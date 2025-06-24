@@ -1195,7 +1195,7 @@ namespace mcu {
 */
     // vector with small buffer optimization (SBO)
     template<typename T, size_t sboSize = 0, index_size_flag SizeFlag = index_size_flag::MEDIUM>
-    class b_vector {
+    class b_vector : hash_kernel {
     private:
         using vector_index_type = typename vector_index_type<SizeFlag>::type;
         
@@ -1612,6 +1612,17 @@ namespace mcu {
         }
         
     private:
+
+        bool is_less(const T& a, const T& b) const noexcept {
+            if(std::is_arithmetic_v<T>){
+                return a < b;
+            }else{
+                size_t a_hash = preprocess_hash_input(a);
+                size_t b_hash = preprocess_hash_input(b);
+                if (a_hash < b_hash) return true;
+            }
+        }
+
         // Partition function with comprehensive safety checks
         vector_index_type partition(vector_index_type low, vector_index_type high) noexcept {
             T* ptr = data_ptr();
@@ -1634,7 +1645,7 @@ namespace mcu {
                 // Additional bounds check during iteration
                 if (i >= size_) break;
                 
-                if (ptr[j] < pivot) {
+                if (is_less(ptr[j], pivot)) {
                     // Safety: validate both indices before swap
                     if (i < size_ && j < size_) {
                         T temp = ptr[i];
@@ -1719,10 +1730,12 @@ namespace mcu {
                     
                     // Safety: bounds check for each access
                     if (j + 1 <= high && j < size_ && j + 1 < size_) {
-                        if (ptr[j] > ptr[j + 1]) {
-                            T temp = ptr[j];
-                            ptr[j] = ptr[j + 1];
-                            ptr[j + 1] = temp;
+                        if (!isLess(array[j], array[j + 1]) && !isLess(array[j + 1], array[j])) {
+                            // Elements are equal, no swap needed
+                        } else if (!isLess(array[j], array[j + 1])) {
+                            T temp = array[j];
+                            array[j] = array[j + 1];
+                            array[j + 1] = temp;
                         }
                     }
                 }
@@ -2004,6 +2017,17 @@ namespace mcu {
             quickSort(0, size_ - 1);
         }
     private:
+
+        bool is_less(const T& a, const T& b) const noexcept {
+            if(std::is_arithmetic_v<T>){
+                return a < b;
+            }else{
+                size_t a_hash = preprocess_hash_input(a);
+                size_t b_hash = preprocess_hash_input(b);
+                return a_hash < b_hash;
+            }
+        }
+
         // Partition function with comprehensive safety checks
         vector_index_type partition(vector_index_type low, vector_index_type high) noexcept {
             // Safety: null pointer check
@@ -2024,7 +2048,7 @@ namespace mcu {
                 // Additional bounds check during iteration
                 if (i >= size_) break;
                 
-                if (array[j] < pivot) {
+                if (is_less(array[j], pivot)) {
                     // Safety: validate both indices before swap
                     if (i < size_ && j < size_) {
                         T temp = array[i];
@@ -2105,7 +2129,9 @@ namespace mcu {
                     
                     // Safety: bounds check for each access
                     if (j + 1 <= high && j < size_ && j + 1 < size_) {
-                        if (array[j] > array[j + 1]) {
+                        if (!isLess(array[j], array[j + 1]) && !isLess(array[j + 1], array[j])) {
+                            // Elements are equal, no swap needed
+                        } else if (!isLess(array[j], array[j + 1])) {
                             T temp = array[j];
                             array[j] = array[j + 1];
                             array[j + 1] = temp;

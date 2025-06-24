@@ -104,7 +104,7 @@ namespace mcu {
         bool inline is_full() const noexcept {
             return size_ >= virtual_cap;
         }
-        template<typename U> friend class ChainedUnorderedMap;
+        template<typename U, typename R> friend class ChainedUnorderedMap;
         template<typename U> friend class ChainedUnorderedSet;
     // protected:
     public:
@@ -1194,7 +1194,7 @@ namespace mcu {
     ------------------------------------------------------------------------------------------------------------------
 */
     // vector with small buffer optimization (SBO)
-    template<typename T, index_size_flag SizeFlag = index_size_flag::MEDIUM, size_t sboSize = 0>
+    template<typename T, size_t sboSize = 0, index_size_flag SizeFlag = index_size_flag::MEDIUM>
     class b_vector {
     private:
         using vector_index_type = typename vector_index_type<SizeFlag>::type;
@@ -1571,33 +1571,26 @@ namespace mcu {
 
         T& back() noexcept {
             assert(!empty() && "b_vector::back() called on empty vector");
-            if (empty()) {
-                // Calling back() on an empty vector is undefined behavior.
-                // To prevent a crash from index underflow in release builds,
-                // this returns a reference to the start of the buffer.
-                // The caller is still responsible for checking !empty() first.
-                return data_ptr()[0];
-            }
-            return data_ptr()[size_ - 1];
-        }
-        const T& back() const noexcept {
-            assert(!empty() && "b_vector::back() called on empty vector");
-            if (empty()) {
-                // Same logic as above for const version
-                return data_ptr()[0];
-            }
+            // Remove the dangerous fallback - just assert and return last valid element
             return data_ptr()[size_ - 1];
         }
 
-        // emplace_back: construct an element in place at the end
-        
+        const T& back() const noexcept {
+            assert(!empty() && "b_vector::back() called on empty vector");
+            // Remove the dangerous fallback - just assert and return last valid element
+            return data_ptr()[size_ - 1];
+        }
+
         void pop_back() noexcept {
             if (empty()) {
-                return; // Do nothing if empty
+                return;
             }
             --size_;
-            // Manually call the destructor for the removed element to release its resources.
-            data_ptr()[size_].~T();
+            // For embedded systems with simple types, often no explicit destructor needed
+            // Only call destructor if T has non-trivial destructor
+            if constexpr (!std::is_trivially_destructible_v<T>) {
+                data_ptr()[size_].~T();
+            }
         }
         void sort() noexcept {
             // Safety check: null data pointer
@@ -1785,7 +1778,6 @@ namespace mcu {
         const T* begin() const noexcept { return data_ptr(); }
         const T* end()   const noexcept { return data_ptr() + size_; }
     };
-
 
 
     template<typename T, index_size_flag SizeFlag = index_size_flag::MEDIUM>
@@ -2588,24 +2580,22 @@ namespace mcu {
 
     // note : - in chainedUnorderedMap, slot_handler manages maps instead of pair elements 
     //        - cap_ : total number of maps in the chain (available + reserve type 1, 2) - size of dynamic array (chain)
-    template <typename T>
-    class ChainedUnorderedMap : public slot_handler{
-    private:
-        using Pair_8 = pair<uint8_t, T>;    // for mapID
-        using Pair_16 = pair<uint16_t, T>;      // for iterator
-        using pair_kmi = pair<uint8_t, int16_t>;   // for keyMappingIN
-        using unordered_map_s = unordered_map<uint8_t, T>;
 
+
+    template <typename R, typename T>
+    class ChainedUnorderedMap : public slot_handler, hash_kernel{
+    private:
+        using Pair_RT = pair<R, T>;             // for iterator - changed from Pair_16
+        using pair_kmi = pair<int16_t, uint8_t>;   // mapID - range, for keyMappingIN 
+        using unordered_map_s = unordered_map<R, T>;
+                                                                                                        
         unordered_map_s** chain = nullptr;  
         unordered_map<uint8_t, uint8_t> rangeMap;        // Which mapID corresponds to which range?
-                                                // key-range, value-mapID(both unique). only contains used map
-        unordered_map<uint8_t, uint8_t> mapRange;        // which range corresponds to which mapID?
-                                                // used for iterator
+                                                        // key-range, value-mapID(both unique). only contains used map
         uint8_t fullness_ = 92;                 // maximum map fill level (in %) at each map
         uint8_t cmap_ability = 234;             // Maximum capacity of each map (234 = 92% of 255)
         uint8_t chain_size = 0;                 // number of used maps in the chain ( which are not empty )
     
-        static constexpr uint8_t CHAIN_INIT_CAP = 4; // initial capacity of the chain
         
         // maximum capacity of each member map in the chain
         inline void recalculate_cmap_ability() noexcept {
@@ -2628,10 +2618,19 @@ namespace mcu {
             }
         }
 
-        // action-OUT : for iterator 
-        [[nodiscard]] inline uint16_t keyMappingOUT(uint8_t key, uint8_t mapID) noexcept {
-            return uint16_t(key + mapRange.getValue(mapID) * cmap_ability);
+        // action-IN : for keyMappingIN - updated to use generic key type R
+        [[nodiscard]] inline pair_kmi keyMappingIN(const R& key) noexcept {
+            size_t tranform_key = preprocess_hash_input(key);
+            uint8_t range;
+            if constexpr (std::is_integral<R>::value){
+                range = static_cast<uint8_t>(tranform_key / cmap_ability);
+            }else if constexpr (std::is_floating_point<R>::value){
+                range = tranform_key % cmap_ability;
+            }
+            int16_t mapID = rangeMap.getValue(range); // Get mapID from range
+            return pair_kmi(mapID, range); // Return pair of mapID and range
         }
+
 
         // in use (only available maps) , contains at least 1 element
         inline bool map_in_use(uint8_t mapID) const noexcept {
@@ -2662,7 +2661,6 @@ namespace mcu {
 
             if(chain_size >= 234){
                 rangeMap.set_fullness(1.0);
-                mapRange.set_fullness(1.0);
             }
             
             chain = new unordered_map_s*[newChainCap];
@@ -2690,15 +2688,13 @@ namespace mcu {
     public:
         // default constructor
         ChainedUnorderedMap() : slot_handler() { 
-            // // Initialize with INIT_CAP maps
-            // remap(INIT_CAP);  // Use remap to initialize resources
+            // Initialize with INIT_CAP maps
+            remap(INIT_CAP);  // Use remap to initialize resources
 
-            // // First, make 3 maps available, 7 reserve type 1 maps
-            // for(uint8_t i=0; i<INIT_CAP; i++){
-            //     if(i < 3) activate_map(i);  // Activate first 3 maps, but it empty 
-            // }
-            remap(CHAIN_INIT_CAP);
-            activate_map(0); // Activate first map
+            // First, make 3 maps available, 7 reserve type 1 maps
+            for(uint8_t i=0; i<INIT_CAP; i++){
+                if(i < 3) activate_map(i);  // Activate first 3 maps, but it empty 
+            }
         }
         
         // Constructor with capacity
@@ -2733,8 +2729,7 @@ namespace mcu {
             fullness_(o.fullness_),
             cmap_ability(o.cmap_ability),
             chain_size(o.chain_size),
-            rangeMap(o.rangeMap),
-            mapRange(o.mapRange)
+            rangeMap(o.rangeMap)
         {
             this->cap_ = o.cap_; // assign base member if needed
             chain = new unordered_map_s*[this->cap_];
@@ -2750,8 +2745,7 @@ namespace mcu {
             fullness_(std::exchange(o.fullness_,   92)),
             cmap_ability(std::exchange(o.cmap_ability, static_cast<uint8_t>(255*92/100))),
             chain_size(std::exchange(o.chain_size,  0)),
-            rangeMap(std::move(o.rangeMap)),     
-            mapRange(std::move(o.mapRange)){
+            rangeMap(std::move(o.rangeMap)){
                 chain = std::exchange(o.chain, nullptr);
         }
         // Copy‐assignment
@@ -2780,39 +2774,18 @@ namespace mcu {
     template<bool IsConst>
     class basic_iterator {
     public:
-    using MapType   = std::conditional_t<IsConst, const ChainedUnorderedMap<T>, ChainedUnorderedMap<T>>;
-    using InnerIter = std::conditional_t<IsConst, typename unordered_map_s::const_iterator, typename unordered_map_s::iterator>;
-    using value_type = Pair_16; // This is pair<uint16_t, T>
-
-    // Proxy structure to allow modification of the underlying map's value
-    // and provide the mapped key.
-    struct ElementProxy {
-        const uint16_t first; // The mapped key, non-modifiable through this proxy.
-        std::conditional_t<IsConst, const T&, T&> second; // Reference to the actual value in the map.
-    
-        ElementProxy(uint16_t key, std::conditional_t<IsConst, const T&, T&> value_ref)
-            : first(key), second(value_ref) {}
-    
-        // Add operator-> for proper -> behavior with iterators
-        // When it->member is called:
-        // 1. basic_iterator::operator->() returns an ElementProxy temporary.
-        // 2. ElementProxy::operator->() is called on this temporary.
-        // 3. This returns a pointer to the temporary, allowing member access.
-        ElementProxy* operator->() { return this; }
-        const ElementProxy* operator->() const { return this; } // For const-correctness
-    };
-
-    using reference  = ElementProxy; // operator* will return this proxy by value.
-    using pointer    = ElementProxy; // operator-> will also return this proxy by value.
-                                    // For it->member, compiler handles (it.operator->()).member.
-    using iterator_category = std::forward_iterator_tag;
-    using difference_type   = std::ptrdiff_t;
+        using MapType   = std::conditional_t<IsConst, const ChainedUnorderedMap<R, T>, ChainedUnorderedMap<R, T>>;
+        using InnerIter = std::conditional_t<IsConst, typename unordered_map_s::const_iterator, typename unordered_map_s::iterator>;
+        using value_type = Pair_RT; // This is pair<R, T>
+        using reference  = std::conditional_t<IsConst, const Pair_RT&, Pair_RT&>;
+        using pointer    = std::conditional_t<IsConst, const Pair_RT*, Pair_RT*>;
+        using iterator_category = std::forward_iterator_tag;
+        using difference_type   = std::ptrdiff_t;
 
     private:
         MapType* parent;
         uint8_t  mapID;
         InnerIter current;
-        // mutable value_type cached_value;  // Cache the current value - REMOVED
         
         // Fast path to move to next valid element
         inline void advanceToValid() {
@@ -2827,8 +2800,6 @@ namespace mcu {
             mapID = MAX_CAP;  // Mark as end iterator
             current = InnerIter(); // Reset current for end iterator
         }
-        // Update the cached value - REMOVED
-        // void updateCache() const { ... }
 
     public:
         basic_iterator() : parent(nullptr), mapID(MAX_CAP), current() {}
@@ -2864,24 +2835,16 @@ namespace mcu {
             }
         }
 
-        // Dereference - return proxy object by value
+        // Dereference - return direct reference to the pair in the inner map
         reference operator*() const {
-            // Assuming iterator is valid and not end()
-            return ElementProxy(
-                parent->keyMappingOUT(current->first, mapID),
-                current->second // current->second is T& for non-const, const T& for const
-            );
+            // Since keys are stored directly, we can return the pair directly
+            return *current;
         }
         
-        // Arrow operator - return proxy object by value
+        // Arrow operator - return direct pointer to the pair in the inner map
         pointer operator->() const {
-            // Assuming iterator is valid and not end()
-            // This returns an ElementProxy temporary. The compiler then calls
-            // ElementProxy::operator->() on this temporary.
-            return ElementProxy(
-                parent->keyMappingOUT(current->first, mapID),
-                current->second
-            );
+            // Since keys are stored directly, we can return the pointer directly
+            return &(*current);
         }
 
         // Pre-increment
@@ -2891,7 +2854,6 @@ namespace mcu {
             }
                 
             // Assumes iterator is dereferenceable or one past the end of a sub-map.
-            // mapID must be < parent->cap_ and map_in_use(mapID) must be true if not end.
             if (mapID < parent->cap_ && parent->map_in_use(mapID)) {
                 ++current;
                 if (current == parent->chain[mapID]->end()) {
@@ -2900,62 +2862,65 @@ namespace mcu {
                 }
             } else {
                 // Iterator was in an invalid state or pointed beyond allocated maps but not to MAX_CAP.
-                // Try to recover by advancing to a valid state or the end.
                 advanceToValid();
             }
             return *this;
         }
             
-            // Post-increment
-            basic_iterator operator++(int) { 
-                basic_iterator tmp = *this; 
-                ++(*this); 
-                return tmp; 
-            }
+        // Post-increment
+        basic_iterator operator++(int) { 
+            basic_iterator tmp = *this; 
+            ++(*this); 
+            return tmp; 
+        }
 
-            // Compare iterators
-            bool operator==(const basic_iterator& o) const {
-                // Fast path for end iterator comparison
-                if (mapID == MAX_CAP && o.mapID == MAX_CAP) return true;
-                
-                // Compare normal iterators
-                return parent == o.parent && mapID == o.mapID && current == o.current;
-            }
+        // Compare iterators
+        bool operator==(const basic_iterator& o) const {
+            // Fast path for end iterator comparison
+            if (mapID == MAX_CAP && o.mapID == MAX_CAP) return true;
             
-            bool operator!=(const basic_iterator& o) const { 
-                return !(*this == o); 
-            }
-            
-            // Check if this is end iterator (helper function)
-            bool is_end() const {
-                return mapID == MAX_CAP;
-            }
-        };
-        // aliases
-        using iterator       = basic_iterator<false>;
-        using const_iterator = basic_iterator<true>;
+            // Compare normal iterators
+            return parent == o.parent && mapID == o.mapID && current == o.current;
+        }
+        
+        bool operator!=(const basic_iterator& o) const { 
+            return !(*this == o); 
+        }
+        
+        // Check if this is end iterator (helper function)
+        bool is_end() const {
+            return mapID == MAX_CAP;
+        }
 
-        // adjust begin/end
-        iterator begin() {
-            for (uint8_t i=0; i<cap_; ++i)
-                if (map_in_use(i))
-                    return iterator(this, i, chain[i]->begin());
-            return iterator();
-        }
-        iterator end() {
-            return iterator();
-        }
-        const_iterator begin() const {
-            for (uint8_t i=0; i<cap_; ++i)
-                if (map_in_use(i))
-                    return const_iterator(this, i, chain[i]->begin());
-            return const_iterator();
-        }
-        const_iterator end() const {
-            return const_iterator();
-        }
-        const_iterator cbegin() const { return begin(); }
-        const_iterator cend() const { return end(); }
+        // Expose mapID for erase operations
+        friend class ChainedUnorderedMap;
+    };
+
+    // aliases
+    using iterator       = basic_iterator<false>;
+    using const_iterator = basic_iterator<true>;
+
+    // begin/end methods remain the same
+    iterator begin() {
+        for (uint8_t i=0; i<cap_; ++i)
+            if (map_in_use(i))
+                return iterator(this, i, chain[i]->begin());
+        return iterator();
+    }
+    iterator end() {
+        return iterator();
+    }
+    const_iterator begin() const {
+        for (uint8_t i=0; i<cap_; ++i)
+            if (map_in_use(i))
+                return const_iterator(this, i, chain[i]->begin());
+        return const_iterator();
+    }
+    const_iterator end() const {
+        return const_iterator();
+    }
+    const_iterator cbegin() const { return begin(); }
+    const_iterator cend() const { return end(); }
     // ---------------------------------------------------------------------------------------------
     // -------------------------------------- end of iterator class --------------------------------
     // ---------------------------------------------------------------------------------------------
@@ -2969,12 +2934,12 @@ namespace mcu {
         */
     private:
         template<typename V>
-        bool insert_core(uint16_t key, V&& value) {
-            uint8_t range = key / cmap_ability;; 
-            int16_t mapID = rangeMap.getValue(range); // Get mapID from range
-            uint8_t innerKey = key - range * cmap_ability;
+        bool insert_core(const R& key, V&& value) {
+            pair_kmi keyMap = keyMappingIN(key); // Get mapID and range from key
+            int16_t mapID = keyMap.first; // Extract mapID from pair
+            uint8_t range = keyMap.second; // Extract range from pair
             if(mapID >=0 ){
-                return chain[mapID]->insert(innerKey, std::forward<V>(value)).second;
+                return chain[mapID]->insert(key, std::forward<V>(value)).second;
             }
             // Second pass: find suitable empty or reserve map
             int16_t emptyMapID = -1;  // Track first empty map separately
@@ -2987,10 +2952,9 @@ namespace mcu {
                         if(chain[i]->empty()){
                             // assign range to this map
                             rangeMap[range] = i;
-                            mapRange[i] = range; // mapID to range
 
                             setState(i, slotState::Used); // marked as Used for the first time
-                            return chain[i]->insert(innerKey, std::forward<V>(value)).second;
+                            return chain[i]->insert(key, std::forward<V>(value)).second;
                             chain_size++;
                         }
                     }else{
@@ -3004,20 +2968,18 @@ namespace mcu {
                     // Priority 2: Type 2 reserve map
                     // assign range to this map
                     rangeMap[range] = i;
-                    mapRange[i] = range; // mapID to range
 
                     setState(i, slotState::Used); // changed mark to Used
-                    return chain[i]->insert(innerKey, std::forward<V>(value)).second;
+                    return chain[i]->insert(key, std::forward<V>(value)).second;
                 }
             }
             if (emptyMapID != -1) {
                 // Use the first empty map
                 activate_map(emptyMapID);
                 rangeMap[range] = emptyMapID; // assign range to this map
-                mapRange[emptyMapID] = range; // mapID to range
 
                 setState(emptyMapID, slotState::Used); 
-                return chain[emptyMapID]->insert(innerKey, std::forward<V>(value)).second;
+                return chain[emptyMapID]->insert(key, std::forward<V>(value)).second;
             } else if (cap_ < MAX_CAP) {    
                 // Suggest capacity extension. remap and try again
                 uint16_t newChainCap = cap_ + 4;
@@ -3029,19 +2991,18 @@ namespace mcu {
                 return false; // No suitable map found and no capacity to extend
             }
         }
-        bool erase_core(uint16_t key) {
-            uint8_t range = key / cmap_ability; // Get range from key
-            int16_t mapID = rangeMap.getValue(range); // Get mapID from range
+        bool erase_core(R key) {
+            pair_kmi keyMap = keyMappingIN(key); // Get mapID and range from key
+            int16_t mapID = keyMap.first; // Extract mapID from pair
+            uint8_t range = keyMap.second; // Extract range from pair
             if (mapID < 0) {
                 return false; // Key not found
             }
-            uint8_t innerKey = key - range * cmap_ability; // Calculate new key for inner map
-            bool erased = chain[mapID]->erase(innerKey); // Erase from the inner map
+            bool erased = chain[mapID]->erase(key); // Erase from the inner map
             if (erased) {
                 // Check if the map is now empty
                 if (chain[mapID]->empty()) {
                     rangeMap.erase(range); // Remove the range mapping
-                    mapRange.erase(mapID); // Remove the mapID mapping
                     setState(mapID, slotState::Deleted); // Mark as Deleted
                     chain[mapID]->fit(); // minimize memory usage
                     chain_size--;
@@ -3051,44 +3012,44 @@ namespace mcu {
         }
     public:
         // Memory-efficient insert methods that avoid creating iterators when not needed
-        bool insert(uint16_t key, const T& value) {
+        bool insert(R key, const T& value) {
             return insert_core(key, value);
         }
 
-        bool insert(uint16_t key, T&& value) {
+        bool insert(R key, T&& value) {
             return insert_core(key, std::move(value));
         }
 
-        bool insert(const Pair_16& p) {
+        bool insert(const Pair_RT& p) {
             return insert_core(p.first, p.second);
         }
 
-        bool insert(Pair_16&& p) {
+        bool insert(Pair_RT&& p) {
             return insert_core(p.first, std::move(p.second));
         }
 
 
         // Public erase method
-        bool erase(uint16_t key) {
+        bool erase(R key) {
             return erase_core(key);
         }
-        // Erase by iterator position - more efficient as we already know the map
         bool erase(iterator pos) {
             if (pos == end()) return false;
             uint8_t mapID = pos.mapID;
-            uint8_t innerKey = pos.innerKey;
             if (chain[mapID] && getState(mapID) == slotState::Used) {
-                size_t erased = chain[mapID]->erase(innerKey);
+                // Get the key directly from the iterator
+                R key = pos->first;  // Direct access since no mapping needed
+                size_t erased = chain[mapID]->erase(key);
                 if (erased) {
                     // If the inner map is now empty, clean up
                     if (chain[mapID]->empty()) {
-                        delete chain[mapID];
-                        chain[mapID] = nullptr;
-                        setState(mapID, slotState::Empty);
-                        // Remove from rangeMap and mapRange
-                        uint8_t range = mapRange[mapID];
+                        // Find and remove the range mapping
+                        pair_kmi keyMap = keyMappingIN(key);
+                        uint8_t range = keyMap.second;
                         rangeMap.erase(range);
-                        mapRange.erase(mapID);
+                        setState(mapID, slotState::Deleted);
+                        chain[mapID]->fit();
+                        chain_size--;
                     }
                     return true;
                 }
@@ -3108,14 +3069,14 @@ namespace mcu {
 
         // Finds an element with the specified key
         // Returns iterator to element if found, end() otherwise
-        iterator find(uint16_t key) {
-            uint8_t range = key / cmap_ability; // Get range from key
-            int16_t mapID = rangeMap.getValue(range); // Get mapID from range
+        iterator find(R key) {
+            pair_kmi keyMap = keyMappingIN(key); // Get mapID and range from key
+            int16_t mapID = keyMap.first; // Extract mapID from pair
+            uint8_t range = keyMap.second; // Extract range from pair
             if (mapID < 0) {
                 return end(); // Key not found
             }
-            uint8_t innerKey = key - range * cmap_ability; // Calculate new key for inner map
-            typename unordered_map_s::iterator innerIt = chain[mapID]->find(innerKey); // Find in the inner map
+            typename unordered_map_s::iterator innerIt = chain[mapID]->find(key); // Find in the inner map
             
             if (innerIt != chain[mapID]->end()) {
                 return iterator(this, mapID, innerIt); // Return iterator to found element
@@ -3124,35 +3085,55 @@ namespace mcu {
         }
 
         // Non-const version
-        T& at(uint16_t key) {
-            uint8_t range = key / cmap_ability;
-            int16_t mapID = rangeMap.getValue(range);
-            if (mapID < 0) throw std::out_of_range("Key not found in ChainedUnorderedMap");
-            uint8_t sub = static_cast<uint8_t>(key % cmap_ability);
-            unordered_map_s* inner = chain[mapID];
-            typename unordered_map_s::iterator it = inner->find(sub);
-            if (it == inner->end()) throw std::out_of_range("Key not found in ChainedUnorderedMap");
+        T& at(const R& key) {
+            pair_kmi keyMap = keyMappingIN(key);
+            int16_t mapID = keyMap.first;
+            if (mapID < 0) {
+                // Key not found - no map contains this range
+                throw std::out_of_range("Key not found in ChainedUnorderedMap");
+            }
+            
+            // Check if map is actually in use
+            if (!map_in_use(mapID)) {
+                throw std::out_of_range("Key not found in ChainedUnorderedMap");
+            }
+            
+            // Find the key directly in the map (no inner key conversion needed)
+            auto it = chain[mapID]->find(key);
+            if (it == chain[mapID]->end()) {
+                throw std::out_of_range("Key not found in ChainedUnorderedMap");
+            }
+            
             return it->second;
         }
 
         // Const version
-        const T& at(uint16_t key) const {
-            uint8_t range = key / cmap_ability;
-            int16_t mapID = rangeMap.getValue(range);
-            if (mapID < 0) throw std::out_of_range("Key not found in ChainedUnorderedMap");
-            uint8_t sub = static_cast<uint8_t>(key % cmap_ability);
-            const unordered_map_s* inner = chain[mapID];
-            typename unordered_map_s::const_iterator it = inner->find(sub);
-            if (it == inner->end()) throw std::out_of_range("Key not found in ChainedUnorderedMap");
+        const T& at(const R& key) const {
+            pair_kmi keyMap = keyMappingIN(key);
+            int16_t mapID = keyMap.first;
+            if (mapID < 0) {
+                throw std::out_of_range("Key not found in ChainedUnorderedMap");
+            }
+            
+            if (!map_in_use(mapID)) {
+                throw std::out_of_range("Key not found in ChainedUnorderedMap");
+            }
+            
+            auto it = chain[mapID]->find(key);
+            if (it == chain[mapID]->end()) {
+                throw std::out_of_range("Key not found in ChainedUnorderedMap");
+            }
+            
             return it->second;
         }
         
         // Operator overload for accessing elements
         // Returns a reference to the value associated with the key
         // Throws std::out_of_range if the key is not found
-        T& operator[](uint16_t key) {
-            uint8_t range = key / cmap_ability; // Get range from key
-            int16_t mapID = rangeMap.getValue(range); // Get mapID from range
+        T& operator[](R key) {
+            pair_kmi keyMap = keyMappingIN(key); // Get mapID and range from key
+            int16_t mapID = keyMap.first; // Extract mapID from pair
+            uint8_t range = keyMap.second; // Extract range from pair
             if (mapID < 0) {
                 // value‐insert a default‐constructed T
                 if (!insert(key, T{})) {
@@ -3160,17 +3141,7 @@ namespace mcu {
                 }
                 mapID = rangeMap.getValue(range); // Recalculate mapID after insertion
             }
-            uint8_t innerKey = static_cast<uint8_t>(key - range * cmap_ability); // Calculate new key for inner map
-            return (*chain[mapID])[innerKey];
-        }
-
-        bool contains(uint16_t key) const {
-            uint8_t range = key / cmap_ability; // Get range from key
-            int16_t mapID = rangeMap.getValue(range); // Get mapID from range
-            if (mapID < 0) {
-                return false; // Key not found
-            }
-            return chain[mapID]->contains(static_cast<uint8_t>(key - range * cmap_ability)); // Check in the inner map
+            return (*chain[mapID])[key];
         }
 
         // actually set new fullness for each inner map in the chain and re-insert all elements
@@ -3220,16 +3191,14 @@ namespace mcu {
             
             // Extract all elements into the buffer
             uint16_t elemIdx = 0;
-            int total_track = 0;
             for (uint8_t i = 0; i < cap_; i++) {
                 if (map_in_use(i)) {
                     auto& map = *(chain[i]);
                     for (auto it = map.begin(); it != map.end(); ++it) {
-                        // Convert internal keys back to original keys for reinsertion
-                        allElements[elemIdx].key = keyMappingOUT(it->first, i);
+                        // Keys are stored directly, no mapping conversion needed
+                        allElements[elemIdx].key = it->first;
                         allElements[elemIdx].value = std::move(it->second);
                         elemIdx++;
-                        total_track++;
                     }
                     // Clear the map for new insertions
                     map.clear();
@@ -3250,7 +3219,6 @@ namespace mcu {
             }
             chain_size = 0; // Reset chain size
             rangeMap.clear(); // Clear rangeMap
-            mapRange.clear(); // Clear mapRange
             // activate maps based on new fullness
             uint8_t requiredMaps = static_cast<uint8_t>((totalElements + cmap_ability - 1) / cmap_ability);
             for (uint8_t i = 0; i < requiredMaps; ++i) {
@@ -3276,7 +3244,6 @@ namespace mcu {
                     recalculate_cmap_ability();
                     remap(old_cap); // Restore old capacity
                     rangeMap.clear(); // Clear rangeMap
-                    mapRange.clear(); // Clear mapRange
                     // activate maps based on old fullness
                     uint8_t oldRequiredMaps = static_cast<uint8_t>((totalElements + cmap_ability - 1) / cmap_ability);  
                     for (uint8_t j = 0; j < oldRequiredMaps; ++j) {
@@ -3371,7 +3338,7 @@ namespace mcu {
             }
 
             total += (cap_*2 + 7)/8;    // flags
-            total += sizeof(*this) + rangeMap.memory_usage() + mapRange.memory_usage(); // this + rangeMap + mapRange
+            total += sizeof(*this) + rangeMap.memory_usage(); // this + rangeMap 
             return total;
         }
 
@@ -3436,18 +3403,9 @@ namespace mcu {
                 }
             }
 
-            // --- Update mapRange to match new rangeMap ---
-            mapRange.clear();
-            for (auto it = rangeMap.begin(); it != rangeMap.end(); ++it) {
-                uint8_t range = it->first;
-                uint8_t mapID = it->second;
-                mapRange[mapID] = range;
-            }
-            // --- End update mapRange ---
-
             // Optional: reduce array capacity if utilization is very low
-            if (activeMaps < cap_ / 3 && cap_ > CHAIN_INIT_CAP) {
-                uint16_t newCap = std::max(static_cast<uint16_t>(CHAIN_INIT_CAP), static_cast<uint16_t>(activeMaps * 2));
+            if (activeMaps < cap_ / 3 && cap_ > INIT_CAP) {
+                uint16_t newCap = std::max(static_cast<uint16_t>(INIT_CAP), static_cast<uint16_t>(activeMaps * 2));
         
                 // Create new smaller chain
                 auto* newChain = new unordered_map_s*[newCap];
@@ -3507,9 +3465,7 @@ namespace mcu {
 
             // 3) reset rangeMap to default
             rangeMap.clear();   
-            mapRange.clear();    // clear mapRange
             rangeMap.fit();
-            mapRange.fit();
         }
         bool empty() const {
             for (uint8_t i = 0; i < cap_; i++) {
@@ -3529,9 +3485,15 @@ namespace mcu {
             swap(a.chain,       b.chain);
             swap(a.chain_size,  b.chain_size);
             swap(a.rangeMap,    b.rangeMap);
-            swap(a.mapRange,    b.mapRange);
         }
     };
+
+
+
+
+
+
+
 
     // -----------------------------------------------------------------------------------------
     // ---------------------------------- ChainedUnorderedSet class -----------------------------------

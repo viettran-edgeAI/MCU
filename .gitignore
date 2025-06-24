@@ -34,8 +34,9 @@
 # Backup files - STL_MCU specific
 src/backup_*.ino
 
-# IDE files
+# IDE and development files
 .vscode/
+.github/
 *.tmp
 *.bak
 

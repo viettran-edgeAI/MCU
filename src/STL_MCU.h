@@ -1730,12 +1730,12 @@ namespace mcu {
                     
                     // Safety: bounds check for each access
                     if (j + 1 <= high && j < size_ && j + 1 < size_) {
-                        if (!isLess(array[j], array[j + 1]) && !isLess(array[j + 1], array[j])) {
+                        if (!is_less(ptr[j], ptr[j + 1]) && !is_less(ptr[j + 1], ptr[j])) {
                             // Elements are equal, no swap needed
-                        } else if (!isLess(array[j], array[j + 1])) {
-                            T temp = array[j];
-                            array[j] = array[j + 1];
-                            array[j + 1] = temp;
+                        } else if (!is_less(ptr[j], ptr[j + 1])) {
+                            T temp = ptr[j];
+                            ptr[j] = ptr[j + 1];
+                            ptr[j + 1] = temp;
                         }
                     }
                 }

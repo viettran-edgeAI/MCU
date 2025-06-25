@@ -1194,7 +1194,7 @@ namespace mcu {
     ------------------------------------------------------------------------------------------------------------------
 */
     // vector with small buffer optimization (SBO)
-    template<typename T, size_t sboSize = 0, index_size_flag SizeFlag = index_size_flag::MEDIUM>
+    template<typename T, index_size_flag SizeFlag = index_size_flag::MEDIUM, size_t sboSize = 0>
     class b_vector : hash_kernel {
     private:
         using vector_index_type = typename vector_index_type<SizeFlag>::type;

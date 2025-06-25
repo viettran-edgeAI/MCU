@@ -35,7 +35,7 @@ private:
     }
 public:
     template<typename T>
-    inline size_t preprocess_hash_input(const T& value) noexcept {
+    inline size_t preprocess_hash_input(const T& value) const noexcept {
         if constexpr (std::is_integral_v<T>) {
             // 1. Integer types: fast path
             return static_cast<size_t>(value);

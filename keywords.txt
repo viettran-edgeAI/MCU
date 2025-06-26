@@ -21,6 +21,7 @@ pair	KEYWORD1
 # ML/CV Classes
 HOGDescriptorMCU	KEYWORD1
 Categorizer	KEYWORD1
+Rf_categorizer	KEYWORD1
 
 # Utility Classes
 hash_kernel	KEYWORD1
@@ -84,6 +85,17 @@ getNumFeatures	KEYWORD2
 getGroupsPerFeature	KEYWORD2
 getMemoryUsage	KEYWORD2
 printInfo	KEYWORD2
+
+# Rf_categorizer Methods
+receiveFromPySerial	KEYWORD2
+receiveFromSerialMonitor	KEYWORD2
+convertToBin	KEYWORD2
+loadCtg	KEYWORD2
+releaseCtg	KEYWORD2
+categorizeFeature	KEYWORD2
+categorizeSample	KEYWORD2
+isValid	KEYWORD2
+getIsLoaded	KEYWORD2
 
 # Utility Functions
 initializeSPIFFS	KEYWORD2

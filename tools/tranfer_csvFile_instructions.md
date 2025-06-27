@@ -24,7 +24,8 @@ MCU/
 ├── processing_data.cpp      # PC-side data processing
 ├── RfCategorizer.h         # ESP32 library header
 ├── RfCategorizer.cpp       # ESP32 library implementation
-├── esp32_categorizer_example.ino  # ESP32 example sketch
+├── esp32_categorizer_example.ino        # ESP32 example: interactive input
+├── esp32_categorizer_example_2.ino      # ESP32 example: Python script transfer
 ├── transfer_categorizer.py # PC-side transfer utility
 └── README.md              # This file
 ```
@@ -49,33 +50,35 @@ This will:
 
 ### 2. Transfer to ESP32
 
-**Method 1: Python Script Transfer (Recommended for PC-generated data)**
-Install required Python package:
-```bash
-pip install pyserial
-```
+#### Method 1: Python Script Transfer (Recommended for PC-generated data)
+- **Example sketch:** `esp32_categorizer_example_2.ino`
+- **Use case:** Automated transfer of large/PC-generated categorizer files
+- **How to use:**
+    1. Upload `esp32_categorizer_example_2.ino` to your ESP32 board.
+    2. **Important:** For ESP32-C3 and similar boards, enable "CDC on Boot" in Arduino IDE (Tools > USB CDC On Boot: Enabled) to ensure USB serial works for data transfer.
+    3. After upload, wait a few seconds for the board to enumerate the USB port.
+    4. Run the transfer script:
 
-Transfer categorizer to ESP32:
-```bash
-python3 transfer_categorizer.py categorizer_esp32.csv /dev/ttyUSB0
-```
+    ```bash
+    python3 transfer_categorizer.py categorizer_esp32.csv /dev/ttyACM0
+    # or /dev/ttyUSB0 depending on your board/OS
+    ```
+    5. The script will handle the handshake and transfer the file automatically.
 
-On Windows:
-```bash
-python transfer_categorizer.py categorizer_esp32.csv COM3
-```
+- **Troubleshooting:**
+    - If you see "No data received from ESP32", ensure CDC on Boot is enabled and wait a few seconds after upload before running the script.
+    - Confirm the correct serial port (use `ls /dev/ttyACM*` or `python3 transfer_categorizer.py --list-ports`).
+    - Do not open the Serial Monitor during transfer.
 
-List available serial ports:
-```bash
-python3 transfer_categorizer.py --list-ports
-```
-
-**Method 2: Interactive Input (For manual data entry)**
-Use the Serial Monitor to directly input categorizer data on the ESP32:
-1. Send `input` command to ESP32
-2. Follow the interactive prompts
-3. Enter CSV data line by line
-4. Type `END` to finish
+#### Method 2: Interactive Input (Manual/Small Data)
+- **Example sketch:** `esp32_categorizer_example.ino`
+- **Use case:** Manual entry or small categorizer files, or when Python script is not available
+- **How to use:**
+    1. Upload `esp32_categorizer_example.ino` to your ESP32 board.
+    2. Open the Serial Monitor in Arduino IDE (baud 115200).
+    3. Follow the prompts to enter the categorizer data line by line (CSV format).
+    4. Type `END` to finish input.
+    5. The sketch will process and store the categorizer for use.
 
 ## ESP32 Side Usage
 
@@ -93,54 +96,17 @@ Copy the library files to your Arduino libraries folder:
 
 Or place them in your project folder.
 
-### 2. Basic Usage
+### 2. Example Sketches
 
-```cpp
-#include "Rf_categorizer.h"
+#### A. Python Script Transfer Example (`esp32_categorizer_example_2.ino`)
+- Designed for use with `transfer_categorizer.py`.
+- Receives the categorizer file via serial, converts to binary, and tests categorization.
+- Suitable for automated, robust transfer.
 
-Rf_categorizer categorizer;
-
-void setup() {
-    Serial.begin(115200);
-    SPIFFS.begin(true);
-    
-    // Option 1: Receive from Serial (EOF method)
-    // Note: receiveFromPySerial will prompt for filename
-    if (categorizer.receiveFromPySerial(Serial, 30000)) {
-        Serial.println("Categorizer received successfully!");
-    }
-    
-    // Option 2: Interactive CSV input method
-    if (categorizer.receiveFromSerialMonitor(false)) {
-        Serial.println("Categorizer data received successfully!");
-    }
-    
-    // Option 3: Load existing categorizer by filename
-    // categorizer = Rf_categorizer("/your_categorizer.bin");
-}
-
-void loop() {
-    // Load categorizer into RAM when needed
-    if (categorizer.loadCtg()) {
-        
-        // Categorize sensor data
-        mcu::b_vector<float> sensorData = {1.2f, 3.4f, 5.6f, 7.8f};
-        auto categories = categorizer.categorizeSample(sensorData);
-        
-        // Use categorized data for ML inference
-        for (uint16_t i = 0; i < categories.size(); i++) {
-            Serial.print(categories[i]);
-            Serial.print(" ");
-        }
-        Serial.println();
-        
-        // Release from RAM to save memory
-        categorizer.releaseCtg();
-    }
-    
-    delay(1000);
-}
-```
+#### B. Interactive Input Example (`esp32_categorizer_example.ino`)
+- Designed for manual entry via Serial Monitor.
+- Prompts user for CSV input, processes, and tests categorization.
+- Useful for quick tests or when PC-side script is not available.
 
 ### 3. Memory Management
 
@@ -175,9 +141,9 @@ Rf_categorizer(const String& binFilename); // Load from binary file
 
 #### Data Input Methods
 ```cpp
-bool receiveFromSerial(HardwareSerial& serial, unsigned long timeout = 30000);
-bool receiveFromSerialMonitor(bool exact_columns = 234, bool print_file = false);
-bool convertToBin();
+bool receiveFromPySerial(Stream& serial, unsigned long timeout = 30000); // For Python script transfer
+bool receiveFromSerialMonitor(bool print_file = false);                  // For interactive input
+bool convertToBin(const String& csvFile);
 ```
 
 #### Memory Management  
@@ -217,7 +183,7 @@ Typical memory usage for different dataset sizes:
 
 ### Optimizations for ESP32
 
-- **Minimal STL Usage**: Uses `std::vector` only where necessary
+- **Minimal STL Usage**: Uses custom containers for memory efficiency
 - **Efficient Binary Format**: Compact storage format
 - **On-Demand Loading**: Load/release pattern saves RAM
 - **Fast Categorization**: O(1) for discrete, O(log n) for continuous features
@@ -244,6 +210,8 @@ Typical memory usage for different dataset sizes:
    - Increase timeout value
    - Check baud rate (115200)
    - Verify CSV file format
+   - For ESP32-C3: Enable CDC on Boot in Arduino IDE
+   - Wait a few seconds after upload before running the transfer script
 
 3. **Memory Issues**
    - Check available heap: `ESP.getFreeHeap()`
@@ -265,9 +233,12 @@ Serial.println("Free heap: " + String(ESP.getFreeHeap()));
 
 ## Example Workflows
 
-### Workflow 1: PC-Generated Data Transfer
+### Workflow 1: PC-Generated Data Transfer (Python Script)
 
-Complete workflow using Python script transfer:
+- Use `esp32_categorizer_example_2.ino` on ESP32
+- Use `transfer_categorizer.py` on PC
+- Enable CDC on Boot for ESP32-C3
+- Wait a few seconds after upload before running the script
 
 ```bash
 # 1. PC Side - Process data
@@ -275,35 +246,28 @@ Complete workflow using Python script transfer:
 # Generates: categorizer_esp32.csv
 
 # 2. Upload ESP32 sketch
-# Upload esp32_categorizer_example.ino to ESP32
+# Upload esp32_categorizer_example_2.ino to ESP32
 
 # 3. Transfer categorizer
-python3 transfer_categorizer.py categorizer_esp32.csv /dev/ttyUSB0
+python3 transfer_categorizer.py categorizer_esp32.csv /dev/ttyACM0
 
 # 4. ESP32 Side - Use categorizer
-# Send commands via Serial Monitor:
-# > load
-# > test
-# > categorize 1.2,3.4,5.6,7.8
-# > release
-# > info
+# Categorizer is received and tested automatically
 ```
 
-### Workflow 2: Interactive Data Input
+### Workflow 2: Interactive Data Input (Serial Monitor)
 
-Complete workflow using interactive input:
+- Use `esp32_categorizer_example.ino` on ESP32
+- Open Serial Monitor and follow prompts
 
 ```bash
 # 1. Upload ESP32 sketch
 # Upload esp32_categorizer_example.ino to ESP32
 
 # 2. ESP32 Side - Interactive input
-# Send commands via Serial Monitor:
-# > input
-# [Follow prompts to enter CSV data]
-# > load
-# > test
-# > info
+# Open Serial Monitor (baud 115200)
+# Enter CSV data as prompted
+# Type END to finish
 ```
 
 **Example Interactive Input Session:**

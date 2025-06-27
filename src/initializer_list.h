@@ -21,12 +21,29 @@ namespace mcu {
     #define MAKE_UINT16_T_LIST(...) \
         min_init_list<uint16_t>((const uint16_t[]){__VA_ARGS__}, \
         sizeof((uint16_t[]){__VA_ARGS__})/sizeof(uint16_t))
+    #define MAKE_UINT32_T_LIST(...) \
+        min_init_list<uint32_t>((const uint32_t[]){__VA_ARGS__}, \
+        sizeof((uint32_t[]){__VA_ARGS__})/sizeof(uint32_t))
+    #define MAKE_UINT64_T_LIST(...) \
+        min_init_list<uint64_t>((const uint64_t[]){__VA_ARGS__}, \
+        sizeof((uint64_t[]){__VA_ARGS__})/sizeof(uint64_t))
+    #define MAKE_DOUBLE_LIST(...) \
+        min_init_list<double>((const double[]){__VA_ARGS__}, \
+        sizeof((double[]){__VA_ARGS__})/sizeof(double))
     #define MAKE_FLOAT_LIST(...) \
         min_init_list<float>((const float[]){__VA_ARGS__}, \
         sizeof((float[]){__VA_ARGS__})/sizeof(float))
     #define MAKE_CHAR_LIST(...)  \
         min_init_list<const char*>((const char*[]){__VA_ARGS__},\
         sizeof((const char*[]){__VA_ARGS__})/sizeof(const char*))
+
+    #define MAKE_STRING_LIST(...) \
+        min_init_list<String>((const String[]){__VA_ARGS__}, \
+        sizeof((String[]){__VA_ARGS__})/sizeof(String))    
+    #define MKAE_SIZE_T_LIST(...) \
+        min_init_list<size_t>((const size_t[]){__VA_ARGS__}, \
+        sizeof((size_t[]){__VA_ARGS__})/sizeof(size_t))
+    
 
     enum class index_size_flag{
         SMALL,

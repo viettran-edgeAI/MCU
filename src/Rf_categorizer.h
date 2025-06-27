@@ -25,6 +25,7 @@ private:
     
     // Helper function to parse CSV line
     mcu::b_vector<String> split(const String& line, char delimiter = ',');
+    bool convertToBin(const String& csvPath);
     
 public:
     // Constructors
@@ -32,8 +33,8 @@ public:
     Rf_categorizer(const String& binFilename);
     
     // Serial transfer methods
-    bool receiveFromPySerial(HardwareSerial& serial, unsigned long timeout = 30000);
-    bool convertToBin();
+    bool receiveFromPySerial(Stream& serial, unsigned long timeout = 30000);
+    bool receiveFromSerialMonitor(bool print_file = false);
     
     // Data input methods
     /**
@@ -54,7 +55,6 @@ public:
      * 
      * @note The binary file will be saved with "_categorizer.bin" suffix
      */
-    bool receiveFromSerialMonitor(bool exact_columns = 234, bool print_file = false);
     
     // Memory management
     bool loadCtg();

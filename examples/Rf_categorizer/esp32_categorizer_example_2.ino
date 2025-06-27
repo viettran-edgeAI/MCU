@@ -8,7 +8,7 @@ Rf_categorizer categorizer;
 
 void setup() {
     Serial.begin(115200);
-    delay(1000);
+    delay(2000);  // Longer delay for stable connection
     
     // Initialize SPIFFS
     if (!SPIFFS.begin(true)) {
@@ -16,7 +16,39 @@ void setup() {
         return;
     }
 
-    categorizer.receiveFromSerialMonitor(); 
+    Serial.println("ESP32 Categorizer Ready - Waiting for Python connection...");
+    Serial.flush();  // Ensure message is sent
+    
+    // Try to receive categorizer data (handles handshake automatically)
+    bool success = false;
+    int maxAttempts = 3;
+    
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+        Serial.println("Attempt " + String(attempt) + "/" + String(maxAttempts) + 
+                      " - Ready to receive categorizer data");
+        Serial.flush();
+        
+        success = categorizer.receiveFromPySerial(Serial, 45000); // 45 second timeout
+        
+        if (success) {
+            Serial.println("✓ Categorizer received successfully!");
+            break;
+        } else {
+            Serial.println("✗ Attempt " + String(attempt) + " failed");
+            if (attempt < maxAttempts) {
+                Serial.println("Retrying in 2 seconds...");
+                delay(2000);
+            }
+        }
+    }
+    
+    if (!success) {
+        Serial.println("❌ Failed to receive categorizer data after " + String(maxAttempts) + " attempts");
+        Serial.println("Please check Python script and try again");
+        return;
+    }
+    
+    // Test the categorizer with sample data
     b_vector<float> test_sample = MAKE_FLOAT_LIST(2,0.02,0.02,0.0276,0.0201,0,0,0,0.0107,0.0291,0.0228,0.0333,0.04,0.036,
         0.0314,0.0449,0.0497,0.04,0.04,0.036,0.027,0.01,0.01,0.0021,0.0051,0.0105,0.02,0.0276,0.0409,0.05,0.05,0.05,0.02,
         0.0371,0.0348,0.0578,0.0674,0.0171,0.0049,-0.0164,-0.0123,-0.01,-0.01,-0.01,0.03,0.0364,0.0213,-0.0214,0.0476,
@@ -31,18 +63,19 @@ void setup() {
         0.9776,0.97,0.97,0.97,0.97,0.985,0.9841,0.9748,0.9778,0.9874,0.9458,0.9702,0.9736,0.98,0.9427,0.9732,1.0037,0.98,
         0.9864,0.9846,0.9725,1.0088,0.9772,0.9777,0.996,1.0142,1.017,0.96,1.0105,0.9655,0.882,0.9989,0.9207,0.9057,0.9718,
         0.9017,0.9692,1.0489,1.0097,0.9887,1.0227,0.997,0.9717,1.0134,0.9219,0.9767,1.0258);
+    
     b_vector<uint8_t> result = categorizer.categorizeSample(test_sample);
     Serial.print("Categorized sample: ");
-    for(auto value : result) {
-        Serial.print(value);
+    for(uint16_t i = 0; i < result.size(); ++i) {
+        Serial.print(result[i]);
         Serial.print(" ");
     }
+    Serial.println();
+    
     categorizer.printInfo();
-
     manageSPIFFSFiles();
-
 }
 
 void loop() {
-
+    // Empty loop for one-time execution
 }

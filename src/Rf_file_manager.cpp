@@ -197,7 +197,16 @@ void deleteAllSPIFFSFiles() {
 }
 
 String reception_data(bool exact_columns, bool print_file) {
+    while (Serial.available()) {
+        Serial.read();
+    }
+    delay(500); // Wait for any previous input to clear
+    while (Serial.available()) {
+        Serial.read();
+    }
+
     Serial.println("Enter base filename (no extension), e.g. animal_data:");
+    Serial.flush();
     String baseName = "";
 
     while (baseName.length() == 0) {
@@ -205,6 +214,7 @@ String reception_data(bool exact_columns, bool print_file) {
             baseName = Serial.readStringUntil('\n');
             baseName.trim();
         }
+        delay(10);
     }
 
     String fullPath = "/" + baseName + ".csv";
@@ -213,12 +223,13 @@ String reception_data(bool exact_columns, bool print_file) {
     File file = SPIFFS.open(fullPath, FILE_WRITE);
     if (!file) {
         Serial.println("❌ Failed to open file for writing");
-        return;
+        return baseName;
     }
 
     Serial.println("📥 Enter CSV lines (separated by space or newline). Type END to finish.");
 
     String buffer = "";
+    int total_rows = 0;
 
     while (true) {
         if (Serial.available()) {
@@ -260,6 +271,7 @@ String reception_data(bool exact_columns, bool print_file) {
             }
 
             buffer = "";
+            total_rows++;
         }
 
         delay(10);
@@ -267,10 +279,11 @@ String reception_data(bool exact_columns, bool print_file) {
     file.close();
     if(exact_columns > 0) {
         cleanMalformedRows(fullPath, exact_columns);
-    } else {
-        Serial.println("No exact column count specified, skipping cleanup.");
-    }
+    } 
     if(print_file) printCSVFile(fullPath);
+
+    Serial.printf("📄 Total rows: %d", total_rows);
+
     return fullPath; // Return the full path of the created file
 }
 

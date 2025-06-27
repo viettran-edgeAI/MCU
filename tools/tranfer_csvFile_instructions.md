@@ -105,17 +105,18 @@ void setup() {
     SPIFFS.begin(true);
     
     // Option 1: Receive from Serial (EOF method)
-    if (categorizer.receiveFromSerial(Serial, 30000)) {
-        categorizer = Rf_categorizer("/categorizer.bin");
+    // Note: receiveFromPySerial will prompt for filename
+    if (categorizer.receiveFromPySerial(Serial, 30000)) {
+        Serial.println("Categorizer received successfully!");
     }
     
     // Option 2: Interactive CSV input method
-    if (categorizer.receiveFromSerialMonitor(234, false)) {
+    if (categorizer.receiveFromSerialMonitor(false)) {
         Serial.println("Categorizer data received successfully!");
     }
     
-    // Option 3: Load existing categorizer
-    // categorizer = Rf_categorizer("/categorizer.bin");
+    // Option 3: Load existing categorizer by filename
+    // categorizer = Rf_categorizer("/your_categorizer.bin");
 }
 
 void loop() {

@@ -16,6 +16,7 @@ Rf_categorizer::Rf_categorizer(const String& binFilename) : filename(binFilename
     }
 }
 
+
 // Helper function to split string
 mcu::b_vector<String> Rf_categorizer::split(const String& line, char delimiter) {
     mcu::b_vector<String> result;
@@ -32,57 +33,190 @@ mcu::b_vector<String> Rf_categorizer::split(const String& line, char delimiter) 
     return result;
 }
 
-// Receive categorizer from Serial in CSV format
-bool Rf_categorizer::receiveFromPySerial(HardwareSerial& serial, unsigned long timeout) {
-    String csvData = "";
+// Update the implementation to use Stream& instead of HardwareSerial&
+bool Rf_categorizer::receiveFromPySerial(Stream& serial, unsigned long timeout) {
     unsigned long startTime = millis();
     
-    Serial.println("Waiting for categorizer data...");
+    // Clear any leftover data in serial buffer
+    while (serial.available()) {
+        serial.read();
+    }
+    delay(100);
     
-    // Read until timeout or end marker
+    // Phase 1: Wait for "receive" command from Python script
+    Serial.println("Waiting for 'receive' command from Python script...");
+    Serial.flush();
+    
+    String commandBuffer = "";
+    commandBuffer.reserve(32);
+    
     while (millis() - startTime < timeout) {
         if (serial.available()) {
-            String line = serial.readStringUntil('\n');
-            line.trim();
+            char c = serial.read();
             
-            if (line == "EOF_CATEGORIZER") {
-                break;
+            if (c == '\n' || c == '\r') {
+                commandBuffer.trim();
+                commandBuffer.toLowerCase();
+                
+                if (commandBuffer.equals("receive")) {
+                    Serial.println("READY"); // Match what Python expects
+                    Serial.flush();
+                    break;
+                } else if (commandBuffer.length() > 0) {
+                    Serial.println("Received: '" + commandBuffer + "' - expecting 'receive'");
+                }
+                commandBuffer = ""; // Reset for next command
+            } else if (c >= 32 && c <= 126 && commandBuffer.length() < 30) { // Printable ASCII only
+                commandBuffer += c;
             }
-            
-            csvData += line + "\n";
-            startTime = millis(); // Reset timeout on data reception
         }
         delay(10);
     }
     
-    if (csvData.length() == 0) {
-        Serial.println("No data received");
+    if (millis() - startTime >= timeout) {
+        Serial.println("Timeout waiting for receive command");
         return false;
     }
     
-    // Save CSV data to temporary file
-    String tempCsvFile = "/temp_categorizer.csv";
-    File file = SPIFFS.open(tempCsvFile, "w");
-    if (!file) {
-        Serial.println("Failed to create temp CSV file");
+    // Phase 2: Receive CSV data
+    Serial.println("Waiting for categorizer data...");
+    Serial.flush();
+    
+    mcu::b_vector<char> csvBuffer;
+    csvBuffer.reserve(4096); // Larger buffer for bigger datasets
+    const size_t MAX_CSV_SIZE = 8192; // Buffer overflow protection for ESP32
+    startTime = millis(); // Reset timeout for data reception
+    
+    bool foundEOF = false;
+    const char* eofMarker = "EOF_CATEGORIZER";
+    const size_t eofLen = 15; // strlen("EOF_CATEGORIZER")
+    size_t eofMatchPos = 0;
+    
+    while (millis() - startTime < timeout && !foundEOF) {
+        if (serial.available()) {
+            char c = serial.read();
+            
+            // Check buffer size limit
+            if (csvBuffer.size() >= MAX_CSV_SIZE) {
+                Serial.println("ERROR: CSV data too large, buffer overflow protection");
+                return false;
+            }
+            
+            csvBuffer.push_back(c);
+            
+            // Efficient EOF detection - character by character matching
+            if (c == eofMarker[eofMatchPos]) {
+                eofMatchPos++;
+                if (eofMatchPos >= eofLen) {
+                    // Remove EOF marker from buffer
+                    csvBuffer.resize(csvBuffer.size() - eofLen);
+                    foundEOF = true;
+                    break;
+                }
+            } else {
+                eofMatchPos = (c == eofMarker[0]) ? 1 : 0;
+            }
+            
+            startTime = millis(); // Reset timeout on data reception
+        }
+        delay(1);
+    }
+    
+    if (!foundEOF) {
+        Serial.println("ERROR: Timeout or no EOF marker found");
         return false;
     }
     
-    file.print(csvData);
-    file.close();
+    if (csvBuffer.empty()) {
+        Serial.println("ERROR: No CSV data received");
+        return false;
+    }
     
-    Serial.println("CSV data received successfully");
+    Serial.println("SUCCESS: CSV data received (" + String(csvBuffer.size()) + " bytes)");
     
-    // Set filename for binary file
-    filename = "/categorizer.bin";
+    // Phase 3: Auto-generate filename (no user input required)
+    static uint16_t fileCounter = 0;
+    char filenameBuffer[32];
+    snprintf(filenameBuffer, sizeof(filenameBuffer), "/categorizer_%u.bin", fileCounter++);
+    filename = filenameBuffer;
+    Serial.println("Binary file will be saved as: " + filename);
     
-    // Convert to binary format
-    return convertToBin();
+    // Phase 4: Save CSV to temporary file using memory-efficient approach
+    String csvPath = "/temp_csv.csv";
+    File csvFile = SPIFFS.open(csvPath, "w");
+    if (!csvFile) {
+        Serial.println("Failed to create temporary CSV file");
+        return false;
+    }
+    
+    // Write buffer to file in chunks to save RAM
+    const uint16_t chunkSize = 128; // Smaller chunks for embedded systems
+    for (uint16_t i = 0; i < csvBuffer.size(); i += chunkSize) {
+        uint16_t writeSize = (i + chunkSize > csvBuffer.size()) ? 
+                            (csvBuffer.size() - i) : chunkSize;
+        
+        // Check write success
+        size_t written = csvFile.write(reinterpret_cast<const uint8_t*>(&csvBuffer[i]), writeSize);
+        if (written != writeSize) {
+            Serial.println("ERROR: Failed to write chunk to file");
+            csvFile.close();
+            return false;
+        }
+    }
+    csvFile.close();
+    
+    // Clear buffer to free memory
+    csvBuffer.clear();
+    csvBuffer.fit();
+    
+    // Phase 5: Convert to binary format
+    bool success = convertToBin(csvPath);
+    
+    // Clean up temporary CSV file
+    SPIFFS.remove(csvPath);
+    
+    if (success) {
+        Serial.println("SUCCESS: Categorizer converted successfully");
+    } else {
+        Serial.println("ERROR: Failed to convert CSV to binary format");
+    }
+    
+    return success;
+}
+
+// Receive categorizer data using interactive CSV input
+bool Rf_categorizer::receiveFromSerialMonitor(bool print_file) {
+    Serial.println("=== Categorizer Data Input ===");
+    Serial.println("Please enter categorizer data in CSV format.");
+    
+    // Use our custom CSV input method instead of reception_data
+    String csvPath = reception_data(0,print_file);
+    
+    // Check if CSV input was successful
+    if (csvPath.length() == 0) {
+        Serial.println("❌ Failed to receive CSV data");
+        return false;
+    }
+    
+    // Extract base name from the full path for binary filename
+    String baseName = csvPath;
+    int lastSlash = baseName.lastIndexOf('/');
+    if (lastSlash >= 0) {
+        baseName = baseName.substring(lastSlash + 1);
+    }
+    int lastDot = baseName.lastIndexOf('.');
+    if (lastDot >= 0) {
+        baseName = baseName.substring(0, lastDot);
+    }
+
+    filename = "/" + baseName + "_ctg.bin";
+    Serial.println("📁 Binary file will be saved as: " + filename);
+    
+    return convertToBin(csvPath);
 }
 
 // Convert CSV format to binary format
-bool Rf_categorizer::convertToBin() {
-    String csvFile = "/temp_categorizer.csv";
+bool Rf_categorizer::convertToBin(const String& csvFile) {
     
     if (!SPIFFS.exists(csvFile)) {
         Serial.println("CSV file not found");
@@ -98,16 +232,19 @@ bool Rf_categorizer::convertToBin() {
     // Read header line
     String header = csvIn.readStringUntil('\n');
     header.trim();
-    mcu::b_vector<String> headerParts = split(header);
+    mcu::b_vector<String> headerParts = split(header, ',');  // Add comma delimiter
     
     if (headerParts.size() != 2) {
         csvIn.close();
-        Serial.println("Invalid CSV header format");
+        Serial.println("Invalid CSV header format. Expected: numFeatures,groupsPerFeature");
+        Serial.println("Got: " + header);
         return false;
     }
     
     numFeatures = headerParts[0].toInt();
     groupsPerFeature = headerParts[1].toInt();
+    
+    Serial.println("Processing " + String(numFeatures) + " features with " + String(groupsPerFeature) + " groups each");
     
     // Create binary file
     File binOut = SPIFFS.open(filename, "w");
@@ -123,99 +260,75 @@ bool Rf_categorizer::convertToBin() {
     
     // Process each feature
     for (uint16_t i = 0; i < numFeatures; i++) {
+        if (!csvIn.available()) {
+            csvIn.close();
+            binOut.close();
+            Serial.println("Unexpected end of file at feature " + String(i));
+            SPIFFS.remove(csvFile);
+            return false;
+        }
+        
         String line = csvIn.readStringUntil('\n');
         line.trim();
-        mcu::b_vector<String> parts = split(line);
         
+        if (line.length() == 0) {
+            csvIn.close();
+            binOut.close();
+            Serial.println("Empty line encountered at feature " + String(i));
+            SPIFFS.remove(csvFile);
+            return false;
+        }
+        
+        mcu::b_vector<String> parts = split(line, ',');  // Add comma delimiter
+        
+        // Expected format: isDiscreteFlag,dataCount,value1,value2,value3,...
         if (parts.size() < 2) {
             csvIn.close();
             binOut.close();
-            Serial.println("Invalid feature line format");
+            Serial.println("Invalid feature line format at feature " + String(i));
+            Serial.println("Expected at least 2 values, got " + String(parts.size()));
+            Serial.println("Line: " + line);
+            SPIFFS.remove(csvFile);
             return false;
         }
         
         uint8_t isDiscreteFlag = parts[0].toInt();
         uint16_t dataCount = parts[1].toInt();
         
+        // Validate that we have enough data values
+        if (parts.size() < (2 + dataCount)) {
+            csvIn.close();
+            binOut.close();
+            Serial.println("Insufficient data values at feature " + String(i));
+            Serial.println("Expected " + String(dataCount) + " values, got " + String(parts.size() - 2));
+            SPIFFS.remove(csvFile);
+            return false;
+        }
+        
         // Write feature metadata
         binOut.write(&isDiscreteFlag, sizeof(isDiscreteFlag));
         binOut.write((uint8_t*)&dataCount, sizeof(dataCount));
         
         // Write feature data
-        for (uint16_t j = 0; j < dataCount && (j + 2) < parts.size(); j++) {
+        for (uint16_t j = 0; j < dataCount; j++) {
             float value = parts[j + 2].toFloat();
             binOut.write((uint8_t*)&value, sizeof(value));
+        }
+        
+        // Debug output for first few features
+        if (i < 3) {
+            Serial.println("Feature " + String(i) + ": discrete=" + String(isDiscreteFlag) + 
+                          ", count=" + String(dataCount) + ", first_value=" + parts[2]);
         }
     }
     
     csvIn.close();
     binOut.close();
     
-    // Clean up temporary CSV file
     SPIFFS.remove(csvFile);
     
-    Serial.println("Conversion to binary completed");
+    Serial.println("Conversion to binary completed successfully");
     return true;
-}
-
-// Receive categorizer data using interactive CSV input
-bool Rf_categorizer::receiveFromSerialMonitor(bool exact_columns, bool print_file) {
-    Serial.println("=== Categorizer Data Input ===");
-    Serial.println("Please enter categorizer data in CSV format.");
-    Serial.println("Expected format:");
-    Serial.println("Line 1: numFeatures,groupsPerFeature");
-    Serial.println("Line 2+: isDiscrete,dataCount,value1,value2,...");
-    Serial.println("=====================================");
-    
-    // Use the reception_data function to get CSV input
-    String csvPath = reception_data(exact_columns, print_file);
-    
-    // Check if reception_data was successful
-    if (csvPath.length() == 0) {
-        Serial.println("❌ Failed to receive data");
-        return false;
-    }
-    
-    // Check if file exists
-    if (!SPIFFS.exists(csvPath)) {
-        Serial.println("❌ CSV file not found: " + csvPath);
-        return false;
-    }
-    
-    // Create temporary copy for processing
-    String tempCsvFile = "/temp_categorizer.csv";
-    if (!cloneCSVFile(csvPath, tempCsvFile)) {
-        Serial.println("❌ Failed to copy CSV file for processing");
-        return false;
-    }
-    
-    // Extract base name from the full path for binary filename
-    String baseName = csvPath;
-    int lastSlash = baseName.lastIndexOf('/');
-    if (lastSlash >= 0) {
-        baseName = baseName.substring(lastSlash + 1);
-    }
-    int lastDot = baseName.lastIndexOf('.');
-    if (lastDot >= 0) {
-        baseName = baseName.substring(0, lastDot);
-    }
-    
-    // Set filename for binary output
-    filename = "/" + baseName + "_categorizer.bin";
-    
-    Serial.println("📁 Binary file will be saved as: " + filename);
-    
-    // Convert to binary format
-    bool success = convertToBin();
-    
-    if (success) {
-        Serial.println("✅ Categorizer data successfully processed and saved!");
-        printInfo();
-    } else {
-        Serial.println("❌ Failed to process categorizer data");
-    }
-    
-    return success;
 }
 
 // Load categorizer from SPIFFS to RAM
@@ -301,7 +414,7 @@ void Rf_categorizer::releaseCtg() {
 
 // Categorize a single feature value
 uint8_t Rf_categorizer::categorizeFeature(uint16_t featureIdx, float value) const {
-    if (!isLoaded || featureIdx >= numFeatures) {
+    if (featureIdx >= numFeatures) {
         return 0;
     }
     
@@ -329,9 +442,12 @@ uint8_t Rf_categorizer::categorizeFeature(uint16_t featureIdx, float value) cons
 // Categorize an entire sample
 mcu::b_vector<uint8_t> Rf_categorizer::categorizeSample(const mcu::b_vector<float>& sample) const {
     mcu::b_vector<uint8_t> result;
-    if (!isLoaded) {
-        Serial.println("Categorizer not loaded");
-        return result;
+    bool preloaded = isLoaded;
+    if (!preloaded) {
+        if (!const_cast<Rf_categorizer*>(this)->loadCtg()) {
+            Serial.println("Failed to load categorizer");
+            return result; // Return empty result
+        }
     }
     
     result.reserve(numFeatures);
@@ -339,7 +455,9 @@ mcu::b_vector<uint8_t> Rf_categorizer::categorizeSample(const mcu::b_vector<floa
     for (uint16_t i = 0; i < numFeatures && i < sample.size(); ++i) {
         result.push_back(categorizeFeature(i, sample[i]));
     }
-    
+    if(!preloaded){
+        const_cast<Rf_categorizer*>(this)->releaseCtg(); // Release if we loaded it just for this operation
+    }
     return result;
 }
 

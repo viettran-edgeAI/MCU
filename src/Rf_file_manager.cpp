@@ -200,7 +200,7 @@ String reception_data(bool exact_columns, bool print_file) {
     while (Serial.available()) {
         Serial.read();
     }
-    delay(500); // Wait for any previous input to clear
+    delay(100); // Wait for any previous input to clear
     while (Serial.available()) {
         Serial.read();
     }

@@ -5,48 +5,109 @@
 #include <FS.h>
 
 /**
- * @brief Clones a CSV file from source to destination with exact formatting preservation
+ * @brief Clones any file from source to destination with format-aware handling
  * 
- * This function creates an exact copy of a CSV file, preserving all formatting including
- * line endings and whitespace. Useful for creating backups or duplicates of data files.
+ * This function creates an exact copy of any file type, automatically detecting
+ * whether it's a text file (csv, txt, log, json) or binary file (jpg, bin, etc.)
+ * and using the appropriate copying method. Text files preserve line endings,
+ * while binary files are copied byte-for-byte.
  * 
- * @param src Source file path (must include leading slash, e.g., "/data.csv")
- * @param dest Destination file path (must include leading slash, e.g., "/data_copy.csv")
+ * If no destination is provided, automatically generates one by adding 'cpy' 
+ * before the file extension (e.g., "/data.csv" → "/datacpy.csv").
+ * 
+ * @param src Source file path (must include leading slash, e.g., "/data.csv", "/image.jpg")
+ * @param dest Destination file path (optional, auto-generated if empty)
  * @return true if cloning was successful, false otherwise
  * 
- * @note Both files must be valid SPIFFS paths. The function will print the cloned file content.
+ * @note Supports all file formats: CSV, TXT, BIN, JPG, LOG, JSON, etc.
  */
-bool cloneCSVFile(const String& src, const String& dest);
-
+bool cloneFile(const String& src, const String& dest = "");
 
 /**
- * @brief Interactive SPIFFS file management interface
+ * @brief Clones file with auto-generated destination name
  * 
- * Provides a command-line interface for viewing and managing files stored in SPIFFS.
- * Users can view file listings with sizes, delete individual files, and monitor
- * available storage space. The interface runs in a loop until user types "END".
+ * @param src Source file path
+ * @return true if cloning was successful, false otherwise
+ */
+bool cloneFile(const String& src);
+
+/**
+ * @brief Clones file with const char* parameters
+ * 
+ * @param src Source file path
+ * @param dest Destination file path
+ * @return true if cloning was successful, false otherwise
+ */
+bool cloneFile(const char* src, const char* dest);
+
+/**
+ * @brief Clones file with const char* source and auto-generated destination
+ * 
+ * @param src Source file path
+ * @return true if cloning was successful, false otherwise
+ */
+bool cloneFile(const char* src);
+
+/**
+ * @brief Renames a file in SPIFFS storage
+ * 
+ * Changes the name of an existing file from oldPath to newPath. Both paths
+ * must be valid SPIFFS paths. The operation will fail if the source file
+ * doesn't exist or if the destination file already exists.
+ * 
+ * @param oldPath Current file path (must include leading slash, e.g., "/old_data.csv")
+ * @param newPath New file path (must include leading slash, e.g., "/new_data.csv")
+ * @return true if rename was successful, false otherwise
+ * 
+ * @note This is an atomic operation - either the file is renamed completely or not at all.
+ *       The file content remains unchanged, only the filename/path changes.
+ */
+bool renameFile(const String& oldPath, const String& newPath);
+
+/**
+ * @brief Renames a file with const char* parameters
+ * 
+ * @param oldPath Current file path
+ * @param newPath New file path
+ * @return true if rename was successful, false otherwise
+ */
+bool renameFile(const char* oldPath, const char* newPath);
+
+/**
+ * @brief Interactive SPIFFS file management interface with isolated operation modes
+ * 
+ * Provides a comprehensive command-line interface for managing files in SPIFFS.
+ * Each operation runs in its own isolated space with dedicated menus and loops.
+ * Users can perform multiple operations within each mode before returning to main menu.
  * 
  * Features:
- * - Lists all files with sizes
- * - Shows free space available
- * - Interactive file deletion with confirmation
- * - Safe exit mechanism
+ * - a: Print file content with repeated file selection
+ * - b: Clone files with source selection and destination input
+ * - c: Rename files with file selection and new name input
+ * - d: Delete individual files or all files ('all' option)
+ * - e: Create new CSV files using interactive data input
+ * - Isolated operation spaces that maintain state until 'end'
+ * - Real-time file list refresh after modifications
+ * - Safe exit mechanisms and confirmation dialogs
  * 
- * @note Requires Serial communication for user interaction
+ * @note Each operation mode maintains its own loop until user types 'end'.
+ *       Type 'exit' in main menu to quit the file manager completely.
+ *       Delete mode supports 'all' command to delete all files with confirmation.
  */
 void manageSPIFFSFiles();
 /**
- * @brief Prints the contents of a CSV file with summary statistics
+ * @brief Prints the contents of any text file with format-aware summary statistics
  * 
- * Displays the complete contents of a CSV file line by line, then provides
- * a summary showing the total number of rows and columns detected.
- * Column count is determined by counting commas in the first row.
+ * Displays the complete contents of text files (CSV, TXT, LOG, JSON) line by line,
+ * then provides a summary. For CSV files, shows row and column count. For other
+ * text files, shows line count. Binary files display only size information.
  * 
- * @param filename Path to the CSV file (e.g., "/data.csv")
+ * @param filename Path to the file (e.g., "/data.csv", "/config.txt", "/image.jpg")
  * 
  * @note File must exist in SPIFFS. Empty lines are skipped during counting.
+ *       Binary files (JPG, BIN, etc.) show only basic file information.
  */
-void printCSVFile(String filename);
+void printFile(String filename);
 
 /**
  * @brief Deletes all files from SPIFFS storage
@@ -76,7 +137,7 @@ void deleteAllSPIFFSFiles();
  * 
  * @note Type "END" to finish data entry. Files are saved with .csv extension.
  */
-String reception_data(bool exact_columns = 0, bool print_file = true);
+String reception_data(int exact_columns = 0, bool print_file = true);
 
 /**
  * @brief Removes malformed rows from CSV files to ensure data consistency
@@ -90,14 +151,13 @@ String reception_data(bool exact_columns = 0, bool print_file = true);
  * 
  * @note Original file is replaced with cleaned version. Backup recommended before use.
  */
-void cleanMalformedRows(const String& filename, uint16_t exact_columns);
-
+void cleanMalformedRows(const String& filename, int exact_columns);
 /**
- * @brief Alias for printCSVFile for backward compatibility
+ * @brief Alias for printFile for backward compatibility
  * 
  * @param filename Path to the file to print
  */
-inline void printFile(const String& filename) {
-    printCSVFile(filename);
+inline void printCSVFile(const String& filename) {
+    printFile(filename);
 }
 

@@ -2583,6 +2583,14 @@ namespace mcu {
                 push_back(*it);
             }
         }
+
+        void fit() {
+            vector_index_type current_size = get_size();
+            if (current_size < get_capacity()) {
+                packed_data.resize(current_size);
+                set_capacity(current_size);
+            }
+        }
         
         void clear() { set_size(0); }
         bool empty() const { return get_size() == 0; }

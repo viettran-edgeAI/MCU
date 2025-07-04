@@ -1194,7 +1194,7 @@ namespace mcu {
     ------------------------------------------------------------------------------------------------------------------
 */
     // vector with small buffer optimization (SBO)
-    template<typename T, index_size_flag SizeFlag = index_size_flag::MEDIUM, size_t sboSize = 0>
+    template<typename T, size_t sboSize = 0, index_size_flag SizeFlag = index_size_flag::MEDIUM>
     class b_vector : hash_kernel {
     private:
         using vector_index_type = typename vector_index_type<SizeFlag>::type;
@@ -1613,13 +1613,15 @@ namespace mcu {
         
     private:
 
-        bool is_less(const T& a, const T& b) const noexcept {
-            if(std::is_arithmetic_v<T>){
+        bool is_less(const T& a, const T& b) noexcept {
+            if constexpr (std::is_arithmetic_v<T>) {
+                // For numeric types, direct comparison
                 return a < b;
-            }else{
-                size_t a_hash = preprocess_hash_input(a);
-                size_t b_hash = preprocess_hash_input(b);
-                if (a_hash < b_hash) return true;
+            } else {
+                // For non-numeric types, use hash preprocessing
+                size_t hash_a = this->preprocess_hash_input(a);
+                size_t hash_b = this->preprocess_hash_input(b);
+                return hash_a < hash_b;
             }
         }
 
@@ -1794,7 +1796,7 @@ namespace mcu {
 
 
     template<typename T, index_size_flag SizeFlag = index_size_flag::MEDIUM>
-    class vector {
+    class vector : hash_kernel{
     private:
         using vector_index_type = typename vector_index_type<SizeFlag>::type;
         T*      array    = nullptr;
@@ -1894,12 +1896,6 @@ namespace mcu {
             return *this;
         }
 
-        void fill(const T& value) noexcept {
-            for (vector_index_type i = 0; i < size_; ++i) {
-                array[i] = value;
-            }
-        }
-
         // Reserve at least newCapacity
         void reserve(vector_index_type newCapacity) noexcept {
             if (newCapacity > capacity_) resize(newCapacity);
@@ -1964,42 +1960,7 @@ namespace mcu {
             size_ += count;
         }
 
-        // Erase element at position
-        void erase(vector_index_type pos) noexcept {
-            if (pos >= size_) return;
-            customCopy(array + pos + 1, array + pos, size_ - pos - 1);
-            --size_;
-        }
-
-        bool empty() const noexcept {
-            return size_ == 0;
-        }
-
-        // Clear contents (keep capacity)
-        void clear() noexcept {
-            size_ = 0;
-        }
-
-        // Shrink capacity to fit size
-        void fit() noexcept {
-            if (size_ < capacity_) resize(size_);
-        }
-        T& back() noexcept {
-            if (size_ == 0){
-                return array[0]; // Return default value if empty
-            }
-            return array[size_ - 1];
-        }
-
-        // emplace_back: construct an element in place at the end
-        
-        void pop_back() noexcept {
-            if (size_ == 0) {
-                return; // Do nothing if empty
-            }
-            --size_;
-        }
-         void sort() noexcept {
+        void sort() noexcept {
             // Safety check: null array pointer
             if (array == nullptr) return;
             
@@ -2017,14 +1978,16 @@ namespace mcu {
             quickSort(0, size_ - 1);
         }
     private:
-
-        bool is_less(const T& a, const T& b) const noexcept {
-            if(std::is_arithmetic_v<T>){
+        // Helper function to compare two elements, using preprocessing for non-numeric types
+        bool is_less(const T& a, const T& b) noexcept {
+            if constexpr (std::is_arithmetic_v<T>) {
+                // For numeric types, direct comparison
                 return a < b;
-            }else{
-                size_t a_hash = preprocess_hash_input(a);
-                size_t b_hash = preprocess_hash_input(b);
-                return a_hash < b_hash;
+            } else {
+                // For non-numeric types, use hash preprocessing
+                size_t hash_a = this->preprocess_hash_input(a);
+                size_t hash_b = this->preprocess_hash_input(b);
+                return hash_a < hash_b;
             }
         }
 
@@ -2129,9 +2092,9 @@ namespace mcu {
                     
                     // Safety: bounds check for each access
                     if (j + 1 <= high && j < size_ && j + 1 < size_) {
-                        if (!isLess(array[j], array[j + 1]) && !isLess(array[j + 1], array[j])) {
+                        if (!is_less(array[j], array[j + 1]) && !is_less(array[j + 1], array[j])) {
                             // Elements are equal, no swap needed
-                        } else if (!isLess(array[j], array[j + 1])) {
+                        } else if (!is_less(array[j], array[j + 1])) {
                             T temp = array[j];
                             array[j] = array[j + 1];
                             array[j + 1] = temp;
@@ -2140,7 +2103,43 @@ namespace mcu {
                 }
             }
         }
+
     public:
+        // Erase element at position
+        void erase(vector_index_type pos) noexcept {
+            if (pos >= size_) return;
+            customCopy(array + pos + 1, array + pos, size_ - pos - 1);
+            --size_;
+        }
+
+        bool empty() const noexcept {
+            return size_ == 0;
+        }
+
+        // Clear contents (keep capacity)
+        void clear() noexcept {
+            size_ = 0;
+        }
+
+        // Shrink capacity to fit size
+        void fit() noexcept {
+            if (size_ < capacity_) resize(size_);
+        }
+        T& back() noexcept {
+            if (size_ == 0){
+                return array[0]; // Return default value if empty
+            }
+            return array[size_ - 1];
+        }
+
+        // emplace_back: construct an element in place at the end
+        
+        void pop_back() noexcept {
+            if (size_ == 0) {
+                return; // Do nothing if empty
+            }
+            --size_;
+        }
         // Returns a pointer such that [data(), data() + size()) is a valid range. For a non-empty %vector, data() == &front().
         T* data() noexcept { return array; }
         const T* data() const noexcept { return array; }
@@ -2187,7 +2186,6 @@ namespace mcu {
     ------------------------------------------------- PACKED VECTOR ---------------------------------------------------
     -------------------------------------------------------------------------------------------------------------------
     */
-    
     
     template<uint8_t BitsPerElement>
     class PackedArray {
@@ -2330,7 +2328,6 @@ namespace mcu {
             count = newSize;
         }
     };
-
 
     // Specialized packed_vector for packed elements
     template<uint8_t BitsPerElement, index_size_flag SizeFlag = index_size_flag::MEDIUM>
@@ -2583,14 +2580,6 @@ namespace mcu {
                 push_back(*it);
             }
         }
-
-        void fit() {
-            vector_index_type current_size = get_size();
-            if (current_size < get_capacity()) {
-                packed_data.resize(current_size);
-                set_capacity(current_size);
-            }
-        }
         
         void clear() { set_size(0); }
         bool empty() const { return get_size() == 0; }
@@ -2625,7 +2614,7 @@ namespace mcu {
             return !(*this == other);
         }
     };
-    
+        
     
 
     /*  ------------------------------------------------------------------------------------------------------------------

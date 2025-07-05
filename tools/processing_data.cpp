@@ -45,7 +45,14 @@ static mcu::vector<std::string> split(const std::string &line) {
     std::istringstream ss(line);
     std::string cell;
     while (std::getline(ss, cell, ',')) {
-        out.push_back(cell);
+        // Trim leading/trailing whitespace from cell
+        size_t first = cell.find_first_not_of(" \t\r\n");
+        if (std::string::npos == first) {
+            out.push_back("");
+            continue;
+        }
+        size_t last = cell.find_last_not_of(" \t\r\n");
+        out.push_back(cell.substr(first, (last - first + 1)));
     }
     return out;
 }
@@ -137,12 +144,14 @@ public:
             // return static_cast<uint8_t>(bin);
             // Quantile binning
             const auto& edges = quantileBinEdges[featureIdx];
+            if (edges.empty()) return 0; // Handle case with no edges
+
             for(uint8_t bin = 0; bin < edges.size(); ++bin) {
                 if(value < edges[bin]) {
                     return bin;
                 }
             }
-            return edges.size(); // Last bin
+            return static_cast<uint8_t>(edges.size()); // Value is in the last bin
         }
     }
     
@@ -196,14 +205,50 @@ public:
 // Helper: compute quantile bin edges for a feature
 mcu::vector<float> computeQuantileBinEdges(mcu::vector<float> values, int numBins) {
     mcu::vector<float> edges;
-    if (values.size() < 2 || numBins < 1) return edges;
+    if (values.empty() || numBins < 2) return edges;
+
     std::sort(values.begin(), values.end());
+    
+    // Generate numBins - 1 edges
     for (int b = 1; b < numBins; ++b) {
-        float q = b * (values.size() / (float)numBins);
-        int idx = static_cast<int>(q);
-        if (idx >= values.size()) idx = values.size() - 1;
-        edges.push_back(values[idx]);
+        float q_idx = b * ((float)(values.size() - 1) / (float)numBins);
+        int idx = static_cast<int>(q_idx);
+        
+        // Basic linear interpolation
+        float fraction = q_idx - idx;
+        float edge_val;
+        if (idx + 1 < values.size()) {
+            edge_val = values[idx] + fraction * (values[idx+1] - values[idx]);
+        } else {
+            edge_val = values.back();
+        }
+        edges.push_back(edge_val);
     }
+
+    // Post-check for constant edges due to low variance
+    bool all_same = true;
+    for(size_t i = 1; i < edges.size(); ++i) {
+        if (std::abs(edges[i] - edges[0]) > 1e-6f) {
+            all_same = false;
+            break;
+        }
+    }
+
+    if (all_same && !edges.empty()) {
+        float min_val = values.front();
+        float max_val = values.back();
+        float range = max_val - min_val;
+
+        // If there's some range, create simple linear bins
+        if (range > 1e-6f) {
+            for (int b = 1; b < numBins; ++b) {
+                edges[b-1] = min_val + b * (range / numBins);
+            }
+        }
+        // If no range, all edges will be the same, which is acceptable.
+        // The categorization logic will place all values in the last bin.
+    }
+    
     return edges;
 }
 
@@ -591,13 +636,8 @@ void generateDatasetParamsCSV(std::string path, const DatasetInfo& datasetInfo, 
         fout << "label_mapping_" << static_cast<int>(mapping.second) << "," << mapping.first << "\n";
     }
     
-    // Calculate and write compression metrics
-    uint16_t packedFeatureBytes = (actualFeatures + getFeaturesPerByte() - 1) / getFeaturesPerByte();
-    fout << "packed_bytes_per_sample," << packedFeatureBytes << "\n";
-    fout << "compression_ratio," << std::fixed << std::setprecision(2) 
-         << (float)actualFeatures / packedFeatureBytes << "\n";
-    
     fout.close();
+    uint16_t packedFeatureBytes = (actualFeatures + getFeaturesPerByte() - 1) / getFeaturesPerByte(); // Round up to nearest byte
     
     std::cout << "✅ Dataset parameters saved to: " << outputFile << "\n";
     std::cout << "   📊 Parameters summary:\n";
@@ -893,6 +933,34 @@ int main() {
         std::cout << "   📋 Categorizer: " << categorizerFile << "\n";
         std::cout << "   ⚙️  Parameters: " << dataParamsFile << "\n";
         std::cout << "\n🚀 Ready for ESP32 transfer!\n";
+        
+        // Optional: Auto-run unified transfer
+        std::cout << "\n=== Auto Transfer Option ===\n";
+        std::cout << "Would you like to transfer all files to ESP32 now? (y/n): ";
+        std::string response;
+        std::getline(std::cin, response);
+        
+        if (response == "y" || response == "Y" || response == "yes") {
+            std::cout << "Enter ESP32 serial port (e.g., /dev/ttyUSB0, COM3): ";
+            std::string serialPort;
+            std::getline(std::cin, serialPort);
+            
+            if (!serialPort.empty()) {
+                std::string transferCommand = "python3 transfer_all_to_esp32.py " + baseName + " " + serialPort;
+                std::cout << "🚀 Running: " << transferCommand << std::endl;
+                
+                int result = system(transferCommand.c_str());
+                if (result == 0) {
+                    std::cout << "✅ Transfer completed successfully!" << std::endl;
+                } else {
+                    std::cout << "❌ Transfer failed. You can run it manually:" << std::endl;
+                    std::cout << "   " << transferCommand << std::endl;
+                }
+            }
+        } else {
+            std::cout << "💡 To transfer manually, run:" << std::endl;
+            std::cout << "   python3 transfer_all_to_esp32.py " << baseName << " <serial_port>" << std::endl;
+        }
 
         std::cout << "\n";
     } catch (const std::exception& e) {

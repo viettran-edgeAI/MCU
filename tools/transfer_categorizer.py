@@ -122,6 +122,12 @@ def send_categorizer_to_esp32(csv_file, serial_port, baud_rate=115200, output_fi
             print(f"   Last ESP32 response: '{response.strip()}'")
             return False
         
+        # Send the desired filename to ESP32
+        print(f"📝 Sending output filename: {output_filename}")
+        ser.write(f"{output_filename}\n".encode('utf-8'))
+        ser.flush()
+        time.sleep(0.5)  # Give ESP32 time to process filename
+        
         # Read CSV file
         print(f"\n📤 Sending categorizer data to ESP32...")
         with open(csv_file, 'r') as f:

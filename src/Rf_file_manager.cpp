@@ -416,7 +416,22 @@ void manageSPIFFSFiles() {
                         delay(10);
                     }
                     if (confirm.equals("CONFIRM")) {
-                        deleteAllSPIFFSFiles();
+                        Serial.println("🗑️ Deleting all files...");
+                        for (int i = 0; i < fileCount; i++) {
+                            String fileToDelete = fileList[i];
+                            if (!SPIFFS.exists(fileToDelete)) {
+                                Serial.printf("⚠️ File does not exist: %s\n", fileToDelete.c_str());
+                                continue;
+                            }
+                            
+                            if (SPIFFS.remove(fileToDelete)) {
+                                Serial.printf("✅ Deleted: %s\n", fileToDelete.c_str());
+                            } else {
+                                Serial.printf("❌ Failed to delete: %s\n", fileToDelete.c_str());
+                            }
+                            delay(100); // Small delay for stability
+                        }
+                        Serial.printf("🧹 Cleanup complete. %d files deleted.\n", fileCount
                         Serial.println("✅ All files deleted! You can continue or type 'end' to exit.");
                     } else {
                         Serial.println("❎ Delete all operation canceled.");

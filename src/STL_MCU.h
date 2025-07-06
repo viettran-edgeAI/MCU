@@ -1194,7 +1194,7 @@ namespace mcu {
     ------------------------------------------------------------------------------------------------------------------
 */
     // vector with small buffer optimization (SBO)
-    template<typename T, size_t sboSize = 0, index_size_flag SizeFlag = index_size_flag::MEDIUM>
+    template<typename T, index_size_flag SizeFlag = index_size_flag::MEDIUM, size_t sboSize = 0>
     class b_vector : hash_kernel {
     private:
         using vector_index_type = typename vector_index_type<SizeFlag>::type;
@@ -1580,6 +1580,11 @@ namespace mcu {
             // Remove the dangerous fallback - just assert and return last valid element
             return data_ptr()[size_ - 1];
         }
+        T& front() noexcept {
+            assert(!empty() && "b_vector::front() called on empty vector");
+            // Remove the dangerous fallback - just assert and return first valid element
+            return data_ptr()[0];
+        }
 
         void pop_back() noexcept {
             if (empty()) {
@@ -1776,14 +1781,79 @@ namespace mcu {
         vector_index_type size() const noexcept { return size_; }
         vector_index_type cap() const noexcept { return capacity_; }
 
-        // Operator[] returns default T() on out-of-range
+        // Operator[] with improved bounds checking
         T& operator[](vector_index_type index) noexcept {
-            assert(index < size_ && "b_vector index out of range");
-            return data_ptr()[index];
+            // Safety: Check for empty vector first
+            if (size_ == 0) {
+                // For empty vector, return a static default value to prevent crashes
+                static T default_value{};
+                return default_value;
+            }
+            
+            // Safety: Bounds check with proper index validation
+            if (index >= size_) {
+                // Return last valid element instead of asserting for embedded safety
+                return data_ptr()[size_ - 1];
+            }
+            
+            // Safety: Verify data pointer is valid
+            T* ptr = data_ptr();
+            if (ptr == nullptr) {
+                static T default_value{};
+                return default_value;
+            }
+            
+            return ptr[index];
         }
     
         const T& operator[](vector_index_type index) const noexcept {
-            assert(index < size_ && "b_vector index out of range");
+            // Safety: Check for empty vector first
+            if (size_ == 0) {
+                static const T default_value{};
+                return default_value;
+            }
+            
+            // Safety: Bounds check with proper index validation
+            if (index >= size_) {
+                // Return last valid element instead of asserting for embedded safety
+                return data_ptr()[size_ - 1];
+            }
+            
+            // Safety: Verify data pointer is valid
+            const T* ptr = data_ptr();
+            if (ptr == nullptr) {
+                static const T default_value{};
+                return default_value;
+            }
+            
+            return ptr[index];
+        }
+
+        // Add safe at() method with bounds checking for debugging
+        T& at(vector_index_type index) noexcept {
+            // This method can use assert for debugging while operator[] is safe
+            assert(index < size_ && "b_vector::at() index out of range");
+            assert(size_ > 0 && "b_vector::at() called on empty vector");
+            assert(data_ptr() != nullptr && "b_vector::at() null data pointer");
+            
+            if (index >= size_ || size_ == 0) {
+                static T default_value{};
+                return default_value;
+            }
+            
+            return data_ptr()[index];
+        }
+
+        const T& at(vector_index_type index) const noexcept {
+            assert(index < size_ && "b_vector::at() index out of range");
+            assert(size_ > 0 && "b_vector::at() called on empty vector");
+            assert(data_ptr() != nullptr && "b_vector::at() null data pointer");
+            
+            if (index >= size_ || size_ == 0) {
+                static const T default_value{};
+                return default_value;
+            }
+            
             return data_ptr()[index];
         }
 
@@ -2131,6 +2201,24 @@ namespace mcu {
             }
             return array[size_ - 1];
         }
+        const T& back() const noexcept {
+            if (size_ == 0){
+                return array[0]; // Return default value if empty
+            }
+            return array[size_ - 1];
+        }
+        T& front() noexcept {
+            if (size_ == 0){
+                return array[0]; // Return default value if empty
+            }
+            return array[0];
+        }
+        const T& front() const noexcept {
+            if (size_ == 0){
+                return array[0]; // Return default value if empty
+            }
+            return array[0];
+        }
 
         // emplace_back: construct an element in place at the end
         
@@ -2330,92 +2418,45 @@ namespace mcu {
     };
 
     // Specialized packed_vector for packed elements
+    // Specialized packed_vector for packed elements
     template<uint8_t BitsPerElement, index_size_flag SizeFlag = index_size_flag::MEDIUM>
     class packed_vector {
     private:
         using vector_index_type = typename vector_index_type<SizeFlag>::type;
         PackedArray<BitsPerElement> packed_data;
-        
-        // For TINY: pack size (4 bits) and capacity (4 bits) into one uint8_t
-        // For others: use separate variables
-        static constexpr bool IS_TINY = (SizeFlag == index_size_flag::TINY);
-        
-        union {
-            struct {
-                vector_index_type size_;
-                vector_index_type capacity_;
-            } separate;
-            uint8_t packed_size_capacity; // Lower 4 bits = size, upper 4 bits = capacity
-        } storage;
+        vector_index_type size_ = 0;
+        vector_index_type capacity_ = 0;
         
         static constexpr int VECTOR_MAX_CAP = 
-            (SizeFlag == index_size_flag::TINY) ? 15 :
             (std::is_same<vector_index_type, uint8_t>::value) ? 255 :
             (std::is_same<vector_index_type, uint16_t>::value) ? 65535 :
             2000000000;
         
         static constexpr uint8_t MAX_VALUE = (1 << BitsPerElement) - 1;
-        
-        // Helper functions for TINY mode
-        vector_index_type get_size() const {
-            return IS_TINY ? (storage.packed_size_capacity & 0x0F) : storage.separate.size_;
-        }
-        
-        vector_index_type get_capacity() const {
-            return IS_TINY ? ((storage.packed_size_capacity >> 4) & 0x0F) : storage.separate.capacity_;
-        }
-        
-        void set_size(vector_index_type new_size) {
-            if (IS_TINY) {
-                storage.packed_size_capacity = (storage.packed_size_capacity & 0xF0) | (new_size & 0x0F);
-            } else {
-                storage.separate.size_ = new_size;
-            }
-        }
-        
-        void set_capacity(vector_index_type new_capacity) {
-            if (IS_TINY) {
-                storage.packed_size_capacity = (storage.packed_size_capacity & 0x0F) | ((new_capacity & 0x0F) << 4);
-            } else {
-                storage.separate.capacity_ = new_capacity;
-            }
-        }
-        
-        void set_size_capacity(vector_index_type new_size, vector_index_type new_capacity) {
-            if (IS_TINY) {
-                storage.packed_size_capacity = ((new_capacity & 0x0F) << 4) | (new_size & 0x0F);
-            } else {
-                storage.separate.size_ = new_size;
-                storage.separate.capacity_ = new_capacity;
-            }
-        }
 
     public:
         // Default constructor
-        packed_vector() : packed_data(1) {
-            set_size_capacity(0, 1);
-        }
+        packed_vector() : packed_data(1), size_(0), capacity_(1) {}
         
         // Constructor with initial capacity
         explicit packed_vector(vector_index_type initialCapacity) 
-            : packed_data((initialCapacity == 0) ? 1 : initialCapacity) {
-            set_size_capacity(0, (initialCapacity == 0) ? 1 : initialCapacity);
-        }
+            : packed_data((initialCapacity == 0) ? 1 : initialCapacity),
+            size_(0), capacity_((initialCapacity == 0) ? 1 : initialCapacity) {}
         
         // Constructor with initial size and value
         explicit packed_vector(vector_index_type initialSize, uint8_t value) 
-            : packed_data((initialSize == 0) ? 1 : initialSize) {
-            set_size_capacity(initialSize, (initialSize == 0) ? 1 : initialSize);
-            value &= MAX_VALUE;
-            for (vector_index_type i = 0; i < get_size(); ++i) {
+            : packed_data((initialSize == 0) ? 1 : initialSize),
+            size_(initialSize), capacity_((initialSize == 0) ? 1 : initialSize) {
+            value &= MAX_VALUE; // Ensure value fits in BitsPerElement
+            for (vector_index_type i = 0; i < size_; ++i) {
                 packed_data.set(i, value);
             }
         }
         
         // Initializer list constructor using custom min_init_list
         packed_vector(mcu::min_init_list<uint8_t> init) 
-            : packed_data(init.size() == 0 ? 1 : init.size()) {
-            set_size_capacity(init.size(), init.size() == 0 ? 1 : init.size());
+            : packed_data(init.size() == 0 ? 1 : init.size()),
+            size_(init.size()), capacity_(init.size() == 0 ? 1 : init.size()) {
             vector_index_type i = 0;
             for (auto it = init.begin(); it != init.end(); ++it) {
                 packed_data.set(i++, (*it) & MAX_VALUE);
@@ -2424,36 +2465,21 @@ namespace mcu {
         
         // Copy constructor
         packed_vector(const packed_vector& other) 
-            : packed_data(other.packed_data) {
-            if (IS_TINY) {
-                storage.packed_size_capacity = other.storage.packed_size_capacity;
-            } else {
-                storage.separate = other.storage.separate;
-            }
-        }
+            : packed_data(other.packed_data), size_(other.size_), capacity_(other.capacity_) {}
         
         // Move constructor
         packed_vector(packed_vector&& other) noexcept 
-            : packed_data(std::move(other.packed_data)) {
-            if (IS_TINY) {
-                storage.packed_size_capacity = other.storage.packed_size_capacity;
-                other.storage.packed_size_capacity = 0x10; // capacity=1, size=0
-            } else {
-                storage.separate = other.storage.separate;
-                other.storage.separate.size_ = 0;
-                other.storage.separate.capacity_ = 0;
-            }
+            : packed_data(std::move(other.packed_data)), size_(other.size_), capacity_(other.capacity_) {
+            other.size_ = 0;
+            other.capacity_ = 0;
         }
         
         // Copy assignment
         packed_vector& operator=(const packed_vector& other) {
             if (this != &other) {
                 packed_data = other.packed_data;
-                if (IS_TINY) {
-                    storage.packed_size_capacity = other.storage.packed_size_capacity;
-                } else {
-                    storage.separate = other.storage.separate;
-                }
+                size_ = other.size_;
+                capacity_ = other.capacity_;
             }
             return *this;
         }
@@ -2462,51 +2488,39 @@ namespace mcu {
         packed_vector& operator=(packed_vector&& other) noexcept {
             if (this != &other) {
                 packed_data = std::move(other.packed_data);
-                if (IS_TINY) {
-                    storage.packed_size_capacity = other.storage.packed_size_capacity;
-                    other.storage.packed_size_capacity = 0x10; // capacity=1, size=0
-                } else {
-                    storage.separate = other.storage.separate;
-                    other.storage.separate.size_ = 0;
-                    other.storage.separate.capacity_ = 0;
-                }
+                size_ = other.size_;
+                capacity_ = other.capacity_;
+                other.size_ = 0;
+                other.capacity_ = 0;
             }
             return *this;
-        }
-
-        void push_back(uint8_t value) {
-            value &= MAX_VALUE;
-            vector_index_type current_size = get_size();
-            vector_index_type current_capacity = get_capacity();
-            
-            if (current_size == current_capacity) {
-                vector_index_type newCapacity;
-                if (VECTOR_MAX_CAP == 15) {
-                    newCapacity = current_capacity + 1;
-                } else if (VECTOR_MAX_CAP == 255) {
-                    newCapacity = current_capacity + 10;
-                } else {
-                    newCapacity = current_capacity * 2;
-                }
-                if (newCapacity > VECTOR_MAX_CAP) newCapacity = VECTOR_MAX_CAP;
-                reserve(newCapacity);
-            }
-            packed_data.set(current_size, value);
-            set_size(current_size + 1);
-        }
-        
-        void pop_back() {
-            vector_index_type current_size = get_size();
-            if (current_size > 0) set_size(current_size - 1);
         }
         
         // Fill all elements with specified value
         void fill(uint8_t value) {
-            value &= MAX_VALUE;
-            vector_index_type current_size = get_size();
-            for (vector_index_type i = 0; i < current_size; ++i) {
+            value &= MAX_VALUE; // Ensure value fits in BitsPerElement
+            for (vector_index_type i = 0; i < size_; ++i) {
                 packed_data.set(i, value);
             }
+        }
+    
+        void push_back(uint8_t value) {
+            value &= MAX_VALUE; // Ensure value fits
+            if (size_ == capacity_) {
+                vector_index_type newCapacity;
+                if (VECTOR_MAX_CAP == 255) {
+                    newCapacity = capacity_ + 10;
+                } else {
+                    newCapacity = capacity_ * 2;
+                }
+                if (newCapacity > VECTOR_MAX_CAP) newCapacity = VECTOR_MAX_CAP;
+                reserve(newCapacity);
+            }
+            packed_data.set(size_++, value);
+        }
+        
+        void pop_back() {
+            if (size_ > 0) --size_;
         }
         
         uint8_t operator[](vector_index_type index) const {
@@ -2515,28 +2529,30 @@ namespace mcu {
         
         // Bounds-checked access
         uint8_t at(vector_index_type index) const {
-            if (index >= get_size()) {
+            if (index >= size_) {
                 throw std::out_of_range("packed_vector::at");
             }
             return packed_data.get(index);
         }
         
         void set(vector_index_type index, uint8_t value) {
-            if (index < get_size()) {
+            if (index < size_) {
                 value &= MAX_VALUE;
                 packed_data.set(index, value);
             }
         }
         
         uint8_t get(vector_index_type index) const {
-            return (index < get_size()) ? packed_data.get(index) : 0;
+            return (index < size_) ? packed_data.get(index) : 0;
         }
         
         // Front and back access
         uint8_t front() const {
-            if (get_size() == 0) throw std::out_of_range("packed_vector::front");
+            if (size_ == 0) throw std::out_of_range("packed_vector::front");
             return packed_data.get(0);
         }
+        
+    public:
         
         // uint8_t back() const {
         //     if (size_ == 0) throw std::out_of_range("packed_vector::back");
@@ -2545,26 +2561,23 @@ namespace mcu {
         
         // Resize like std::vector
         void resize(vector_index_type newSize, uint8_t value = 0) {
-            vector_index_type current_capacity = get_capacity();
-            vector_index_type current_size = get_size();
-            
-            if (newSize > current_capacity) {
+            if (newSize > capacity_) {
                 reserve(newSize);
             }
-            if (newSize > current_size) {
+            if (newSize > size_) {
+                // Fill new elements with value
                 value &= MAX_VALUE;
-                for (vector_index_type i = current_size; i < newSize; ++i) {
+                for (vector_index_type i = size_; i < newSize; ++i) {
                     packed_data.set(i, value);
                 }
             }
-            set_size(newSize);
+            size_ = newSize;
         }
         
         void reserve(vector_index_type newCapacity) {
-            vector_index_type current_capacity = get_capacity();
-            if (newCapacity > current_capacity) {
+            if (newCapacity > capacity_) {
                 packed_data.resize(newCapacity);
-                set_capacity(newCapacity);
+                capacity_ = newCapacity;
             }
         }
         
@@ -2580,15 +2593,20 @@ namespace mcu {
                 push_back(*it);
             }
         }
+        void fit() {
+            if (size_ < capacity_) {
+                packed_data.resize(size_);
+                capacity_ = size_;
+            }
+        }
         
-        void clear() { set_size(0); }
-        bool empty() const { return get_size() == 0; }
-        vector_index_type size() const { return get_size(); }
-        vector_index_type capacity() const { return get_capacity(); }
+        void clear() { size_ = 0; }
+        bool empty() const { return size_ == 0; }
+        vector_index_type size() const { return size_; }
+        vector_index_type capacity() const { return capacity_; }
         
         uint8_t back() const {
-            vector_index_type current_size = get_size();
-            return (current_size > 0) ? packed_data.get(current_size - 1) : 0;
+            return (size_ > 0) ? packed_data.get(size_ - 1) : 0;
         }
         
         static constexpr uint8_t max_value() { return MAX_VALUE; }
@@ -2596,15 +2614,14 @@ namespace mcu {
         
         // Memory usage in bytes
         size_t memory_usage() const {
-            size_t bits = get_capacity() * BitsPerElement;
+            size_t bits = capacity_ * BitsPerElement;
             return (bits + 7) / 8;
         }
         
         // Comparison operators
         bool operator==(const packed_vector& other) const {
-            vector_index_type current_size = get_size();
-            if (current_size != other.get_size()) return false;
-            for (vector_index_type i = 0; i < current_size; ++i) {
+            if (size_ != other.size_) return false;
+            for (vector_index_type i = 0; i < size_; ++i) {
                 if (packed_data.get(i) != other.packed_data.get(i)) return false;
             }
             return true;
@@ -2614,9 +2631,7 @@ namespace mcu {
             return !(*this == other);
         }
     };
-        
     
-
     /*  ------------------------------------------------------------------------------------------------------------------
     ---------------------------------------------- CHAINED UNORDERED MAP -------------------------------------------------
     ----------------------------------------------------------------------------------------------------------------------

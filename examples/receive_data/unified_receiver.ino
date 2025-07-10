@@ -200,7 +200,7 @@ void handleFileChunk() {
         bytesWritten += bytesRead;
         // Serial.printf("  ...wrote %u bytes (%u / %u)\n", bytesRead, bytesWritten, receivedFileSize);
     }
-    delay(1); // Yield to other tasks, important for single-core chips
+    delay(10); // Yield to other tasks, important for single-core chips
 
     Serial.print(RESP_ACK);
 

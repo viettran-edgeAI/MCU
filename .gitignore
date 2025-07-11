@@ -48,3 +48,7 @@ src/backup_*.ino
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+__pycache__/
+*.py[cod]
+*.pyo   

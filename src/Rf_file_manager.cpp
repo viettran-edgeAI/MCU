@@ -431,7 +431,7 @@ void manageSPIFFSFiles() {
                             }
                             delay(100); // Small delay for stability
                         }
-                        Serial.printf("🧹 Cleanup complete. %d files deleted.\n", fileCount
+                        Serial.printf("🧹 Cleanup complete. %d files deleted.\n", fileCount);
                         Serial.println("✅ All files deleted! You can continue or type 'end' to exit.");
                     } else {
                         Serial.println("❎ Delete all operation canceled.");

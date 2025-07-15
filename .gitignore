@@ -31,6 +31,10 @@
 *.out
 *.app
 
+# Executable files without extension (common for Linux/embedded builds)
+src/*
+tools/*
+
 # Backup files - STL_MCU specific
 src/backup_*.ino
 
@@ -51,4 +55,4 @@ Thumbs.db
 
 __pycache__/
 *.py[cod]
-*.pyo   
+*.pyo

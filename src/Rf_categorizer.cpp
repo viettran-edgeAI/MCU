@@ -78,7 +78,45 @@ bool Rf_categorizer::receiveFromPySerial(Stream& serial, unsigned long timeout) 
         return false;
     }
     
-    // Phase 2: Receive CSV data
+    // Phase 2: Receive desired filename
+    Serial.println("Waiting for filename...");
+    Serial.flush();
+    
+    String receivedFilename = "";
+    startTime = millis(); // Reset timeout for filename reception
+    
+    while (millis() - startTime < timeout) {
+        if (serial.available()) {
+            char c = serial.read();
+            
+            if (c == '\n' || c == '\r') {
+                receivedFilename.trim();
+                if (receivedFilename.length() > 0) {
+                    // Ensure filename starts with '/' for SPIFFS
+                    if (!receivedFilename.startsWith("/")) {
+                        receivedFilename = "/" + receivedFilename;
+                    }
+                    filename = receivedFilename;
+                    Serial.println("Received filename: " + filename);
+                    break;
+                }
+            } else if (c >= 32 && c <= 126 && receivedFilename.length() < 60) { // Printable ASCII only
+                receivedFilename += c;
+            }
+        }
+        delay(10);
+    }
+    
+    if (receivedFilename.length() == 0) {
+        // Fallback to auto-generated filename if none received
+        static uint16_t fileCounter = 0;
+        char filenameBuffer[32];
+        snprintf(filenameBuffer, sizeof(filenameBuffer), "/categorizer_%u.bin", fileCounter++);
+        filename = filenameBuffer;
+        Serial.println("No filename received, using: " + filename);
+    }
+    
+    // Phase 3: Receive CSV data
     Serial.println("Waiting for categorizer data...");
     Serial.flush();
     
@@ -134,11 +172,6 @@ bool Rf_categorizer::receiveFromPySerial(Stream& serial, unsigned long timeout) 
     
     Serial.println("SUCCESS: CSV data received (" + String(csvBuffer.size()) + " bytes)");
     
-    // Phase 3: Auto-generate filename (no user input required)
-    static uint16_t fileCounter = 0;
-    char filenameBuffer[32];
-    snprintf(filenameBuffer, sizeof(filenameBuffer), "/categorizer_%u.bin", fileCounter++);
-    filename = filenameBuffer;
     Serial.println("Binary file will be saved as: " + filename);
     
     // Phase 4: Save CSV to temporary file using memory-efficient approach

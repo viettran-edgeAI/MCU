@@ -56,7 +56,7 @@ public:
                 hash = (hash * 33) ^ static_cast<uint8_t>(*str++);
             return hash;
         }
-#if __has_include(<string>)
+    #if __has_include(<string>)
         else if constexpr (std::is_same_v<T, std::string> || std::is_same_v<T, const std::string&>) {
             // 4. std::string: hash its data
             size_t hash = 5381;
@@ -64,8 +64,8 @@ public:
                 hash = (hash * 33) ^ static_cast<uint8_t>(c);
             return hash;
         }
-#endif
-#ifdef ARDUINO
+    #endif
+    #ifdef ARDUINO
         else if constexpr (std::is_same_v<T, String> || std::is_same_v<T, const String&>) {
             // 5. Arduino String: hash its data
             size_t hash = 5381;
@@ -73,7 +73,7 @@ public:
                 hash = (hash * 33) ^ static_cast<uint8_t>(value[i]);
             return hash;
         }
-#endif
+    #endif
         else if constexpr (std::is_trivially_copyable_v<T>) {
             // 6. Custom struct/POD: hash raw bytes
             const uint8_t* raw = reinterpret_cast<const uint8_t*>(&value);
@@ -84,13 +84,13 @@ public:
         }
         else {
             static_assert(std::is_trivially_copyable_v<T> ||
-#if __has_include(<string>)
-                          std::is_same_v<T, std::string> ||
-#endif
-#ifdef ARDUINO
-                          std::is_same_v<T, String> ||
-#endif
-                          std::is_same_v<T, const char*> || std::is_same_v<T, char*>,
+    #if __has_include(<string>)
+                            std::is_same_v<T, std::string> ||
+    #endif
+    #ifdef ARDUINO
+                            std::is_same_v<T, String> ||
+    #endif
+        std::is_same_v<T, const char*> || std::is_same_v<T, char*>,
                 "Unsupported type: use integer, float/double, const char*, std::string, Arduino String, or trivially copyable PODs.");
             return 0;
         }

@@ -12,18 +12,666 @@
 
 */
 
-#include "Rf_components.h"
+#include "STL_MCU.h"  
+#include "FS.h"
+#include "SPIFFS.h"
+#include "esp_system.h"
+
 
 using namespace mcu;
-
+bool cloneCSVFile(const String& src, const String& dest);
 void checkHeapFragmentation();
 
 static int lowest_ram = 9999999; // lowest RAM usage during forest creation and training
 static int min_largest_block; // minimum largest block size during forest creation and training
 static int lowest_rom;
 
+typedef struct Rf_sample{
+    packed_vector<2, SMALL> features;           // set containing the values ​​of the features corresponding to that sample , 2 bit per value.
+    uint8_t label;                     // label of the sample 
+}Rf_sample;
 
+using OOB_set = ChainedUnorderedSet<uint16_t>; // OOB set type
+using sampleID_set = ChainedUnorderedSet<uint16_t>; // Sample ID set type
+using sample_set = ChainedUnorderedMap<Rf_sample>; // set of samples
+
+typedef struct Tree_node{
+    uint8_t featureID;                 
+    uint8_t packed_data;               // threshold(2) + label(5) + is_leaf(1)
+    pair<Tree_node*, Tree_node*> children; // left and right children for binary split
+    
+    // Getter methods for packed data
+    uint8_t getThreshold() const { return packed_data & 0x03; }                    // bits 0-1
+    uint8_t getLabel() const { return (packed_data >> 2) & 0x1F; }                 // bits 2-6
+    bool getIsLeaf() const { return (packed_data >> 7) & 0x01; }                   // bit 7
+    
+    // Setter methods for packed data
+    void setThreshold(uint8_t threshold) { 
+        packed_data = (packed_data & 0xFC) | (threshold & 0x03); 
+    }
+    void setLabel(uint8_t label) { 
+        packed_data = (packed_data & 0x83) | ((label & 0x1F) << 2); 
+    }
+    void setIsLeaf(bool is_leaf) { 
+        packed_data = (packed_data & 0x7F) | (is_leaf ? 0x80 : 0x00); 
+    }
+    
+    Tree_node() : featureID(0), packed_data(0), children({nullptr, nullptr}) {}
+} Tree_node;
+
+class Rf_tree {
+  public:
+    Tree_node* root = nullptr;
+    String filename;
+    bool isLoaded = false;
+    bool isPurged = false; // Flag to indicate if the tree has been purged
+
+    Rf_tree() : filename(""), isLoaded(true) {}
+    
+    Rf_tree(const String& fn) : filename(fn), isLoaded(false) {}
+
+    ~Rf_tree() {
+        if (!isPurged) { // Only clean up if not already purged
+            if (isLoaded && filename.length()) {
+                releaseTree();
+            }
+            clearTree();
+        }
+    }
+
+    void clearTree() {
+        if (root) {
+            clearTreeRecursive(root);
+            root = nullptr;
+        }
+        isLoaded = false;
+    }
+
+    // Optimized tree loading with memory monitoring
+    void loadTree(bool reuse = true) {
+        if (isLoaded || !filename.length()) return;
+        
+        // Check available RAM before loading
+        if (ESP.getFreeHeap() < 4000) {
+            Serial.printf("⚠️ Low memory (%d bytes), skipping tree load: %s\n", 
+                         ESP.getFreeHeap(), filename.c_str());
+            return;
+        }
+        
+        File file = SPIFFS.open(filename.c_str(), FILE_READ);
+        if (!file) {
+            Serial.printf("❌ Failed to load tree: %s\n", filename.c_str());
+            return;
+        }
+
+        // Read and verify header
+        uint32_t magic = 0;
+        if (file.readBytes((char*)&magic, 4) != 4 || magic != 0x54524545) {
+            Serial.printf("❌ Invalid tree header: %s\n", filename.c_str());
+            file.close();
+            return;
+        }
+
+        // Load tree structure
+        root = loadNodeFromFile(file);
+        file.close();
+        if(!reuse) {
+            // Remove the file after loading if not reusing
+            if (SPIFFS.exists(filename.c_str())) {
+                SPIFFS.remove(filename.c_str());
+                // Serial.printf("✅ Tree file removed after loading: %s\n", filename.c_str());
+            }
+        }
+        
+        if (root) {
+            isLoaded = true;
+        }
+    }
+
+    // Optimized tree saving with compact format
+    void releaseTree(bool reuse = true) {
+        if (!isLoaded || !filename.length() || !root) return;
+        
+        File file = SPIFFS.open(filename.c_str(), FILE_WRITE);
+
+        if (!file) {
+            Serial.printf("❌ Failed to save tree: %s\n", filename.c_str());
+            return;
+        }
+
+        // Write header
+        uint32_t magic = 0x54524545;
+        file.write((uint8_t*)&magic, 4);
+
+        // Save tree structure
+        saveNodeToFile(file, root);
+        file.close();
+
+        // Clear from RAM
+        clearTree();
+    }
+
+    // Direct prediction without loading entire tree (streaming)
+    uint8_t predictSample(Rf_sample& sample) {
+        if (!root || !isLoaded) return 255;     // invalid prediction result
+        return predictRecursive(root, sample);
+    }
+
+  private:
+    uint8_t predictRecursive(Tree_node* node, Rf_sample& sample) {
+        if (node->getIsLeaf()) {
+            return node->getLabel();
+        }
+        
+        uint8_t sampleValue = sample.features[node->featureID];
+        uint8_t threshold = node->getThreshold();
+        
+        // Binary split: left child (<=threshold), right child (>threshold)
+        if (sampleValue <= threshold) {
+            if (node->children.first) {
+                return predictRecursive(node->children.first, sample);
+            }
+        } else {
+            if (node->children.second) {
+                return predictRecursive(node->children.second, sample);
+            }
+        }
+        
+        // Fallback to node's label if child is null
+        return node->getLabel();
+    }
+
+
+    void clearTreeRecursive(Tree_node* node) {
+        if (!node) return;
+        
+        if (node->children.first) {
+            clearTreeRecursive(node->children.first);
+        }
+        if (node->children.second) {
+            clearTreeRecursive(node->children.second);
+        }
+        delete node;
+    }
+
+    Tree_node* loadNodeFromFile(File& file) {
+        uint8_t featureID, packed_data;
+        
+        if (file.readBytes((char*)&featureID, 1) != 1 ||
+            file.readBytes((char*)&packed_data, 1) != 1) {
+            return nullptr;
+        }
+        
+        Tree_node* node = new Tree_node();
+        node->featureID = featureID;
+        node->packed_data = packed_data;
+
+        // Load children with memory check
+        if (!node->getIsLeaf() && ESP.getFreeHeap() > 2000) {
+            // Load left child
+            node->children.first = loadNodeFromFile(file);
+            if (!node->children.first) {
+                delete node;
+                return nullptr;
+            }
+            
+            // Load right child
+            node->children.second = loadNodeFromFile(file);
+            if (!node->children.second) {
+                clearTreeRecursive(node->children.first);
+                delete node;
+                return nullptr;
+            }
+        } else if (!node->getIsLeaf()) {
+            // Skip children if low memory - convert to leaf
+            skipNodeInFile(file); // Skip left child
+            skipNodeInFile(file); // Skip right child
+            node->setIsLeaf(true);
+        }
+
+        return node;
+    }
+
+    bool saveNodeToFile(File& file, Tree_node* node) {
+        if (file.write(node->featureID) != 1 ||
+            file.write(node->packed_data) != 1) {
+            return false;
+        }
+
+        // Save children if not a leaf
+        if (!node->getIsLeaf()) {
+            if (!saveNodeToFile(file, node->children.first) ||
+                !saveNodeToFile(file, node->children.second)) {
+                return false;
+            }
+        }
+        
+        return true;
+    }
+    void skipNodeInFile(File& file) {
+        uint8_t featureID, packed_data;
+        if (file.readBytes((char*)&featureID, 1) == 1 &&
+            file.readBytes((char*)&packed_data, 1) == 1) {
+            
+            Tree_node temp;
+            temp.packed_data = packed_data;
+            
+            if (!temp.getIsLeaf()) {
+                skipNodeInFile(file); // Skip left child
+                skipNodeInFile(file); // Skip right child
+            }
+        }
+    }
+  public:
+    void purgeTree() {
+        if (root) {
+            clearTreeRecursive(root);
+            root = nullptr;
+        }
+        isLoaded = false;
+        isPurged = true; // Set purged flag
+        // remove tree file from SPIFFS
+        if(filename){
+            if (filename.length() && SPIFFS.exists(filename.c_str())) {
+                SPIFFS.remove(filename.c_str());
+                Serial.printf("🗑️ Deleted file %s\n", filename.c_str());
+            } 
+        }
+        filename = ""; // Clear filename
+    }
+};
+
+
+// flag for Rf_data : base data, training data, subset data (for each tree in forest), etc.
+typedef enum Rf_data_flags{
+    BASE_DATA = 0,          // base data, used for initial training
+    TRAINING_DATA,          // training data, used for training the forest
+    SUBSET_DATA,            // subset data, used for each tree in the forest
+    TESTING_DATA,          // testing data, used for evaluating the model
+    VALIDATION_DATA      // validation data, used for model validation
+}Rf_data_flags;
+
+class Rf_data {
+  public:
+    ChainedUnorderedMap<Rf_sample> allSamples;    // all sample and it's ID 
+    Rf_data_flags flag;
+    static void (*restore_data_callback)(Rf_data_flags&, uint8_t);
+    String filename;      
+    bool   isLoaded = false;
+
+    Rf_data() : filename(""){}
+    Rf_data(const String& fn) : filename(fn), isLoaded(false) {}
+
+    // Load data from CSV format (used only once for initial dataset loading)
+    void loadCSVData(String csvFilename, uint8_t numFeatures) {
+        if(isLoaded) return;
+        
+        File file = SPIFFS.open(csvFilename.c_str(), FILE_READ);
+        if (!file) {
+            Serial.println("❌ Failed to open CSV file for reading.");
+            return;
+        }
+
+        uint16_t sampleID = 0;
+        while (file.available()) {
+            String line = file.readStringUntil('\n');
+            line.trim();
+            if (line.length() == 0) continue;
+
+            Rf_sample s;
+            s.features.clear();
+            s.features.reserve(numFeatures);
+
+            uint8_t fieldIdx = 0;
+            int start = 0;
+            while (start < line.length()) {
+                int comma = line.indexOf(',', start);
+                if (comma < 0) comma = line.length();
+
+                String tok = line.substring(start, comma);
+                uint8_t v = (uint8_t)tok.toInt();
+
+                if (fieldIdx == 0) {
+                    s.label = v;
+                } else {
+                    s.features.push_back(v);
+                }
+
+                fieldIdx++;
+                start = comma + 1;
+            }
+            s.features.fit();
+
+            allSamples[sampleID] = s;
+            if (sampleID++ >= 10000) break;
+        }
+        allSamples.fit();
+        file.close();
+        isLoaded = true;
+        SPIFFS.remove(csvFilename);
+        Serial.println("✅ CSV data loaded from file.");
+    }
+
+    // Save data with original sample IDs preserved
+    // save to binary format : sampleID (2 bytes) | label (1 byte) | features (packed : 4 values per byte)
+    void releaseData(bool reuse = false) {
+        if(!isLoaded || !filename.length()) return;
+        if(!reuse){
+            // Remove any existing file
+            if (SPIFFS.exists(filename.c_str())) {
+                SPIFFS.remove(filename.c_str());
+            }
+
+            File file = SPIFFS.open(filename.c_str(), FILE_WRITE);
+            if (!file) {
+                Serial.println("❌ Failed to open binary file for writing.");
+                return;
+            }
+
+            // Write binary header
+            uint32_t numSamples = allSamples.size();
+            uint16_t numFeatures = 0;
+            
+            // Determine number of features from first sample
+            if(numSamples > 0) {
+                numFeatures = allSamples.begin()->second.features.size();
+            }
+            
+            file.write((uint8_t*)&numSamples, sizeof(numSamples));
+            file.write((uint8_t*)&numFeatures, sizeof(numFeatures));
+
+            // Calculate packed bytes needed for features (4 values per byte)
+            uint16_t packedFeatureBytes = (numFeatures + 3) / 4;
+
+            // Write samples WITH original IDs
+            for (auto entry = allSamples.begin(); entry != allSamples.end(); ++entry) {
+                uint16_t originalId = entry->first;  // ✅ Get original sample ID
+                const Rf_sample& s = entry->second;
+                
+                // ✅ Write original ID first
+                file.write((uint8_t*)&originalId, sizeof(originalId));
+                
+                // Write label
+                file.write(&s.label, sizeof(s.label));
+                
+                // Pack and write features
+                uint8_t packedBuffer[packedFeatureBytes];
+                // Initialize buffer to 0
+                for(uint16_t i = 0; i < packedFeatureBytes; i++) {
+                    packedBuffer[i] = 0;
+                }
+                
+                // Pack 4 feature values into each byte
+                for (size_t i = 0; i < s.features.size(); ++i) {
+                    uint16_t byteIndex = i / 4;
+                    uint8_t bitOffset = (i % 4) * 2;
+                    uint8_t feature_value = s.features[i] & 0x03;
+                    packedBuffer[byteIndex] |= (feature_value << bitOffset);
+                }
+                
+                file.write(packedBuffer, packedFeatureBytes);
+            }
+
+            file.close();
+        }
+        
+        // Clear memory
+        allSamples.clear();
+        allSamples.fit();
+        isLoaded = false;
+    }
+
+    // Load data with original sample IDs preserved
+    // load from binary format : sampleID (2 bytes) | label (1 byte) | features (packed : 4 values per byte)
+    void loadData(bool reuse = false) {
+        if(isLoaded || !filename.length()) return;
+        bool restore_yet = false;
+
+        //extract tree_index from filename : tree_0_data.bin -> 0
+        uint8_t treeIndex = 0;
+        if(flag == SUBSET_DATA) {
+            int tree_index = filename.indexOf('_');
+            if(tree_index > 0) {
+                String index_str = filename.substring(tree_index + 1, filename.indexOf('_', tree_index + 1));
+                if(index_str.length() > 0) {
+                    treeIndex = static_cast<uint8_t>(index_str.toInt());
+                }
+            }
+        }
+        
+        File file = SPIFFS.open(filename.c_str(), FILE_READ);
+        if (!file) {
+            Serial.println("❌ Failed to open binary file for reading.");
+            if(SPIFFS.exists(filename.c_str())) {
+                SPIFFS.remove(filename.c_str());
+            }
+            if(restore_data_callback){
+                restore_yet = true;
+                restore_data_callback(flag, treeIndex);
+            }
+        }
+
+        if(!restore_yet) {    
+            // Read binary header
+            uint32_t numSamples;
+            uint16_t numFeatures;
+            
+            if(file.read((uint8_t*)&numSamples, sizeof(numSamples)) != sizeof(numSamples) ||
+            file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
+                Serial.println("❌ Failed to read binary header.");
+                if(restore_data_callback){
+                    restore_yet = true;
+                    restore_data_callback(flag, treeIndex);
+                }
+            }
+
+            if(!restore_yet) {
+                // Calculate packed bytes needed for features (4 values per byte)
+                uint16_t packedFeatureBytes = (numFeatures + 3) / 4;
+                
+                // ✅ Read samples with original IDs
+                for(uint16_t i = 0; i < numSamples; i++) {
+                    uint16_t originalId;  // ✅ Read original sample ID
+                    Rf_sample s;
+                    
+                    // ✅ Read original ID first
+                    if(file.read((uint8_t*)&originalId, sizeof(originalId)) != sizeof(originalId)) {
+                        Serial.printf("❌ Failed to read sample ID for sample %u\n", i);
+                        if(restore_data_callback){
+                            restore_data_callback(flag, treeIndex);
+                        }
+                        break;
+                    }
+                    
+                    // Read label
+                    if(file.read(&s.label, sizeof(s.label)) != sizeof(s.label)) {
+                        Serial.printf("❌ Failed to read label for sample %u\n", i);
+                        if(restore_data_callback){
+                            restore_data_callback(flag, treeIndex);
+                        }
+                        break;
+                    }
+                    
+                    // Read packed features
+                    s.features.clear();
+                    s.features.reserve(numFeatures);
+                    
+                    // Read packed bytes
+                    uint8_t packedBuffer[packedFeatureBytes];
+                    if(file.read(packedBuffer, packedFeatureBytes) != packedFeatureBytes) {
+                        Serial.printf("❌ Failed to read packed features for sample %u\n", i);
+                        if(restore_data_callback){
+                            restore_data_callback(flag, treeIndex);
+                        }
+                        break;
+                    }
+                    
+                    // Unpack features from bytes
+                    for(uint16_t j = 0; j < numFeatures; j++) {
+                        uint16_t byteIndex = j / 4;
+                        uint8_t bitOffset = (j % 4) * 2;
+                        uint8_t mask = 0x03 << bitOffset;
+                        uint8_t feature = (packedBuffer[byteIndex] & mask) >> bitOffset;
+                        s.features.push_back(feature);
+                    }
+                    s.features.fit();
+                    
+                    // ✅ Use original ID instead of sequential counter
+                    allSamples[originalId] = s;
+                }
+            }
+            allSamples.fit();
+            isLoaded = true;
+        }
+        if(file){
+            file.close();
+        }
+        if(!reuse) {
+            if (SPIFFS.exists(filename.c_str())) {
+                Serial.printf("Removing binary file: %s\n", filename.c_str());
+                SPIFFS.remove(filename.c_str());
+            }
+        }
+    }
+
+    // overload : load a chunk of data instead of all data
+    sample_set loadData(b_vector<uint16_t>& sampleIDs_bag) {
+        sample_set chunkSamples;
+        if(isLoaded || !filename.length()) return chunkSamples;
+        sampleIDs_bag.sort();
+
+        File file = SPIFFS.open(filename.c_str(), FILE_READ);
+        if (!file) {
+            Serial.println("❌ Failed to open binary file for reading.");
+            return chunkSamples;
+        }
+
+        uint32_t numSamples;
+        uint16_t numFeatures;
+        if(file.read((uint8_t*)&numSamples, sizeof(numSamples)) != sizeof(numSamples) ||
+        file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
+            Serial.println("❌ Failed to read binary header.");
+            file.close();
+            return chunkSamples;
+        }
+
+        uint16_t packedFeatureBytes = (numFeatures + 3) / 4;
+        chunkSamples.reserve(sampleIDs_bag.size());
+
+        // Use a set for fast lookup
+        sampleID_set sampleIDs_set;
+        for (auto id : sampleIDs_bag) sampleIDs_set.insert(id);
+
+        for(uint32_t i = 0; i < numSamples; i++) {
+            uint16_t originalId;
+            if(file.read((uint8_t*)&originalId, sizeof(originalId)) != sizeof(originalId)) break;
+
+            if(sampleIDs_set.find(originalId) == sampleIDs_set.end()) {
+                // Not needed, skip label and features
+                file.seek(file.position() + sizeof(uint8_t) + packedFeatureBytes);
+                continue;
+            }
+
+            Rf_sample s;
+            // Read label
+            if(file.read(&s.label, sizeof(s.label)) != sizeof(s.label)) break;
+
+            // Read packed features
+            s.features.clear();
+            s.features.reserve(numFeatures);
+            uint8_t packedBuffer[packedFeatureBytes];
+            if(file.read(packedBuffer, packedFeatureBytes) != packedFeatureBytes) break;
+
+            for(uint16_t j = 0; j < numFeatures; j++) {
+                uint16_t byteIndex = j / 4;
+                uint8_t bitOffset = (j % 4) * 2;
+                uint8_t mask = 0x03 << bitOffset;
+                uint8_t feature = (packedBuffer[byteIndex] & mask) >> bitOffset;
+                s.features.push_back(feature);
+            }
+            s.features.fit();
+            chunkSamples[originalId] = s;
+
+            if(chunkSamples.size() >= sampleIDs_bag.size()) break;
+        }
+        file.close();
+        return chunkSamples;
+    }
+        
+    // repeat a number of samples to reach a certain number of samples: boostrap sampling
+    void boostrapData(uint16_t numSamples, uint16_t maxSamples){
+        bool preloaded = isLoaded;
+        if(!isLoaded){
+            loadData(true);
+        }
+        uint16_t currentSize = allSamples.size();
+        b_vector<uint16_t> sampleIDs;
+        sampleIDs.reserve(currentSize);
+        for (const auto& entry : allSamples) {
+            sampleIDs.push_back(entry.first); // Store original IDs
+        }
+        sampleIDs.sort(); // Sort IDs for consistent access
+        uint16_t cursor = 0;
+        b_vector<uint16_t> newSampleIDs;
+        for(uint16_t i = 0; i<maxSamples; i++){
+            if(sampleIDs[cursor] != i){
+                newSampleIDs.push_back(i); // Add missing IDs
+            }else{
+                cursor++;
+            }
+        }
+        if(currentSize >= numSamples) {
+            Serial.printf("Data already has %d samples, no need to boostrap.\n", currentSize);
+            return;
+        }
+        // Serial.printf("Boostraping data from %d to %d samples...\n", currentSize, numSamples);
+        allSamples.reserve(numSamples);
+        while(allSamples.size() < numSamples) {
+            // Randomly select a sample ID from existing samples
+            uint16_t pos = esp_random()% currentSize;
+            uint16_t sampleID = sampleIDs[pos]; // Get the original ID
+            auto it = allSamples.find(sampleID);
+            if (it == allSamples.end()) {
+                continue; // Skip if not found
+            }
+            Rf_sample sample = it->second; // Get the sample
+            // Add the sample again with a new ID
+            uint16_t newID = newSampleIDs.back();
+            allSamples[newID] = sample; // Use new ID
+            newSampleIDs.pop_back(); // Remove used ID
+
+        }
+        if(!preloaded) {
+            releaseData(true); // Save to SPIFFS if not preloaded
+        }
+    }
+    // FIXED: Safe data purging
+    void purgeData() {
+        // Clear in-memory structures first
+        allSamples.clear();
+        allSamples.fit();
+        isLoaded = false;
+
+        // Then remove the SPIFFS file if one was specified
+        if (filename.length()) {
+            if (SPIFFS.exists(filename.c_str())) {
+                SPIFFS.remove(filename.c_str());
+                Serial.printf("🗑️ Deleted file %s\n", filename.c_str());
+            }
+            filename = "";
+        }
+    }
+};  
 void (*Rf_data::restore_data_callback)(Rf_data_flags&, uint8_t) = nullptr;
+
+
+typedef enum Rf_training_flags : uint8_t{
+    EARLY_STOP  = 0x00,        // early stop training if accuracy is not improving
+    ACCURACY    = 0x01,          // calculate accuracy of the model
+    PRECISION   = 0x02,          // calculate precision of the model
+    RECALL      = 0x04,            // calculate recall of the model
+    F1_SCORE    = 0x08          // calculate F1 score of the model
+}Rf_training_flags;
 
 // -------------------------------------------------------------------------------- 
 class RandomForest{
@@ -65,22 +713,20 @@ public:
 
     RandomForest(){};
     RandomForest(String baseFile, int numtree, bool use_Gini = true, bool boostrap = true){
-        // int dot_index = baseFile.lastIndexOf('.');
-        // String baseName = baseFile.substring(0,dot_index);
-        // String extension = baseFile.substring(dot_index);
-        // String backup_file = baseName + "_2" + extension;
-        // cloneFile(baseFile, backup_file);
-        first_scan();
+        int dot_index = baseFile.lastIndexOf('.');
+        String baseName = baseFile.substring(0,dot_index);
+        String extension = baseFile.substring(dot_index);
+        String backup_file = baseName + "_2" + extension;
+        cloneCSVFile(baseFile, backup_file);
+        first_scan(backup_file, false);
         
         instance_ptr = this; // Set the static instance pointer
         Rf_data::restore_data_callback = &RandomForest::static_restore_data;
 
         // Load CSV data once and convert to binary format
-        // a.loadCSVData(backup_file, numFeatures);
-        a.filename = baseFile;
+        a.loadCSVData(backup_file, numFeatures);
         a.flag = Rf_data_flags::BASE_DATA;
-        a.loadData();
-        // a.filename = baseName + ".bin";
+        a.filename = baseName + ".bin";
         
         unity_threshold  = 1.25f / static_cast<float>(numLabels);
         if(numFeatures == 2) unity_threshold  = 0.4f;
@@ -109,8 +755,7 @@ public:
         train_data.purgeData();
         test_data.purgeData();
         if(this->use_validation) validation_data.purgeData();
-        // a.purgeData();
-        a.releaseData();
+        a.purgeData();
         
         for(auto& data : dataList){
             data.first.purgeData();
@@ -152,6 +797,7 @@ public:
         }
         Serial.printf("RAM after forest creation: %d\n", ESP.getFreeHeap());
     }
+
   private:
     // ----------------------------------------------------------------------------------
     // Split data into training and testing sets
@@ -182,7 +828,7 @@ public:
             uint16_t sampleId = static_cast<uint16_t>(esp_random() % totalSamples);
             train_sampleIDs.insert(sampleId);
         }
-        for(const auto& sampleID : train_sampleIDs){
+        for(auto sampleID : train_sampleIDs){
           train_backup.push_back(sampleID);
         }
         train_sampleIDs.fit();
@@ -195,7 +841,7 @@ public:
             }
         }
         test_sampleIDs.fit();
-        for(const auto& sampleID : test_sampleIDs){
+        for(auto sampleID : test_sampleIDs){
           test_backup.push_back(sampleID);
         }
         test_backup.sort();
@@ -208,7 +854,7 @@ public:
                 }
             }
             validation_sampleIDs.fit();
-            for(const auto& sampleID : validation_sampleIDs){
+            for(auto sampleID : validation_sampleIDs){
             validation_backup.push_back(sampleID);
             }
             validation_backup.sort();
@@ -250,7 +896,7 @@ public:
 
         // Copy test samples  
         test_data.allSamples.reserve(testSize);
-        for(const auto& sampleId : test_sampleIDs){
+        for(auto sampleId : test_sampleIDs){
             test_data.allSamples[sampleId] = this->a.allSamples[sampleId];
         }
         checkHeapFragmentation();
@@ -262,7 +908,7 @@ public:
         // Copy validation samples
         if(this->use_validation){    
             validation_data.allSamples.reserve(validationSize);
-            for(const auto& sampleId : validation_sampleIDs){
+            for(auto sampleId : validation_sampleIDs){
                 validation_data.allSamples[sampleId] = this->a.allSamples[sampleId];
             }
             validation_data.releaseData(); // Write to binary SPIFFS, clear RAM
@@ -271,7 +917,7 @@ public:
         this->a.releaseData();
 
         b_vector<uint16_t> train_sampleIDs_vec;
-        for(const auto& sampleId : train_sampleIDs){
+        for(auto sampleId : train_sampleIDs){
             train_sampleIDs_vec.push_back(sampleId);
         }
         train_data.allSamples = a.loadData(train_sampleIDs_vec); // Load only training samples
@@ -349,89 +995,96 @@ public:
     }
 
     // ------------------------------------------------------------------------------
-    void first_scan(bool header = false) {
-        // Read dataset parameters from /dataset_params.csv
-        File file = SPIFFS.open("/digit_data_dp.csv", "r");
+    void first_scan(String filename, bool header = false) {
+        File file = SPIFFS.open(filename, "r");
         if (!file) {
-            Serial.println("❌ Failed to open /dataset_params.csv file.");
+            Serial.println("❌ Failed to open file.");
             return;
         }
 
-        // Skip header line
-        file.readStringUntil('\n');
+        unordered_map<uint8_t, uint16_t> labelCounts;
+        unordered_set<uint8_t> featureValues;
 
-        // Initialize variables with defaults
         uint16_t numSamples = 0;
-        uint16_t numFeatures = 0;
-        uint8_t numLabels = 0;
-        uint16_t labelCounts[32] = {0}; // Support up to 32 labels
-        String labelMappings[32];       // Store label names
-        uint8_t maxFeatureValue = 3;    // Default for 2-bit quantized data
+        uint16_t maxFeatures = 0;
 
-        // Parse parameters from CSV
+        // Skip header
+        if (header) {
+            file.readStringUntil('\n');
+        }
+
         while (file.available()) {
             String line = file.readStringUntil('\n');
             line.trim();
             if (line.length() == 0) continue;
 
-            int commaIndex = line.indexOf(',');
-            if (commaIndex == -1) continue;
+            int lastIndex = 0;
+            int featureIndex = 0;
+            bool malformed = false;
 
-            String parameter = line.substring(0, commaIndex);
-            String value = line.substring(commaIndex + 1);
-            parameter.trim();
-            value.trim();
+            while (true) {
+                int commaIndex = line.indexOf(',', lastIndex);
+                String token = (commaIndex != -1) ?
+                    line.substring(lastIndex, commaIndex) :
+                    line.substring(lastIndex);
 
-            // Parse key parameters
-            if (parameter == "num_features") {
-                numFeatures = value.toInt();
-            } else if (parameter == "num_samples") {
-                numSamples = value.toInt();
-            } else if (parameter == "num_labels") {
-                numLabels = value.toInt();
-            } else if (parameter == "max_feature_value") {
-                maxFeatureValue = value.toInt();
-            } else if (parameter.startsWith("samples_label_")) {
-                // Extract label index from parameter name
-                int labelIndex = parameter.substring(14).toInt(); // "samples_label_".length() = 14
-                if (labelIndex < 32) {
-                    labelCounts[labelIndex] = value.toInt();
+                token.trim();
+                if (token.length() == 0) {
+                    malformed = true;
+                    break;
                 }
-            } else if (parameter.startsWith("label_mapping_")) {
-                // Extract label index from parameter name  
-                int labelIndex = parameter.substring(14).toInt(); // "label_mapping_".length() = 14
-                if (labelIndex < 32) {
-                    labelMappings[labelIndex] = value;
+
+                int numValue = token.toInt();
+                if (featureIndex == 0) {
+                    labelCounts[numValue]++;
+                } else {
+                    featureValues.insert(numValue);
+                    uint16_t featurePos = featureIndex - 1;
+                    if (featurePos + 1 > maxFeatures) {
+                        maxFeatures = featurePos + 1;
+                    }
                 }
+
+                if (commaIndex == -1) break;
+                lastIndex = commaIndex + 1;
+                featureIndex++;
+            }
+
+            if (!malformed) {
+                numSamples++;
+                if (numSamples >= 10000) break;
             }
         }
-        file.close();
 
-        // Store parsed values
-        this->numFeatures = numFeatures;
+        this->numFeatures = maxFeatures;
         this->numSamples = numSamples;
-        this->numLabels = numLabels;
 
         // Analyze label distribution
-        if (numLabels > 0) {
+        if (labelCounts.size() > 0) {
+            float expectedCountPerLabel = (float)numSamples / labelCounts.size();
+            float maxImbalanceRatio = 0.0f;
+            uint8_t minorityLabel = 0;
+            uint8_t majorityLabel = 0;
             uint16_t minorityCount = numSamples;
             uint16_t majorityCount = 0;
 
-            for (uint8_t i = 0; i < numLabels; i++) {
-                if (labelCounts[i] > majorityCount) {
-                    majorityCount = labelCounts[i];
+            for (auto& it : labelCounts) {
+                uint8_t label = it.first;
+                uint16_t count = it.second;
+                if (count > majorityCount) {
+                    majorityCount = count;
+                    majorityLabel = label;
                 }
-                if (labelCounts[i] < minorityCount && labelCounts[i] > 0) {
-                    minorityCount = labelCounts[i];
+                if (count < minorityCount) {
+                    minorityCount = count;
+                    minorityLabel = label;
                 }
             }
 
-            float maxImbalanceRatio = 0.0f;
             if (minorityCount > 0) {
                 maxImbalanceRatio = (float)majorityCount / minorityCount;
             }
 
-            // Set training flags based on imbalance
             if (maxImbalanceRatio > 10.0f) {
                 this->trainFlag |= Rf_training_flags::RECALL;
                 Serial.printf("📉 Imbalanced dataset (ratio: %.2f). Setting trainFlag to RECALL.\n", maxImbalanceRatio);
@@ -447,65 +1100,49 @@ public:
             }
         }
 
-        // Dataset summary output
-        Serial.printf("📊 Dataset Summary (from params file):\n");
-        Serial.printf("  Total samples: %u\n", numSamples);
-        Serial.printf("  Total features: %u\n", numFeatures);
-        Serial.printf("  Unique labels: %u\n", numLabels);
+        // Summary
+        Serial.printf("📊 Dataset Summary:\n");
+        Serial.printf("  Total samples: %d\n", numSamples);
+        Serial.printf("  Total features: %d\n", maxFeatures);
+        Serial.printf("  Unique labels: %d\n", labelCounts.size());
+        this->numLabels = labelCounts.size();
 
         Serial.println("  Label distribution:");
         float lowest_distribution = 100.0f;
-        for (uint8_t i = 0; i < numLabels; i++) {
-            if (labelCounts[i] > 0) {
-                float percent = (float)labelCounts[i] / numSamples * 100.0f;
-                if (percent < lowest_distribution) {
-                    lowest_distribution = percent;
-                }
-                
-                // Show label mapping if available
-                if (labelMappings[i].length() > 0) {
-                    Serial.printf("    Label %u (%s): %u samples (%.2f%%)\n", 
-                                 i, labelMappings[i].c_str(), labelCounts[i], percent);
-                } else {
-                    Serial.printf("    Label %u: %u samples (%.2f%%)\n", 
-                                 i, labelCounts[i], percent);
-                }
+        for (auto& label : labelCounts) {
+            float percent = (float)label.second / numSamples * 100.0f;
+            if(percent < lowest_distribution) {
+                lowest_distribution = percent;
             }
+            Serial.printf("    Label %d: %d samples (%.2f%%)\n", label.first, label.second, percent);
         }
-        
         this->lowest_distribution = lowest_distribution / 100.0f; // Store as fraction
-        
-        // Check if validation should be disabled due to low sample count
-        if (lowest_distribution * numSamples * valid_ratio < 10) {
-            use_validation = false;
+        if(lowest_distribution * numSamples * valid_ratio < 10){
+            use_validation = false; // disable validation if too few samples
             Serial.println("⚖️ Setting use_validation to false due to low sample count in validation set.");
             train_ratio = 0.7f; // Adjust train ratio to compensate
         }
 
-        // Set feature values for quantized data (0 to maxFeatureValue)
         Serial.print("Feature values: ");
-        this->allFeaturesValue.clear();
-        for (uint8_t val = 0; val <= maxFeatureValue; val++) {
-            Serial.printf("%u ", val);
+        for (uint8_t val : featureValues) {
+            Serial.printf("%d ", val);
             this->allFeaturesValue.push_back(val);
         }
-        Serial.println();
-
-        // Calculate optimal parameters based on dataset size
         int baseline_minsplit_ratio = 100 * (this->numSamples / 500 + 1); 
         if (baseline_minsplit_ratio > 500) baseline_minsplit_ratio = 500; 
         uint8_t min_minSplit = max(3, this->numSamples / baseline_minsplit_ratio);
         uint8_t max_minSplit = 12;
-        int base_maxDepth = min(log2(this->numSamples), log2(this->numFeatures) * 1.5f);
+        int base_maxDepth = min(log2(this->numSamples), log2(this->numFeatures)*1.5f);
         uint8_t max_maxDepth = min(8, base_maxDepth);
         uint8_t min_maxDepth = 3;
 
-        this->minSplit = (min_minSplit + max_minSplit) / 2;
-        this->maxDepth = (min_maxDepth + max_maxDepth) / 2;
+        this->minSplit = ( min_minSplit + max_minSplit ) / 2;
+        this->maxDepth = ( min_maxDepth + max_maxDepth ) / 2;
 
-        Serial.printf("Setting minSplit to %u and maxDepth to %u based on dataset size.\n", 
-                     this->minSplit, this->maxDepth);
+        Serial.printf("Setting minSplit to %d and maxDepth to %d based on dataset size.\n", this->minSplit, this->maxDepth);
+
         Serial.println();
+        file.close();
     }
 
     // Static wrapper to call the member restore_data
@@ -985,7 +1622,7 @@ public:
                 checkHeapFragmentation();
                 loadForest(); // Reload trees into RAM after releasing data
             }
-            for(const auto& sample : train_samples_buffer){                
+            for(auto sample : train_samples_buffer){                
                 uint16_t sampleId = sample.first;  // Get the sample ID
              
                 // Find all trees whose OOB set contains this sampleId
@@ -1006,7 +1643,7 @@ public:
                 unordered_map<uint8_t, uint8_t> oobPredictClass;
                 uint16_t oobTotalPredict = 0;
                 
-                for(const uint8_t& treeIdx : activeTrees){
+                for(uint8_t treeIdx : activeTrees){
                     uint8_t predict = root[treeIdx].predictSample(sample.second);
                     if(predict < numLabels){
                         oobPredictClass[predict]++;
@@ -1054,7 +1691,7 @@ public:
                 Serial.println("❌ No validation samples found in RAM!");
                 return make_pair(0.0f, 0.0f);
             }
-            for(const auto& sample : validation_data.allSamples){
+            for(auto sample : validation_data.allSamples){
                 uint16_t sampleId = sample.first;  // Get the sample ID
                 uint8_t actualLabel = sample.second.label;
 
@@ -1109,7 +1746,7 @@ public:
         Serial.printf("Ram after releasing trees: %d\n", ESP.getFreeHeap());
 
         // Calculate the requested metric
-        float oob_result = 0.0f;
+float oob_result = 0.0f;
         float valid_result = 0.0f;
         float combined_oob_result = 0.0f;
         float combined_valid_result = 0.0f;
@@ -1349,20 +1986,10 @@ public:
         bool parameter_changed_this_cycle = false;
         uint8_t prev_minSplit = minSplit;
         uint16_t prev_maxDepth = maxDepth;
-
-        // Get initial evaluation with double-check for stability
-        Serial.println("Initial evaluation (double-check for stability)...");
-        pair<float,float> eval1 = get_training_evaluation_index();
-        rebuildForest(); // Rebuild to account for randomness
-        pair<float,float> eval2 = get_training_evaluation_index();
-        
-        // Use average of two evaluations for more stable baseline
-        current_oob_score = (eval1.first + eval2.first) / 2.0f;
-        current_valid_score = (eval1.second + eval2.second) / 2.0f;
         
         // Dynamic combine ratio based on dataset analysis
         if(!this->use_validation){
-            current_combined_score = current_oob_score;
+            combine_ratio = 0.0f;
             Serial.println("No validation set - using OOB-only evaluation");
         } else {
             // Adaptive combine ratio based on dataset difficulty and size
@@ -1376,12 +2003,21 @@ public:
             
             Serial.printf("Adaptive combine_ratio: %.2f (size_factor: %.2f, balance: %.2f)\n", 
                         combine_ratio, size_factor, label_balance);
-            current_combined_score = current_valid_score * combine_ratio + current_oob_score * (1.0f - combine_ratio);
         }
         
         Serial.printf("Parameter ranges: minSplit[%d-%d], maxDepth[%d-%d]\n", 
                     min_minSplit, max_minSplit, min_maxDepth, max_maxDepth);
         
+        // Get initial evaluation with double-check for stability
+        Serial.println("Initial evaluation (double-check for stability)...");
+        pair<float,float> eval1 = get_training_evaluation_index();
+        rebuildForest(); // Rebuild to account for randomness
+        pair<float,float> eval2 = get_training_evaluation_index();
+        
+        // Use average of two evaluations for more stable baseline
+        current_oob_score = (eval1.first + eval2.first) / 2.0f;
+        current_valid_score = (eval1.second + eval2.second) / 2.0f;
+        current_combined_score = current_valid_score * combine_ratio + current_oob_score * (1.0f - combine_ratio);
         
         float score_variance = abs(eval1.first - eval2.first) + abs(eval1.second - eval2.second);
         Serial.printf("Score variance between builds: %.4f (lower is better)\n", score_variance);
@@ -1488,13 +2124,8 @@ public:
             pair<float,float> evaluation_result = get_training_evaluation_index();
             float eval_oob = evaluation_result.first;
             float eval_valid = evaluation_result.second;
-            float eval_combined;
-
-            if(this->use_validation){
-              eval_combined = eval_valid * combine_ratio + eval_oob * (1.0f - combine_ratio);
-            }else{
-              eval_combined =  eval_oob;
-            }       
+            float eval_combined = eval_valid * combine_ratio + eval_oob * (1.0f - combine_ratio);
+            
             Serial.printf("Evaluation %d - OOB: %.4f, Validation: %.4f, Combined: %.4f\n", 
                         evaluation_phase + 1, eval_oob, eval_valid, eval_combined);
             
@@ -1631,8 +2262,7 @@ public:
             pair<float,float> final_eval = get_training_evaluation_index();
             current_oob_score = final_eval.first;
             current_valid_score = final_eval.second;
-            if(this->use_validation) current_combined_score = current_valid_score * combine_ratio + current_oob_score * (1.0f - combine_ratio);
-            else current_combined_score = current_oob_score;
+            current_combined_score = current_valid_score * combine_ratio + current_oob_score * (1.0f - combine_ratio);
         }
         
         cleanupBestState();
@@ -1794,7 +2424,7 @@ public:
         }
         
         // Single pass over samples
-        for (const auto& kv : data.allSamples) {
+        for (auto kv : data.allSamples) {
             uint8_t actual = kv.second.label;
             uint8_t pred = predClassSample(const_cast<Rf_sample&>(kv.second));
             
@@ -1904,9 +2534,8 @@ public:
 RandomForest* RandomForest::instance_ptr = nullptr;
 
 void setup() {
-    Serial.begin(115200);  
-    while (!Serial);       // <-- Waits for Serial monitor to connect (important for USB CDC)
-
+    Serial.begin(115200);
+    while (!Serial);
     delay(2000);
     if (!SPIFFS.begin(true)) {
         Serial.println("SPIFFS mount failed");
@@ -1918,16 +2547,15 @@ void setup() {
     Serial.printf("===> ROM left: %d\n", SPIFFS.totalBytes() - SPIFFS.usedBytes());;
 
     // const char* filename = "/categorical_data.csv";    // easy dataset : use_Gini = false | boostrap = true; 97% - sklearn 95%.
-    // const char* filename = "/walker.bin";    // medium dataset : use_Gini = false | boostrap = true; 92% - sklearn : 85%  (5,3)
-    const char* filename = "/digit_data_nml.bin"; // hard dataset : use_Gini = true/false | boostrap = true; 89/92% - sklearn : 90% (6,5)
+    // const char* filename = "/walker_fall.csv";    // medium dataset : use_Gini = false | boostrap = true; 92% - sklearn : 85%  (5,3)
+    const char* filename = "/digit_data.csv"; // hard dataset : use_Gini = true/false | boostrap = true; 89/92% - sklearn : 90% (6,5)
 
     RandomForest forest = RandomForest(filename, 20, false, true);
     forest.trainFlag |= Rf_training_flags::ACCURACY;
 
-
     forest.MakeForest();
     // forest.Prunning();
-    forest.training(6); 
+    forest.training(15); 
 
     auto result = forest.predict(forest.test_data);
     Serial.printf("\nlowest RAM: %d\n", lowest_ram);
@@ -2001,7 +2629,132 @@ void setup() {
 void loop() {
     manageSPIFFSFiles();
 }
+void manageSPIFFSFiles() {
+  if (!SPIFFS.begin(true)) {
+    Serial.println("❌ SPIFFS Mount Failed!");
+    return;
+  }
 
+  while (true) {
+    Serial.println("\n====== 📂 Files in SPIFFS ======");
+    File root = SPIFFS.open("/");
+    File file = root.openNextFile();
+
+    String fileList[50];  // List of full paths
+    int fileCount = 0;
+
+    Serial.printf("📦 SPIFFS Free Space: %d / %d bytes available\n", SPIFFS.totalBytes() - SPIFFS.usedBytes(), SPIFFS.totalBytes());
+
+    while (file && fileCount < 50) {
+      String path = String(file.name());  // Full path, e.g. "/animal_data.csv"
+      size_t fileSize = file.size();
+      if (!path.startsWith("/")) {
+        path = "/" + path;
+      }
+      fileList[fileCount] = path;
+
+
+      Serial.printf("%2d: %-20s (%d bytes)\n", fileCount + 1, path.c_str(), fileSize);
+
+      file.close();
+      file = root.openNextFile();
+      fileCount++;
+    }
+
+    if (fileCount == 0) {
+      Serial.println("⚠️ No files found.");
+    }
+
+    Serial.println("\nType a file number to delete it, or type END to finish:");
+
+    String input = "";
+    while (input.length() == 0) {
+      if (Serial.available()) {
+        input = Serial.readStringUntil('\n');
+        input.trim();
+      }
+      delay(10);
+    }
+
+    if (input.equalsIgnoreCase("END")) {
+      Serial.println("🔚 Exiting file manager.");
+      break;
+    }
+
+    int index = input.toInt();
+    if (index >= 1 && index <= fileCount) {
+      String fileToDelete = fileList[index - 1];
+      if (!fileToDelete.startsWith("/")) {
+        fileToDelete = "/" + fileToDelete;
+      }
+
+      Serial.printf("🗑️  Are you sure you want to delete '%s'?\n", fileToDelete.c_str());
+      Serial.println("Type OK to confirm or NO to cancel:");
+
+      String confirm = "";
+      while (confirm.length() == 0) {
+        if (Serial.available()) {
+          confirm = Serial.readStringUntil('\n');
+          confirm.trim();
+        }
+        delay(10);
+      }
+
+      if (confirm.equalsIgnoreCase("OK")) {
+        if (!SPIFFS.exists(fileToDelete)) {
+          Serial.println("⚠️ File does not exist!");
+          continue;
+        }
+
+        if (SPIFFS.remove(fileToDelete)) {
+          Serial.printf("✅ Deleted: %s\n", fileToDelete.c_str());
+        } else {
+          Serial.printf("❌ Failed to delete: %s\n", fileToDelete.c_str());
+        }
+      } else {
+        Serial.println("❎ Deletion canceled.");
+      }
+    } else {
+      Serial.println("⚠️ Invalid file number.");
+    }
+  }
+}
+
+bool cloneCSVFile(const String& src, const String& dest) {
+    File sourceFile = SPIFFS.open(src, FILE_READ);
+    if (!sourceFile) {
+        Serial.print("❌ Failed to open source file: ");
+        Serial.println(src);
+        return false;
+    }
+
+    if(SPIFFS.exists(dest.c_str())){
+      SPIFFS.remove(dest.c_str());
+    }
+
+    File destFile = SPIFFS.open(dest, FILE_WRITE);
+    if (!destFile) {
+        Serial.print("❌ Failed to create destination file: ");
+        Serial.println(dest);
+        sourceFile.close();
+        return false;
+    }
+
+    while (sourceFile.available()) {
+        String line = sourceFile.readStringUntil('\n');
+        destFile.print(line);
+        destFile.print('\n');  // manually add \n to preserve exact format
+    }
+
+    sourceFile.close();
+    destFile.close();
+
+    Serial.print("✅ File cloned exactly from ");
+    Serial.print(src);
+    Serial.print(" ➝ ");
+    Serial.println(dest);
+    return true;
+}
 void checkHeapFragmentation() {
     size_t freeHeap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
     size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);

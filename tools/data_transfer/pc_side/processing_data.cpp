@@ -885,11 +885,11 @@ int main(int argc, char* argv[]) {
         size_t dot = baseName.find_last_of('.') ;
         if (dot != std::string::npos) baseName = baseName.substr(0, dot);
         // All result files in the same directory as input
-        std::string categorizerFile = inputDir + "/" + baseName + "_ctg.csv";
-        std::string dataParamsFile = inputDir + "/" + baseName + "_dp.csv";
-        std::string normalizedFile = inputDir + "/" + baseName + "_nml.csv";
-        std::string truncatedFile = inputDir + "/" + baseName + "_truncated.csv";
-        std::string binaryFile = inputDir + "/" + baseName + "_nml.bin";  // Add binary output file
+        std::string categorizerFile = inputDir + "/result/" + baseName + "_ctg.csv";
+        std::string dataParamsFile = inputDir + "/result/" + baseName + "_dp.csv";
+        std::string normalizedFile = inputDir + "/result/" + baseName + "_nml.csv";
+        std::string truncatedFile = inputDir + "/result/" + baseName + "_truncated.csv";
+        std::string binaryFile = inputDir + "/result/" + baseName + "_nml.bin";  // Add binary output file
 
         // Step 1: Scan dataset to get info and create label mapping
         std::cout << "=== Dataset Analysis ===\n";

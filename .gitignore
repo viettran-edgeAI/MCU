@@ -52,7 +52,3 @@ Thumbs.db
 __pycache__/
 *.py[cod]
 *.pyo
-
-# Ignore all files in src/ and tools/ that are executable (no extension)
-src/*
-tools/*

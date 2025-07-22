@@ -34,19 +34,21 @@ RESP_ERROR = b"ERROR"
 
 # The following 2 parameters must match exactly esp32 side sketch
 # changed them when transfer process failed
-CHUNK_SIZE = 1024  # bytes per chunk , change to 512, 256 if transfer fails
-MINI_DELAY = 0.001  # delay between chunks, change to 0.01 / 0 if transfer fails
+CHUNK_SIZE = 256 # bytes per chunk - further reduced for USB CDC compatibility
+CHUNK_DELAY = 80  # delay between chunks in ms - increased for USB CDC stability
 
 # Timeout settings
-SERIAL_TIMEOUT = 5  # seconds
-ACK_TIMEOUT = 10 # seconds
+SERIAL_TIMEOUT = 10  # seconds - increased for USB CDC
+ACK_TIMEOUT = 30 # seconds - significantly increased for large file transfers with USB CDC
 
 def get_file_paths(base_name):
-    """Generate full file paths from a base name."""
+    """Generate full file paths from a base name in the result folder."""
+    result_dir = os.path.join(os.path.dirname(__file__), '..', 'data', 'result')
+    result_dir = os.path.abspath(result_dir)
     return {
-        "categorizer": f"{base_name}_ctg.csv",
-        "params": f"{base_name}_dp.csv",
-        "dataset": f"{base_name}_nml.bin"
+        "categorizer": os.path.join(result_dir, f"{base_name}_ctg.csv"),
+        "params": os.path.join(result_dir, f"{base_name}_dp.csv"),
+        "dataset": os.path.join(result_dir, f"{base_name}_nml.bin")
     }
 
 def wait_for_response(ser, expected_response, timeout=ACK_TIMEOUT, verbose=True):
@@ -55,13 +57,29 @@ def wait_for_response(ser, expected_response, timeout=ACK_TIMEOUT, verbose=True)
     buffer = b""
     while time.time() - start_time < timeout:
         if ser.in_waiting > 0:
-            buffer += ser.read(ser.in_waiting)
+            new_data = ser.read(ser.in_waiting)
+            buffer += new_data
+            
+            # Check if we have the expected response
             if expected_response in buffer:
                 if verbose:
                     print(f"✅ Got response: {expected_response.decode()}")
                 return True
+                
+            # Check for error response
+            if b"ERROR" in buffer:
+                if verbose:
+                    print(f"❌ ESP32 reported ERROR: {buffer.decode(errors='ignore')}")
+                return False
+                
+            # Clear buffer if it gets too large to prevent memory issues
+            if len(buffer) > 1024:
+                buffer = buffer[-512:]  # Keep only the last 512 bytes
+                
+        time.sleep(0.005)  # Smaller delay for better responsiveness with USB CDC
+        
     if verbose:
-        print(f"❌ Timeout waiting for '{expected_response.decode()}'. Got: {buffer.decode()}")
+        print(f"❌ Timeout waiting for '{expected_response.decode()}'. Got: {buffer.decode(errors='ignore')}")
     return False
 
 def send_command(ser, command, payload=b""):
@@ -69,6 +87,7 @@ def send_command(ser, command, payload=b""):
     packet = CMD_HEADER + struct.pack('B', command) + payload
     ser.write(packet)
     ser.flush()
+    time.sleep(0.01)  # Small delay to ensure command is processed
 
 def transfer_file(ser, file_path, esp32_filename):
     """Handles the transfer of a single file with a progress bar."""
@@ -103,19 +122,41 @@ def transfer_file(ser, file_path, esp32_filename):
     # 2. Send File Chunks
     with open(file_path, 'rb') as f:
         bytes_sent = 0
+        retry_count = 0
+        max_retries = 5  # Increased retries for USB CDC
+        consecutive_failures = 0  # Track consecutive failures
+        
         while True:
             chunk = f.read(CHUNK_SIZE)
             if not chunk:
                 break  # End of file
 
             send_command(ser, CMD_FILE_CHUNK, chunk)
-            time.sleep(0.01)  # Small delay to allow ESP32 to process
             
-            # Wait for ACK without printing success message to keep progress bar clean
-            if not wait_for_response(ser, RESP_ACK, verbose=False):
-                sys.stdout.write('\n') # Newline after progress bar
-                print(f"❌ Failed to get ACK for a chunk.")
-                return False
+            # Longer delay for USB CDC stability
+            time.sleep(CHUNK_DELAY/1000)
+            
+            # Wait for ACK with retry mechanism
+            if not wait_for_response(ser, RESP_ACK, timeout=ACK_TIMEOUT, verbose=False):
+                retry_count += 1
+                consecutive_failures += 1
+                if retry_count > max_retries:
+                    sys.stdout.write('\n') # Newline after progress bar
+                    print(f"❌ Failed to get ACK for chunk after {max_retries} retries.")
+                    return False
+                else:
+                    # Seek back and retry the chunk
+                    f.seek(f.tell() - len(chunk))
+                    sys.stdout.write('\n') # Newline after progress bar
+                    print(f"⚠️  Retrying chunk {retry_count}/{max_retries}...")
+                    
+                    # Progressive backoff for consecutive failures
+                    backoff_delay = min(5.0, 0.5 * consecutive_failures)
+                    time.sleep(backoff_delay)
+                    continue
+            else:
+                retry_count = 0  # Reset retry count on success
+                consecutive_failures = 0  # Reset consecutive failure count
             
             bytes_sent += len(chunk)
             
@@ -164,7 +205,14 @@ def main():
     try:
         print(f"🔌 Connecting to ESP32 on {port} at {baudrate}bps...")
         with serial.Serial(port, baudrate, timeout=SERIAL_TIMEOUT) as ser:
-            time.sleep(2) # Wait for serial connection to establish
+            # Clear any pending data and wait for stable connection
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+            time.sleep(3) # Extended wait for USB CDC connection to establish
+            
+            # Test connection stability
+            print("🔄 Testing connection stability...")
+            time.sleep(2)  # Additional time for USB CDC
 
             # 1. Start Session
             print("🤝 Initiating transfer session...")

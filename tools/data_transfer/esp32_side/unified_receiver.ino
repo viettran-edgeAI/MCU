@@ -10,6 +10,7 @@
 #include "Arduino.h"
 #include "FS.h"
 #include "SPIFFS.h"
+#include "Rf_file_manager.h"
 
 // --- Protocol Constants ---
 // Must match the Python sender script
@@ -24,8 +25,10 @@ const char* RESP_READY = "READY";
 const char* RESP_OK = "OK";
 const char* RESP_ERROR = "ERROR";
 
-const uint16_t CHUNK_SIZE = 512; // Must match python script. Reduced for C3 stability.
-const uint32_t SERIAL_TIMEOUT_MS = 10000; // 10-second timeout for reads
+const uint16_t CHUNK_SIZE = 256; // Further reduced for USB CDC compatibility
+const uint32_t CHUNK_DELAY = 50; // Increased delay for USB CDC stability
+const uint32_t SERIAL_TIMEOUT_MS = 30000; // Extended timeout for large files
+const uint32_t HEADER_WAIT_MS = 100; // Wait time for header assembly
 
 // --- State Machine ---
 enum class State {
@@ -49,6 +52,16 @@ uint32_t bytesWritten = 0;
 // --- LED Configuration ---
 const uint8_t LED_PIN = 2; // Built-in LED on many ESP32 boards
 
+// --- Function Declarations ---
+void setLed(bool on);
+void blinkLed(int count, int duration);
+bool read_header();
+void handleStartSession();
+void handleCommand();
+void handleFileInfo();
+void handleFileChunk();
+void handleEndSession();
+
 void setLed(bool on) { 
     digitalWrite(LED_PIN, on ? HIGH : LOW);
 }
@@ -67,14 +80,13 @@ void setup() {
     Serial.begin(115200);
     Serial.setTimeout(SERIAL_TIMEOUT_MS);
 
+    // manageSPIFFSFiles();
+
     if (!SPIFFS.begin(true)) {
-        Serial.println("SPIFFS Mount Failed");
         currentState = State::ERROR_STATE;
         return;
     }
 
-    Serial.println("\nESP32 Unified Receiver Ready.");
-    Serial.println("Waiting for transfer session to start...");
     blinkLed(3, 100); // Signal ready
 }
 
@@ -99,11 +111,24 @@ void loop() {
             break;
         // Other states are handled within the command loop
     }
+    
+    // Small yield to prevent blocking
+    yield();
 }
 
 // --- Protocol Handlers ---
 
 bool read_header() {
+    // Wait for complete header with timeout
+    uint32_t start_time = millis();
+    while (Serial.available() < sizeof(CMD_HEADER) - 1) {
+        if (millis() - start_time > HEADER_WAIT_MS) {
+            return false;
+        }
+        delay(1);
+        yield();
+    }
+    
     uint8_t header_buffer[sizeof(CMD_HEADER) - 1];
     size_t bytes_read = Serial.readBytes(header_buffer, sizeof(header_buffer));
     if (bytes_read != sizeof(header_buffer) || memcmp(header_buffer, CMD_HEADER, sizeof(header_buffer)) != 0) {
@@ -117,15 +142,31 @@ void handleStartSession() {
 
     if (!read_header()) return; // Wait for a valid header
 
+    // Wait for command byte
+    while (!Serial.available()) {
+        delay(1);
+        yield();
+    }
     uint8_t command = Serial.read();
     if (command != CMD_START_SESSION) return;
 
+    // Wait for basename length
+    while (!Serial.available()) {
+        delay(1);
+        yield();
+    }
     uint8_t basename_len = Serial.read();
+    
+    // Wait for complete basename
+    while (Serial.available() < basename_len) {
+        delay(1);
+        yield();
+    }
     Serial.readBytes(receivedBaseName, basename_len);
     receivedBaseName[basename_len] = '\0';
 
-    Serial.printf("Received START_SESSION for base: %s\n", receivedBaseName);
     Serial.print(RESP_READY);
+    Serial.flush();
     currentState = State::WAITING_FOR_COMMAND;
 }
 
@@ -143,34 +184,48 @@ void handleCommand() {
             handleEndSession();
             break;
         default:
-            Serial.printf("Unknown command: 0x%02X\n", command);
             break;
     }
 }
 
 void handleFileInfo() {
+    // Wait for filename length
+    while (!Serial.available()) {
+        delay(1);
+        yield();
+    }
     uint8_t filename_len = Serial.read();
+    
+    // Wait for complete filename
+    while (Serial.available() < filename_len) {
+        delay(1);
+        yield();
+    }
     Serial.readBytes(receivedFileName, filename_len);
     receivedFileName[filename_len] = '\0';
 
+    // Wait for file size (4 bytes)
+    while (Serial.available() < sizeof(receivedFileSize)) {
+        delay(1);
+        yield();
+    }
     Serial.readBytes((uint8_t*)&receivedFileSize, sizeof(receivedFileSize));
     bytesWritten = 0;
-
-    Serial.printf("Receiving file: %s (%u bytes)\n", receivedFileName, receivedFileSize);
 
     if (currentFile) {
         currentFile.close();
     }
     currentFile = SPIFFS.open(receivedFileName, FILE_WRITE);
     if (!currentFile) {
-        Serial.println("Failed to open file for writing");
         currentState = State::ERROR_STATE;
         Serial.print(RESP_ERROR);
+        Serial.flush();
         return;
     }
 
     setLed(true); // Turn LED on during transfer
     Serial.print(RESP_ACK);
+    Serial.flush();
     currentState = State::RECEIVING_FILE_CHUNK;
 }
 
@@ -181,31 +236,62 @@ void handleFileChunk() {
 
     if (!read_header()) return;
     
+    // Wait for command byte
+    while (!Serial.available()) {
+        delay(1);
+        yield();
+    }
     uint8_t command = Serial.read();
     if (command != CMD_FILE_CHUNK) {
         // If we get something other than a chunk, maybe it's a new command
         currentState = State::WAITING_FOR_COMMAND;
-        // We need to put the command back in the stream or handle it here.
-        // For simplicity, we'll just go back to waiting for a command.
-        // This assumes the sender won't send malformed sequences.
         return;
     }
 
     uint8_t buffer[CHUNK_SIZE];
     size_t bytesToRead = min((size_t)CHUNK_SIZE, (size_t)(receivedFileSize - bytesWritten));
+    
+    // Wait for complete chunk data
+    uint32_t start_time = millis();
+    while (Serial.available() < bytesToRead) {
+        if (millis() - start_time > 5000) { // 5 second timeout for chunk data
+            Serial.print(RESP_ERROR);
+            Serial.flush();
+            currentState = State::ERROR_STATE;
+            return;
+        }
+        delay(1);
+        yield();
+    }
+    
     size_t bytesRead = Serial.readBytes(buffer, bytesToRead);
 
     if (bytesRead > 0) {
-        currentFile.write(buffer, bytesRead);
+        size_t written = currentFile.write(buffer, bytesRead);
+        if (written != bytesRead) {
+            currentState = State::ERROR_STATE;
+            Serial.print(RESP_ERROR);
+            Serial.flush();
+            return;
+        }
+        
         bytesWritten += bytesRead;
-        // Serial.printf("  ...wrote %u bytes (%u / %u)\n", bytesRead, bytesWritten, receivedFileSize);
+        
+        // Flush file buffer more frequently for USB CDC
+        if (bytesWritten % (CHUNK_SIZE * 2) == 0) {
+            currentFile.flush();
+        }
     }
-    delay(10); // Yield to other tasks, important for single-core chips
+    
+    // Longer delay for stability with USB CDC
+    delay(CHUNK_DELAY);
+    yield(); // Allow other tasks to run
 
     Serial.print(RESP_ACK);
+    Serial.flush(); // Ensure ACK is sent immediately
 
     if (bytesWritten >= receivedFileSize) {
-        Serial.println("File transfer complete.");
+        currentFile.flush(); // Final flush
         currentFile.close();
         setLed(false);
         blinkLed(2, 50); // Quick blink for success
@@ -214,24 +300,13 @@ void handleFileChunk() {
 }
 
 void handleEndSession() {
-    Serial.println("Received END_SESSION. All transfers complete.");
     if (currentFile) {
         currentFile.close();
     }
     setLed(false);
     blinkLed(5, 100); // Final success signal
     Serial.print(RESP_OK);
+    Serial.flush();
     currentState = State::SESSION_ENDED;
-    listSPIFFSFiles();
 }
 
-void listSPIFFSFiles() {
-    Serial.println("\n--- SPIFFS Contents ---");
-    File root = SPIFFS.open("/");
-    File file = root.openNextFile();
-    while(file){
-        Serial.printf("  - %s (%u bytes)\n", file.name(), file.size());
-        file = root.openNextFile();
-    }
-    Serial.println("-----------------------");
-}

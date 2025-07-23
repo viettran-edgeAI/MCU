@@ -636,10 +636,10 @@ class Rf_data {
         uint16_t cursor = 0;
         mcu::b_vector<uint16_t> newSampleIDs;
         for(uint16_t i = 0; i<maxSamples; i++){
-            if(sampleIDs[cursor] != i){
-                newSampleIDs.push_back(i); // Add missing IDs
-            }else{
+            if(cursor < sampleIDs.size() && sampleIDs[cursor] == i){
                 cursor++;
+            } else {
+                newSampleIDs.push_back(i); // Add missing IDs
             }
         }
         if(currentSize >= numSamples) {
@@ -658,10 +658,11 @@ class Rf_data {
             }
             Rf_sample sample = it->second; // Get the sample
             // Add the sample again with a new ID
-            uint16_t newID = newSampleIDs.back();
-            allSamples[newID] = sample; // Use new ID
-            newSampleIDs.pop_back(); // Remove used ID
-
+            if(!newSampleIDs.empty()) {
+                uint16_t newID = newSampleIDs.back();
+                allSamples[newID] = sample; // Use new ID
+                newSampleIDs.pop_back(); // Remove used ID
+            }
         }
         if(!preloaded) {
             releaseData(true); // Save to SPIFFS if not preloaded

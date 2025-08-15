@@ -131,7 +131,7 @@ namespace mcu {
             }
             return -1;
         }
-        const int16_t getValue(V key) const noexcept {
+        int16_t getValue(V key) const noexcept {
             uint8_t index     = hashFunction(cap_, key, best_hashers_16[cap_ - 1]);
             uint8_t attempts= 0;
 
@@ -1193,6 +1193,13 @@ namespace mcu {
     ------------------------------------------------- VECTOR ---------------------------------------------------------
     ------------------------------------------------------------------------------------------------------------------
 */
+    // Forward declarations (for b_vector <-> vector conversion mechanism)
+    template<typename T, index_size_flag SizeFlag, size_t sboSize>
+    class b_vector;
+    
+    template<typename T, index_size_flag SizeFlag>
+    class vector;
+
     // vector with small buffer optimization (SBO)
     template<typename T, index_size_flag SizeFlag = index_size_flag::MEDIUM, size_t sboSize = 0>
     class b_vector : hash_kernel {
@@ -1350,6 +1357,26 @@ namespace mcu {
             other.using_heap = false;
         }
 
+        // Constructor: from regular vector (conversion constructor)
+        template<index_size_flag OtherSizeFlag>
+        b_vector(const vector<T, OtherSizeFlag>& other) noexcept : size_(static_cast<vector_index_type>(other.size())) {
+            if (other.size() <= SBO_SIZE) {
+                using_heap = false;
+                capacity_ = SBO_SIZE;
+                T* buffer_ptr = reinterpret_cast<T*>(buffer);
+                for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
+                    new(buffer_ptr + i) T(i < size_ ? other.data()[i] : T());
+                }
+            } else {
+                using_heap = true;
+                capacity_ = static_cast<vector_index_type>(other.size());
+                heap_array = new T[capacity_];
+                for (vector_index_type i = 0; i < size_; ++i) {
+                    heap_array[i] = other.data()[i];
+                }
+            }
+        }
+
         // Destructor
         ~b_vector() noexcept {
             if (using_heap) {
@@ -1460,11 +1487,57 @@ namespace mcu {
             }
             return *this;
         }
+
+        // Assignment operator: from regular vector (conversion assignment)
+        template<index_size_flag OtherSizeFlag>
+        b_vector& operator=(const vector<T, OtherSizeFlag>& other) noexcept {
+            // Clear current data
+            if (using_heap) {
+                delete[] heap_array;
+            } else {
+                T* p = reinterpret_cast<T*>(buffer);
+                for (vector_index_type i = 0; i < SBO_SIZE; ++i) p[i].~T();
+            }
+
+            size_ = static_cast<vector_index_type>(other.size());
+
+            if (other.size() <= SBO_SIZE) {
+                // Use SBO
+                using_heap = false;
+                capacity_ = SBO_SIZE;
+                T* buffer_ptr = reinterpret_cast<T*>(buffer);
+                for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
+                    new(buffer_ptr + i) T(i < size_ ? other.data()[i] : T());
+                }
+            } else {
+                // Use heap
+                using_heap = true;
+                capacity_ = static_cast<vector_index_type>(other.size());
+                heap_array = new T[capacity_];
+                for (vector_index_type i = 0; i < size_; ++i) {
+                    heap_array[i] = other.data()[i];
+                }
+            }
+
+            return *this;
+        }
         void fill(const T& value) noexcept {
             T* ptr = data_ptr();
             for (vector_index_type i = 0; i < size_; ++i) {
                 ptr[i] = value;
             }
+        }
+
+        // Implicit conversion operator to regular vector
+        template<index_size_flag TargetSizeFlag = SizeFlag>
+        operator vector<T, TargetSizeFlag>() const noexcept {
+            vector<T, TargetSizeFlag> result;
+            result.clear();
+            result.reserve(static_cast<typename mcu::vector_index_type<TargetSizeFlag>::type>(size_));
+            for (vector_index_type i = 0; i < size_; ++i) {
+                result.push_back(data_ptr()[i]);
+            }
+            return result;
         }
 
         // Reserve at least newCapacity
@@ -1934,6 +2007,17 @@ namespace mcu {
             other.capacity_ = 0;
         }
 
+        // Constructor: from b_vector (conversion constructor)
+        template<index_size_flag OtherSizeFlag, size_t sboSize>
+        vector(const b_vector<T, OtherSizeFlag, sboSize>& other) noexcept
+            : array(new T[other.size() == 0 ? 1 : other.size()]),
+            size_(static_cast<vector_index_type>(other.size())),
+            capacity_(other.size() == 0 ? 1 : static_cast<vector_index_type>(other.size())) {
+            for (vector_index_type i = 0; i < size_; ++i) {
+                array[i] = other.data()[i];
+            }
+        }
+
         // Destructor
         ~vector() noexcept {
             delete[] array;
@@ -1966,9 +2050,39 @@ namespace mcu {
             return *this;
         }
 
+        // Assignment operator: from b_vector (conversion assignment)
+        template<index_size_flag OtherSizeFlag, size_t sboSize>
+        vector& operator=(const b_vector<T, OtherSizeFlag, sboSize>& other) noexcept {
+            vector_index_type new_size = static_cast<vector_index_type>(other.size());
+            vector_index_type new_capacity = (new_size == 0) ? 1 : new_size;
+            
+            T* newArray = new T[new_capacity];
+            for (vector_index_type i = 0; i < new_size; ++i) {
+                newArray[i] = other.data()[i];
+            }
+            
+            delete[] array;
+            array = newArray;
+            size_ = new_size;
+            capacity_ = new_capacity;
+            
+            return *this;
+        }
+
         // Reserve at least newCapacity
         void reserve(vector_index_type newCapacity) noexcept {
             if (newCapacity > capacity_) resize(newCapacity);
+        }
+
+        // Implicit conversion operator to b_vector
+        template<index_size_flag TargetSizeFlag = SizeFlag, size_t sboSize = 0>
+        operator b_vector<T, TargetSizeFlag, sboSize>() const noexcept {
+            b_vector<T, TargetSizeFlag, sboSize> result;
+            result.clear();
+            for (vector_index_type i = 0; i < size_; ++i) {
+                result.push_back(array[i]);
+            }
+            return result;
         }
 
         // Append element
@@ -2269,6 +2383,7 @@ namespace mcu {
         const T* begin() const noexcept { return array; }
         const T* end()   const noexcept { return array + size_; }
     };
+    
     /*
     -------------------------------------------------------------------------------------------------------------------
     ------------------------------------------------- PACKED VECTOR ---------------------------------------------------
@@ -2534,6 +2649,87 @@ namespace mcu {
             }
             return *this;
         }
+
+        // Iterator class for packed_vector
+        class iterator {
+        private:
+            PackedArray<BitsPerElement>* data_ptr;
+            vector_index_type index;
+            
+        public:
+            iterator(PackedArray<BitsPerElement>* ptr, vector_index_type idx) 
+                : data_ptr(ptr), index(idx) {}
+                
+            uint8_t operator*() const { return data_ptr->get_unsafe(index); }
+            
+            iterator& operator++() { ++index; return *this; }
+            iterator operator++(int) { iterator tmp = *this; ++index; return tmp; }
+            iterator& operator--() { --index; return *this; }
+            iterator operator--(int) { iterator tmp = *this; --index; return tmp; }
+            
+            iterator operator+(vector_index_type n) const { return iterator(data_ptr, index + n); }
+            iterator operator-(vector_index_type n) const { return iterator(data_ptr, index - n); }
+            iterator& operator+=(vector_index_type n) { index += n; return *this; }
+            iterator& operator-=(vector_index_type n) { index -= n; return *this; }
+            
+            bool operator==(const iterator& other) const { return index == other.index; }
+            bool operator!=(const iterator& other) const { return index != other.index; }
+            bool operator<(const iterator& other) const { return index < other.index; }
+            bool operator>(const iterator& other) const { return index > other.index; }
+            bool operator<=(const iterator& other) const { return index <= other.index; }
+            bool operator>=(const iterator& other) const { return index >= other.index; }
+            
+            vector_index_type operator-(const iterator& other) const { return index - other.index; }
+            
+            // Get current index for debugging
+            vector_index_type get_index() const { return index; }
+        };
+        
+        class const_iterator {
+        private:
+            const PackedArray<BitsPerElement>* data_ptr;
+            vector_index_type index;
+            
+        public:
+            const_iterator(const PackedArray<BitsPerElement>* ptr, vector_index_type idx) 
+                : data_ptr(ptr), index(idx) {}
+                
+            // Convert from iterator to const_iterator
+            const_iterator(const iterator& it) 
+                : data_ptr(it.data_ptr), index(it.index) {}
+                
+            uint8_t operator*() const { return data_ptr->get_unsafe(index); }
+            
+            const_iterator& operator++() { ++index; return *this; }
+            const_iterator operator++(int) { const_iterator tmp = *this; ++index; return tmp; }
+            const_iterator& operator--() { --index; return *this; }
+            const_iterator operator--(int) { const_iterator tmp = *this; --index; return tmp; }
+            
+            const_iterator operator+(vector_index_type n) const { return const_iterator(data_ptr, index + n); }
+            const_iterator operator-(vector_index_type n) const { return const_iterator(data_ptr, index - n); }
+            const_iterator& operator+=(vector_index_type n) { index += n; return *this; }
+            const_iterator& operator-=(vector_index_type n) { index -= n; return *this; }
+            
+            bool operator==(const const_iterator& other) const { return index == other.index; }
+            bool operator!=(const const_iterator& other) const { return index != other.index; }
+            bool operator<(const const_iterator& other) const { return index < other.index; }
+            bool operator>(const const_iterator& other) const { return index > other.index; }
+            bool operator<=(const const_iterator& other) const { return index <= other.index; }
+            bool operator>=(const const_iterator& other) const { return index >= other.index; }
+            
+            vector_index_type operator-(const const_iterator& other) const { return index - other.index; }
+            
+            // Get current index for debugging
+            vector_index_type get_index() const { return index; }
+        };
+
+        // Iterator methods
+        iterator begin() { return iterator(&packed_data, 0); }
+        iterator end() { return iterator(&packed_data, get_size()); }
+        const_iterator begin() const { return const_iterator(&packed_data, 0); }
+        const_iterator end() const { return const_iterator(&packed_data, get_size()); }
+        const_iterator cbegin() const { return const_iterator(&packed_data, 0); }
+        const_iterator cend() const { return const_iterator(&packed_data, get_size()); }
         
         // Move assignment
         packed_vector& operator=(packed_vector&& other) noexcept {
@@ -2897,10 +3093,10 @@ namespace mcu {
         }
         // Copy Constructor
         ChainedUnorderedMap(const ChainedUnorderedMap& o) noexcept : slot_handler(o),
+            rangeMap(o.rangeMap),
             fullness_(o.fullness_),
             cmap_ability(o.cmap_ability),
-            chain_size(o.chain_size),
-            rangeMap(o.rangeMap)
+            chain_size(o.chain_size)
         {
             this->cap_ = o.cap_; // assign base member if needed
             chain = new unordered_map_s*[this->cap_];
@@ -2913,10 +3109,10 @@ namespace mcu {
 
         // Move Constructor
         ChainedUnorderedMap(ChainedUnorderedMap&& o) noexcept : slot_handler(std::move(o)),   // steal cap_ & flags
+            rangeMap(std::move(o.rangeMap)),    
             fullness_(std::exchange(o.fullness_,   92)),
             cmap_ability(std::exchange(o.cmap_ability, static_cast<uint8_t>(255*92/100))),
-            chain_size(std::exchange(o.chain_size,  0)),
-            rangeMap(std::move(o.rangeMap)){
+            chain_size(std::exchange(o.chain_size,  0)){
                 chain = std::exchange(o.chain, nullptr);
         }
         // Copy‐assignment
@@ -4084,8 +4280,6 @@ namespace mcu {
         iterator find(const T& key) {
             pair_kmi keyPair = keyMappingIN(key); 
             int16_t setID = keyPair.first; // Get setID from pair
-            uint8_t range = keyPair.second; // Get range from pair
-
 
             if (setID < 0) {
                 return end(); // Key not found

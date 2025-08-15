@@ -1,10 +1,11 @@
-#include "STL_MCU.h"  
+
 #include <string>
 #include <random>
 #include <iostream>
 #include <fstream>
 #include <sstream>
 #include <iomanip>
+#include <vector>
 #include <cmath>
 #include <sys/stat.h>
 #include <ctime>
@@ -14,779 +15,14 @@
 #define mkdir _mkdir
 #endif
 
+#include "pc_components.h"
+
+
+#include <iomanip>
+#include <algorithm>
+
 using namespace mcu;
 
-struct Rf_sample{
-    packed_vector<2, SMALL> features;           // set containing the values ​​of the features corresponding to that sample , 2 bit per value.
-    uint8_t label;                     // label of the sample 
-};
-
-using OOB_set = ChainedUnorderedSet<uint16_t>; // OOB set type
-using sampleID_set = ChainedUnorderedSet<uint16_t>; // Sample ID set type
-using sample_set = ChainedUnorderedMap<uint16_t, Rf_sample>; // set of samples
-
-struct Tree_node{
-    uint32_t packed_data; 
-    
-    // Bit layout (32 bits total) - optimized for breadth-first tree building:
-    // Bits 0-9:    featureID (10 bits) - 0 to 1023 features
-    // Bits 10-17:  label (8 bits) - 0 to 255 classes  
-    // Bits 18-19:  threshold (2 bits) - 0 to 3
-    // Bit 20:      is_leaf (1 bit) - 0 or 1
-    // Bits 21-31:  left child index (11 bits) - 0 to 2047 nodes -> max 8kB RAM per tree 
-    // Note: right child index = left child index + 1 (breadth-first property)
-
-    // Constructor
-    Tree_node() : packed_data(0) {}
-
-    // Getter methods for packed data
-    uint16_t getFeatureID() const {
-        return packed_data & 0x3FF;  // Bits 0-9 (10 bits)
-    }
-    
-    uint8_t getLabel() const {
-        return (packed_data >> 10) & 0xFF;  // Bits 10-17 (8 bits)
-    }
-    
-    uint8_t getThreshold() const {
-        return (packed_data >> 18) & 0x03;  // Bits 18-19 (2 bits)
-    }
-    
-    bool getIsLeaf() const {
-        return (packed_data >> 20) & 0x01;  // Bit 20
-    }
-    
-    uint16_t getLeftChildIndex() const {
-        return (packed_data >> 21) & 0x7FF;  // Bits 21-31 (11 bits)
-    }
-    
-    uint16_t getRightChildIndex() const {
-        return getLeftChildIndex() + 1;  // Breadth-first property: right = left + 1
-    }
-    
-    // Setter methods for packed data
-    void setFeatureID(uint16_t featureID) {
-        packed_data = (packed_data & 0xFFFFFC00) | (featureID & 0x3FF);  // Bits 0-9
-    }
-    
-    void setLabel(uint8_t label) {
-        packed_data = (packed_data & 0xFFFC03FF) | ((uint32_t)(label & 0xFF) << 10);  // Bits 10-17
-    }
-    
-    void setThreshold(uint8_t threshold) {
-        packed_data = (packed_data & 0xFFF3FFFF) | ((uint32_t)(threshold & 0x03) << 18);  // Bits 18-19
-    }
-    
-    void setIsLeaf(bool isLeaf) {
-        packed_data = (packed_data & 0xFFEFFFFF) | ((uint32_t)(isLeaf ? 1 : 0) << 20);  // Bit 20
-    }
-    
-    void setLeftChildIndex(uint16_t index) {
-        packed_data = (packed_data & 0x001FFFFF) | ((uint32_t)(index & 0x7FF) << 21);  // Bits 21-31
-    }
-    
-    // Note: setRightChildIndex is not needed since right = left + 1
-};
-
-class Rf_tree {
-  public:
-    b_vector<Tree_node> nodes;  // Vector-based tree storage
-    std::string filename;
-
-    Rf_tree() : filename("") {}
-    
-    Rf_tree(const std::string& fn) : filename(fn) {}
-
-    // Count total number of nodes in the tree (including leaf nodes)
-    uint32_t countNodes() const {
-        return nodes.size();
-    }
-
-    size_t get_memory_usage() const {
-        return nodes.size() * 4;
-    }
-
-    // Count leaf nodes in the tree
-    uint32_t countLeafNodes() const {
-        uint32_t leafCount = 0;
-        for (const auto& node : nodes) {
-            if (node.getIsLeaf()) {
-                leafCount++;
-            }
-        }
-        return leafCount;
-    }
-
-    // Get tree depth
-    uint16_t getTreeDepth() const {
-        if (nodes.empty()) return 0;
-        return getTreeDepthRecursive(0);
-    }
-
-    // Save tree to disk using standard C++ file I/O
-    void saveTree(std::string folder_path = "") {
-        if (!filename.length() || nodes.empty()) return;
-        std::string full_path = folder_path.length() ? (folder_path + "/" + filename) : filename;
-        std::ofstream file(full_path, std::ios::binary);
-        if (!file.is_open()) {
-            std::cout << "❌ Failed to save tree: " << full_path << std::endl;
-            return;
-        }
-        // Write header
-        uint32_t magic = 0x54524545;
-        file.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
-        
-        // Write number of nodes
-        uint32_t nodeCount = nodes.size();
-        file.write(reinterpret_cast<const char*>(&nodeCount), sizeof(nodeCount));
-        
-        // Save all nodes - just save the packed_data since everything is packed into it
-        for (const auto& node : nodes) {
-            file.write(reinterpret_cast<const char*>(&node.packed_data), sizeof(node.packed_data));
-        }
-        
-        file.close();
-        // Clear from RAM
-        purgeTree();
-    }
-
-    // load tree from disk into RAM
-    void loadTree(const std::string& file_path) {
-        std::ifstream file(file_path, std::ios::binary);
-        if (!file.is_open()) {
-            std::cout << "❌ Failed to open tree file: " << file_path << std::endl;
-            return;
-        }
-        
-        // Read and verify magic number
-        uint32_t magic;
-        file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
-        if (magic != 0x54524545) { // "TREE" in hex
-            std::cout << "❌ Invalid tree file format (bad magic number): " << file_path << std::endl;
-            file.close();
-            return;
-        }
-        
-        // Read number of nodes
-        uint32_t nodeCount;
-        file.read(reinterpret_cast<char*>(&nodeCount), sizeof(nodeCount));
-        if (nodeCount == 0 || nodeCount > 2047) { // 11-bit limit
-            std::cout << "❌ Invalid node count in tree file: " << nodeCount << std::endl;
-            file.close();
-            return;
-        }
-        
-        // Clear existing nodes and reserve space
-        nodes.clear();
-        nodes.reserve(nodeCount);
-        
-        // Load all nodes
-        for (uint32_t i = 0; i < nodeCount; i++) {
-            Tree_node node;
-            file.read(reinterpret_cast<char*>(&node.packed_data), sizeof(node.packed_data));
-            
-            if (file.fail()) {
-                std::cout << "❌ Failed to read node " << i << " from tree file: " << file_path << std::endl;
-                nodes.clear();
-                file.close();
-                return;
-            }
-            
-            nodes.push_back(node);
-        }
-        
-        file.close();
-        
-        // Update filename for future operations
-        filename = file_path;
-        
-        std::cout << "✅ Tree loaded successfully: " << file_path 
-                  << " (" << nodeCount << " nodes)" << std::endl;
-    }
-
-    uint8_t predictSample(const Rf_sample& sample) const {
-        if (nodes.empty()) return 0;
-        
-        uint16_t currentIndex = 0;  // Start from root
-        
-        while (currentIndex < nodes.size() && !nodes[currentIndex].getIsLeaf()) {
-            // Bounds check for feature access
-            if (nodes[currentIndex].getFeatureID() >= sample.features.size()) {
-                return 0; // Invalid feature access
-            }
-            
-            uint8_t featureValue = sample.features[nodes[currentIndex].getFeatureID()];
-            
-            if (featureValue <= nodes[currentIndex].getThreshold()) {
-                // Go to left child
-                currentIndex = nodes[currentIndex].getLeftChildIndex();
-            } else {
-                // Go to right child
-                currentIndex = nodes[currentIndex].getRightChildIndex();
-            }
-            
-            // Bounds check for child indices
-            if (currentIndex >= nodes.size()) {
-                return 0; // Invalid child index
-            }
-        }
-        
-        return (currentIndex < nodes.size()) ? nodes[currentIndex].getLabel() : 0;
-    }
-
-    void purgeTree() {
-        nodes.clear();
-        filename = ""; // Clear filename
-    }
-
-  private:
-    // Recursive helper to get tree depth
-    uint16_t getTreeDepthRecursive(uint16_t nodeIndex) const {
-        if (nodeIndex >= nodes.size()) return 0;
-        if (nodes[nodeIndex].getIsLeaf()) return 1;
-        
-        uint16_t leftIndex = nodes[nodeIndex].getLeftChildIndex();
-        uint16_t rightIndex = nodes[nodeIndex].getRightChildIndex();
-        
-        uint16_t leftDepth = getTreeDepthRecursive(leftIndex);
-        uint16_t rightDepth = getTreeDepthRecursive(rightIndex);
-        
-        return 1 + (leftDepth > rightDepth ? leftDepth : rightDepth);
-    }
-};
-
-class Rf_data {
-  public:
-    ChainedUnorderedMap<uint16_t, Rf_sample> allSamples;    // all sample and it's ID 
-
-    Rf_data(){}
-
-    // Load data from CSV format (used only once for initial dataset conversion)
-    void loadCSVData(std::string csvFilename, uint8_t numFeatures) {
-        std::ifstream file(csvFilename);
-        if (!file.is_open()) {
-            std::cout << "❌ Failed to open CSV file for reading: " << csvFilename << std::endl;
-            return;
-        }
-
-        std::cout << "📊 Loading CSV: " << csvFilename << " (expecting " << (int)numFeatures << " features per sample)" << std::endl;
-        
-        uint16_t sampleID = 0;
-        uint16_t linesProcessed = 0;
-        uint16_t emptyLines = 0;
-        uint16_t validSamples = 0;
-        uint16_t invalidSamples = 0;
-        
-        std::string line;
-        while (std::getline(file, line) && sampleID < 10000) {
-            linesProcessed++;
-            
-            // Trim whitespace
-            line.erase(0, line.find_first_not_of(" \t\r\n"));
-            line.erase(line.find_last_not_of(" \t\r\n") + 1);
-            
-            if (line.empty()) {
-                emptyLines++;
-                continue;
-            }
-
-            Rf_sample s;
-            s.features.clear();
-            s.features.reserve(numFeatures);
-
-            uint8_t fieldIdx = 0;
-            std::stringstream ss(line);
-            std::string token;
-            
-            while (std::getline(ss, token, ',')) {
-                // Trim token
-                token.erase(0, token.find_first_not_of(" \t"));
-                token.erase(token.find_last_not_of(" \t") + 1);
-                
-                uint8_t v = static_cast<uint8_t>(std::stoi(token));
-
-                if (fieldIdx == 0) {
-                    s.label = v;
-                } else {
-                    s.features.push_back(v);
-                }
-
-                fieldIdx++;
-            }
-            
-            // Validate the sample
-            if (fieldIdx != numFeatures + 1) {
-                std::cout << "❌ Line " << linesProcessed << ": Expected " << (int)(numFeatures + 1) << " fields, got " << (int)fieldIdx << std::endl;
-                invalidSamples++;
-                continue;
-            }
-            if (s.features.size() != numFeatures) {
-                std::cout << "❌ Line " << linesProcessed << ": Expected " << (int)numFeatures << " features, got " << s.features.size() << std::endl;
-                invalidSamples++;
-                continue;
-            }
-            
-            s.features.fit();
-
-            allSamples[sampleID] = s;
-            sampleID++;
-            validSamples++;
-        }
-        
-        std::cout << "📋 CSV Processing Results:" << std::endl;
-        std::cout << "   Lines processed: " << linesProcessed << std::endl;
-        std::cout << "   Empty lines: " << emptyLines << std::endl;
-        std::cout << "   Valid samples: " << validSamples << std::endl;
-        std::cout << "   Invalid samples: " << invalidSamples << std::endl;
-        std::cout << "   Total samples in memory: " << allSamples.size() << std::endl;
-        
-        allSamples.fit();
-        file.close();
-        std::cout << "✅ CSV data loaded successfully." << std::endl;
-    }
-};
-
-typedef enum Rf_training_flags : uint8_t{
-    ACCURACY    = 0x01,          // calculate accuracy of the model
-    PRECISION   = 0x02,          // calculate precision of the model
-    RECALL      = 0x04,            // calculate recall of the model
-    F1_SCORE    = 0x08          // calculate F1 score of the model
-}Rf_training_flags;
-
-// Helper functions to convert between flag enum and string representation
-std::string flagsToString(uint8_t flags) {
-    std::vector<std::string> flag_names;
-    
-    if (flags & ACCURACY) flag_names.push_back("ACCURACY");
-    if (flags & PRECISION) flag_names.push_back("PRECISION");
-    if (flags & RECALL) flag_names.push_back("RECALL");
-    if (flags & F1_SCORE) flag_names.push_back("F1_SCORE");
-    
-    if (flag_names.empty()) return "NONE";
-    
-    std::string result = flag_names[0];
-    for (size_t i = 1; i < flag_names.size(); i++) {
-        result += " | " + flag_names[i];
-    }
-    return result;
-}
-
-uint8_t stringToFlags(const std::string& flag_str) {
-    uint8_t flags = 0;
-    
-    if (flag_str.find("ACCURACY") != std::string::npos) flags |= ACCURACY;
-    if (flag_str.find("PRECISION") != std::string::npos) flags |= PRECISION;
-    if (flag_str.find("RECALL") != std::string::npos) flags |= RECALL;
-    if (flag_str.find("F1_SCORE") != std::string::npos) flags |= F1_SCORE;
-    
-    // Default to ACCURACY if no valid flags found
-    if (flags == 0) flags = ACCURACY;
-    
-    return flags;
-}
-
-struct Rf_config{
-    // model parameters
-    uint8_t quantization_coefficient = 2;
-    uint8_t num_trees = 20;
-    uint8_t num_features;  
-    uint8_t num_labels;
-    uint8_t k_fold; 
-    uint8_t min_split; 
-    uint16_t max_depth;
-    uint16_t num_samples;  // number of samples in the base data
-    size_t RAM_usage = 0;
-    int epochs = 20;    // number of epochs for inner training
-
-    float train_ratio = 0.75; // ratio of training data to total data, default is 0.6
-    float valid_ratio = 0.2f; // ratio of validation data to total data, default is 0.2
-    float boostrap_ratio = 0.632f; // ratio of samples taken from train data to create subdata
-
-    b_vector<uint8_t> max_depth_range;      // for training
-    b_vector<uint8_t> min_split_range;      // for training 
-    b_vector<bool, SMALL> overwrite{5}; // min_slit-> max_depth-> unity_threshold-> combine_ratio-> training_flag
-
-    Rf_training_flags training_flag;
-    std::string data_path;
-    std::string config_path = "trained_model/model_config.json"; // path to model configuration file
-    
-    // model configurations
-    float unity_threshold = 0.5f;   // unity_threshold  for classification, effect to precision and recall - default value
-    float impurity_threshold = 0.01f; // threshold for impurity, default is 0.01
-    float combine_ratio = 0.5f;      // auto-calculated ratio for combining validation with primary evaluation (OOB/CV)
-
-    bool use_gini = false; // use Gini impurity for training
-    bool use_validation = false; // use validation set for training
-    bool use_bootstrap = true; // use bootstrap sampling for training
-    bool cross_validation = false; // use cross validation for evaluation
-
-    // Constructor
-    Rf_config() {};
-
-    void init(std::string init_path = "model_config.json"){
-        std::ifstream config_file(init_path);
-        
-        if (!config_file.is_open()) {
-            std::cout << "⚠️  Config file not found: " << init_path << ". Using default values." << std::endl;
-            return;
-        }
-        
-        std::string line;
-        std::string content;
-        
-        // Read entire file content
-        while (std::getline(config_file, line)) {
-            content += line;
-        }
-        config_file.close();
-        
-        // Parse JSON values using simple string parsing
-        // Extract num_trees
-        size_t pos = content.find("\"num_trees\"");
-        if (pos != std::string::npos) {
-            pos = content.find("\"value\":", pos);
-            if (pos != std::string::npos) {
-                pos = content.find(":", pos) + 1;
-                size_t end = content.find(",", pos);
-                if (end == std::string::npos) end = content.find("}", pos);
-                std::string value = content.substr(pos, end - pos);
-                // Remove whitespace
-                value.erase(0, value.find_first_not_of(" \t\r\n"));
-                value.erase(value.find_last_not_of(" \t\r\n") + 1);
-                num_trees = static_cast<uint8_t>(std::stoi(value));
-            }
-        }
-        
-        // Extract k_fold
-        pos = content.find("\"k_fold\"");
-        if (pos != std::string::npos) {
-            pos = content.find("\"value\":", pos);
-            if (pos != std::string::npos) {
-                pos = content.find(":", pos) + 1;
-                size_t end = content.find(",", pos);
-                if (end == std::string::npos) end = content.find("}", pos);
-                std::string value = content.substr(pos, end - pos);
-                value.erase(0, value.find_first_not_of(" \t\r\n"));
-                value.erase(value.find_last_not_of(" \t\r\n") + 1);
-                k_fold = static_cast<uint8_t>(std::stoi(value));
-            }
-        }
-        
-        // Extract criterion (gini or entropy)
-        pos = content.find("\"criterion\"");
-        if (pos != std::string::npos) {
-            pos = content.find("\"value\":", pos);
-            if (pos != std::string::npos) {
-                pos = content.find(":", pos) + 1;
-                size_t end = content.find(",", pos);
-                if (end == std::string::npos) end = content.find("}", pos);
-                std::string value = content.substr(pos, end - pos);
-                value.erase(0, value.find_first_not_of(" \t\r\n\""));
-                value.erase(value.find_last_not_of(" \t\r\n\"") + 1);
-                use_gini = (value == "gini");
-            }
-        }
-        
-        // Extract use_bootstrap
-        pos = content.find("\"use_bootstrap\"");
-        if (pos != std::string::npos) {
-            pos = content.find("\"value\":", pos);
-            if (pos != std::string::npos) {
-                pos = content.find(":", pos) + 1;
-                size_t end = content.find(",", pos);
-                if (end == std::string::npos) end = content.find("}", pos);
-                std::string value = content.substr(pos, end - pos);
-                value.erase(0, value.find_first_not_of(" \t\r\n"));
-                value.erase(value.find_last_not_of(" \t\r\n") + 1);
-                use_bootstrap = (value == "true");
-            }
-        }
-        
-        // Extract use_validation
-        pos = content.find("\"use_validation\"");
-        if (pos != std::string::npos) {
-            pos = content.find("\"value\":", pos);
-            if (pos != std::string::npos) {
-                pos = content.find(":", pos) + 1;
-                size_t end = content.find(",", pos);
-                if (end == std::string::npos) end = content.find("}", pos);
-                std::string value = content.substr(pos, end - pos);
-                value.erase(0, value.find_first_not_of(" \t\r\n"));
-                value.erase(value.find_last_not_of(" \t\r\n") + 1);
-                use_validation = (value == "true");
-            }
-        }
-        
-        // Extract cross_validation
-        pos = content.find("\"cross_validation\"");
-        if (pos != std::string::npos) {
-            pos = content.find("\"value\":", pos);
-            if (pos != std::string::npos) {
-                pos = content.find(":", pos) + 1;
-                size_t end = content.find(",", pos);
-                if (end == std::string::npos) end = content.find("}", pos);
-                std::string value = content.substr(pos, end - pos);
-                value.erase(0, value.find_first_not_of(" \t\r\n"));
-                value.erase(value.find_last_not_of(" \t\r\n") + 1);
-                cross_validation = (value == "true");
-            }
-        }
-
-        pos = content.find("\"k_folds\"");
-        if (pos != std::string::npos) {
-            pos = content.find("\"value\":", pos);
-            if (pos != std::string::npos) {
-                pos = content.find(":", pos) + 1;
-                size_t end = content.find(",", pos);
-                if (end == std::string::npos) end = content.find("}", pos);
-                std::string value = content.substr(pos, end - pos);
-                value.erase(0, value.find_first_not_of(" \t\r\n"));
-                value.erase(value.find_last_not_of(" \t\r\n") + 1);
-                k_fold = static_cast<uint8_t>(std::stoi(value));
-            }
-        }
-        
-        // Extract data_path
-        pos = content.find("\"data_path\"");
-        if (pos != std::string::npos) {
-            pos = content.find("\"value\":", pos);
-            if (pos != std::string::npos) {
-                pos = content.find("\"", pos + 8); // Find opening quote after "value":
-                if (pos != std::string::npos) {
-                    pos++; // Move past opening quote
-                    size_t end = content.find("\"", pos);
-                    if (end != std::string::npos) {
-                        data_path = content.substr(pos, end - pos);
-                    }
-                }
-            }
-        }
-
-        // Helper function to check if parameter is enabled (supports all status types)
-        auto isParameterEnabled = [&content](const std::string& param_name) -> bool {
-            size_t pos = content.find("\"" + param_name + "\"");
-            if (pos != std::string::npos) {
-                size_t status_pos = content.find("\"status\":", pos);
-                if (status_pos != std::string::npos && status_pos < content.find("}", pos)) {
-                    size_t start = content.find("\"", status_pos + 9) + 1;
-                    size_t end = content.find("\"", start);
-                    if (start != std::string::npos && end != std::string::npos) {
-                        std::string status = content.substr(start, end - start);
-                        return status == "enabled" || status == "overwrite" || status == "stacked";
-                    }
-                }
-            }
-            return false;
-        };
-
-        // Helper function to check if parameter has stack mode
-        auto isParameterStacked = [&content](const std::string& param_name) -> bool {
-            size_t pos = content.find("\"" + param_name + "\"");
-            if (pos != std::string::npos) {
-                size_t status_pos = content.find("\"status\":", pos);
-                if (status_pos != std::string::npos && status_pos < content.find("}", pos)) {
-                    size_t start = content.find("\"", status_pos + 9) + 1;
-                    size_t end = content.find("\"", start);
-                    if (start != std::string::npos && end != std::string::npos) {
-                        std::string status = content.substr(start, end - start);
-                        return status == "stacked";
-                    }
-                }
-            }
-            return false;
-        };
-
-        // Helper function to extract parameter value
-        auto extractParameterValue = [&content](const std::string& param_name) -> std::string {
-            size_t pos = content.find("\"" + param_name + "\"");
-            if (pos != std::string::npos) {
-                size_t value_pos = content.find("\"value\":", pos);
-                if (value_pos != std::string::npos && value_pos < content.find("}", pos)) {
-                    size_t start = content.find(":", value_pos) + 1;
-                    size_t end = content.find(",", start);
-                    if (end == std::string::npos) end = content.find("\n", start);
-                    if (end == std::string::npos) end = content.find("}", start);
-                    std::string value = content.substr(start, end - start);
-                    value.erase(0, value.find_first_not_of(" \t\r\n\""));
-                    value.erase(value.find_last_not_of(" \t\r\n\"") + 1);
-                    return value;
-                }
-            }
-            return "";
-        };
-
-        // Initialize overwrite vector: min_split, max_depth, unity_threshold, combine_ratio, train_flag
-        overwrite.clear();
-        for (int i = 0; i < 5; i++) {
-            overwrite.push_back(false);
-        }
-
-        // Check and extract min_split
-        overwrite[0] = isParameterEnabled("min_split");
-        if (overwrite[0]) {
-            std::string value = extractParameterValue("min_split");
-            if (!value.empty()) {
-                min_split = static_cast<uint8_t>(std::stoi(value));
-                std::cout << "⚙️  min_split override enabled: " << (int)min_split << std::endl;
-            }
-        }
-
-        // Check and extract max_depth
-        overwrite[1] = isParameterEnabled("max_depth");
-        if (overwrite[1]) {
-            std::string value = extractParameterValue("max_depth");
-            if (!value.empty()) {
-                max_depth = static_cast<uint16_t>(std::stoi(value));
-                std::cout << "⚙️  max_depth override enabled: " << (int)max_depth << std::endl;
-            }
-        }
-
-        // Check and extract unity_threshold
-        overwrite[2] = isParameterEnabled("unity_threshold");
-        if (overwrite[2]) {
-            std::string value = extractParameterValue("unity_threshold");
-            if (!value.empty()) {
-                unity_threshold = std::stof(value);
-                std::cout << "⚙️  unity_threshold override enabled: " << unity_threshold << std::endl;
-            }
-        }
-
-        // Check and extract combine_ratio
-        overwrite[3] = isParameterEnabled("combine_ratio");
-        if (overwrite[3]) {
-            std::string value = extractParameterValue("combine_ratio");
-            if (!value.empty()) {
-                combine_ratio = std::stof(value);
-                std::cout << "⚙️  combine_ratio override enabled: " << combine_ratio << std::endl;
-            }
-        }
-
-        // Check and extract train_flag
-        overwrite[4] = isParameterEnabled("train_flag");
-        if (overwrite[4]) {
-            std::string value = extractParameterValue("train_flag");
-            if (!value.empty()) {
-                bool isStacked = isParameterStacked("train_flag");
-                if (isStacked) {
-                    // Stacked mode: combine with automatic flags (will be determined later)
-                    uint8_t user_flags = stringToFlags(value);
-                    training_flag = static_cast<Rf_training_flags>(user_flags); // Temporarily store user flags
-                    std::cout << "⚙️  train_flag stacked mode enabled: " << flagsToString(user_flags) << " (will be combined with auto-detected flags)\n";
-                } else {
-                    // Overwrite mode: replace automatic flags completely
-                    training_flag = static_cast<Rf_training_flags>(stringToFlags(value));
-                    std::cout << "⚙️  train_flag overwrite mode enabled: " << flagsToString(training_flag) << std::endl;
-                }
-            }
-        }
-
-        // Extract impurity_threshold if present
-        pos = content.find("\"impurity_threshold\"");
-        if (pos != std::string::npos) {
-            pos = content.find("\"value\":", pos);
-            if (pos != std::string::npos) {
-                pos = content.find(":", pos) + 1;
-                size_t end = content.find(",", pos);
-                if (end == std::string::npos) end = content.find("}", pos);
-                std::string value = content.substr(pos, end - pos);
-                value.erase(0, value.find_first_not_of(" \t\r\n"));
-                value.erase(value.find_last_not_of(" \t\r\n") + 1);
-                impurity_threshold = std::stof(value);
-            }
-        }
-
-        if(use_validation){
-            train_ratio = 0.6f; // default training ratio
-            valid_ratio = 0.2f; // default validation ratio
-        }else{
-            valid_ratio = 0.0f; // no validation ratio
-        }
-
-        if(use_validation && cross_validation){
-            use_validation = false; // disable validation if cross-validation is used
-            std::cout << "⚠️  Cross-validation is enabled, validation will be disabled." << std::endl;
-        }
-        
-        std::cout << "✅ Configuration loaded from " << init_path << std::endl;
-        std::cout << "   Number of trees: " << (int)num_trees << std::endl;
-        std::cout << "   K-fold: " << (int)k_fold << std::endl;
-        std::cout << "   Criterion: " << (use_gini ? "gini" : "entropy") << std::endl;
-        std::cout << "   Use bootstrap: " << (use_bootstrap ? "true" : "false") << std::endl;
-        std::cout << "   Use validation: " << (use_validation ? "true" : "false") << std::endl;
-        std::cout << "   Cross validation: " << (cross_validation ? "true" : "false") << std::endl;
-        std::cout << "   Data path: " << data_path << std::endl;
-    }
-
-
-    void saveConfig(size_t ram_usage, std::string config_path = "") const {
-        // Save model configuration with forest statistics
-        if (config_path.empty()) {
-            config_path = "trained_model/esp32_config.json";
-        }
-        std::ofstream config_file(config_path);
-        if(config_file.is_open()) {
-            config_file << "{\n";
-            config_file << "  \"numTrees\": " << (int)num_trees << ",\n";
-            config_file << "  \"numFeatures\": " << (int)num_features << ",\n";
-            config_file << "  \"numLabels\": " << (int)num_labels << ",\n";
-            config_file << "  \"minSplit\": " << (int)min_split << ",\n";
-            config_file << "  \"maxDepth\": " << (int)max_depth << ",\n";
-            config_file << "  \"useGini\": " << (use_gini ? "true" : "false") << ",\n";
-            config_file << "  \"useValidation\": " << (use_validation ? "true" : "false") << ",\n";
-            config_file << "  \"crossValidation\": " << (cross_validation ? "true" : "false") << ",\n";
-            config_file << "  \"k_fold\": " << (int)k_fold << ",\n";
-            config_file << "  \"unityThreshold\": " << unity_threshold << ",\n";
-            config_file << "  \"impurityThreshold\": " << impurity_threshold << ",\n";
-            config_file << "  \"combineRatio\": " << combine_ratio << ",\n";
-            config_file << "  \"trainRatio\": " << train_ratio << ",\n";
-            config_file << "  \"validRatio\": " << valid_ratio << ",\n";
-            config_file << "  \"useBootstrap\": " << (use_bootstrap ? "true" : "false") << ",\n";
-            config_file << "  \"trainFlag\": \"" << flagsToString(training_flag) << "\",\n";
-            config_file << "  \"Estimated RAM (bytes)\": " << ram_usage <<"\n";
-            config_file << "}";
-            config_file.close();
-            std::cout << "✅ Model configuration saved to " << config_path << "\n";
-        }else {
-            std::cerr << "❌ Failed to open config file for writing: " << config_path << "\n";
-        }
-    }
-
-    void saveConfigCSV(size_t ram_usage, std::string csv_path = "") const {
-        // Save model configuration as CSV
-        if (csv_path.empty()) {
-            csv_path = "trained_model/esp32_config.csv";
-        }
-        
-        std::ofstream csv_file(csv_path);
-        if(csv_file.is_open()) {
-            // Header
-            csv_file << "Parameter,Value\n";
-            
-            // Data rows
-            csv_file << "numTrees," << (int)num_trees << "\n";
-            csv_file << "numFeatures," << (int)num_features << "\n";
-            csv_file << "numLabels," << (int)num_labels << "\n";
-            csv_file << "minSplit," << (int)min_split << "\n";
-            csv_file << "maxDepth," << (int)max_depth << "\n";
-            csv_file << "useGini," << (use_gini ? "true" : "false") << "\n";
-            csv_file << "useValidation," << (use_validation ? "true" : "false") << "\n";
-            csv_file << "crossValidation," << (cross_validation ? "true" : "false") << "\n";
-            csv_file << "unityThreshold," << unity_threshold << "\n";
-            csv_file << "impurityThreshold," << impurity_threshold << "\n";
-            csv_file << "combineRatio," << combine_ratio << "\n";
-            csv_file << "trainRatio," << train_ratio << "\n";
-            csv_file << "validRatio," << valid_ratio << "\n";
-            csv_file << "useBootstrap," << (use_bootstrap ? "true" : "false") << "\n";
-            csv_file << "trainFlag," << flagsToString(training_flag) << "\n";
-            csv_file << "RAM_usage," << ram_usage << "\n";
-            
-            csv_file.close();
-            std::cout << "✅ Model configuration saved to " << csv_path << " (CSV format)\n";
-        } else {
-            std::cerr << "❌ Failed to open CSV config file for writing: " << csv_path << "\n";
-        }
-    }
-};
 
 
 class RandomForest{
@@ -797,6 +33,8 @@ public:
     Rf_data validation_data; // validation data, used for evaluating the model
 
     Rf_config config;
+
+    b_vector<float> peak_nodes;
 
 private:
     vector<Rf_tree, SMALL> root;                     // b_vector storing root nodes of trees (now manages SPIFFS filenames)
@@ -840,13 +78,10 @@ public:
         std::cout << "🧹 Cleaning files... \n";
         for(auto& tree : root){
             tree.purgeTree();
-        }
-          
+        }  
         // Clear data safely
         dataList.clear();
     }
-
-
 
     void MakeForest(){
         root.clear();
@@ -897,6 +132,7 @@ public:
         std::cout << "Average depth: " << (float)(maxDepth + minDepth) / 2.0f << "\n";
         std::cout << "----------------------------------------\n";
     }
+    
     private:
     // ----------------------------------------------------------------------------------
     // Split data into training and testing sets (or validation if enabled)
@@ -967,7 +203,7 @@ public:
         uint16_t numSample = train_data.allSamples.size();  
         
         // The target size for a bootstrap sample is the same as the original training set size.
-        uint16_t bootstrap_sample_size = config.use_bootstrap ? numSample : static_cast<uint16_t>(numSample * 0.632f);
+        uint16_t bootstrap_sample_size = config.use_bootstrap ? numSample : static_cast<uint16_t>(numSample * config.boostrap_ratio);
 
         // Create a b_vector of all sample IDs for efficient random access
         b_vector<uint16_t> allSampleIds;
@@ -1081,6 +317,12 @@ public:
         config.num_samples = numSamples;
         config.num_labels = labelCounts.size();
 
+        // Dataset summary
+        std::cout << "📊 Dataset Summary:\n";
+        std::cout << "  Total samples: " << numSamples << "\n";
+        std::cout << "  Total features: " << maxFeatures << "\n";
+        std::cout << "  Unique labels: " << labelCounts.size() << "\n";
+
         // Analyze label distribution and set appropriate training flags
         if (labelCounts.size() > 0) {
             uint16_t minorityCount = numSamples;
@@ -1175,12 +417,6 @@ public:
             }
         }
 
-        // Dataset summary
-        std::cout << "📊 Dataset Summary:\n";
-        std::cout << "  Total samples: " << numSamples << "\n";
-        std::cout << "  Total features: " << maxFeatures << "\n";
-        std::cout << "  Unique labels: " << labelCounts.size() << "\n";
-
         std::cout << "  Label distribution:\n";
         float lowestDistribution = 100.0f;
         for (auto& label : labelCounts) {
@@ -1194,10 +430,12 @@ public:
         // config.lowest_distribution = lowestDistribution / 100.0f; // Store as fraction
         
         // Check if validation should be disabled due to low sample count
-        if (lowestDistribution * numSamples * config.valid_ratio < 10) {
-            config.use_validation = false;
-            std::cout << "⚖️ Setting use_validation to false due to low sample count in validation set.\n";
-            config.train_ratio = 0.75f; // Adjust train ratio to compensate
+        if(config.use_validation){
+            if (lowestDistribution * numSamples * config.valid_ratio < 10) {
+                config.use_validation = false;
+                std::cout << "⚖️ Setting use_validation to false due to low sample count in validation set.\n";
+                config.train_ratio = 0.75f; // Adjust train ratio to compensate
+            }
         }
 
         std::cout << "Feature values: ";
@@ -1224,7 +462,7 @@ public:
 
         // Set default values only if not overridden
         if (!config.overwrite[0]) {
-            config.min_split = (min_minSplit + max_minSplit) / 2;
+            config.min_split = (min_minSplit + max_minSplit + 1) / 2;
         }
         if (!config.overwrite[1]) {
             config.max_depth = (min_maxDepth + max_maxDepth) / 2;
@@ -1244,7 +482,7 @@ public:
         } else {
             // min_split automatic - build range with step 2
             uint8_t min_split_step = 2;
-            if(config.overwrite[1]) {
+            if(config.overwrite[1] || max_minSplit - min_minSplit < 4) {
                 min_split_step = 1; // If max_depth is overridden, use smaller step for min_split
             }
             for(uint8_t i = min_minSplit; i <= max_minSplit; i += min_split_step) {
@@ -1308,7 +546,7 @@ public:
         // Calculate adaptive combine_ratio
         if (!config.overwrite[3]) {
             // Apply automatic calculation only if not overridden
-            config.combine_ratio = 0.3f + 0.4f * validation_reliability * dataset_factor * feature_factor * balance_factor;
+            config.combine_ratio = 1 - (0.3f + 0.4f * validation_reliability * dataset_factor * feature_factor * balance_factor);
             config.combine_ratio = std::max(0.2f, std::min(0.8f, config.combine_ratio)); // Clamp between 0.2 and 0.8
             
             std::cout << "Auto-calculated combine_ratio: " << config.combine_ratio 
@@ -1449,6 +687,7 @@ public:
     }
     
     // Breadth-first tree building for optimal node layout
+
     void build_tree(Rf_tree& tree, Rf_data& data, uint8_t min_split, uint16_t max_depth, bool use_Gini) {
         tree.nodes.clear();
         if (data.allSamples.empty()) return;
@@ -1459,24 +698,32 @@ public:
             Rf_data nodeData;
             uint16_t depth;
             
-            NodeToBuild() : nodeIndex(0), depth(0) {}  // Default constructor
+            NodeToBuild() : nodeIndex(0), depth(0) {}
             NodeToBuild(uint16_t idx, Rf_data data, uint16_t d) 
                 : nodeIndex(idx), nodeData(std::move(data)), depth(d) {}
         };
         
         // Queue for breadth-first processing
         b_vector<NodeToBuild> queue;
-        queue.reserve(2048); // Max possible nodes (11-bit index = 2047 max)
+        queue.reserve(200); // Reserve space for efficiency
         
         // Create root node
         Tree_node rootNode;
         tree.nodes.push_back(rootNode);
         queue.push_back(NodeToBuild(0, data, 0));
+
+        // ---- BFS queue peak tracking (for ESP32 RAM estimation) ----
+        size_t peak_queue_size = 0;
+        auto track_peak = [&](size_t cur) {
+            if (cur > peak_queue_size) peak_queue_size = cur;
+        };
+        track_peak(queue.size());
+        // ------------------------------------------------------------
         
         // Process nodes breadth-first
         while (!queue.empty()) {
             NodeToBuild current = queue.front();
-            queue.erase(0); // Remove first element
+            queue.erase(0);
             
             // Check stopping conditions for this node
             unordered_set<uint8_t> labels;
@@ -1487,39 +734,50 @@ public:
             bool shouldBeLeaf = false;
             uint8_t leafLabel = 0;
             
-            // Determine if this should be a leaf
+            // More lenient stopping conditions for binary classification
             if (labels.size() == 1) {
+                // Only stop if completely pure
                 shouldBeLeaf = true;
                 leafLabel = *labels.begin();
-            } else if (current.nodeData.allSamples.size() < min_split || current.depth >= max_depth) {
+            } else if (current.nodeData.allSamples.size() < min_split) {
+                // Respect minimum split size
                 shouldBeLeaf = true;
-                // Find majority label
-                uint16_t labelCounts[config.num_labels] = {0};
-                for (const auto& entry : current.nodeData.allSamples) {
-                    if (entry.second.label < config.num_labels) {
-                        labelCounts[entry.second.label]++;
-                    }
-                }
-                uint16_t maxCount = 0;
-                for (uint8_t i = 0; i < config.num_labels; i++) {
-                    if (labelCounts[i] > maxCount) {
-                        maxCount = labelCounts[i];
-                        leafLabel = i;
-                    }
-                }
+            } else if (current.depth >= max_depth) {
+                // Respect maximum depth
+                shouldBeLeaf = true;
             }
             
+            // Find majority label for potential leaf
+            uint16_t labelCounts[config.num_labels] = {0};
+            for (const auto& entry : current.nodeData.allSamples) {
+                if (entry.second.label < config.num_labels) {
+                    labelCounts[entry.second.label]++;
+                }
+            }
+            uint16_t maxCount = 0;
+            for (uint8_t i = 0; i < config.num_labels; i++) {
+                if (labelCounts[i] > maxCount) {
+                    maxCount = labelCounts[i];
+                    leafLabel = i;
+                }
+            }
+
             if (shouldBeLeaf) {
                 // Configure as leaf node
                 tree.nodes[current.nodeIndex].setIsLeaf(true);
                 tree.nodes[current.nodeIndex].setLabel(leafLabel);
                 tree.nodes[current.nodeIndex].setFeatureID(0);
-                continue; // Skip to next node
+                continue;
             }
             
-            // Find best split for internal node
+            // Enhanced feature selection for binary classification
             uint8_t num_selected_features = static_cast<uint8_t>(sqrt(config.num_features));
             if (num_selected_features == 0) num_selected_features = 1;
+            
+            // For binary classification with few features, be more aggressive
+            if (config.num_labels == 2 && config.num_features <= 10) {
+                num_selected_features = std::min(config.num_features, (uint8_t)(config.num_features * 0.8));
+            }
 
             unordered_set<uint16_t> selectedFeatures;
             selectedFeatures.reserve(num_selected_features);
@@ -1532,24 +790,30 @@ public:
             }
             
             SplitInfo bestSplit = findBestSplit(current.nodeData, selectedFeatures, use_Gini);
-            float gain_threshold = use_Gini ? config.impurity_threshold/2 : config.impurity_threshold;
             
+            // More lenient gain threshold for binary classification
+            float gain_threshold = config.impurity_threshold;
+            if (config.num_labels == 2) {
+                // Reduce threshold for binary classification to allow more splits
+                gain_threshold = std::min(config.impurity_threshold, 0.005f);
+                if (use_Gini) {
+                    gain_threshold = std::min(gain_threshold, 0.0025f);
+                }
+            } else {
+                gain_threshold = use_Gini ? config.impurity_threshold/2 : config.impurity_threshold;
+            }
+            
+            // Debug output for troubleshooting
+            if (current.depth == 0 && bestSplit.gain <= gain_threshold) {
+                std::cout << "⚠️ Root node would be leaf - gain: " << bestSplit.gain 
+                        << ", threshold: " << gain_threshold 
+                        << ", samples: " << current.nodeData.allSamples.size()
+                        << ", labels: " << labels.size() << std::endl;
+            }
+
+            // 
             if (bestSplit.gain <= gain_threshold) {
                 // Make it a leaf with majority label
-                uint16_t labelCounts[config.num_labels] = {0};
-                for (const auto& entry : current.nodeData.allSamples) {
-                    if (entry.second.label < config.num_labels) {
-                        labelCounts[entry.second.label]++;
-                    }
-                }
-                uint16_t maxCount = 0;
-                uint8_t leafLabel = 0;
-                for (uint8_t i = 0; i < config.num_labels; i++) {
-                    if (labelCounts[i] > maxCount) {
-                        maxCount = labelCounts[i];
-                        leafLabel = i;
-                    }
-                }
                 tree.nodes[current.nodeIndex].setIsLeaf(true);
                 tree.nodes[current.nodeIndex].setLabel(leafLabel);
                 tree.nodes[current.nodeIndex].setFeatureID(0);
@@ -1571,43 +835,40 @@ public:
                 }
             }
             
-            // Create child nodes (breadth-first: left child, then right child)
+            // Ensure both children have samples before proceeding
+            if (leftData.allSamples.empty() || rightData.allSamples.empty()) {
+                // Split didn't actually separate data - make this a leaf
+                tree.nodes[current.nodeIndex].setIsLeaf(true);
+                tree.nodes[current.nodeIndex].setLabel(leafLabel);
+                tree.nodes[current.nodeIndex].setFeatureID(0);
+                continue;
+            }
+            
+            // Create child nodes
             uint16_t leftChildIndex = tree.nodes.size();
             uint16_t rightChildIndex = leftChildIndex + 1;
             
-            // Set left child index in parent (right child index is automatically left + 1)
             tree.nodes[current.nodeIndex].setLeftChildIndex(leftChildIndex);
             
-            // Add left child node
             Tree_node leftChild;
             tree.nodes.push_back(leftChild);
             
-            // Add right child node  
             Tree_node rightChild;
             tree.nodes.push_back(rightChild);
             
-            // Queue children for processing (maintain breadth-first order)
-            if (!leftData.allSamples.empty()) {
-                queue.push_back(NodeToBuild(leftChildIndex, std::move(leftData), current.depth + 1));
-            } else {
-                // Empty left child becomes a leaf with majority label
-                tree.nodes[leftChildIndex].setIsLeaf(true);
-                tree.nodes[leftChildIndex].setLabel(leafLabel);
-                tree.nodes[leftChildIndex].setFeatureID(0);
-            }
-            
-            if (!rightData.allSamples.empty()) {
-                queue.push_back(NodeToBuild(rightChildIndex, std::move(rightData), current.depth + 1));
-            } else {
-                // Empty right child becomes a leaf with majority label  
-                tree.nodes[rightChildIndex].setIsLeaf(true);
-                tree.nodes[rightChildIndex].setLabel(leafLabel);
-                tree.nodes[rightChildIndex].setFeatureID(0);
-            }
+            // Queue children for processing
+            queue.push_back(NodeToBuild(leftChildIndex, std::move(leftData), current.depth + 1));
+            track_peak(queue.size());
+            queue.push_back(NodeToBuild(rightChildIndex, std::move(rightData), current.depth + 1));
+            track_peak(queue.size());
         }
+
+        // Print BFS queue peak after the tree is built
+        float peak_nodes_percent = (float)peak_queue_size / (float)tree.nodes.size() * 100.0f;
+        peak_nodes.push_back(peak_nodes_percent);
     }
 
-    // 
+
     uint8_t predClassSample(Rf_sample& s){
         int16_t totalPredict = 0;
         unordered_map<uint8_t, uint8_t> predictClass;
@@ -1953,7 +1214,7 @@ public:
             
             // Create bootstrap samples from cv_train_data
             uint16_t numSample = cv_train_data.allSamples.size();
-            uint16_t bootstrap_sample_size = config.use_bootstrap ? numSample : static_cast<uint16_t>(numSample * 0.632f);
+            uint16_t bootstrap_sample_size = config.use_bootstrap ? numSample : static_cast<uint16_t>(numSample * config.boostrap_ratio);
             
             b_vector<uint16_t> cvTrainIDs;
             cvTrainIDs.reserve(numSample);
@@ -2020,8 +1281,18 @@ public:
     // Grid Search Training with Multiple Runs
     // -----------------------------------------------------------------------------------
     // Enhanced training with adaptive evaluation strategy
-    void fit(){
+    void training(){
         std::cout << "\n🚀 Training Random Forest...\n";
+        // remove old tree_log.csv if exists
+        std::remove("rf_tree_log.csv");
+        // Create new tree_log.csv with header
+        std::ofstream file("rf_tree_log.csv");
+        if (!file.is_open()) {
+            std::cerr << "❌ Failed to create tree_log.csv\n";          
+            return;
+        }
+        file << "min_split,max_depth,total_nodes\n";
+        file.close();
 
         uint8_t best_min_split = config.min_split;
         uint16_t best_max_depth = config.max_depth;
@@ -2042,9 +1313,23 @@ public:
             }
         }
 
+        // Create temporary directory for saving best forests during iterations
+        std::string temp_folder = "temp_best_forest";
+        std::string final_folder = result_folder;
+        
+        #ifdef _WIN32
+            _mkdir(temp_folder.c_str());
+            _mkdir(final_folder.c_str());
+        #else
+            mkdir(temp_folder.c_str(), 0755);
+            mkdir(final_folder.c_str(), 0755);
+        #endif
+
         // Calculate total iterations for progress bar
         uint32_t total_iterations = config.min_split_range.size() * config.max_depth_range.size() * num_runs;
         uint32_t current_iteration = 0;
+
+        int avg_nodes;
 
         // Grid search over min_split and max_depth ranges
         for (uint8_t current_min_split : config.min_split_range) {
@@ -2053,6 +1338,11 @@ public:
                 config.max_depth = current_max_depth;
 
                 float total_run_score = 0.0f;
+                float best_run_score = -1.0f;
+                
+                // Track best forest for this parameter combination
+                bool best_forest_saved = false;
+                avg_nodes = 0;
 
                 for (int i = 0; i < num_runs; ++i) {
                     float combined_score = 0.0f;
@@ -2060,6 +1350,10 @@ public:
                     if (use_cv) {
                         // Cross validation mode
                         combined_score = get_cross_validation_score();
+                        
+                        // For CV mode, we need to rebuild with current parameters to save
+                        ClonesData();
+                        rebuildForest();
                     } else {
                         // OOB and validation mode
                         ClonesData();
@@ -2071,6 +1365,21 @@ public:
 
                         // Combine OOB and validation scores using the adaptive ratio
                         combined_score = (1.0f - config.combine_ratio) * oob_score + config.combine_ratio * validation_score;
+                    }
+
+                    // Calculate total_nodes for this parameter combination (sum of all nodes in all trees)
+                    int total_nodes = 0;
+                    for (uint8_t i = 0; i < config.num_trees; i++) {
+                        total_nodes += root[i].countNodes();
+                    }
+                    avg_nodes += total_nodes / config.num_trees;
+
+                    // Save the best forest of the 3 runs for this parameter combination
+                    if (combined_score > best_run_score) {
+                        best_run_score = combined_score;
+                        // Save current forest to temporary folder (silently)
+                        saveForest(temp_folder, true);
+                        best_forest_saved = true;
                     }
                     
                     total_run_score += combined_score;
@@ -2092,13 +1401,29 @@ public:
                     std::cout << "Score: " << std::setprecision(3) << combined_score;
                     std::cout.flush();
                 }
+                avg_nodes /= num_runs;
+                // Append min_split, max_depth, total_nodes to rf_tree_log.csv
+                if(avg_nodes > 0) {
+                    std::ofstream log_file("rf_tree_log.csv", std::ios::app);
+                    if (log_file.is_open()) {
+                        log_file << (int)config.min_split << "," 
+                                 << (int)config.max_depth << "," 
+                                 << avg_nodes << "\n";
+                        log_file.close();
+                    }
+                }
+                
 
                 float avg_score = total_run_score / num_runs;
 
-                if (avg_score > best_score) {
+                // If this parameter combination gives better average score, copy to final folder
+                if (avg_score > best_score && best_forest_saved) {
                     best_score = avg_score;
                     best_min_split = config.min_split;
                     best_max_depth = config.max_depth;
+                    
+                    // Copy best forest from temp folder to final folder
+                    copyDirectory(temp_folder, final_folder);
                 }
             }
         }
@@ -2106,19 +1431,67 @@ public:
         std::cout << "\n✅ Training Complete! Best: min_split=" << (int)best_min_split 
                   << ", max_depth=" << (int)best_max_depth << ", score=" << best_score << "\n";
 
-        // Set the best parameters and rebuild the final forest
+        // Load the best forest that was saved during training
+        std::cout << "🔨 Loading best forest from saved files...\n";
+        loadForest(final_folder);
+        
+        // Update config with best parameters found
         config.min_split = best_min_split;
         config.max_depth = best_max_depth;
+        
+        // Clean up temporary folder
+        std::cout << "🧹 Cleaning up temporary files...\n";
+        #ifdef _WIN32
+            system(("rmdir /s /q " + temp_folder).c_str());
+        #else
+            system(("rm -rf " + temp_folder).c_str());
+        #endif
+    }
 
-        std::cout << "🔨 Building final forest...\n";
-        ClonesData(); // Use fresh bootstrap samples for the final model
-        rebuildForest();
+private:
+    // Helper function to copy directory contents
+    void copyDirectory(const std::string& source_path, const std::string& dest_path) {
+        // Create destination directory if it doesn't exist
+        #ifdef _WIN32
+            _mkdir(dest_path.c_str());
+        #else
+            mkdir(dest_path.c_str(), 0755);
+        #endif
+        
+        // Copy all tree files
+        for(uint8_t i = 0; i < config.num_trees; i++){
+            std::string src_file = source_path + "/tree_" + std::to_string(i) + ".bin";
+            std::string dest_file = dest_path + "/tree_" + std::to_string(i) + ".bin";
+            
+            std::ifstream src(src_file, std::ios::binary);
+            if (src.is_open()) {
+                std::ofstream dest(dest_file, std::ios::binary);
+                dest << src.rdbuf();
+                src.close();
+                dest.close();
+            }
+        }
+        
+        // Copy config files if they exist
+        std::string config_json_src = source_path + rf_config_file;
+
+        std::string config_json_dest = dest_path + rf_config_file;
+        
+        std::ifstream json_src(config_json_src, std::ios::binary);
+        if (json_src.is_open()) {
+            std::ofstream json_dest(config_json_dest, std::ios::binary);
+            json_dest << json_src.rdbuf();
+            json_src.close();
+            json_dest.close();
+        }
     }
 
 public:
     // Save the trained forest to files
-    void saveForest(const std::string& folder_path = "trained_model") {
-        std::cout << "💾 Saving trained forest to " << folder_path << "...\n";
+    void saveForest(const std::string& folder_path = result_folder, bool silent = false) {
+        if (!silent) {
+            std::cout << "💾 Saving trained forest to " << folder_path << "...\n";
+        }
         
         // Create directory if it doesn't exist
         #ifdef _WIN32
@@ -2155,11 +1528,10 @@ public:
         
         // Save config in both JSON and CSV formats
         config.saveConfig(ram_usage);
-        config.saveConfigCSV(ram_usage);
     }
     
     // Load the best trained forest from files (trees only, ignores config file)
-    void loadForest(const std::string& folder_path = "trained_model") {
+    void loadForest(const std::string& folder_path = result_folder) {
         std::cout << "📂 Loading trained forest from " << folder_path << "...\n";
         
         uint8_t loaded_trees = 0;
@@ -2298,7 +1670,6 @@ public:
 };
 
 
-
 int main() {
     auto start = std::chrono::high_resolution_clock::now();
     std::cout << "Random Forest PC Training\n";
@@ -2308,7 +1679,7 @@ int main() {
     forest.MakeForest();
     
     // Train the forest to find optimal parameters (combine_ratio auto-calculated in first_scan)
-    forest.fit();
+    forest.training();
 
     //print forest statistics
     forest.printForestStatistics();
@@ -2371,14 +1742,64 @@ int main() {
     std::cout << "Avg: " << avgAccuracy << "\n";
 
     float result_score = forest.predict(forest.test_data, static_cast<Rf_training_flags>(forest.config.training_flag));
+    forest.config.result_score = result_score;
+    forest.config.saveConfig(forest.config.RAM_usage);
     std::cout << "result score: " << result_score << "\n";
 
-
-    // Save the trained model
-    forest.saveForest();
+    node_predictor pre;
+    pre.init();
+    pre.train();
+    float pre_ac = pre.get_accuracy();
+    // Fix: get_accuracy() already returns percentage (0-100), don't multiply by 100 again
+    pre.accuracy = static_cast<uint8_t>(std::min(100.0f, std::max(0.0f, pre_ac)));
+    std::cout << "node predictor accuracy: " << pre_ac << "% (stored as: " << (int)pre.accuracy << "%)" << std::endl;
+    pre.save_model(node_predictor_file);
 
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed = end - start;
     std::cout << "Total training time: " << elapsed.count() << " seconds\n ";
+
+    std::cout << "Peak nodes in forest: ";
+    b_vector<int> percent_count{10};
+    for(auto peak : forest.peak_nodes) {
+        if(peak > 25) percent_count[0]++;
+        if(peak > 26) percent_count[1]++;
+        if(peak > 27) percent_count[2]++;
+        if(peak > 28) percent_count[3]++;
+        if(peak > 29) percent_count[4]++;
+        if(peak > 30) percent_count[5]++;   
+        if(peak > 31) percent_count[6]++;
+        if(peak > 32) percent_count[7]++;
+        if(peak > 33) percent_count[8]++;
+        if(peak > 34) percent_count[9]++;
+    }
+    bool peak_found = false;
+    uint8_t percent_track = 25;
+    size_t total_peak_nodes = forest.peak_nodes.size(); // Fix: use actual number of trees
+    for(auto count : percent_count) {
+        float percent = total_peak_nodes > 0 ? (float)count/(float)total_peak_nodes * 100.0f : 0.0f; // Fix: calculate actual percentage
+        std::cout << percent << "%, ";
+        if(percent < 10.0f && !peak_found) { // Fix: compare with 10.0 instead of 10
+            pre.peak_percent = percent_track;
+            peak_found = true;
+        }
+        percent_track++;
+    }
+    if (!peak_found) { // If no percentage < 10%, use a reasonable default
+        pre.peak_percent = 30;
+    }
+    std::cout << "\nPeak nodes percentage: " << (int)pre.peak_percent << "%\n";
+    forest.peak_nodes.sort();
+    std::cout << "\n max peak: " << forest.peak_nodes.back() << "\n";
+
+    //prinout node_predcitor
+    std::cout << "Node Predictor Model:\n";
+    std::cout << "Accuracy: " << (int)pre.accuracy << "%\n";
+    std::cout << "Peak Percent: " << (int)pre.peak_percent << "%\n";
+    std::cout << "bias: " << pre.coefficients[0] << "\n";
+    std::cout << "Min Split: " << pre.coefficients[1] << "\n";
+    std::cout << "Max Depth: " << pre.coefficients[2] << "\n";
+    
+
     return 0;
 }

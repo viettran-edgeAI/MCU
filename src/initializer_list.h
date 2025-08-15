@@ -1,6 +1,17 @@
 #pragma once
 
 namespace mcu {
+    // Add embedded-specific conditional implementation
+    template<bool B, typename T, typename F>
+    struct conditional_t {
+        using type = T;
+    };
+
+    template<typename T, typename F>
+    struct conditional_t<false, T, F> {
+        using type = F;
+    };
+
     template<typename T>
     struct min_init_list {
         const T* data_;
@@ -20,6 +31,38 @@ namespace mcu {
     #define MAKE_CHAR_LIST(...)  \
         min_init_list<const char*>((const char*[]){__VA_ARGS__},\
         sizeof((const char*[]){__VA_ARGS__})/sizeof(const char*))
+    // Define a simple initializer list for strings (standard c++ and arduino compatible)
+    #if defined(ARDUINO)
+    #define MAKE_STRING_LIST(...) \
+        min_init_list<String>((const String[]){__VA_ARGS__}, \
+        sizeof((String[]){__VA_ARGS__})/sizeof(String))
+    #else
+    #define MAKE_STRING_LIST(...) \
+        min_init_list<std::string>((const std::string[]){__VA_ARGS__}, \
+        sizeof((std::string[]){__VA_ARGS__})/sizeof(std::string))
+    #endif
+
+    #define MAKE_BOOL_LIST(...) \
+        min_init_list<bool>((const bool[]){__VA_ARGS__}, \
+        sizeof((bool[]){__VA_ARGS__})/sizeof(bool)) 
+    #define MAKE_UINT8_LIST(...) \
+        min_init_list<uint8_t>((const uint8_t[]){__VA_ARGS__}, \
+        sizeof((uint8_t[]){__VA_ARGS__})/sizeof(uint8_t))           
+    #define MAKE_UINT16_LIST(...) \
+        min_init_list<uint16_t>((const uint16_t[]){__VA_ARGS__}, \
+        sizeof((uint16_t[]){__VA_ARGS__})/sizeof(uint16_t))
+    #define MAKE_UINT32_LIST(...) \
+        min_init_list<uint32_t>((const uint32_t[]){__VA_ARGS__}, \
+        sizeof((uint32_t[]){__VA_ARGS__})/sizeof(uint32_t))     
+    #define MAKE_UINT64_LIST(...) \
+        min_init_list<uint64_t>((const uint64_t[]){__VA_ARGS__}, \
+        sizeof((uint64_t[]){__VA_ARGS__})/sizeof(uint64_t))     
+    #define MAKE_SIZE_T_LIST(...) \
+        min_init_list<size_t>((const size_t[]){__VA_ARGS__}, \
+        sizeof((size_t[]){__VA_ARGS__})/sizeof(size_t))
+    #define MAKE_DOUBLE_LIST(...) \
+        min_init_list<double>((const double[]){__VA_ARGS__}, \
+        sizeof((double[]){__VA_ARGS__})/sizeof(double))
 
     enum class index_size_flag{
         TINY,
@@ -59,10 +102,20 @@ namespace mcu {
 
     template<typename T>
     struct index_type {
-        using type = typename std::conditional<
+        using type = typename conditional_t<
             sizeof(T) <= 1,
             uint16_t,
             size_t
         >::type;
+    };
+
+    template<typename T, typename U>
+    struct is_same_t {
+        static constexpr bool value = false;
+    };
+
+    template<typename T>
+    struct is_same_t<T, T> {
+        static constexpr bool value = true;
     };
 }

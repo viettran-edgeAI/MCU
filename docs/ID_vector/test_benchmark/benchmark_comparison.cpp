@@ -7,7 +7,7 @@
 #include <memory>
 #include <algorithm>
 #include <fstream>
-#include "ID_vector.cpp"
+#include "../ID_vector.cpp"
 
 using namespace mcu;
 using namespace std::chrono;
@@ -31,34 +31,36 @@ private:
     std::vector<BenchmarkResult> results;
     
     // Estimate memory usage for std::vector
-    size_t estimate_vector_memory(const std::vector<size_t>& vec) {
-        return vec.capacity() * sizeof(size_t) + sizeof(std::vector<size_t>);
+    template<typename T>
+    size_t estimate_vector_memory(const std::vector<T>& vec) {
+        return vec.capacity() * sizeof(T) + sizeof(std::vector<T>);
     }
     
     // Estimate memory usage for unordered_set
-    size_t estimate_unordered_set_memory(const std::unordered_set<size_t>& set) {
+    template<typename T>
+    size_t estimate_unordered_set_memory(const std::unordered_set<T>& set) {
         // Conservative estimate: 
-        // - Each element: sizeof(size_t) + pointer overhead
+        // - Each element: sizeof(T) + pointer overhead
         // - Hash table overhead: load factor ~0.75, so extra buckets
         // - Node allocation overhead
-        size_t element_size = sizeof(size_t) + sizeof(void*) * 2; // value + 2 pointers (next, hash)
+        size_t element_size = sizeof(T) + sizeof(void*) * 2; // value + 2 pointers (next, hash)
         size_t estimated_buckets = set.size() / 0.75; // account for load factor
         size_t bucket_overhead = estimated_buckets * sizeof(void*);
-        return set.size() * element_size + bucket_overhead + sizeof(std::unordered_set<size_t>);
+        return set.size() * element_size + bucket_overhead + sizeof(std::unordered_set<T>);
     }
     
     // Estimate memory usage for ID_vector
-    template<uint8_t BPV>
-    size_t estimate_id_vector_memory(const ID_vector<BPV>& vec) {
-        size_t max_id = vec.get_maxID();
-        size_t total_bits = (max_id + 1) * BPV;
+    template<typename T, uint8_t BitsPerValue>
+    size_t estimate_id_vector_memory(const ID_vector<T, BitsPerValue>& vec) {
+        T range = vec.get_maxID() - vec.get_minID() + 1;
+        size_t total_bits = range * BitsPerValue;
         size_t data_bytes = (total_bits + 7) / 8;
-        return data_bytes + sizeof(ID_vector<BPV>);
+        return data_bytes + sizeof(ID_vector<T, BitsPerValue>);
     }
     
 public:
-    template<uint8_t BPV>
-    void benchmark_insertion(const std::string& test_name, size_t max_id, const std::vector<size_t>& test_data) {
+    template<typename T, uint8_t BitsPerValue>
+    void benchmark_insertion(const std::string& test_name, T max_id, const std::vector<T>& test_data) {
         std::cout << "\n=== " << test_name << " ===\n";
         
         BenchmarkResult result;
@@ -67,7 +69,7 @@ public:
         // Benchmark ID_vector insertion
         auto start = high_resolution_clock::now();
         
-        ID_vector<BPV> id_vec(max_id);
+        ID_vector<T, BitsPerValue> id_vec(0, max_id);
         for (auto id : test_data) {
             if (id <= max_id) {
                 id_vec.push_back(id);
@@ -78,14 +80,14 @@ public:
         result.id_vector_time_ns = duration_cast<nanoseconds>(end - start).count();
         result.id_vector_memory_bytes = estimate_id_vector_memory(id_vec);
         
-        std::cout << "ID_vector<" << (int)BPV << "> inserted " << id_vec.size() 
+        std::cout << "ID_vector<" << typeid(T).name() << ", " << (int)BitsPerValue << "> inserted " << id_vec.size() 
                   << " elements in " << result.id_vector_time_ns << " ns\n";
         std::cout << "ID_vector memory usage: " << result.id_vector_memory_bytes << " bytes\n";
         
         // Benchmark unordered_set insertion
         start = high_resolution_clock::now();
         
-        std::unordered_set<size_t> uset;
+        std::unordered_set<T> uset;
         for (auto id : test_data) {
             if (id <= max_id) {
                 uset.insert(id);
@@ -103,7 +105,7 @@ public:
         // Benchmark std::vector insertion (sorted)
         start = high_resolution_clock::now();
         
-        std::vector<size_t> vec;
+        std::vector<T> vec;
         for (auto id : test_data) {
             if (id <= max_id) {
                 auto it = std::lower_bound(vec.begin(), vec.end(), id);
@@ -135,16 +137,16 @@ public:
         results.push_back(result);
     }
     
-    template<uint8_t BPV>
-    void benchmark_lookup(const std::string& test_name, size_t max_id, 
-                         const std::vector<size_t>& insert_data, 
-                         const std::vector<size_t>& lookup_data) {
+    template<typename T, uint8_t BitsPerValue>
+    void benchmark_lookup(const std::string& test_name, T max_id, 
+                         const std::vector<T>& insert_data, 
+                         const std::vector<T>& lookup_data) {
         std::cout << "\n=== " << test_name << " ===\n";
         
         // Prepare data structures
-        ID_vector<BPV> id_vec(max_id);
-        std::unordered_set<size_t> uset;
-        std::vector<size_t> vec;
+        ID_vector<T, BitsPerValue> id_vec(0, max_id);
+        std::unordered_set<T> uset;
+        std::vector<T> vec;
         
         for (auto id : insert_data) {
             if (id <= max_id) {
@@ -226,7 +228,7 @@ public:
     void benchmark_memory_scaling() {
         std::cout << "\n=== Memory Scaling Analysis ===\n";
         
-        std::vector<size_t> max_ids = {1000, 5000, 10000, 50000, 100000};
+        std::vector<size_t> max_ids = {1000, 5000, 10000, 50000, 65000}; // Adjusted to fit uint16_t
         std::vector<size_t> element_counts = {100, 500, 1000, 5000, 10000};
         
         std::cout << std::setw(10) << "Max ID" 
@@ -245,47 +247,54 @@ public:
             size_t max_id = max_ids[i];
             size_t elem_count = element_counts[i];
             
-            // Create test data
-            std::vector<size_t> test_data;
-            std::random_device rd;
-            std::mt19937 gen(rd());
-            std::uniform_int_distribution<size_t> dis(0, max_id);
-            
-            for (size_t j = 0; j < elem_count; ++j) {
-                test_data.push_back(dis(gen));
-            }
-            
-            // Test all data structures
-            ID_vector<1> vec1(max_id);
-            ID_vector<2> vec2(max_id);
-            std::unordered_set<size_t> uset;
-            std::vector<size_t> vec;
-            
-            for (auto id : test_data) {
-                vec1.push_back(id);
-                vec2.push_back(id);
-                uset.insert(id);
-                auto it = std::lower_bound(vec.begin(), vec.end(), id);
-                if (it == vec.end() || *it != id) {
-                    vec.insert(it, id);
+            try {
+                // Create test data
+                std::vector<size_t> test_data;
+                std::random_device rd;
+                std::mt19937 gen(rd());
+                std::uniform_int_distribution<size_t> dis(0, max_id);
+                
+                for (size_t j = 0; j < elem_count; ++j) {
+                    test_data.push_back(dis(gen));
                 }
+                
+                // Test all data structures
+                ID_vector<uint16_t, 1> vec1(0, static_cast<uint16_t>(max_id));
+                ID_vector<uint16_t, 2> vec2(0, static_cast<uint16_t>(max_id));
+                std::unordered_set<size_t> uset;
+                std::vector<size_t> vec;
+                
+                for (auto id : test_data) {
+                    if (id <= max_id && id <= 65535) { // Additional safety check
+                        vec1.push_back(static_cast<uint16_t>(id));
+                        vec2.push_back(static_cast<uint16_t>(id));
+                        uset.insert(id);
+                        auto it = std::lower_bound(vec.begin(), vec.end(), id);
+                        if (it == vec.end() || *it != id) {
+                            vec.insert(it, id);
+                        }
+                    }
+                }
+                
+                size_t mem1 = estimate_id_vector_memory(vec1);
+                size_t mem2 = estimate_id_vector_memory(vec2);
+                size_t mem_uset = estimate_unordered_set_memory(uset);
+                size_t mem_vec = estimate_vector_memory(vec);
+                
+                std::cout << std::setw(10) << max_id
+                          << std::setw(12) << elem_count
+                          << std::setw(15) << mem1
+                          << std::setw(15) << mem2
+                          << std::setw(15) << mem_uset
+                          << std::setw(12) << mem_vec
+                          << std::setw(10) << std::fixed << std::setprecision(2) << (double)mem1/mem_uset
+                          << std::setw(10) << std::setprecision(2) << (double)mem1/mem_vec
+                          << std::setw(10) << std::setprecision(2) << (double)mem2/mem_uset
+                          << std::setw(10) << std::setprecision(2) << (double)mem2/mem_vec << "\n";
+            } catch (const std::exception& e) {
+                std::cout << "Error in memory scaling test: " << e.what() << "\n";
+                continue;
             }
-            
-            size_t mem1 = estimate_id_vector_memory(vec1);
-            size_t mem2 = estimate_id_vector_memory(vec2);
-            size_t mem_uset = estimate_unordered_set_memory(uset);
-            size_t mem_vec = estimate_vector_memory(vec);
-            
-            std::cout << std::setw(10) << max_id
-                      << std::setw(12) << elem_count
-                      << std::setw(15) << mem1
-                      << std::setw(15) << mem2
-                      << std::setw(15) << mem_uset
-                      << std::setw(12) << mem_vec
-                      << std::setw(10) << std::fixed << std::setprecision(2) << (double)mem1/mem_uset
-                      << std::setw(10) << std::setprecision(2) << (double)mem1/mem_vec
-                      << std::setw(10) << std::setprecision(2) << (double)mem2/mem_uset
-                      << std::setw(10) << std::setprecision(2) << (double)mem2/mem_vec << "\n";
         }
     }
     
@@ -392,45 +401,45 @@ public:
         
         // Test 1: Small dataset, sparse IDs
         {
-            std::vector<size_t> sparse_data;
-            std::uniform_int_distribution<size_t> sparse_dis(0, 10000);
+            std::vector<uint16_t> sparse_data;
+            std::uniform_int_distribution<uint16_t> sparse_dis(0, 10000);
             for (int i = 0; i < 1000; ++i) {
                 sparse_data.push_back(sparse_dis(gen));
             }
-            benchmark_insertion<1>("Small Sparse Dataset (BPV=1)", 10000, sparse_data);
-            benchmark_lookup<1>("Small Sparse Lookup (BPV=1)", 10000, sparse_data, sparse_data);
+            benchmark_insertion<uint16_t, 1>("Small Sparse Dataset (BPV=1)", 10000, sparse_data);
+            benchmark_lookup<uint16_t, 1>("Small Sparse Lookup (BPV=1)", 10000, sparse_data, sparse_data);
         }
         
         // Test 2: Dense dataset
         {
-            std::vector<size_t> dense_data;
-            for (size_t i = 0; i < 1000; ++i) {
+            std::vector<uint16_t> dense_data;
+            for (uint16_t i = 0; i < 1000; ++i) {
                 dense_data.push_back(i);
             }
-            benchmark_insertion<1>("Dense Dataset (BPV=1)", 1000, dense_data);
-            benchmark_lookup<1>("Dense Lookup (BPV=1)", 1000, dense_data, dense_data);
+            benchmark_insertion<uint16_t, 1>("Dense Dataset (BPV=1)", 1000, dense_data);
+            benchmark_lookup<uint16_t, 1>("Dense Lookup (BPV=1)", 1000, dense_data, dense_data);
         }
         
         // Test 3: Large dataset with duplicates (BPV=2)
         {
-            std::vector<size_t> dup_data;
-            std::uniform_int_distribution<size_t> dup_dis(0, 5000);
+            std::vector<uint16_t> dup_data;
+            std::uniform_int_distribution<uint16_t> dup_dis(0, 5000);
             for (int i = 0; i < 10000; ++i) {
                 dup_data.push_back(dup_dis(gen));
             }
-            benchmark_insertion<2>("Large Dataset with Duplicates (BPV=2)", 5000, dup_data);
-            benchmark_lookup<2>("Large Lookup with Duplicates (BPV=2)", 5000, dup_data, dup_data);
+            benchmark_insertion<uint16_t, 2>("Large Dataset with Duplicates (BPV=2)", 5000, dup_data);
+            benchmark_lookup<uint16_t, 2>("Large Lookup with Duplicates (BPV=2)", 5000, dup_data, dup_data);
         }
         
         // Test 4: Very large sparse dataset
         {
-            std::vector<size_t> huge_sparse;
-            std::uniform_int_distribution<size_t> huge_dis(0, 1000000);
+            std::vector<uint32_t> huge_sparse;
+            std::uniform_int_distribution<uint32_t> huge_dis(0, 100000); // Reduced for reasonable performance
             for (int i = 0; i < 5000; ++i) {
                 huge_sparse.push_back(huge_dis(gen));
             }
-            benchmark_insertion<1>("Very Large Sparse (BPV=1)", 1000000, huge_sparse);
-            benchmark_lookup<1>("Very Large Sparse Lookup (BPV=1)", 1000000, huge_sparse, huge_sparse);
+            benchmark_insertion<uint32_t, 1>("Very Large Sparse (BPV=1)", 100000, huge_sparse);
+            benchmark_lookup<uint32_t, 1>("Very Large Sparse Lookup (BPV=1)", 100000, huge_sparse, huge_sparse);
         }
         
         // Memory scaling analysis

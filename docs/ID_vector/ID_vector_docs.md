@@ -131,7 +131,7 @@ The benchmark results have been comprehensively visualized in multiple formats t
 ### 1. Performance Comparison Charts
 This comprehensive visualization includes execution time comparison, memory usage analysis, speedup factors, and memory efficiency ratios across all test scenarios.
 
-![Performance Comparison Charts](../images/performance_comparison.png)
+![Performance Comparison Charts](images/performance_comparison.png)
 
 **Key Features:**
 - **Execution Time Comparison** (log scale): Shows dramatic speed differences across all test scenarios
@@ -142,7 +142,7 @@ This comprehensive visualization includes execution time comparison, memory usag
 ### 2. Summary Statistics
 Statistical analysis featuring average performance metrics, distribution analysis, and clear percentage breakdowns for quick comprehension.
 
-![Summary Statistics](../images/summary_statistics.png)
+![Summary Statistics](images/summary_statistics.png)
 
 **Analysis Components:**
 - **Average Performance Metrics**: Bar chart showing overall speedup and memory ratios
@@ -153,7 +153,7 @@ Statistical analysis featuring average performance metrics, distribution analysi
 ### 3. Detailed Analysis
 Advanced analytical visualizations showing time vs memory trade-offs, efficiency scores, performance heatmaps, and cumulative advantages.
 
-![Detailed Analysis](../images/detailed_analysis.png)
+![Detailed Analysis](images/detailed_analysis.png)
 
 **Advanced Metrics:**
 - **Time vs Memory Trade-off**: Scatter plot showing optimal positioning in performance space
@@ -282,5 +282,5 @@ The comprehensive benchmarks and visualizations demonstrate clear advantages acr
 - **Source Code**: `ID_vector.cpp`, `test_benchmark/test_idvector.cpp`
 - **Benchmark Program**: `test_benchmark/benchmark_comparison.cpp`  
 - **Visualization Script**: `test_benchmark/visualize_benchmark.py`
-- **Performance Charts**: `../images/performance_comparison.png`, `../images/summary_statistics.png`, `../images/detailed_analysis.png`
+- **Performance Charts**: `images/performance_comparison.png`, `images/summary_statistics.png`, `images/detailed_analysis.png`
 - **Raw Data**: `test_benchmark/benchmark_results.csv`, `test_benchmark/performance_report.txt`

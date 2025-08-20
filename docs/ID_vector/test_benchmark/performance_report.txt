@@ -1,0 +1,27 @@
+================================================================================
+ID_VECTOR PERFORMANCE ANALYSIS REPORT
+================================================================================
+
+OVERALL PERFORMANCE SUMMARY:
+  Average speedup vs unordered_set: 12.3x
+  Average speedup vs std::vector:   36.4x
+  Average memory ratio vs unordered_set: 0.194 (19.4%)
+  Average memory ratio vs std::vector:   0.526 (52.6%)
+
+BEST PERFORMANCE SCENARIOS:
+  Best speedup vs unordered_set: Small Sparse Dataset (BPV=1) (35.1x)
+  Best speedup vs std::vector:   Small Sparse Lookup (BPV=1) (61.2x)
+  Best memory efficiency vs unordered_set: Dense Dataset (BPV=1) (0.5%)
+  Best memory efficiency vs std::vector:   Dense Dataset (BPV=1) (1.9%)
+
+KEY INSIGHTS:
+  • ID_vector consistently outperforms both alternatives in speed
+  • Memory efficiency is exceptional vs unordered_set (avg 80.6% savings)
+  • Also memory efficient vs std::vector (avg 47.4% savings)
+  • Fastest execution: Dense Lookup (BPV=1) (731 ns)
+
+RECOMMENDATIONS:
+  • Use ID_vector when memory is limited and IDs have known upper bounds
+  • Particularly effective for sparse datasets with large ID ranges
+  • BPV=1 for unique sets, BPV=2+ for multisets with count limits
+================================================================================

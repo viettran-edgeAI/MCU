@@ -152,7 +152,10 @@ using namespace mcu;
                 is_same_t<T, uint16_t>::value, uint16_t,
                 typename conditional_t<
                     is_same_t<T, uint32_t>::value, size_t,
-                    size_t
+                    typename conditional_t<
+                        is_same_t<T, size_t>::value, size_t,
+                        size_t  // Default to size_t if T is not recognized
+                    >::type
                 >::type
             >::type
         >::type;
@@ -160,10 +163,13 @@ using namespace mcu;
         // Size type that can handle total count considering BitsPerValue
         // When BitsPerValue > 1, total size can exceed index_type capacity
         using size_type = typename conditional_t<
-            (sizeof(index_type) == 1), uint32_t,  // uint8_t -> uint32_t (for safety)
+            (sizeof(index_type) == 1), uint32_t,   // uint8_t -> uint32_t (4 bytes)
             typename conditional_t<
-                (sizeof(index_type) == 2), uint64_t,  // uint16_t -> uint64_t (for safety)
-                size_t  // size_t stays size_t
+                (sizeof(index_type) == 2), uint64_t,   // uint16_t -> uint64_t (8 bytes)
+                typename conditional_t<
+                    (sizeof(index_type) == 4), size_t,     // uint32_t -> size_t
+                    size_t  // Default to size_t for larger types
+                >::type
             >::type
         >::type;
         
@@ -433,7 +439,6 @@ using namespace mcu;
             id_array = PackedArray<BitsPerValue>(bytes);
             id_array.copy_from(other.id_array, bytes);
         }
-        
 
         // Move constructor
         ID_vector(ID_vector&& other) noexcept 
@@ -490,9 +495,18 @@ using namespace mcu;
 
         // insert ID (order independent, data structure is inherently sorted)
         void push_back(index_type id){
-            if(id < min_id_ || id > max_id_){
-                throw std::out_of_range("ID exceeds allowed ID range");
+            // Check if ID exceeds absolute maximum
+            if(id >= MAX_RF_ID){
+                throw std::out_of_range("ID exceeds maximum allowed RF ID limit");
             }
+            
+            // Auto-expand range if necessary
+            if(id > max_id_){
+                set_maxID(id);
+            } else if(id < min_id_){
+                set_minID(id);
+            }
+            
             index_type index = id_to_index(id);
             count_type current_count = id_array.get(index);
             if(current_count < MAX_COUNT){

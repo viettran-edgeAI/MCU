@@ -106,21 +106,20 @@ public:
         assert_test(vec.contains(2000), "Contains max ID 2000");
         
         // Test adding IDs outside range should throw
-        bool exception_thrown = false;
-        try {
-            vec.push_back(999); // below min
-        } catch (const std::out_of_range&) {
-            exception_thrown = true;
-        }
-        assert_test(exception_thrown, "Exception thrown for ID < minID");
+        // Test auto-grow behavior - IDs outside range should now auto-expand
+        size_t size_before = vec.size();
+        uint16_t max_before = vec.get_maxID();
+        uint16_t min_before = vec.get_minID();
         
-        exception_thrown = false;
-        try {
-            vec.push_back(2001); // above max
-        } catch (const std::out_of_range&) {
-            exception_thrown = true;
-        }
-        assert_test(exception_thrown, "Exception thrown for ID > maxID");
+        vec.push_back(999); // below min - should auto-expand min_id
+        assert_test(vec.get_minID() <= 999, "Auto-expand min_id for ID < minID");
+        assert_test(vec.contains(999), "ID below min_id successfully added");
+        assert_test(vec.size() == size_before + 1, "Size increased after auto-expand");
+        
+        vec.push_back(2001); // above max - should auto-expand max_id
+        assert_test(vec.get_maxID() >= 2001, "Auto-expand max_id for ID > maxID");
+        assert_test(vec.contains(2001), "ID above max_id successfully added");
+        assert_test(vec.size() == size_before + 2, "Size increased after second auto-expand");
         
         // Test set_minID method
         ID_vector<uint16_t> vec2(100);
@@ -134,7 +133,7 @@ public:
         assert_test(vec2.get_maxID() == 300, "set_ID_range correctly updates max ID");
         
         // Test error cases for range setting
-        exception_thrown = false;
+        bool exception_thrown = false;
         try {
             vec2.set_ID_range(400, 300); // min > max
         } catch (const std::out_of_range&) {
@@ -272,26 +271,20 @@ public:
         assert_test(vec.contains(50), "Can add min ID");
         
         // Try to add beyond max ID
-        bool exception_thrown = false;
-        try {
-            vec.push_back(101);
-        } catch (const std::out_of_range&) {
-            exception_thrown = true;
-        }
-        assert_test(exception_thrown, "Exception thrown for ID > maxID");
+        // Test auto-grow behavior instead of exceptions
+        size_t size_before = vec.size();
+        vec.push_back(101); // Should auto-expand max_id
+        assert_test(vec.get_maxID() >= 101, "Auto-expand max_id for ID > original maxID");
+        assert_test(vec.contains(101), "ID above original max successfully added");
         
         // Try to add below min ID
-        exception_thrown = false;
-        try {
-            vec.push_back(49);
-        } catch (const std::out_of_range&) {
-            exception_thrown = true;
-        }
-        assert_test(exception_thrown, "Exception thrown for ID < minID");
+        vec.push_back(49); // Should auto-expand min_id  
+        assert_test(vec.get_minID() <= 49, "Auto-expand min_id for ID < original minID");
+        assert_test(vec.contains(49), "ID below original min successfully added");
         
         // Test empty vector operations
         ID_vector<uint16_t> empty_vec(10, 20);
-        exception_thrown = false;
+        bool exception_thrown = false;
         try {
             empty_vec.back();
         } catch (const std::out_of_range&) {
@@ -951,6 +944,162 @@ public:
         assert_test(vec.maxID() == 90000, "maxID still returns largest actual element");
     }
 
+    // Test auto-grow functionality
+    void test_auto_grow_functionality() {
+        std::cout << "\n=== Test: Auto-Grow Functionality ===\n";
+        
+        // Test 1: Auto-expanding max_id
+        {
+            ID_vector<uint16_t, 1> vec(0, 10);  // Start with small range [0, 10]
+            assert_test(vec.get_maxID() == 10, "Initial max_id is 10");
+            assert_test(vec.get_minID() == 0, "Initial min_id is 0");
+            
+            // Add ID within range
+            vec.push_back(5);
+            assert_test(vec.contains(5), "ID 5 added within range");
+            assert_test(vec.get_maxID() == 10, "max_id unchanged after adding ID within range");
+            
+            // Add ID that requires expanding max_id
+            vec.push_back(15);
+            assert_test(vec.contains(15), "ID 15 added with auto-expansion");
+            assert_test(vec.get_maxID() >= 15, "max_id auto-expanded to accommodate ID 15");
+            
+            // Add even larger ID
+            vec.push_back(100);
+            assert_test(vec.contains(100), "ID 100 added with auto-expansion");
+            assert_test(vec.get_maxID() >= 100, "max_id auto-expanded to accommodate ID 100");
+            
+            // Verify all IDs are still present
+            assert_test(vec.contains(5), "Original ID 5 preserved after expansion");
+            assert_test(vec.contains(15), "ID 15 preserved");
+            assert_test(vec.contains(100), "ID 100 preserved");
+            assert_test(vec.size() == 3, "Size is correct after auto-expansions");
+        }
+        
+        // Test 2: Auto-expanding min_id
+        {
+            ID_vector<uint16_t, 1> vec(100, 200);  // Start with range [100, 200]
+            assert_test(vec.get_minID() == 100, "Initial min_id is 100");
+            assert_test(vec.get_maxID() == 200, "Initial max_id is 200");
+            
+            // Add ID within range
+            vec.push_back(150);
+            assert_test(vec.contains(150), "ID 150 added within range");
+            assert_test(vec.get_minID() == 100, "min_id unchanged after adding ID within range");
+            
+            // Add ID that requires expanding min_id
+            vec.push_back(50);
+            assert_test(vec.contains(50), "ID 50 added with min_id auto-expansion");
+            assert_test(vec.get_minID() <= 50, "min_id auto-expanded to accommodate ID 50");
+            
+            // Add even smaller ID
+            vec.push_back(10);
+            assert_test(vec.contains(10), "ID 10 added with min_id auto-expansion");
+            assert_test(vec.get_minID() <= 10, "min_id auto-expanded to accommodate ID 10");
+            
+            // Verify all IDs are still present
+            assert_test(vec.contains(150), "Original ID 150 preserved after expansion");
+            assert_test(vec.contains(50), "ID 50 preserved");
+            assert_test(vec.contains(10), "ID 10 preserved");
+            assert_test(vec.size() == 3, "Size is correct after min_id auto-expansions");
+        }
+        
+        // Test 3: Auto-expanding from empty vector
+        {
+            ID_vector<uint16_t, 1> vec;  // Default range
+            uint16_t initial_max = vec.get_maxID();
+            
+            // Add ID that requires expansion from default
+            vec.push_back(1000);
+            assert_test(vec.contains(1000), "ID 1000 added to empty vector with auto-expansion");
+            assert_test(vec.get_maxID() >= 1000, "max_id auto-expanded from default to accommodate ID 1000");
+            assert_test(vec.size() == 1, "Size is 1 after adding to empty vector");
+        }
+        
+        // Test 4: MAX_RF_ID limit enforcement
+        {
+            ID_vector<uint8_t, 1> vec;  // uint8_t has MAX_RF_ID = 255
+            
+            // Try to add ID at the limit
+            bool exception_thrown = false;
+            try {
+                vec.push_back(255);  // Should throw because 255 >= MAX_RF_ID for uint8_t
+            } catch (const std::out_of_range& e) {
+                exception_thrown = true;
+            }
+            assert_test(exception_thrown, "Exception thrown for ID >= MAX_RF_ID");
+            assert_test(vec.size() == 0, "Vector remains empty after failed insertion");
+        }
+        
+        // Test 5: Auto-grow with different bit sizes
+        {
+            ID_vector<uint16_t, 2> vec_2bit(0, 5);  // 2 bits per element, small initial range
+            
+            // Add multiple instances within range
+            vec_2bit.push_back(3);
+            vec_2bit.push_back(3);
+            assert_test(vec_2bit.count(3) == 2, "2-bit vector handles multiple instances");
+            
+            // Auto-expand and add new ID
+            vec_2bit.push_back(50);
+            assert_test(vec_2bit.contains(50), "2-bit vector auto-expanded for ID 50");
+            assert_test(vec_2bit.get_maxID() >= 50, "2-bit vector max_id expanded");
+            assert_test(vec_2bit.count(3) == 2, "Original count preserved after expansion");
+        }
+        
+        // Test 6: Performance with auto-grow
+        {
+            ID_vector<uint16_t, 1> vec;
+            auto start = high_resolution_clock::now();
+            
+            // Add sequence of IDs that require multiple expansions
+            std::vector<uint16_t> test_ids = {10, 100, 500, 1000, 2000, 5000, 10000};
+            for (auto id : test_ids) {
+                vec.push_back(id);
+            }
+            
+            auto end = high_resolution_clock::now();
+            auto duration = duration_cast<microseconds>(end - start);
+            
+            assert_test(vec.size() == test_ids.size(), "All IDs added successfully with auto-grow");
+            assert_test(vec.get_maxID() >= 10000, "Final max_id is sufficient");
+            assert_test(duration.count() < 1000, "Auto-grow performance is reasonable (< 1ms)");
+            
+            // Verify all IDs are present and in correct order
+            std::vector<uint16_t> result_ids;
+            for (auto id : vec) {
+                result_ids.push_back(id);
+            }
+            std::sort(test_ids.begin(), test_ids.end());
+            assert_test(result_ids == test_ids, "All IDs preserved and correctly ordered");
+        }
+        
+        // Test 7: Memory efficiency with auto-grow
+        {
+            ID_vector<uint16_t, 1> auto_vec;
+            ID_vector<uint16_t, 1> manual_vec(0, 10000);  // Pre-allocated large range
+            
+            // Add same IDs to both vectors
+            std::vector<uint16_t> sparse_ids = {10, 100, 1000, 5000};
+            for (auto id : sparse_ids) {
+                auto_vec.push_back(id);   // Auto-grows
+                manual_vec.push_back(id); // Uses pre-allocated space
+            }
+            
+            // Auto-grow vector should use less memory than pre-allocated
+            uint16_t auto_range = auto_vec.get_maxID() - auto_vec.get_minID() + 1;
+            uint16_t manual_range = manual_vec.get_maxID() - manual_vec.get_minID() + 1;
+            
+            assert_test(auto_range <= manual_range, "Auto-grow uses optimal range");
+            assert_test(auto_vec.size() == manual_vec.size(), "Both vectors have same logical size");
+            
+            // Verify both have same content
+            for (auto id : sparse_ids) {
+                assert_test(auto_vec.contains(id) && manual_vec.contains(id), "Both vectors contain same IDs");
+            }
+        }
+    }
+
     void run_all_tests() {
         std::cout << "🚀 Starting Comprehensive ID_vector Test Suite" << std::endl;
         std::cout << std::string(60, '=') << std::endl;
@@ -971,6 +1120,7 @@ public:
         test_smart_range_configuration();
         test_size_overflow_prevention();
         test_range_getters();
+        test_auto_grow_functionality();
         
         print_results();
     }

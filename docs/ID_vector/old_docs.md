@@ -1,32 +1,26 @@
 # ID_vector: A High-Performance, Memory-Efficient Integer Set Data Structure
 
-## Part 1: Overview and Core Concepts
+## Overview
 
-### What is ID_vector?
+`ID_vector` is a specialized data structure designed for storing sets of positive integers (ID) with exceptional memory efficiency and O(1) performance characteristics. The only trade-off is that it requires manual max_id setup(which is the largest expected ID) to initialize and will behave similar to a regular vector.
 
-`ID_vector` is a specialized data structure designed for storing sets of positive integers (IDs) with exceptional memory efficiency and O(1) performance characteristics. Unlike conventional data structures, `ID_vector` trades CPU cycles for memory efficiency - a particularly valuable trade-off in embedded systems and resource-constrained environments where memory is often the most limiting factor.
+Unlike conventional data structures, `ID_vector` trades CPU cycles for memory efficiency - a particularly valuable trade-off in embedded systems and resource-constrained environments where memory is often the most limiting factor.
 
-### Overview 
+## Core Mechanism
 
-ID_vector - member of mcu library space is a vector class specially designed to store IDs (positive integers) with optimization in both aspects: memory and speed surpassing conventional containers (vector, unordered_set..)
+### Bit-Packing Architecture
 
-### Core Mechanism
+**Default behavior**: When using single `max_id` constructor or default constructor, `min_id = 0`, so allocation becomes `(max_id + 1) × BitsPerValue` bits (backward compatible)
 
-#### Bit-Packing Architecture
+### Visual Representation
 
-Suppose you need to store a list of IDs (positive integers). With a normal `vector<size_t>`, you spend 4 bytes for each element. So with 1000 elements, it costs 4 KB of memory. 
-
-However, if you know the largest ID in advance (say 2000), you can store those IDs as indexes of bits: initialize a 2000-bit contiguous array with all elements set to 0. When you need to store ID 300, the 299th bit is set to 1. To store 1000 IDs, you only spend 2000/8 ≈ 250 bytes - an 94.75% memory reduction!
-
-#### Visual Representation
-
-**BPV = 1 (Contains unique IDs only)**
+#### BPV = 1 (Contain unique IDs only)
 ```
 index:     0  1  2  3  4  5  6  7  8  9  10 11 12 13 14 15
 Bit:      [0][1][0][1][0][0][1][0][1][0][0][1][0][0][0][1]
 Value:     -  ✓  -  ✓  -  -  ✓  -  ✓  -  -  ✓  -  -  -  ✓
 ```
-**IDs stored**: 1, 3, 6, 8, 11, 15.
+**IDs stored**: 1, 3, 6, 8, 11, 15 .
 
 #### BPV = 2 (Up to 3 instances per ID)
 ```
@@ -43,38 +37,149 @@ Bit:      [0]  [1]  [0]  [1]  [0]  [0]  [1]  [0]  [1]
 ```
 **IDs stored**: 1000, 1002, 1005, 1007, 1010, 1014 .
 
-#### Memory Layout Strategy
 
-The data structure allocates a contiguous bit array where:
-- **ID mapping**: Each ID maps to bit position `(id - min_id)`, enabling O(1) access
-- **Count storage**: Multiple bits per position allow counting duplicate IDs (when BPV > 1)
-- **Dynamic sizing**: The vector automatically expands during `push_back()` operations
-- **Range optimization**: Memory allocation adjusts based on the actual ID range needed
+### Memory Layout Strategy
 
-### Key Benefits
+Instead of storing individual elements like traditional containers, `ID_vector` allocates a contiguous bit array where each ID corresponds to a specific bit position. For a range from `min_id` to `max_id`:
 
-#### 🚀 **Performance Advantages**
+- **Total allocation**: `(max_id - min_id + 1) × BitsPerValue` bits = `⌈((max_id - min_id + 1) × BitsPerValue) / 8⌉` bytes
+- **ID storage**: Each ID maps to bit position `(id - min_id)`, enabling O(1) access
+- **Count storage**: Multiple bits per position allow counting duplicate IDs
+- **Range optimization**: Only allocates memory for the actual ID range needed
+
+**Example**: For min_id = 1000, max_id = 2000 with BPV = 1:
+- Traditional `vector<uint16_t>`: 1000 elements × 2 bytes = **2000 bytes**
+- `ID_vector<uint16_t, 1>(1000, 2000)`: (2000 - 1000 + 1) × 1 bit = 1001 bits = **126 bytes**
+- `ID_vector<uint16_t, 1>(0, 2000)`: (2000 + 1) × 1 bit = 2001 bits = **251 bytes**
+- **Memory savings**: 94% vs traditional, 50% vs full range allocation
+
+## Key Benefits
+
+### 🚀 **Performance Advantages**
 - **O(1) Operations**: Constant-time insertion, lookup, and deletion
 - **Self-Sorting**: Elements maintained in natural sorted order without overhead
-- **Flexible Counting**: Efficient storage for unique integer sets (BPV=1) or multiple instances (BPV > 1)
-- **Speed**: O(1) performance across all operations with no hash collisions
+- **Unique IDs**: Efficient storage for unique integer sets (with BPV=1) or allow multiple instances (with BPV > 1)
+- **Speed**: O(1) performance across all operations with no hash collisions 
 
-#### 💾 **Memory Efficiency**
+### 💾 **Memory Efficiency**
 - **Bit-Level Precision**: Uses only necessary bits per element (1-8 bits configurable)
 - **No Fragmentation**: Single allocation prevents memory fragmentation
-- **Dynamic Growth**: Adjusts memory usage based on actual data requirements
 
-#### 🛡️ **Safety & Control**
-- **Automatic Management**: Dynamic sizing eliminates manual setup requirements
+### 🛡️ **Safety & Control**
+- **Manual Memory Control**: `set_maxID()` prevents accidental memory overallocation
 - **Overflow Protection**: Configurable limits prevent unusually large IDs from causing issues
-- **Exception Safety**: Clear error handling for out-of-range operations
 
-#### **Trade-offs**
+### **Cons**
 - **Limited to Integers**: Only supports positive integer IDs
-- **Sparse Data**: Memory optimization can degrade with extremely sparse sets
-- **⚠️ Silent Overflow**: Adding more instances than BPV capacity results in silent failure
+- **Efficiency** : memory optimization degrades with sparse sets
+- **manual setup** : requires manual maxID setting before vector can actually work
+- **⚠️ Silent Overflow**: If you add more instances than the capacity (e.g., 4 instances with BPV=2 that only allows max 3), nothing happens. This silent failure can lead to infinite loops or incorrect program behavior in some cases.
 
-### Comprehensive Performance Comparison
+## Range Optimization with min_id
+
+### Problem with Default min_id = 0
+
+By default, `ID_vector` allocates bits starting from ID 0. This works well when your IDs start from 0 or are evenly distributed, but becomes inefficient when dealing with high-value ID ranges.
+
+**Example Problem**:
+```cpp
+ID_vector<uint16_t, 1> sensor_ids(50000);  // IDs 0-50000, but you only use 45000-50000
+// Wastes memory for 45,000 unused IDs (0-44999)
+// Memory: (50000 + 1) bits = 6251 bytes
+// Actually needed: only 5001 bits = 626 bytes
+```
+
+### Solution: Custom min_id Range
+
+Set both minimum and maximum ID bounds to optimize memory usage:
+
+```cpp
+// Efficient: Only allocate for the range you actually need
+ID_vector<uint16_t, 1> sensor_ids(45000, 50000);  // Range: 45000-50000
+// Memory: (50000 - 45000 + 1) bits = 5001 bits = 626 bytes
+// Memory savings: 90% compared to default allocation
+```
+
+### Range Configuration Methods
+
+```cpp
+// Constructor with range
+ID_vector<uint16_t, 1> ids(min_id, max_id);
+
+// Runtime configuration  
+ID_vector<uint16_t, 1> ids;
+ids.set_minID(1000);        // Set minimum ID
+ids.set_maxID(2000);        // Set maximum ID
+ids.set_ID_range(1000, 2000); // Set both at once
+
+// Query current range
+auto min_val = ids.get_minID();
+auto max_val = ids.get_maxID();
+```
+
+### Use Cases for min_id Optimization
+
+#### 1. **High-Value Sensor Networks**
+```cpp
+// IoT sensor IDs start from 10000
+ID_vector<uint16_t, 1> active_sensors(10000, 15000);
+// vs default: 94% memory savings
+```
+
+#### 2. **Database Record IDs**
+```cpp
+// Database auto-increment IDs in range 500000-600000
+ID_vector<uint32_t, 2> error_records(500000, 600000);
+// Track error counts per record efficiently
+```
+
+#### 3. **Process/Thread IDs**
+```cpp
+// System PIDs typically start from 1000+
+ID_vector<uint16_t, 1> monitored_processes(1000, 32767);
+// Significant memory optimization for process tracking
+```
+
+#### 4. **Network Device Management**
+```cpp
+// Device IDs allocated in specific ranges
+ID_vector<uint16_t, 1> network_devices(192001, 193000);  // 1000 devices
+// vs ID_vector<uint16_t, 1> network_devices(193000): 99.5% memory savings
+```
+
+### Memory Impact Comparison
+
+| Scenario | Default (min=0) | Optimized Range | Memory Savings |
+|----------|-----------------|-----------------|----------------|
+| IDs 10000-11000 | 1376 bytes | 126 bytes | **90.8%** |
+| IDs 50000-51000 | 6251 bytes | 126 bytes | **98.0%** |
+| IDs 100000-101000 | 12501 bytes | 126 bytes | **99.0%** |
+| IDs 500000-501000 | 62501 bytes | 126 bytes | **99.8%** |
+
+### Best Practices for Range Setting
+
+1. **Analyze Your ID Distribution**: Identify the actual min/max bounds of your data
+2. **Set Tight Bounds**: Use the smallest possible range that covers your needs
+3. **Consider Growth**: Leave some room for future ID expansion
+4. **Validate Inputs**: Add bounds checking when accepting external IDs
+
+```cpp
+class SensorManager {
+    // Sensors allocated in range 45000-50000
+    ID_vector<uint16_t, 1> active_sensors{45000, 50000};
+    
+public:
+    bool add_sensor(uint16_t sensor_id) {
+        if (sensor_id < 45000 || sensor_id > 50000) {
+            return false;  // Invalid range
+        }
+        active_sensors.push_back(sensor_id);
+        return true;
+    }
+};
+```
+
+## Comprehensive Performance Comparison
 
 We conducted extensive benchmarks comparing `ID_vector` against `std::unordered_set` and `std::vector` using nanosecond-precision timing across multiple scenarios.
 
@@ -183,19 +288,21 @@ Advanced analytical visualizations showing time vs memory trade-offs, efficiency
 
 These visualizations clearly demonstrate that `ID_vector` consistently operates in the optimal region of both speed and memory efficiency compared to traditional alternatives.
 
-### Quick Start Examples
+## Quick Start Examples
 
+### Basic Operations
 ```cpp
-// Basic usage with automatic sizing
-ID_vector<uint16_t, 1> unique_ids;              // Unique IDs, dynamic sizing
-ID_vector<uint16_t, 2> counted_ids;             // Up to 3 instances per ID
+// Modern type-safe template syntax
+ID_vector<uint16_t, 1> unique_ids(1000);         // Unique IDs 0-1000
+ID_vector<uint16_t, 1> range_ids(5000, 10000);   // Optimized range 5000-10000
+ID_vector<uint16_t, 2> counted_ids(1000, 5000);  // Up to 3 instances per ID
 
 // Essential operations - all O(1)
-unique_ids.push_back(500);                      // Add ID (auto-expands if needed)
-bool exists = unique_ids.contains(100);         // Check presence  
-uint8_t count = counted_ids.count(50);          // Get count
-unique_ids.erase(200);                          // Remove one instance
-auto total = unique_ids.size();                 // Get total instances
+unique_ids.push_back(500);                       // Add ID
+bool exists = unique_ids.contains(100);          // Check presence  
+uint8_t count = counted_ids.count(50);           // Get count
+unique_ids.erase(200);                           // Remove one instance
+auto total = unique_ids.size();                  // Get total instances (size_type)
 
 // Range-based iteration (automatically sorted)
 for (auto id : unique_ids) {
@@ -203,133 +310,120 @@ for (auto id : unique_ids) {
 }
 ```
 
-### Advanced Configuration
-
-#### Setting max_id (Recommended)
-For optimal memory efficiency, set the maximum expected ID before extensive use:
-
-```cpp
-ID_vector<uint16_t, 1> sensor_ids;
-sensor_ids.set_maxID(2000);                     // Prevents memory fragmentation
-sensor_ids.push_back(1500);                     // Efficient allocation
-```
-
-#### min_id for High-Value Ranges (Advanced)
-For IDs that don't start from 0, setting min_id optimizes memory usage:
-
-```cpp
-ID_vector<uint16_t, 1> high_value_ids;
-high_value_ids.set_minID(45000);                // Set minimum ID
-high_value_ids.set_maxID(50000);                // Set maximum ID
-// Alternative: high_value_ids.set_ID_range(45000, 50000);
-
-// Memory savings: stores only range 45000-50000 instead of 0-50000
-high_value_ids.push_back(47500);                // Maps to bit position (47500-45000)
-```
-
-#### Type Selection Guide
+### Type Selection Guide
 ```cpp
 // Choose template parameter T based on your maximum ID:
-ID_vector<uint8_t, 1> small_range;              // Max ID ≤ 255
-ID_vector<uint16_t, 1> medium_range;            // Max ID ≤ 65,535  
-ID_vector<uint32_t, 1> large_range;             // Max ID ≤ 4.3 billion
-ID_vector<size_t, 1> unlimited_range;           // No practical limit
+ID_vector<uint8_t, 1> small_range;     // Max ID ≤ 255
+ID_vector<uint16_t, 1> medium_range;   // Max ID ≤ 65,535  
+ID_vector<uint32_t, 1> large_range;    // Max ID ≤ 4.3 billion
+ID_vector<size_t, 1> unlimited_range;  // No practical limit
 ```
 
-### Use Case Guidelines
+## Use Case Guidelines
 
-#### ✅ **Optimal Use Cases**
+### ✅ **Optimal Use Cases**
 1. **Embedded Systems**: RAM-constrained environments requiring efficient integer sets
 2. **Real-time Applications**: Guaranteed O(1) performance for time-critical operations  
-3. **Sensor Networks**: Managing device IDs with known ranges
+3. **Sparse Datasets**: Large ID ranges with relatively few actual elements
 4. **High-frequency Lookups**: Applications with many `contains()` operations
 5. **Cache-sensitive Code**: Benefits from linear memory layout and spatial locality
-6. **ID Range Management**: Applications dealing with allocated ID blocks or ranges
-7. **Database Record Tracking**: Efficient storage for record IDs and status tracking
+6. **Known ID Bounds**: Applications where maximum ID can be determined at design time
+7. **🆕 High-Value ID Ranges**: When IDs don't start from 0 (sensors, database records, PIDs)
+8. **🆕 Range-Specific Applications**: Network devices, allocated ID blocks, partitioned systems
 
-#### ⚠️ **Consider Alternatives When**
-1. **Extremely Sparse Data**: When memory usage exceeds `std::vector` due to very large, sparse ID ranges
-2. **Completely Unknown Ranges**: Applications where ID bounds cannot be estimated
+### ⚠️ **Alternative Consideration**
+1. **Very Sparse Data**: When memory usage exceeds `std::vector` (rare, only in extreme sparsity)
+2. **Unknown Ranges**: Frequently changing maximum ID requirements
 3. **Non-integer Keys**: Only supports positive integer identifiers
-4. **Frequent Range Changes**: Applications requiring constant capacity modifications
+4. **Dynamic Range Growth**: Applications requiring frequent capacity changes
 5. **Thread-heavy Applications**: No built-in thread safety (external synchronization required)
 
-### Integration with MCU Ecosystem
+## Performance Insights & Recommendations
 
-`ID_vector` is designed to be fully compatible with other container classes in the `mcu` namespace, particularly for embedded systems development:
-
-#### Compatibility with mcu::vector and mcu::b_vector
-
-```cpp
-#include "STL_MCU.h"  // Includes all mcu container classes
-
-// Convert from mcu::vector
-mcu::vector<uint16_t> regular_vec = {100, 200, 300, 400};
-ID_vector<uint16_t, 1> id_vec(regular_vec);      // Direct conversion
-
-// Convert from mcu::b_vector  
-mcu::b_vector<uint16_t> bounded_vec = MAKE_UINT16_LIST(100, 200, 300);
-ID_vector<uint16_t, 1> from_bvec(bounded_vec);   // Direct conversion
-
-// Use together in embedded applications
-class EmbeddedSensorManager {
-    mcu::vector<uint16_t> sensor_data;           // Raw sensor readings
-    ID_vector<uint16_t, 1> active_sensors;       // Active sensor IDs (memory efficient)
-    ID_vector<uint16_t, 2> error_counts;         // Error count per sensor
-    
-public:
-    void process_sensor_reading(uint16_t sensor_id, uint16_t value) {
-        active_sensors.push_back(sensor_id);     // Track active sensor
-        sensor_data.push_back(value);            // Store reading
-        
-        if (value > ERROR_THRESHOLD) {
-            error_counts.push_back(sensor_id);   // Increment error count
-        }
-    }
-    
-    bool is_sensor_active(uint16_t id) const {
-        return active_sensors.contains(id);      // O(1) lookup
-    }
-    
-    uint8_t get_error_count(uint16_t id) const {
-        return error_counts.count(id);           // Get error frequency
-    }
-};
-```
-
-#### Embedded Systems Design Benefits
-
-1. **Memory Predictability**: Unlike dynamic containers, ID_vector provides predictable memory usage patterns essential for embedded systems
-2. **No Dynamic Allocation Fragmentation**: Single allocation strategy prevents memory fragmentation issues
-3. **Deterministic Performance**: O(1) operations with no worst-case scenarios for real-time requirements
-4. **Low Overhead**: Minimal metadata storage compared to traditional containers
-5. **Arduino/MCU Friendly**: Designed specifically for resource-constrained environments
-
-### Conclusion
-
-`ID_vector` represents a specialized solution optimized for embedded systems and resource-constrained environments. With its dynamic sizing capabilities, O(1) performance guarantees, and seamless integration with the `mcu` namespace ecosystem, it provides an excellent choice for integer set operations where memory efficiency and predictable performance are critical.
-
-The data structure is particularly valuable when combined with other `mcu` container classes, offering embedded developers a comprehensive toolkit for efficient data management in RAM-limited environments.
-
----
-
-*`ID_vector` is part of the STL_MCU library, designed specifically for embedded systems and microcontroller applications.*
-
-### Performance Insights & Recommendations
-
-#### Key Findings
+### Key Findings
 - **Consistent Superiority**: ID_vector outperforms alternatives in 100% of tested scenarios for speed
 - **Memory Efficiency**: Achieves 80.6% average memory savings vs unordered_set, 47.4% vs vector
 - **Scalability**: Performance advantages increase with dataset size and sparsity
 - **Predictability**: No worst-case scenarios due to O(1) guarantees
 
-#### Best Practices
-1. **Set Realistic Maximums**: Use appropriate max_id values for your domain
+### Best Practices
+1. **Set Realistic Maximums**: Use `set_maxID()` with domain-appropriate bounds
 2. **Choose Appropriate BPV**: Match bits-per-value to actual counting requirements
 3. **Validate Input**: Add bounds checking for external data sources
-4. **Consider Sparsity**: Most effective when ID range is reasonable for actual element count
+4. **Consider Sparsity**: Most effective when ID range >> actual element count
 
-## Part 3: API Reference and Usage Guide
+### Integration Strategy
+```cpp
+// Example: Sensor ID management in embedded system with optimized ranges
+class SensorManager {
+    // Sensors allocated in range 45000-50000 (5000 sensors)
+    ID_vector<uint16_t, 1> active_sensors{45000, 50000};    // Range optimization
+    ID_vector<uint16_t, 2> error_counts{45000, 50000};      // Track error frequencies
+    
+public:
+    void activate_sensor(uint16_t id) {
+        if (id >= 45000 && id <= 50000) {         // Range validation
+            active_sensors.push_back(id);
+        }
+    }
+    
+    bool is_active(uint16_t id) const {
+        return active_sensors.contains(id);       // O(1) lookup
+    }
+    
+    void report_error(uint16_t id) {
+        if (id >= 45000 && id <= 50000) {         // Range validation
+            error_counts.push_back(id);           // Auto-increment count
+        }
+    }
+    
+    // Memory usage: ~626 bytes vs 6251 bytes (90% savings)
+};
+
+// Example: Database record tracking with high IDs  
+class DatabaseTracker {
+    ID_vector<uint32_t, 1> cached_records{500000, 600000};  // 100K record range
+    
+public:
+    void cache_record(uint32_t record_id) {
+        cached_records.push_back(record_id);       // Memory-efficient storage
+    }
+    
+    bool is_cached(uint32_t record_id) const {
+        return cached_records.contains(record_id); // Fast lookup
+    }
+    
+    // Memory: ~12.5KB vs ~75KB for full range (83% savings)
+};
+```
+
+## Conclusion
+
+`ID_vector` represents a specialized solution that prioritizes memory efficiency and performance over generality. With benchmark-proven advantages of:
+
+- **12-36x faster** operations on average
+- **Up to 99.5% memory savings** in optimal scenarios  
+- **Guaranteed O(1) performance** without worst-case degradation
+- **Predictable memory usage** enabling precise resource planning
+
+This data structure is particularly valuable for embedded systems, real-time applications, and any scenario where both memory efficiency and performance are critical requirements.
+
+The comprehensive benchmarks and visualizations demonstrate clear advantages across diverse use cases, making `ID_vector` an excellent choice for integer set operations in resource-constrained environments with predictable ID ranges.
+
+---
+
+*Performance data collected using nanosecond-precision benchmarks with g++ -O2 optimization on August 20, 2025*
+
+## Files Reference
+- **Source Code**: `ID_vector.cpp`, `test_benchmark/test_idvector.cpp`
+- **Benchmark Program**: `test_benchmark/benchmark_comparison.cpp`  
+- **Visualization Script**: `test_benchmark/visualize_benchmark.py`
+- **Performance Charts**: `images/performance_comparison.png`, `images/summary_statistics.png`, `images/detailed_analysis.png`
+- **Raw Data**: `test_benchmark/benchmark_results.csv`, `test_benchmark/performance_report.txt`
+
+---
+
+# Complete API Reference
 
 ## Template Declaration
 
@@ -365,15 +459,21 @@ using size_type = /* varies */;  // Large enough to prevent overflow
 ## Constructors
 
 ```cpp
-// Default constructor (empty, dynamic sizing)
+// Default constructor (empty, must call set_maxID before use)
 ID_vector();
+
+// Single max_id constructor (range: 0 to max_id)
+explicit ID_vector(index_type max_id);
+
+// Range constructor (range: min_id to max_id) - RECOMMENDED
+ID_vector(index_type min_id, index_type max_id);
 
 // Copy constructor
 ID_vector(const ID_vector& other);
 
-// Copy from mcu containers
-ID_vector(const mcu::vector<T>& other);         // Copy from mcu::vector
-ID_vector(const mcu::b_vector<T>& other);       // Copy from mcu::b_vector
+<template T>
+ID_vector(const b_vector<T>& other); // Copy from mcu::b_vector
+ID_vector(const vector<T>& other); // Copy from mcu::vector
 
 // Move constructor
 ID_vector(ID_vector&& other) noexcept;
@@ -382,29 +482,36 @@ ID_vector(ID_vector&& other) noexcept;
 ### Constructor Examples
 
 ```cpp
-ID_vector<uint16_t, 1> vec1;                    // Empty, dynamic sizing
-ID_vector<uint16_t, 2> vec2;                    // Empty, up to 3 per ID
+ID_vector<uint16_t, 1> vec1;                    // Empty, needs setup
+ID_vector<uint16_t, 1> vec2(1000);              // Range: 0-1000
+ID_vector<uint16_t, 1> vec3(5000, 10000);       // Range: 5000-10000 (optimized)
+ID_vector<uint16_t, 2> vec4(1000, 5000);        // Range: 1000-5000, up to 3 per ID
 
-// Copy from existing containers
-mcu::vector<uint16_t> regular_vec = {1, 2, 3, 4};
-ID_vector<uint16_t> vec3(regular_vec);          // Copy from mcu::vector
-
-mcu::b_vector<uint16_t> bounded_vec = MAKE_UINT16_LIST(1, 2, 3, 4);
-ID_vector<uint16_t> vec4(bounded_vec);          // Copy from mcu::b_vector
+// constructors with existing mcu::b_vector or mcu::vector
+b_vector<uint16_t> bvec = MAKE_UINT16_LIST(1, 2, 3, 4);
+ID_vector<uint16_t> vec_from_bvec(bvec);    // Copy from b_vector
 
 auto vec5 = vec3;                               // Copy constructor
 auto vec6 = std::move(vec4);                    // Move constructor
 ```
 
-## Range Configuration (Optional)
-
-For optimal memory efficiency, you can configure the expected ID range:
+## Assignment Operators
 
 ```cpp
-// Set maximum ID (recommended for memory efficiency)
+// Copy assignment
+ID_vector& operator=(const ID_vector& other);
+
+// Move assignment  
+ID_vector& operator=(ID_vector&& other) noexcept;
+```
+
+## Range Configuration
+
+```cpp
+// Set maximum ID (min_id remains unchanged, default 0)
 void set_maxID(index_type max_id);
 
-// Set minimum ID (advanced: for high-value ID ranges)
+// Set minimum ID (max_id remains unchanged)
 void set_minID(index_type min_id);
 
 // Set both min and max ID range
@@ -417,22 +524,17 @@ index_type get_maxID() const;
 
 ### Range Configuration Examples
 
+> **⚠️ Note**: u must set maxID before using the vector, minID is optional. 
+
 ```cpp
 ID_vector<uint16_t, 1> vec;
+vec.set_maxID(2000);                    // ID Range: 0-2000
+vec.set_minID(500);                     // ID Range: 500-2000
+vec.set_ID_range(1000, 3000);           // ID Range: 1000-3000
 
-// Basic setup (recommended)
-vec.set_maxID(2000);                    // Prevents memory fragmentation
-
-// Advanced: optimize for high-value ranges
-vec.set_minID(45000);                   // For IDs starting from 45000
-vec.set_maxID(50000);                   // Memory only allocated for 45000-50000
-// Alternative: vec.set_ID_range(45000, 50000);
-
-auto min_id = vec.get_minID();          // Returns: 45000
-auto max_id = vec.get_maxID();          // Returns: 50000
+auto min_id = vec.get_minID();          // Returns: 1000
+auto max_id = vec.get_maxID();          // Returns: 3000
 ```
-
-> **💡 Tip**: Setting `max_id` before extensive use prevents memory fragmentation. Setting `min_id` for high-value ID ranges can provide significant memory savings.
 
 ## Primary Operations (All O(1))
 
@@ -654,20 +756,18 @@ size_t estimated_memory_bytes() const {
 }
 ```
 
-### Best Practices Summary
+## Best Practices Summary
 
-1. **Configure for Efficiency**:
+1. **Choose Appropriate Template Parameters**:
    ```cpp
-   ID_vector<uint16_t, 1> vec;
-   vec.set_maxID(expected_max);                 // Prevents fragmentation
-   vec.set_minID(expected_min);                 // Optimizes high-value ranges
+   ID_vector<uint8_t, 1> small_range;     // For IDs 0-255
+   ID_vector<uint16_t, 1> medium_range;   // For IDs 0-65K
+   ID_vector<uint32_t, 1> large_range;    // For IDs 0-4B+
    ```
 
-2. **Choose Appropriate Template Parameters**:
+2. **Use Range Optimization**:
    ```cpp
-   ID_vector<uint8_t, 1> small_range;          // For IDs 0-255
-   ID_vector<uint16_t, 1> medium_range;        // For IDs 0-65K
-   ID_vector<uint32_t, 1> large_range;         // For IDs 0-4B+
+   ID_vector<uint16_t, 1> optimized(5000, 10000);  // 90%+ memory savings
    ```
 
 3. **Handle Exceptions**:
@@ -681,12 +781,6 @@ size_t estimated_memory_bytes() const {
 
 4. **Choose Appropriate BitsPerValue**:
    ```cpp
-   ID_vector<uint16_t, 1> unique_only;         // Set behavior
-   ID_vector<uint16_t, 4> frequency;           // Up to 15 instances per ID
-   ```
-
-5. **Leverage MCU Ecosystem**:
-   ```cpp
-   mcu::vector<uint16_t> input_data = get_sensor_ids();
-   ID_vector<uint16_t, 1> efficient_storage(input_data);  // Convert for efficiency
+   ID_vector<uint16_t, 1> unique_only;    // Set behavior
+   ID_vector<uint16_t, 4> frequency;      // Up to 15 instances per ID
    ```

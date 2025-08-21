@@ -2,10 +2,6 @@
 
 ## Part 1: Overview and Core Concepts
 
-### What is ID_vector?
-
-`ID_vector` is a specialized data structure designed for storing sets of positive integers (IDs) with exceptional memory efficiency and O(1) performance characteristics. Unlike conventional data structures, `ID_vector` trades CPU cycles for memory efficiency - a particularly valuable trade-off in embedded systems and resource-constrained environments where memory is often the most limiting factor.
-
 ### Overview 
 
 ID_vector - member of mcu library space is a vector class specially designed to store IDs (positive integers) with optimization in both aspects: memory and speed surpassing conventional containers (vector, unordered_set..)
@@ -64,15 +60,11 @@ The data structure allocates a contiguous bit array where:
 - **No Fragmentation**: Single allocation prevents memory fragmentation
 - **Dynamic Growth**: Adjusts memory usage based on actual data requirements
 
-#### 🛡️ **Safety & Control**
-- **Automatic Management**: Dynamic sizing eliminates manual setup requirements
-- **Overflow Protection**: Configurable limits prevent unusually large IDs from causing issues
-- **Exception Safety**: Clear error handling for out-of-range operations
 
 #### **Trade-offs**
 - **Limited to Integers**: Only supports positive integer IDs
 - **Sparse Data**: Memory optimization can degrade with extremely sparse sets
-- **⚠️ Silent Overflow**: Adding more instances than BPV capacity results in silent failure
+- **⚠️ Silent Overflow**: If you add more instances than the capacity (e.g., 4 instances with BPV=2 that only allows max 3), nothing happens. This silent failure can lead to infinite loops or incorrect program behavior in some cases.
 
 ### Comprehensive Performance Comparison
 
@@ -187,7 +179,7 @@ These visualizations clearly demonstrate that `ID_vector` consistently operates 
 
 ```cpp
 // Basic usage with automatic sizing
-ID_vector<uint16_t, 1> unique_ids;              // Unique IDs, dynamic sizing
+ID_vector<uint16_t> unique_ids;                 // Using default BPV=1 (unique IDs)
 ID_vector<uint16_t, 2> counted_ids;             // Up to 3 instances per ID
 
 // Essential operations - all O(1)
@@ -209,7 +201,7 @@ for (auto id : unique_ids) {
 For optimal memory efficiency, set the maximum expected ID before extensive use:
 
 ```cpp
-ID_vector<uint16_t, 1> sensor_ids;
+ID_vector<uint16_t> sensor_ids;
 sensor_ids.set_maxID(2000);                     // Prevents memory fragmentation
 sensor_ids.push_back(1500);                     // Efficient allocation
 ```
@@ -218,7 +210,7 @@ sensor_ids.push_back(1500);                     // Efficient allocation
 For IDs that don't start from 0, setting min_id optimizes memory usage:
 
 ```cpp
-ID_vector<uint16_t, 1> high_value_ids;
+ID_vector<uint16_t> high_value_ids;
 high_value_ids.set_minID(45000);                // Set minimum ID
 high_value_ids.set_maxID(50000);                // Set maximum ID
 // Alternative: high_value_ids.set_ID_range(45000, 50000);
@@ -230,10 +222,10 @@ high_value_ids.push_back(47500);                // Maps to bit position (47500-4
 #### Type Selection Guide
 ```cpp
 // Choose template parameter T based on your maximum ID:
-ID_vector<uint8_t, 1> small_range;              // Max ID ≤ 255
-ID_vector<uint16_t, 1> medium_range;            // Max ID ≤ 65,535  
-ID_vector<uint32_t, 1> large_range;             // Max ID ≤ 4.3 billion
-ID_vector<size_t, 1> unlimited_range;           // No practical limit
+ID_vector<uint8_t> small_range;              // Max ID ≤ 255
+ID_vector<uint16_t> medium_range;            // Max ID ≤ 65,535  
+ID_vector<uint32_t> large_range;             // Max ID ≤ 4.3 billion
+ID_vector<size_t> unlimited_range;           // No practical limit
 ```
 
 ### Use Case Guidelines
@@ -265,21 +257,21 @@ ID_vector<size_t, 1> unlimited_range;           // No practical limit
 
 // Convert from mcu::vector
 mcu::vector<uint16_t> regular_vec = {100, 200, 300, 400};
-ID_vector<uint16_t, 1> id_vec(regular_vec);      // Direct conversion
+ID_vector<uint16_t> id_vec(regular_vec);      // Direct conversion
 
 // Convert from mcu::b_vector  
 mcu::b_vector<uint16_t> bounded_vec = MAKE_UINT16_LIST(100, 200, 300);
-ID_vector<uint16_t, 1> from_bvec(bounded_vec);   // Direct conversion
+ID_vector<uint16_t> from_bvec(bounded_vec);   // Direct conversion
 
 // Use together in embedded applications
 class EmbeddedSensorManager {
-    mcu::vector<uint16_t> sensor_data;           // Raw sensor readings
-    ID_vector<uint16_t, 1> active_sensors;       // Active sensor IDs (memory efficient)
+    mcu::vector<uint16_t> sensor_data;             // Raw sensor readings
+    ID_vector<uint16_t> active_sensors;           // Active sensor IDs (memory efficient)
     ID_vector<uint16_t, 2> error_counts;         // Error count per sensor
     
 public:
     void process_sensor_reading(uint16_t sensor_id, uint16_t value) {
-        active_sensors.push_back(sensor_id);     // Track active sensor
+        active_sensors.push_back(sensor_id);      // Track active sensor
         sensor_data.push_back(value);            // Store reading
         
         if (value > ERROR_THRESHOLD) {
@@ -381,9 +373,11 @@ ID_vector(ID_vector&& other) noexcept;
 
 ### Constructor Examples
 
+>**🚀 Note**: default BPV=1 , so no need to specified it (meaning IDs contain in vector is unique)
+
 ```cpp
-ID_vector<uint16_t, 1> vec1;                    // Empty, dynamic sizing
-ID_vector<uint16_t, 2> vec2;                    // Empty, up to 3 per ID
+ID_vector<uint16_t> vec1;                       // default bpv - unique IDs only 
+ID_vector<uint16_t, 2> vec2;                    // turn off unique feature, allow up to 3 instances per ID
 
 // Copy from existing containers
 mcu::vector<uint16_t> regular_vec = {1, 2, 3, 4};
@@ -418,7 +412,7 @@ index_type get_maxID() const;
 ### Range Configuration Examples
 
 ```cpp
-ID_vector<uint16_t, 1> vec;
+ID_vector<uint16_t> vec;
 
 // Basic setup (recommended)
 vec.set_maxID(2000);                    // Prevents memory fragmentation
@@ -448,9 +442,6 @@ count_type count(index_type id) const;
 
 // Remove one instance of ID (decrement count)
 bool erase(index_type id);
-
-// Remove all instances of specific ID
-bool erase_all(index_type id);
 
 // Get total number of stored instances
 size_type size() const;
@@ -484,12 +475,12 @@ bool is_empty = vec.empty();             // Returns: true
 ## Access operations (all O(N) - return value , not reference)
 ```cpp
 // get smallest ID stored in the vector
-index_type minID() const;       // noexception - return 0 if empty
-index_type front() const;       // throws exception if empty
+index_type minID() const;       // ✅ safe: no exception - return 0 if empty
+index_type front() const;       // ⚠️ throws exception if empty
 
 // get largest ID stored in the vector
-index_type maxID() const;       // noexception - return 0 if empty
-index_type back() const;        // throws exception if empty
+index_type maxID() const;       // ✅ safe: no exception - return 0 if empty
+index_type back() const;        // ⚠️ :throws exception if empty
 
 // access nth element (0-based, sorted order with repetitions) 
 index_type operator[](size_type index) const;  // throws exception if index >= size()
@@ -658,16 +649,16 @@ size_t estimated_memory_bytes() const {
 
 1. **Configure for Efficiency**:
    ```cpp
-   ID_vector<uint16_t, 1> vec;
+   ID_vector<uint16_t> vec;
    vec.set_maxID(expected_max);                 // Prevents fragmentation
    vec.set_minID(expected_min);                 // Optimizes high-value ranges
    ```
 
 2. **Choose Appropriate Template Parameters**:
    ```cpp
-   ID_vector<uint8_t, 1> small_range;          // For IDs 0-255
-   ID_vector<uint16_t, 1> medium_range;        // For IDs 0-65K
-   ID_vector<uint32_t, 1> large_range;         // For IDs 0-4B+
+   ID_vector<uint8_t> small_range;          // For unique IDs 0-255
+   ID_vector<uint16_t> medium_range;        // For unique IDs 0-65K
+   ID_vector<uint32_t> large_range;         // For unique IDs 0-4B+
    ```
 
 3. **Handle Exceptions**:
@@ -681,7 +672,7 @@ size_t estimated_memory_bytes() const {
 
 4. **Choose Appropriate BitsPerValue**:
    ```cpp
-   ID_vector<uint16_t, 1> unique_only;         // Set behavior
+   ID_vector<uint16_t> unique_only;             // Set behavior
    ID_vector<uint16_t, 4> frequency;           // Up to 15 instances per ID
    ```
 

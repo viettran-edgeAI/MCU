@@ -16,13 +16,13 @@ However, if you know the largest ID in advance (say 2000), you can store those I
 
 #### Visual Representation
 
-**BPV = 1 (Contains unique IDs only)**
+**BPV (Bits_per_value) = 1 (Contains unique IDs only)**
 ```
 index:     0  1  2  3  4  5  6  7  8  9  10 11 12 13 14 15
 Bit:      [0][1][0][1][0][0][1][0][1][0][0][1][0][0][0][1]
 Value:     -  ✓  -  ✓  -  -  ✓  -  ✓  -  -  ✓  -  -  -  ✓
 ```
-**=> IDs stored**: 1, 3, 6, 8, 11, 15.
+**=> IDs stored**: 1, 3, 6, 8, 11, 15...
 
 #### BPV = 2 (Up to 3 instances per ID)
 ```
@@ -30,14 +30,14 @@ index:     0    1    2    3    4    5    6    7    8
 Bits:    [00] [01] [00] [11] [00] [00] [10] [00] [11]
 Count:     0    1    0    3    0    0    2    0    3
 ```
-**=> Ids stored**: 1, 3, 3, 3, 6, 6, 8, 8, 8.
+**=> Ids stored**: 1, 3, 3, 3, 6, 6, 8, 8, 8...
 
 #### Advance : enable min_id (eg: min_id = 1000, bpv = 1)
 ```
 index:     0    1    2    3    4    5    6    7    8
 Bit:      [0]  [1]  [0]  [1]  [0]  [0]  [1]  [0]  [1]
 ```
-**=> IDs stored**: 1000, 1002, 1005, 1007, 1010, 1014 .
+**=> IDs stored**: 1001, 1003, 1006, 1008...
 
 #### Memory Layout Strategy
 

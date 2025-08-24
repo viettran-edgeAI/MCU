@@ -1000,6 +1000,10 @@ void saveBinaryDataset(const mcu::vector<ESP32_Sample>& samples,
     for (size_t i = 0; i < samples.size(); ++i) {
         const ESP32_Sample& sample = samples[i];
         
+        // Write sample ID
+        uint16_t sampleID = static_cast<uint16_t>(i);
+        file.write(reinterpret_cast<const char*>(&sampleID), sizeof(uint16_t));
+        
         // Write label
         file.write(reinterpret_cast<const char*>(&sample.label), sizeof(uint8_t));
         
@@ -1028,7 +1032,7 @@ void saveBinaryDataset(const mcu::vector<ESP32_Sample>& samples,
         size_t fileSize = check.tellg();
         check.close();
         
-        size_t expectedSize = 6 + samples.size() * (1 + packedFeatureBytes);
+        size_t expectedSize = 6 + samples.size() * (3 + packedFeatureBytes);
         
         std::cout << "✅ Binary conversion completed:" << std::endl;
         std::cout << "   📁 File: " << binaryFilename << std::endl;

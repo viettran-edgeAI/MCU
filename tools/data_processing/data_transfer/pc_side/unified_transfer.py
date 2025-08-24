@@ -35,7 +35,7 @@ RESP_ERROR = b"ERROR"
 # The following 2 parameters must match exactly esp32 side sketch
 # changed them when transfer process failed
 CHUNK_SIZE = 256 # bytes per chunk - further reduced for USB CDC compatibility
-CHUNK_DELAY = 80  # delay between chunks in ms - increased for USB CDC stability
+CHUNK_DELAY = 50  # delay between chunks in ms - increased for USB CDC stability
 
 # Timeout settings
 SERIAL_TIMEOUT = 10  # seconds - increased for USB CDC
@@ -43,7 +43,7 @@ ACK_TIMEOUT = 30 # seconds - significantly increased for large file transfers wi
 
 def get_file_paths(base_name):
     """Generate full file paths from a base name in the result folder."""
-    result_dir = os.path.join(os.path.dirname(__file__), '..', 'data', 'result')
+    result_dir = os.path.join(os.path.dirname(__file__), '../..', 'data', 'result')
     result_dir = os.path.abspath(result_dir)
     return {
         "categorizer": os.path.join(result_dir, f"{base_name}_ctg.csv"),

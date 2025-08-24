@@ -26,7 +26,7 @@ const char* RESP_OK = "OK";
 const char* RESP_ERROR = "ERROR";
 
 const uint16_t CHUNK_SIZE = 256; // Further reduced for USB CDC compatibility
-const uint32_t CHUNK_DELAY = 50; // Increased delay for USB CDC stability
+const uint32_t CHUNK_DELAY = 30; // Increased delay for USB CDC stability
 const uint32_t SERIAL_TIMEOUT_MS = 30000; // Extended timeout for large files
 const uint32_t HEADER_WAIT_MS = 100; // Wait time for header assembly
 
@@ -44,8 +44,8 @@ State currentState = State::WAITING_FOR_SESSION;
 
 // --- Global Variables ---
 File currentFile;
-char receivedBaseName[64];
-char receivedFileName[64];
+char receivedBaseName[32];
+char receivedFileName[32];
 uint32_t receivedFileSize = 0;
 uint32_t bytesWritten = 0;
 
@@ -215,6 +215,12 @@ void handleFileInfo() {
     if (currentFile) {
         currentFile.close();
     }
+    
+    // Delete existing file if it exists
+    if (SPIFFS.exists(receivedFileName)) {
+        SPIFFS.remove(receivedFileName);
+    }
+    
     currentFile = SPIFFS.open(receivedFileName, FILE_WRITE);
     if (!currentFile) {
         currentState = State::ERROR_STATE;

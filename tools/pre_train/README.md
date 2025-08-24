@@ -32,7 +32,7 @@ This tool enables pre-training of optimized Random Forest models using normalize
 
 2. **Compile the program:**
    ```bash
-   g++ -std=c++17 -I../../src -o random_forest_pc random_forest_pc.cpp
+   g++ -std=c++17 -I../../src -o pre_train random_forest_pc.cpp
    ```
 
 3. **Configure your model:**
@@ -40,7 +40,7 @@ This tool enables pre-training of optimized Random Forest models using normalize
 
 4. **Run the training:**
    ```bash
-   ./random_forest_pc
+   ./pre_train
    ```
 
 5. **Deploy results:**
@@ -52,8 +52,8 @@ The training process generates the following files in the `trained_model/` direc
 
 | File | Description |
 |------|-------------|
-| `final_config.json` | Complete model configuration and metadata |
-| `final_config.csv` | CSV version of configuration for analysis |
+| `esp32_config.json` | Complete model configuration and metadata |
+| `esp32_config.csv` | CSV version of configuration for analysis |
 | `tree_0.bin`, `tree_1.bin`, ... | Binary tree files optimized for ESP32 SPIFFS |
 
 ## Configuration Guide
@@ -204,6 +204,69 @@ Training flags specify which metrics to optimize during model training:
 - **Reduce `k_folds`**: Fewer folds = faster cross-validation
 - **Smaller datasets**: Consider data reduction techniques if training is too slow
 
+## Integration with ESP32
+
+The generated model files are designed for seamless integration with ESP32. You have two deployment options:
+
+### Option 1: Manual File Copy
+1. Copy `trained_model/` contents to your ESP32 project
+2. Load tree files from SPIFFS during initialization
+3. Use the STL_MCU inference API for predictions
+
+### Option 2: Automated Serial Transfer
+
+This directory includes specialized transfer tools for uploading pre-trained model files directly to ESP32 via serial connection:
+
+- **PC Side**: `pc_side/transfer_model.py` - Python script for sending model files
+- **ESP32 Side**: `esp32_side/model_receiver.ino` - Arduino sketch for receiving files
+
+#### Quick Transfer Usage
+
+1. **Upload receiver to ESP32:**
+   ```bash
+   # Upload esp32_side/model_receiver.ino to your ESP32
+   ```
+
+2. **Run transfer from PC:**
+   ```bash
+   cd pc_side
+   python3 transfer_model.py /dev/ttyUSB0  # Linux/macOS
+   python3 transfer_model.py COM3         # Windows
+   ```
+
+#### Transfer Features
+
+- **Automatic file discovery** from `trained_model/` directory
+- **Combined progress bar** for tree files (single status bar for all trees)
+- **File preservation** - maintains original filenames on ESP32
+- **Robust error recovery** with retry mechanisms
+- **SPIFFS management** with storage information display
+- **Selective transfer** - JSON config only (ignores CSV version)
+
+#### Files Transferred
+
+- `esp32_config.json` - Model configuration (JSON format only)
+- `tree_0.bin`, `tree_1.bin`, ... `tree_N.bin` - Decision tree binary data
+
+> **Note on Pipeline Integration**: This model transfer tool is part of a modular pipeline system. Each stage (data processing, pre-training, etc.) has its own specialized transfer tools. There will be a unified transfer system in an external folder that handles the complete pipeline data transfer, similar to how `unified_transfer.py` and `unified_receiver.ino` work together for coordinated multi-stage transfers.
+
+## Technical Details
+
+### Architecture
+- **Breadth-first tree building**: Optimized memory layout for embedded systems. Each node in the tree takes up only 4 bytes.
+- **2-bit quantization**: Reduces memory footprint while maintaining accuracy
+- **Binary tree serialization**: Compact storage format for SPIFFS
+
+### Evaluation Methods
+- **Out-of-Bag (OOB)**: Uses bootstrap samples for unbiased evaluation
+- **Validation Set**: Hold-out evaluation with configurable ratio
+- **K-fold Cross-Validation**: Robust evaluation for small datasets
+
+### Hyperparameter Optimization
+- **Grid Search**: Systematic exploration of parameter combinations
+- **Automatic Range Detection**: Dataset-driven parameter range selection
+- **Override System**: Manual control when needed
+
 ## Troubleshooting
 
 ### Common Issues
@@ -236,30 +299,6 @@ The training process provides detailed logging:
 - Training progress with cross-validation scores
 - Final model statistics and memory usage
 
-## Technical Details
-
-### Architecture
-- **Breadth-first tree building**: Optimized memory layout for embedded systems
-- **2-bit quantization**: Reduces memory footprint while maintaining accuracy
-- **Binary tree serialization**: Compact storage format for SPIFFS
-
-### Evaluation Methods
-- **Out-of-Bag (OOB)**: Uses bootstrap samples for unbiased evaluation
-- **Validation Set**: Hold-out evaluation with configurable ratio
-- **K-fold Cross-Validation**: Robust evaluation for small datasets
-
-### Hyperparameter Optimization
-- **Grid Search**: Systematic exploration of parameter combinations
-- **Automatic Range Detection**: Dataset-driven parameter range selection
-- **Override System**: Manual control when needed
-
-## Integration with ESP32
-
-The generated model files are designed for seamless integration with ESP32:
-
-1. Copy `trained_model/` contents to your ESP32 project
-2. Load tree files from SPIFFS during initialization
-3. Use the STL_MCU inference API for predictions
 
 For complete integration examples, see the main STL_MCU documentation.
 

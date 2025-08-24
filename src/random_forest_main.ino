@@ -2,8 +2,6 @@
 
 using namespace mcu;
 
-void (*Rf_data::restore_data_callback)(Rf_data_flags&, uint8_t) = nullptr;
-
 typedef enum Rf_training_flags : uint8_t{
     EARLY_STOP  = 0x00,        // early stop training if accuracy is not improving
     ACCURACY    = 0x01,          // calculate accuracy of the model
@@ -12,9 +10,13 @@ typedef enum Rf_training_flags : uint8_t{
     F1_SCORE    = 0x08          // calculate F1 score of the model
 }Rf_training_flags;
 
+
+
 // -------------------------------------------------------------------------------- 
 class RandomForest{
 public:
+    String model_name;  // base_name
+
     Rf_data base_data;
     Rf_data train_data;
     Rf_data test_data;
@@ -22,60 +24,45 @@ public:
 
     Rf_base base;
     Rf_config config;
-    Rf_categorizer *categorizer; 
+    Rf_categorizer categorizer; 
     Rf_memory_logger memory_tracker;
     Rf_node_predictor  node_predictor; // Node predictor number of nodes required for a tree based on min_split and max_depth
 
 private:
     vector<Rf_tree, SMALL> root;                     // b_vector storing root nodes of trees (now manages SPIFFS filenames)
-    vector<pair<Rf_data, OOB_set>> dataList; // b_vector of pairs: Rf_data and OOB set for each tree
+    b_vector<ID_vector<uint16_t,2>, SMALL> dataList; // b_vector of pairs: Rf_data and OOB set for each tree
+
     b_vector<uint16_t> train_backup;   // backup of training set sample IDs 
     b_vector<uint16_t> test_backup;    // backup of testing set sample IDs
     b_vector<uint16_t> validation_backup; // backup of validation set sample IDs
-    b_vector<NodeToBuild> queue_nodes; // Queue for breadth-first processing
 
-    // buffer for new node_data samples (node_predictor will be updated continuously)
-    b_vector<node_data> predictor_buffer;
+    b_vector<NodeToBuild, SMALL, 10> queue_nodes; // Queue for breadth-first processing
 
     bool optimal_mode = false;  
 
 
 public:
-    static RandomForest* instance_ptr;      // Pointer to the single instance
 
     RandomForest(){};
-    RandomForest(const char* baseFile){
+    RandomForest(const char* base_name){
+        model_name = String(base_name);
         // initial components
         memory_tracker.init();
-        base.init(baseFile); // Initialize base with the provided base file
+        base.init(base_name); // Initialize base with the provided base name
         config.loadConfig();
         node_predictor.loadPredictor(); 
 
-        // Extract data_params file from baseFile, load forest parameters
+        // Extract data_params file from base_name, load forest parameters
         String dpFile = base.get_dpFile();
         first_scan(dpFile.c_str());
         config.num_trees = 5;
 
-
         String ctgFile = base.get_ctgFile();
-        // categorizer.init(ctgFile); // Initialize categorizer with the provided file
-        // categorizer.loadCategorizer();
-        categorizer = new Rf_categorizer(); // Initialize categorizer with the provided file
-        categorizer->init(ctgFile.c_str());
-        categorizer->loadCategorizer();
-
-        
-        // Set up a pointer connection between forest - data for restore callback mechanism
-        instance_ptr = this; // Set the static instance pointer
-        Rf_data::restore_data_callback = &RandomForest::static_restore_data;
+        categorizer.init(ctgFile); // Initialize categorizer with the provided file
+        categorizer.loadCategorizer();
 
         // load base data 
-        base_data.flag = Rf_data_flags::BASE_DATA;
-        if(base.baseFile_is_csv()) 
-            base_data.loadCSVData(baseFile, config.num_features);   // load and convert to bin format
-        else 
-            base_data.loadData(true,baseFile);   // loading base data and copy into new file, keep the original file intact   
-        base_data.releaseData(false); 
+        base_data.filename = base.get_baseFile();
         
         // resource separation
         dataList.reserve(config.num_trees);
@@ -104,11 +91,7 @@ public:
             data.first.purgeData();
         }
 
-        // re_train node predictor with new samples 
-        if(predictor_buffer.size() > 0){
-            node_predictor.add_new_samples(predictor_buffer);
-            node_predictor.re_train(); // Re-train predictor with new samples
-        }
+        node_predictor.re_train()
     }
 
     void MakeForest(){
@@ -144,7 +127,7 @@ public:
             dataList[i].first.releaseData(true);
         }
         n_data.total_nodes /= config.num_trees; // Average nodes per tree
-        predictor_buffer.push_back(n_data); // Store node data for predictor
+        node_predictor.buffer.push_back(n_data); // Add node data to predictor buffer
 
         Serial.printf("RAM after forest creation: %d\n", ESP.getFreeHeap());
     }
@@ -167,72 +150,54 @@ public:
         sampleID_set train_sampleIDs;
         sampleID_set test_sampleIDs;
         sampleID_set validation_sampleIDs;
-        train_sampleIDs.reserve(trainSize);
-        test_sampleIDs.reserve(testSize);
-        validation_sampleIDs.reserve(validationSize);
+        train_sampleIDs.reserve(totalSamples);
+        test_sampleIDs.reserve(totalSamples);
+        validation_sampleIDs.reserve(totalSamples);
 
-        train_backup.clear(); // Clear previous backup
-        train_backup.reserve(totalSamples - trainSize);
 
         while (train_sampleIDs.size() < trainSize) {
             uint16_t sampleId = static_cast<uint16_t>(esp_random() % totalSamples);
             train_sampleIDs.insert(sampleId);
         }
-        for(const auto& sampleID : train_sampleIDs){
-          train_backup.push_back(sampleID);
-        }
-        train_backup.sort();
 
         while(test_sampleIDs.size() < testSize) {
             uint16_t i = static_cast<uint16_t>(esp_random() % totalSamples);
-            if (train_sampleIDs.find(i) == train_sampleIDs.end()) {
+            if (!train_sampleIDs.contains(i)) {
                 test_sampleIDs.insert(i);
             }
         }
         test_sampleIDs.fit();
-        for(const auto& sampleID : test_sampleIDs){
-          test_backup.push_back(sampleID);
-        }
-        test_backup.sort();
+
         if(config.use_validation) {
             // Create validation set from remaining samples    
             while(validation_sampleIDs.size() < validationSize) {
                 uint16_t i = static_cast<uint16_t>(esp_random() % totalSamples);
-                if (train_sampleIDs.find(i) == train_sampleIDs.end() && test_sampleIDs.find(i) == test_sampleIDs.end()) {
+                if (!train_sampleIDs.contains(i) && !test_sampleIDs.contains(i)) {
                     validation_sampleIDs.insert(i);
                 }
             }
             validation_sampleIDs.fit();
-            for(const auto& sampleID : validation_sampleIDs){
-            validation_backup.push_back(sampleID);
-            }
-            validation_backup.sort();
         }
 
         if(config.use_validation) {
             validation_data.isLoaded = true;
-            validation_data.flag = VALID_DATA;
         }
-
-        train_data.flag = TRAIN_DATA;
-        test_data.flag = TEST_DATA;
-
         train_data.isLoaded = true;
         test_data.isLoaded = true;
 
-        train_data.allSamples = base_data.loadData(train_backup); // Load only training samples
+        train_data.allSamples = base_data.loadData(train_sampleIDs); // Load only training samples
         memory_tracker.log();   // check heap fragmentation at highest RAM usage point
         train_sampleIDs.clear(); // Clear sample IDs set to free memory
         train_sampleIDs.fit(); // Fit the set to release unused memory
         train_data.releaseData(false); // Write to binary SPIFFS, clear RAM
 
-        test_data.allSamples = base_data.loadData(test_backup); // Load only testing samples
+        test_data.allSamples = base_data.loadData(test_sampleIDs); // Load only testing samples
         test_sampleIDs.clear(); // Clear sample IDs set to free memory
         test_sampleIDs.fit(); // Fit the set to release unused memory
         test_data.releaseData(false); // Write to binary SPIFFS, clear RAM
 
         if(config.use_validation) {
-            validation_data.allSamples = base_data.loadData(validation_backup); // Load only validation samples
+            validation_data.allSamples = base_data.loadData(validation_sampleIDs); // Load only validation samples
             validation_sampleIDs.clear(); // Clear sample IDs set to free memory
             validation_sampleIDs.fit(); // Fit the set to release unused memory
             validation_data.releaseData(false); // Write to binary SPIFFS, clear RAM
@@ -253,7 +218,6 @@ public:
 
         sampleID_set inBagSamples;
         inBagSamples.reserve(numSubSample);
-        OOB_set oob_set;
         oob_set.reserve(oob_size);
         Rf_data sub_data;
         sub_data.allSamples.reserve(numSubSample);
@@ -447,119 +411,6 @@ public:
         if(config.min_split_range.empty()) config.min_split_range.push_back(config.min_split); // Ensure at least one value
         if(config.max_depth_range.empty()) config.max_depth_range.push_back(config.max_depth); // Ensure at least one value
         Serial.println();
-    }
-
-    // Static wrapper to call the member restore_data
-    static void static_restore_data(Rf_data_flags& flag, uint8_t treeIndex) {
-        if (instance_ptr) {
-            instance_ptr->restore_data(flag, treeIndex);
-        }
-    }
-    // restore Rf_data obj when it's loadData() fails
-    void restore_data(Rf_data_flags& data_flag, uint8_t treeIndex) {
-        Serial.println("trying to restore data...");
-        if (Rf_data::restore_data_callback == nullptr) {
-            Serial.println("❌ Restore callback not set, cannot restore data.");
-            return;
-        }
-        if(data_flag == Rf_data_flags::TRAIN_DATA || data_flag == Rf_data_flags::TEST_DATA || data_flag == Rf_data_flags::VALID_DATA) {   
-            // Restore train/test set from backup and base data / baseFile (a)
-            Rf_data *restore_data;
-            b_vector<uint16_t> *restore_backup;
-            switch (data_flag) {
-                case Rf_data_flags::TRAIN_DATA:
-                {
-                    if(train_backup.empty()) {
-                        Serial.println("❌ No training backup available, cannot restore training data.");
-                        return;
-                    }
-                    restore_data = &train_data;
-                    restore_backup = &train_backup;
-                }
-                break;
-                case Rf_data_flags::TEST_DATA:
-                {
-                    if(test_backup.empty()) {
-                        Serial.println("❌ No testing backup available, cannot restore testing data.");
-                        return;
-                    }
-                    restore_data = &test_data;
-                    restore_backup = &test_backup;
-                }
-                break;
-                case Rf_data_flags::VALID_DATA:
-                {
-                    if(validation_backup.empty()) {
-                        Serial.println("❌ No validation backup available, cannot restore validation data.");
-                        return;
-                    }
-                    restore_data = &validation_data;
-                    restore_backup = &validation_backup;
-                }
-                break;
-                default:
-                    Serial.println("❌ Invalid data flag for restore.");
-                    return;
-            }
-            restore_data->allSamples.clear(); // Clear existing samples
-            restore_data->allSamples = base_data.loadData(*restore_backup); // Load samples from base data using backup IDs
-            if(restore_data->allSamples.empty()) {
-                Serial.println("❌ Failed to restore data from backup.");
-                return;
-            }
-            restore_data->isLoaded = true; // Mark as loaded
-            Serial.printf("Training data restored with %d samples.\n", train_data.allSamples.size());
-        }else if(data_flag == Rf_data_flags::SUB_DATA){
-            // Restore subset data for a specific tree
-            // also reconstructs its corresponding oob set
-            if (treeIndex >= dataList.size()) {
-                Serial.printf("❌ Invalid tree index: %d\n", treeIndex);
-                return;
-            }
-            Rf_data& subsetData = dataList[treeIndex].first; // Get the subset data for this tree
-            OOB_set& oob_set = dataList[treeIndex].second;
-
-            subsetData.allSamples.clear(); // Clear existing samples
-            oob_set.clear(); // Clear existing OOB set
-
-            if (subsetData.isLoaded) {
-                Serial.printf("Subset data for tree %d already loaded, skipping restore.\n", treeIndex);
-                return;
-            }
-            Serial.printf("Restoring subset data for tree %d...\n", treeIndex);
-            uint16_t numSubSamples = train_backup.size() * config.boostrap_ratio; // Calculate number of samples for this subset
-            sampleID_set inBagSamples;
-            inBagSamples.reserve(numSubSamples);
-            b_vector<uint16_t> inBagSamplesVec;
-            inBagSamplesVec.reserve(numSubSamples);
-
-            while(inBagSamples.size() < numSubSamples) {
-                uint16_t idx = static_cast<uint16_t>(esp_random() % train_backup.size());
-                uint16_t sampleId = train_backup[idx]; // Get sample ID from backup
-                if(inBagSamples.insert(sampleId)) { // Only insert if not already present
-                    inBagSamplesVec.push_back(sampleId);
-                }
-            }
-            // restore subset data 
-            if(!train_data.isLoaded) {
-                // load samples from SPIFFS
-                subsetData.allSamples = train_data.loadData(inBagSamplesVec); // Load only in-bag samples
-            }else{
-                // load samples from RAM
-                for (const auto& sampleId : inBagSamples) {
-                    if (train_data.allSamples.find(sampleId) != train_data.allSamples.end()) {
-                        subsetData.allSamples[sampleId] = train_data.allSamples[sampleId];
-                    }
-                }
-            }
-            if(config.use_boostrap) {
-                subsetData.boostrapData(numSubSamples, config.num_samples); // Apply boostrap sampling if enabled
-            } 
-            subsetData.isLoaded = true; 
-            Serial.printf("Subset data for tree %d restored with %d samples.\n", treeIndex, subsetData.allSamples.size());
-        }else{
-            return;   // unexpected flag / base data 
-        }
     }
 
     // FIXED: Enhanced forest cleanup
@@ -1341,8 +1192,13 @@ public:
         return predClassSample(sample);
     }
 
+    String predict(b_vector<float>& features){
+        auto p_sample = categorizer.categorizeSample(features);
+        return categorizer.getOriginalLabel(predict(p_sample));
+    }
+
     // get prediction score based on training flags
-    float predict(Rf_data& data, Rf_training_flags flags) {
+    float predict2(Rf_data& data, Rf_training_flags flags) {
         auto metrics = predict(data);
 
         float combined_score = 0.0f;
@@ -1447,7 +1303,7 @@ void setup() {
     RandomForest forest = RandomForest(filename);
 
     // printout size of forest object in stack
-    // Serial.printf("RandomForest object size: %d bytes\n", sizeof(forest));
+    Serial.printf("RandomForest object size: %d bytes\n", sizeof(forest));
 
     forest.MakeForest();
 
@@ -1520,6 +1376,14 @@ void setup() {
     Serial.printf("Average Recall: %.3f\n", avgRecall);
     Serial.printf("Average F1-Score: %.3f\n", avgF1);
     Serial.printf("Average Accuracy: %.3f\n", avgAccuracy);
+
+    // check actual prediction time 
+    b_vector<float> sample = MAKE_FLOAT_LIST(0,0,0.014528,0.000782722,0.817357,0.277754,0.137853,0.0161738,0,0,0,0,0.252639,0.0556202,0.319129,0.257954,0.0149651,0.0648652,0.0220988,0.00182159,0.877327,0.00550756,0.133955,0.0187333,0.0275399,0,0,0.0248582,0.0363544,0.134907,0.406297,0.14517,0.660452,0.0193004,0.0872476,0.0170596,0.183969,0.0070201,0.0392839,0.00355617,0.0551359,0.124477,0.226905,0.0582358,0.0218746,0.00100708,0.254847,0.617445,0,0,0,0,0.768671,0.0542131,0.301566,0.249534,0.163292,0.215959,0.210117,0.111435,0.00786254,0,0.181712,0.300076,0.0661908,0.000662339,0,0.0419681,0.345039,0.220849,0.830398,0.239182,0.0471657,0.0858931,0.155634,0.120172,0.171163,0.00210992,0.00423227,0.0409593,0.255201,0.133301,0.314904,0.0781977,0.0096404,0.00762942,0.314006,0.42933,0.000130379,0.00131339,0.00315603,0,0.64453,0,0.000782274,0.336626,0,0.0176682,0.0297794,0,0,0,0.0138204,0,0.0573581,0.0521479,0.0586363,0.267836,0.00254183,0.216103,0.916323,0.176272,0,0.0117796,0.0287043,0,0.0182255,0.000955436,0.00278896,0.0780402,0.0260911,0.0408793,0.635657,0.265235,0.100382,0.709452,0.0494404,0.00125326,0.000117986,0,0.00284004,0.00127189,0.358305,0.000972935,0.000117986,0.523924,0,0.553178,0.243659,0.000263824,0.444076,0.185569,0.00661191,0.00721455
+);
+    long unsigned start = millis();
+    String pred = forest.predict2(sample);
+    long unsigned end = millis();
+    Serial.printf("Prediction for sample took %lu ms: %s\n", end - start, pred.c_str());
 
 
     // forest.visual_result(forest.test_data); // Optional visualization

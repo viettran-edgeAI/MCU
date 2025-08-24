@@ -1,6 +1,12 @@
 #include "Rf_file_manager.h"
 
 bool cloneFile(const String& src, const String& dest) {
+    if(SPIFFS.exists(src) == false) {
+        Serial.print("❌ Source file does not exist: ");
+        Serial.println(src);
+        return false;
+    }
+
     String actualDest = dest;
     
     // Auto-generate destination if not provided

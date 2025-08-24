@@ -40,8 +40,8 @@ g++ -std=c++17 -I../../src -o processing_data processing_data.cpp
 ### Configuration
 ```cpp
 static constexpr uint8_t quantization_coefficient = 2;  // 2 bits per feature
-static const int MAX_NUM_FEATURES = 234;               // Maximum features
-static const int MAX_LABELS = 31;                      // Maximum labels
+static const int MAX_NUM_FEATURES = 1023;               // Maximum features
+static const int MAX_LABELS = 254;                      // Maximum labels
 ```
 
 ## Step 2: Binary Conversion

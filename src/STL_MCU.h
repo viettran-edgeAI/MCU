@@ -1556,7 +1556,7 @@ namespace mcu {
             if (size_ == capacity_) {
                 size_t doubled;
                 if(VECTOR_MAX_CAP == 255)
-                    doubled = capacity_ ? capacity_ + 10 : 1;
+                    doubled = capacity_ ? capacity_ + 20 : 1;
                 else
                     doubled = capacity_ ? capacity_ * 2 : 1;
                 if (doubled > VECTOR_MAX_CAP) doubled = VECTOR_MAX_CAP;
@@ -2400,6 +2400,7 @@ namespace mcu {
         PackedArray(size_t capacity_bytes) {
             data = new uint8_t[capacity_bytes]();
         }
+        PackedArray() : data(nullptr) {}
 
         ~PackedArray() {
             delete[] data;
@@ -2898,6 +2899,764 @@ namespace mcu {
         bool operator!=(const packed_vector& other) const {
             return !(*this == other);
         }
+    };
+
+    /*  
+    ------------------------------------------------------------------------------------------------------------------
+    --------------------------------------------------- ID_VECTOR ----------------------------------------------------
+    ------------------------------------------------------------------------------------------------------------------
+    */
+
+    template <typename T,  uint8_t BitsPerValue = 1>
+    class ID_vector{
+        static_assert(BitsPerValue > 0 && BitsPerValue <= 8, "BitsPerValue must be between 1 and 8");
+    public:
+        using count_type = uint8_t; // type for storing count of each ID
+        
+        // Index type mapping based on T
+        using index_type = typename conditional_t<
+            is_same_t<T, uint8_t>::value, uint8_t,
+            typename conditional_t<
+                is_same_t<T, uint16_t>::value, uint16_t,
+                typename conditional_t<
+                    is_same_t<T, uint32_t>::value, size_t,
+                    typename conditional_t<
+                        is_same_t<T, size_t>::value, size_t,
+                        size_t  // Default to size_t if T is not recognized
+                    >::type
+                >::type
+            >::type
+        >::type;
+        
+        // Size type that can handle total count considering BitsPerValue
+        // When BitsPerValue > 1, total size can exceed index_type capacity
+        using size_type = typename conditional_t<
+            (sizeof(index_type) == 1), uint16_t,   // uint8_t -> uint32_t (4 bytes)
+            typename conditional_t<
+                (sizeof(index_type) == 2), size_t,   // uint16_t -> uint64_t (8 bytes)
+                typename conditional_t<
+                    (sizeof(index_type) == 4), size_t,     // uint32_t -> size_t
+                    size_t  // Default to size_t for larger types
+                >::type
+            >::type
+        >::type;
+        
+    private:
+        PackedArray<BitsPerValue> id_array; // BitsPerValue bits per ID
+        index_type max_id_ = 0; // maximum ID that can be stored
+        index_type min_id_ = 0; // minimum ID that can be stored
+        size_type size_ = 0; // total number of ID instances stored
+
+        // MAX_RF_ID based on index_type capacity
+        constexpr static index_type MAX_RF_ID = 
+            is_same_t<index_type, uint8_t>::value ? 255 :
+            is_same_t<index_type, uint16_t>::value ? 65535 :
+            536870912; // For size_t types
+            
+        constexpr static index_type DEFAULT_MAX_ID = 
+            is_same_t<index_type, uint8_t>::value ? 63 :
+            is_same_t<index_type, uint16_t>::value ? 255 :
+            127; // default max ID
+            
+        constexpr static count_type MAX_COUNT = (1 << BitsPerValue) - 1; // maximum count per ID
+
+        static constexpr size_t bits_to_bytes(size_t bits){ return (bits + 7) >> 3; }
+
+        void allocate_bits(){
+            index_type range = max_id_ - min_id_ + 1; // number of IDs in range
+            size_t total_bits = range * BitsPerValue; // multiply by bits per value
+            size_t bytes = bits_to_bytes(total_bits);
+            id_array = PackedArray<BitsPerValue>(bytes);
+        }
+
+        // Convert external ID to internal array index
+        index_type inline id_to_index(index_type id) const {
+            return id - min_id_;
+        }
+
+        // Convert internal array index to external ID
+        index_type inline index_to_id(index_type index) const {
+            return index + min_id_;
+        }
+
+    public:
+        // Set maximum ID that can be stored and allocate memory accordingly
+        void set_maxID(index_type new_max_id) {
+            if(new_max_id >= MAX_RF_ID){
+                throw std::out_of_range("Max RF ID exceeds limit");
+            }
+            if(new_max_id < min_id_){
+                throw std::out_of_range("Max ID cannot be less than min ID");
+            }
+            
+            // If vector is empty, just update max_id and allocate new memory
+            if(size_ == 0) {
+                max_id_ = new_max_id;
+                allocate_bits();
+                return;
+            }
+            
+            // Vector has elements - check if we can safely preserve data
+            index_type current_max_element = maxID(); // Get largest actual element
+            
+            if(new_max_id >= current_max_element) {
+                // Safe case: new max_id is at or above the largest element
+                // We can preserve all data by copying to new memory layout
+                
+                // Save current data
+                index_type old_max_id = max_id_;
+                index_type old_range = max_id_ - min_id_ + 1;
+                size_t old_total_bits = old_range * BitsPerValue;
+                size_t old_bytes = bits_to_bytes(old_total_bits);
+                PackedArray<BitsPerValue> old_array(old_bytes);
+                old_array.copy_from(id_array, old_bytes);
+                
+                // Update max_id and allocate new memory
+                max_id_ = new_max_id;
+                allocate_bits();
+                
+                // Copy elements from old array to new array (indices remain the same)
+                for(index_type old_id = min_id_; old_id <= old_max_id; ++old_id) {
+                    index_type old_index = old_id - min_id_;
+                    count_type element_count = old_array.get(old_index);
+                    if(element_count > 0) {
+                        index_type new_index = old_id - min_id_; // Same index in new array
+                        id_array.set(new_index, element_count);
+                    }
+                }
+                // size_ remains the same since we preserved all elements
+                
+            } else {
+                // Potentially unsafe case: new max_id is below some existing elements
+                // This would cause data loss, so we throw an exception
+                throw std::out_of_range("Cannot set max_id below existing elements. Current largest element is " + std::to_string(current_max_element));
+            }
+        }
+
+        // Set minimum ID that can be stored and allocate memory accordingly
+        void set_minID(index_type new_min_id) {
+            if(new_min_id >= MAX_RF_ID){
+                throw std::out_of_range("Min RF ID exceeds limit");
+            }
+            if(new_min_id > max_id_){
+                throw std::out_of_range("Min ID cannot be greater than max ID");
+            }
+            
+            // If vector is empty, just update min_id and allocate new memory
+            if(size_ == 0) {
+                min_id_ = new_min_id;
+                allocate_bits();
+                return;
+            }
+            
+            // Vector has elements - check if we can safely cut off lower range
+            index_type current_min_element = minID(); // Get smallest actual element
+            
+            if(new_min_id <= current_min_element) {
+                // Safe case: new min_id is at or below the smallest element
+                // We can preserve all data by copying to new memory layout
+                
+                // Save current data
+                index_type old_min_id = min_id_;
+                index_type old_range = max_id_ - min_id_ + 1;
+                size_t old_total_bits = old_range * BitsPerValue;
+                size_t old_bytes = bits_to_bytes(old_total_bits);
+                PackedArray<BitsPerValue> old_array(old_bytes);
+                old_array.copy_from(id_array, old_bytes);
+                
+                // Update min_id and allocate new memory
+                min_id_ = new_min_id;
+                allocate_bits();
+                
+                // Copy elements from old array to new array with adjusted indices
+                for(index_type old_id = current_min_element; old_id <= max_id_; ++old_id) {
+                    index_type old_index = old_id - old_min_id;
+                    count_type element_count = old_array.get(old_index);
+                    if(element_count > 0) {
+                        index_type new_index = old_id - min_id_;
+                        id_array.set(new_index, element_count);
+                    }
+                }
+                // size_ remains the same since we preserved all elements
+                
+            } else {
+                // Potentially unsafe case: new min_id is above some existing elements
+                // This would cause data loss, so we throw an exception
+                throw std::out_of_range("Cannot set min_id above existing elements. Current smallest element is " + std::to_string(current_min_element));
+            }
+        }
+
+        // Set both min and max ID range and allocate memory accordingly
+        void set_ID_range(index_type new_min_id, index_type new_max_id) {
+            if(new_min_id >= MAX_RF_ID || new_max_id >= MAX_RF_ID){
+                throw std::out_of_range("RF ID exceeds limit");
+            }
+            if(new_min_id > new_max_id){
+                throw std::out_of_range("Min ID cannot be greater than max ID");
+            }
+            
+            // If vector is empty, just update range and allocate new memory
+            if(size_ == 0) {
+                min_id_ = new_min_id;
+                max_id_ = new_max_id;
+                allocate_bits();
+                return;
+            }
+            
+            // Vector has elements - check if we can safely preserve data
+            index_type current_min_element = minID(); // Get smallest actual element
+            index_type current_max_element = maxID(); // Get largest actual element
+            
+            if(new_min_id <= current_min_element && new_max_id >= current_max_element) {
+                // Safe case: new range encompasses all existing elements
+                // We can preserve all data by copying to new memory layout
+                
+                // Save current data
+                index_type old_min_id = min_id_;
+                index_type old_max_id = max_id_;
+                index_type old_range = max_id_ - min_id_ + 1;
+                size_t old_total_bits = old_range * BitsPerValue;
+                size_t old_bytes = bits_to_bytes(old_total_bits);
+                PackedArray<BitsPerValue> old_array(old_bytes);
+                old_array.copy_from(id_array, old_bytes);
+                
+                // Update range and allocate new memory
+                min_id_ = new_min_id;
+                max_id_ = new_max_id;
+                allocate_bits();
+                
+                // Copy elements from old array to new array with adjusted indices
+                for(index_type old_id = old_min_id; old_id <= old_max_id; ++old_id) {
+                    index_type old_index = old_id - old_min_id;
+                    count_type element_count = old_array.get(old_index);
+                    if(element_count > 0) {
+                        index_type new_index = old_id - min_id_;
+                        id_array.set(new_index, element_count);
+                    }
+                }
+                // size_ remains the same since we preserved all elements
+                
+            } else {
+                // Potentially unsafe case: new range doesn't encompass all existing elements
+                // This would cause data loss, so we throw an exception
+                std::string error_msg = "Cannot set ID range that excludes existing elements. ";
+                error_msg += "Current elements range: [" + std::to_string(current_min_element) + ", " + std::to_string(current_max_element) + "]";
+                throw std::out_of_range(error_msg);
+            }
+        }
+
+        // default constructor (default max ID 127, min ID 0 -> 128 bits -> 16 bytes)
+        ID_vector(){
+            set_maxID(DEFAULT_MAX_ID);
+        }
+
+        // constructor with max expected ID - calls set_maxID automatically
+        explicit ID_vector(index_type max_id){
+            set_maxID(max_id);
+        }
+
+        // constructor with min and max expected ID range
+        ID_vector(index_type min_id, index_type max_id){
+            set_ID_range(min_id, max_id);
+        }
+
+        // Copy constructor
+        ID_vector(const ID_vector& other) 
+            : id_array(), max_id_(other.max_id_), min_id_(other.min_id_), size_(other.size_) {
+            index_type range = max_id_ - min_id_ + 1;
+            size_t total_bits = range * BitsPerValue;
+            size_t bytes = bits_to_bytes(total_bits);
+            id_array = PackedArray<BitsPerValue>(bytes);
+            id_array.copy_from(other.id_array, bytes);
+        }
+
+        // constructor with b_vector of IDs (uint8_t, uint16_t, uint32_t, size_t)
+        template<typename Y>
+        ID_vector(const b_vector<Y>& ids,
+                  typename std::enable_if<std::is_same<Y, uint8_t>::value || 
+                                         std::is_same<Y, uint16_t>::value || 
+                                         std::is_same<Y, uint32_t>::value ||
+                                         std::is_same<Y, size_t>::value >::type* = nullptr) {
+            if(ids.empty()){
+                set_maxID(DEFAULT_MAX_ID);
+                return;
+            }
+            ids.sort();
+            index_type min_id = static_cast<size_t>(ids.front());
+            index_type max_id = static_cast<size_t>(ids.back());
+            set_ID_range(min_id, max_id);
+            for(const Y& id : ids){
+                push_back(static_cast<size_t>(id));
+            }
+        }
+        // constructor with vector of IDs (uint8_t, uint16_t, uint32_t, size_t)
+        template<typename Y>
+        ID_vector(const vector<Y>& ids,
+                  typename std::enable_if<std::is_same<Y, uint8_t>::value || 
+                                         std::is_same<Y, uint16_t>::value || 
+                                         std::is_same<Y, uint32_t>::value ||
+                                         std::is_same<Y, size_t>::value >::type* = nullptr) {
+            if(ids.empty()){
+                set_maxID(DEFAULT_MAX_ID);
+                return;
+            }
+            ids.sort();
+            index_type min_id = static_cast<size_t>(ids.front());
+            index_type max_id = static_cast<size_t>(ids.back());
+            set_ID_range(min_id, max_id);
+            for(const Y& id : ids){
+                push_back(static_cast<size_t>(id));
+            }
+        }
+
+        // Move constructor
+        ID_vector(ID_vector&& other) noexcept 
+            : id_array(std::move(other.id_array)), 
+              max_id_(other.max_id_), min_id_(other.min_id_), size_(other.size_) {
+            other.min_id_ = 0;
+            other.max_id_ = 0;
+            other.size_ = 0;
+        }
+
+        // Copy assignment operator
+        ID_vector& operator=(const ID_vector& other) {
+            if (this != &other) {
+                min_id_ = other.min_id_;
+                max_id_ = other.max_id_;
+                size_ = other.size_;
+                
+                index_type range = max_id_ - min_id_ + 1;
+                size_t total_bits = range * BitsPerValue;
+                size_t bytes = bits_to_bytes(total_bits);
+                id_array = PackedArray<BitsPerValue>(bytes);
+                id_array.copy_from(other.id_array, bytes);
+            }
+            return *this;
+        }
+
+        // Move assignment operator
+        ID_vector& operator=(ID_vector&& other) noexcept {
+            if (this != &other) {
+                id_array = std::move(other.id_array);
+                min_id_ = other.min_id_;
+                max_id_ = other.max_id_;
+                size_ = other.size_;
+                
+                other.min_id_ = 0;
+                other.max_id_ = 0;
+                other.size_ = 0;
+            }
+            return *this;
+        }
+
+        // Destructor (default is fine since PackedArray handles its own cleanup)
+        ~ID_vector() = default;
+
+
+        // check presence
+        bool contains(index_type id) const {
+            if(id < min_id_ || id > max_id_) return false;
+            return id_array.get(id_to_index(id)) != 0;
+        }
+
+        // insert ID (order independent, data structure is inherently sorted)
+        void push_back(index_type id){
+            // Check if ID exceeds absolute maximum
+            if(id >= MAX_RF_ID){
+                throw std::out_of_range("ID exceeds maximum allowed RF ID limit");
+            }
+            
+            // Auto-expand range if necessary
+            if(id > max_id_){
+                set_maxID(id);
+            } else if(id < min_id_){
+                set_minID(id);
+            }
+            
+            index_type index = id_to_index(id);
+            count_type current_count = id_array.get(index);
+            if(current_count < MAX_COUNT){
+                id_array.set(index, current_count + 1);
+                ++size_;
+            } // if already at max count, ignore (do nothing)
+        }
+
+        // get count of specific ID
+        count_type count(index_type id) const {
+            if(id < min_id_ || id > max_id_) return 0;
+            return id_array.get(id_to_index(id));
+        }
+
+        // remove one instance of specific ID (if exists)
+        bool erase(index_type id){
+            if(id < min_id_ || id > max_id_) return false;
+            index_type index = id_to_index(id);
+            count_type current_count = id_array.get(index);
+            if(current_count > 0){
+                id_array.set(index, current_count - 1);
+                --size_;
+                return true;
+            }
+            return false;
+        }
+        // largest ID in the vector (if empty, throws)
+        T back() const {
+            if(size_ == 0) throw std::out_of_range("ID_vector is empty");
+            
+            // Find the highest ID with count > 0
+            for(T id = max_id_; id >= min_id_; --id) {
+                if(id_array.get(id_to_index(id)) > 0) {
+                    return id;
+                }
+            }
+            throw std::out_of_range("ID_vector::back() internal error");
+        }
+
+        // pop largest ID (remove one instance)
+        void pop_back(){
+            if(size_ == 0) return; // empty
+            
+            // Find the highest ID with count > 0 and decrement
+            for(index_type id = max_id_; id >= min_id_; --id) {
+                index_type index = id_to_index(id);
+                count_type current_count = id_array.get(index);
+                if(current_count > 0) {
+                    id_array.set(index, current_count - 1);
+                    --size_;
+                    return;
+                }
+            }
+        }
+
+        T front() const {
+            if(size_ == 0) throw std::out_of_range("ID_vector is empty");
+            
+            // Find the lowest ID with count > 0
+            for(T id = min_id_; id <= max_id_; ++id) {
+                if(id_array.get(id_to_index(id)) > 0) {
+                    return id;  
+                }
+            }
+            throw std::out_of_range("ID_vector::front() internal error");
+        }
+
+        void pop_front() {
+            if(size_ == 0) return; // empty
+
+            // Find the lowest ID with count > 0 and decrement
+            for(index_type id = min_id_; id <= max_id_; ++id) {
+                index_type index = id_to_index(id);
+                count_type current_count = id_array.get(index);
+                if(current_count > 0) {
+                    id_array.set(index, current_count - 1);
+                    --size_;
+                    return;
+                }
+            }
+        }
+
+        void reserve(index_type new_max_id){
+            if(new_max_id >= MAX_RF_ID){
+                throw std::out_of_range("Max RF ID exceeds limit");
+            }
+            if(new_max_id < min_id_){
+                throw std::out_of_range("Max ID cannot be less than min ID");
+            }
+            if(new_max_id > max_id_){
+                set_maxID(new_max_id);
+            }
+        }
+
+
+        // nth element (0-based) among all ID instances (in ascending order)
+        // When an ID appears multiple times, it will be returned multiple times
+        index_type operator[](size_type index) const {
+            if(index >= size_) throw std::out_of_range("ID_vector::operator[] index out of range");
+            
+            size_type current_count = 0;
+            for(index_type id = min_id_; id <= max_id_; ++id) {
+                count_type id_count = id_array.get(id_to_index(id));
+                if(id_count > 0) {
+                    if(current_count + id_count > index) {
+                        // The index falls within this ID's instances
+                        return id;
+                    }
+                    current_count += id_count;
+                }
+            }
+            throw std::out_of_range("ID_vector::operator[] internal error");
+        }
+
+        // iterator over all ID instances (ascending order with repetitions)
+        class iterator {
+            const ID_vector* vec = nullptr;
+            index_type current_id = 0; // Current ID being processed
+            count_type remaining_count = 0; // Remaining instances of current ID
+
+            void find_first() {
+                current_id = vec ? vec->min_id_ : 0;
+                remaining_count = 0;
+                
+                if (!vec) {
+                    current_id = 0;
+                    remaining_count = 0;
+                    return;
+                }
+
+                // Find the first ID with count > 0, starting from min_id
+                while (current_id <= vec->max_id_) {
+                    count_type id_count = vec->id_array.get(vec->id_to_index(current_id));
+                    if (id_count > 0) {
+                        remaining_count = id_count - 1; // -1 because we're returning this instance
+                        return;
+                    }
+                    ++current_id;
+                }
+
+                // No IDs found
+                current_id = vec->max_id_ + 1;
+                remaining_count = 0;
+            }
+
+            void find_next() {
+                if (!vec) {
+                    current_id = 0;
+                    remaining_count = 0;
+                    return;
+                }
+
+                // If we still have instances of the current ID, just decrement
+                if (remaining_count > 0) {
+                    --remaining_count;
+                    return;
+                }
+
+                // Find the next ID with count > 0
+                ++current_id; // Move to next ID
+                while (current_id <= vec->max_id_) {
+                    count_type id_count = vec->id_array.get(vec->id_to_index(current_id));
+                    if (id_count > 0) {
+                        remaining_count = id_count - 1; // -1 because we're returning this instance
+                        return;
+                    }
+                    ++current_id;
+                }
+
+                // No more IDs found
+                current_id = vec->max_id_ + 1;
+                remaining_count = 0;
+            }
+
+        public:
+            using value_type = index_type;
+            using difference_type = std::ptrdiff_t;
+            using iterator_category = std::forward_iterator_tag;
+            using pointer = const value_type*;
+            using reference = const value_type&;
+
+            iterator() : vec(nullptr), current_id(0), remaining_count(0) {}
+
+            // Constructor for begin() and end()
+            iterator(const ID_vector* v, bool is_end) : vec(v), current_id(0), remaining_count(0) {
+                if (!v || v->size_ == 0 || is_end) {
+                    current_id = v ? v->max_id_ + 1 : 0;
+                    remaining_count = 0;
+                } else {
+                    find_first();
+                }
+            }
+
+            reference operator*() const { return current_id; }
+
+            iterator& operator++() {
+                find_next();
+                return *this;
+            }
+
+            iterator operator++(int) {
+                iterator tmp = *this;
+                find_next();
+                return tmp;
+            }
+
+            bool operator==(const iterator& other) const {
+                return vec == other.vec && current_id == other.current_id && remaining_count == other.remaining_count;
+            }
+
+            bool operator!=(const iterator& other) const {
+                return !(*this == other);
+            }
+        };
+
+        iterator begin() const { return iterator(this, false); }
+        iterator end() const { return iterator(this, true); }
+
+        // Comparison operators
+        bool operator==(const ID_vector& other) const {
+            if (this == &other) return true;
+            if (min_id_ != other.min_id_ || max_id_ != other.max_id_ || size_ != other.size_) {
+                return false;
+            }
+            
+            // Compare element by element
+            for (index_type id = min_id_; id <= max_id_; ++id) {
+                if (count(id) != other.count(id)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        bool operator!=(const ID_vector& other) const {
+            return !(*this == other);
+        }
+
+        // Subset comparison (this ⊆ other)
+        bool is_subset_of(const ID_vector& other) const {
+            if (min_id_ < other.min_id_ || max_id_ > other.max_id_) {
+                return false; // Range not contained
+            }
+            
+            for (index_type id = min_id_; id <= max_id_; ++id) {
+                if (count(id) > other.count(id)) {
+                    return false; // This has more instances than other
+                }
+            }
+            return true;
+        }
+
+        // Set operations
+        ID_vector operator|(const ID_vector& other) const { // Union
+            index_type new_min = (min_id_ < other.min_id_) ? min_id_ : other.min_id_;
+            index_type new_max = (max_id_ > other.max_id_) ? max_id_ : other.max_id_;
+            ID_vector result(new_min, new_max);
+            
+            for (index_type id = new_min; id <= new_max; ++id) {
+                count_type count1 = (id >= min_id_ && id <= max_id_) ? count(id) : 0;
+                count_type count2 = (id >= other.min_id_ && id <= other.max_id_) ? other.count(id) : 0;
+                count_type max_count = (count1 > count2) ? count1 : count2;
+                
+                for (count_type i = 0; i < max_count; ++i) {
+                    result.push_back(id);
+                }
+            }
+            return result;
+        }
+
+        ID_vector operator&(const ID_vector& other) const { // Intersection
+            index_type new_min = (min_id_ > other.min_id_) ? min_id_ : other.min_id_;
+            index_type new_max = (max_id_ < other.max_id_) ? max_id_ : other.max_id_;
+            
+            if (new_min > new_max) {
+                return ID_vector(); // Empty intersection
+            }
+            
+            ID_vector result(new_min, new_max);
+            
+            for (index_type id = new_min; id <= new_max; ++id) {
+                count_type count1 = count(id);
+                count_type count2 = other.count(id);
+                count_type min_count = (count1 < count2) ? count1 : count2;
+                
+                for (count_type i = 0; i < min_count; ++i) {
+                    result.push_back(id);
+                }
+            }
+            return result;
+        }
+
+        ID_vector operator-(const ID_vector& other) const { // Difference (this - other)
+            ID_vector result(min_id_, max_id_);
+            
+            for (index_type id = min_id_; id <= max_id_; ++id) {
+                count_type count1 = count(id);
+                count_type count2 = (id >= other.min_id_ && id <= other.max_id_) ? other.count(id) : 0;
+                count_type diff_count = (count1 > count2) ? (count1 - count2) : 0;
+                
+                for (count_type i = 0; i < diff_count; ++i) {
+                    result.push_back(id);
+                }
+            }
+            return result;
+        }
+
+        // Compound assignment operators
+        ID_vector& operator|=(const ID_vector& other) { // Union assignment
+            *this = *this | other;
+            return *this;
+        }
+
+        ID_vector& operator&=(const ID_vector& other) { // Intersection assignment
+            *this = *this & other;
+            return *this;
+        }
+
+        ID_vector& operator-=(const ID_vector& other) { // Difference assignment
+            *this = *this - other;
+            return *this;
+        }
+
+       // number of stored IDs
+        size_type size() const { return size_; }
+        bool empty() const { return size_ == 0; }
+
+        void fit() {
+            // Fit the ID_vector to the current range and size
+            index_type new_min_id = minID();
+            index_type new_max_id = maxID();
+            if(new_min_id != min_id_ || new_max_id != max_id_) {
+                set_ID_range(new_min_id, new_max_id);
+            }
+        }
+
+        void clear(){
+            index_type range = max_id_ - min_id_ + 1;
+            size_t total_bits = range * BitsPerValue;
+            size_t bytes = bits_to_bytes(total_bits);
+            uint8_t* data = id_array.raw_data();
+            for(size_t i=0;i<bytes;++i) data[i] = 0;
+            size_ = 0;
+        }
+
+        // Get current minimum ID that can be stored
+        index_type get_minID() const {
+            return min_id_;
+        }
+
+        // Get current maximum ID that can be stored  
+        index_type get_maxID() const {
+            return max_id_;
+        }
+
+        // get the smallest ID currently stored in the vector
+        T minID(){
+            if(size_ == 0) {
+                throw std::out_of_range("ID_vector is empty");
+            }
+            // Find the lowest ID with count > 0
+            for(T id = min_id_; id <= max_id_; ++id) {
+                if(id_array.get(id_to_index(id)) > 0) {
+                    return id;  
+                }
+            }
+            throw std::out_of_range("ID_vector::minID() internal error");
+        }
+
+        // get the largest ID currently stored in the vector
+        T maxID(){
+            if(size_ == 0) {
+                throw std::out_of_range("ID_vector is empty");
+            }
+            // Find the highest ID with count > 0
+            for(T id = max_id_; id >= min_id_; --id) {
+                if(id_array.get(id_to_index(id)) > 0) {
+                    return id;  
+                }
+            }
+            throw std::out_of_range("ID_vector::maxID() internal error");
+        }
+
+        // takeout normalized vector of IDs (ascending order, no repetitions)
     };
 
 /*  ------------------------------------------------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 
 #include <iostream>
 #include <stdexcept>
-#include "initializer_list.h"
+#include "../../src/initializer_list.h"
 #include <type_traits>
 #include <cassert>
 #include <utility>
@@ -21,7 +21,11 @@ using namespace mcu;
 
         // Remove count - capacity is managed by packed_vector
         PackedArray(size_t capacity_bytes) {
-            data = new uint8_t[capacity_bytes]();
+            if(capacity_bytes > 0) {
+                data = new uint8_t[capacity_bytes]();
+            } else {
+                data = nullptr;
+            }
         }
 
         ~PackedArray() {
@@ -72,6 +76,8 @@ using namespace mcu;
 
         // Fast bit manipulation without bounds checking
         inline void set_unsafe(size_t index, uint8_t value) {
+            if(data == nullptr) return; // Safety check
+            
             value &= (1 << BitsPerElement) - 1;
             size_t bitPos = index * BitsPerElement;
             size_t byteIdx = bitPos >> 3;  // Faster than /8
@@ -93,6 +99,8 @@ using namespace mcu;
         }
 
         inline uint8_t get_unsafe(size_t index) const {
+            if(data == nullptr) return 0; // Safety check
+            
             size_t bitPos = index * BitsPerElement;
             size_t byteIdx = bitPos >> 3;  // Faster than /8
             size_t bitOff = bitPos & 7;    // Faster than %8
@@ -195,7 +203,7 @@ using namespace mcu;
         static constexpr size_t bits_to_bytes(size_t bits){ return (bits + 7) >> 3; }
 
         void allocate_bits(){
-            index_type range = max_id_ - min_id_ + 1; // number of IDs in range
+            size_t range = (size_t)max_id_ - (size_t)min_id_ + 1; // number of IDs in range (use size_t to avoid overflow)
             size_t total_bits = range * BitsPerValue; // multiply by bits per value
             size_t bytes = bits_to_bytes(total_bits);
             id_array = PackedArray<BitsPerValue>(bytes);
@@ -214,7 +222,7 @@ using namespace mcu;
     public:
         // Set maximum ID that can be stored and allocate memory accordingly
         void set_maxID(index_type new_max_id) {
-            if(new_max_id >= MAX_RF_ID){
+            if(new_max_id > MAX_RF_ID){
                 throw std::out_of_range("Max RF ID exceeds limit");
             }
             if(new_max_id < min_id_){
@@ -237,7 +245,7 @@ using namespace mcu;
                 
                 // Save current data
                 index_type old_max_id = max_id_;
-                index_type old_range = max_id_ - min_id_ + 1;
+                size_t old_range = (size_t)max_id_ - (size_t)min_id_ + 1; // Use size_t to avoid overflow
                 size_t old_total_bits = old_range * BitsPerValue;
                 size_t old_bytes = bits_to_bytes(old_total_bits);
                 PackedArray<BitsPerValue> old_array(old_bytes);
@@ -267,7 +275,7 @@ using namespace mcu;
 
         // Set minimum ID that can be stored and allocate memory accordingly
         void set_minID(index_type new_min_id) {
-            if(new_min_id >= MAX_RF_ID){
+            if(new_min_id > MAX_RF_ID){
                 throw std::out_of_range("Min RF ID exceeds limit");
             }
             if(new_min_id > max_id_){
@@ -290,7 +298,7 @@ using namespace mcu;
                 
                 // Save current data
                 index_type old_min_id = min_id_;
-                index_type old_range = max_id_ - min_id_ + 1;
+                size_t old_range = (size_t)max_id_ - (size_t)min_id_ + 1; // Use size_t to avoid overflow
                 size_t old_total_bits = old_range * BitsPerValue;
                 size_t old_bytes = bits_to_bytes(old_total_bits);
                 PackedArray<BitsPerValue> old_array(old_bytes);
@@ -320,7 +328,7 @@ using namespace mcu;
 
         // Set both min and max ID range and allocate memory accordingly
         void set_ID_range(index_type new_min_id, index_type new_max_id) {
-            if(new_min_id >= MAX_RF_ID || new_max_id >= MAX_RF_ID){
+            if(new_min_id > MAX_RF_ID || new_max_id > MAX_RF_ID){
                 throw std::out_of_range("RF ID exceeds limit");
             }
             if(new_min_id > new_max_id){
@@ -346,7 +354,7 @@ using namespace mcu;
                 // Save current data
                 index_type old_min_id = min_id_;
                 index_type old_max_id = max_id_;
-                index_type old_range = max_id_ - min_id_ + 1;
+                size_t old_range = (size_t)max_id_ - (size_t)min_id_ + 1; // Use size_t to avoid overflow
                 size_t old_total_bits = old_range * BitsPerValue;
                 size_t old_bytes = bits_to_bytes(old_total_bits);
                 PackedArray<BitsPerValue> old_array(old_bytes);
@@ -407,10 +415,12 @@ using namespace mcu;
                 throw std::out_of_range("ID_vector is empty");
             }
             // Find the highest ID with count > 0
-            for(index_type id = max_id_; id >= min_id_; --id) {
+            // Use a safer loop to avoid unsigned underflow issues
+            for(index_type id = max_id_; ; --id) {
                 if(id_array.get(id_to_index(id)) > 0) {
                     return id;  
                 }
+                if(id == min_id_) break; // Avoid underflow
             }
             throw std::out_of_range("ID_vector::maxID() internal error");
         }
@@ -433,7 +443,7 @@ using namespace mcu;
         // Copy constructor
         ID_vector(const ID_vector& other) 
             : id_array(), max_id_(other.max_id_), min_id_(other.min_id_), size_(other.size_) {
-            index_type range = max_id_ - min_id_ + 1;
+            size_t range = (size_t)max_id_ - (size_t)min_id_ + 1; // Use size_t to avoid overflow
             size_t total_bits = range * BitsPerValue;
             size_t bytes = bits_to_bytes(total_bits);
             id_array = PackedArray<BitsPerValue>(bytes);
@@ -456,7 +466,7 @@ using namespace mcu;
                 max_id_ = other.max_id_;
                 size_ = other.size_;
                 
-                index_type range = max_id_ - min_id_ + 1;
+                size_t range = (size_t)max_id_ - (size_t)min_id_ + 1; // Use size_t to avoid overflow
                 size_t total_bits = range * BitsPerValue;
                 size_t bytes = bits_to_bytes(total_bits);
                 id_array = PackedArray<BitsPerValue>(bytes);
@@ -496,7 +506,7 @@ using namespace mcu;
         // insert ID (order independent, data structure is inherently sorted)
         void push_back(index_type id){
             // Check if ID exceeds absolute maximum
-            if(id >= MAX_RF_ID){
+            if(id > MAX_RF_ID){
                 throw std::out_of_range("ID exceeds maximum allowed RF ID limit");
             }
             
@@ -552,10 +562,12 @@ using namespace mcu;
             if(size_ == 0) throw std::out_of_range("ID_vector is empty");
             
             // Find the highest ID with count > 0
-            for(index_type id = max_id_; id >= min_id_; --id) {
+            // Use a safer loop to avoid unsigned underflow issues
+            for(index_type id = max_id_; ; --id) {
                 if(id_array.get(id_to_index(id)) > 0) {
                     return id;
                 }
+                if(id == min_id_) break; // Avoid underflow
             }
             throw std::out_of_range("ID_vector::back() internal error");
         }
@@ -565,7 +577,8 @@ using namespace mcu;
             if(size_ == 0) return; // empty
             
             // Find the highest ID with count > 0 and decrement
-            for(index_type id = max_id_; id >= min_id_; --id) {
+            // Use a safer loop to avoid unsigned underflow issues
+            for(index_type id = max_id_; ; --id) {
                 index_type index = id_to_index(id);
                 count_type current_count = id_array.get(index);
                 if(current_count > 0) {
@@ -573,16 +586,33 @@ using namespace mcu;
                     --size_;
                     return;
                 }
+                if(id == min_id_) break; // Avoid underflow
             }
         }
 
         void clear(){
-            index_type range = max_id_ - min_id_ + 1;
+            if(size_ == 0) return; // Already empty
+            
+            size_t range = (size_t)max_id_ - (size_t)min_id_ + 1; // Use size_t to avoid overflow
             size_t total_bits = range * BitsPerValue;
             size_t bytes = bits_to_bytes(total_bits);
             uint8_t* data = id_array.raw_data();
-            for(size_t i=0;i<bytes;++i) data[i] = 0;
+            if(data != nullptr) {
+                for(size_t i=0;i<bytes;++i) data[i] = 0;
+            }
             size_ = 0;
+        }
+        void fit() {
+            // Fit the ID_vector to the current range and size
+            if(size_ == 0) {
+                // Empty vector - nothing to fit
+                return;
+            }
+            index_type new_min_id = minID();
+            index_type new_max_id = maxID();
+            if(new_min_id != min_id_ || new_max_id != max_id_) {
+                set_ID_range(new_min_id, new_max_id);
+            }
         }
 
         // nth element (0-based) among all ID instances (in ascending order)

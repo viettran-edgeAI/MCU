@@ -3382,6 +3382,16 @@ namespace mcu {
             }
         }
 
+        // get number of unique IDs stored (if bitspervalue=1, this is same as size())
+        size_type unique_size() const {
+            if(BitsPerValue == 1) return size_;
+            size_type unique_count = 0;
+            index_type range = (size_t)max_id_  -  (size_t)min_id_ + 1;
+            for(index_type i = 0; i < range; ++i){
+                if(id_array.get(i) > 0) ++unique_count;
+            }
+            return unique_count;
+        }
 
         // nth element (0-based) among all ID instances (in ascending order)
         // When an ID appears multiple times, it will be returned multiple times

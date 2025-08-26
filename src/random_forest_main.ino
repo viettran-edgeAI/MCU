@@ -10,8 +10,6 @@ typedef enum Rf_training_flags : uint8_t{
     F1_SCORE    = 0x08          // calculate F1 score of the model
 }Rf_training_flags;
 
-
-
 // -------------------------------------------------------------------------------- 
 class RandomForest{
 public:
@@ -27,45 +25,40 @@ public:
     Rf_categorizer categorizer; 
     Rf_memory_logger memory_tracker;
     Rf_node_predictor  node_predictor; // Node predictor number of nodes required for a tree based on min_split and max_depth
-
 private:
     vector<Rf_tree, SMALL> root;                     // b_vector storing root nodes of trees (now manages SPIFFS filenames)
-    b_vector<ID_vector<uint16_t,2>, SMALL> dataList; // b_vector of pairs: Rf_data and OOB set for each tree
-
-    b_vector<uint16_t> train_backup;   // backup of training set sample IDs 
-    b_vector<uint16_t> test_backup;    // backup of testing set sample IDs
-    b_vector<uint16_t> validation_backup; // backup of validation set sample IDs
-
-    b_vector<NodeToBuild, SMALL, 10> queue_nodes; // Queue for breadth-first processing
+    vector<ID_vector<uint16_t,2>, SMALL> dataList; // each ID_vector stores sample IDs of a sub_dataset, reference to index of allSamples vector in train_data
+    b_vector<NodeToBuild, SMALL, 20> queue_nodes; // Queue for breadth-first tree building
 
     bool optimal_mode = false;  
-
-
+    bool is_loaded = false;
 public:
 
     RandomForest(){};
     RandomForest(const char* base_name){
         model_name = String(base_name);
+
         // initial components
         memory_tracker.init();
         base.init(base_name); // Initialize base with the provided base name
-        config.loadConfig();
-        node_predictor.loadPredictor(); 
+        config.init(base.get_configFile());
+        categorizer.init(base.get_ctgFile());
+        node_predictor.init(base.get_nodePredictFile());
 
-        // Extract data_params file from base_name, load forest parameters
-        String dpFile = base.get_dpFile();
-        first_scan(dpFile.c_str());
-        config.num_trees = 5;
-
-        String ctgFile = base.get_ctgFile();
-        categorizer.init(ctgFile); // Initialize categorizer with the provided file
-        categorizer.loadCategorizer();
+        // load resources
+        config.loadConfig();  // load config file
+        first_scan(base.get_dpFile());   // load data parameters into config
+        categorizer.loadCategorizer(); // load categorizer
+        node_predictor.loadPredictor(); // load node predictor
 
         // load base data 
-        base_data.filename = base.get_baseFile();
+        String baseData = "/base_data.bin";         // make a copy of base data to avoid accidental deletion
+        cloneFile(base.get_baseFile().c_str(), baseData.c_str());
+        base_data.filename = baseData;
         
-        // resource separation
+        // data separation
         dataList.reserve(config.num_trees);
+        memory_tracker.log("forest init");
         splitData();
         ClonesData();
     }
@@ -76,8 +69,8 @@ public:
 
         // clear all trees
         for(auto& tree : root){
-            tree.purgeTree();       // completely remove tree - for development stage 
-            // tree.releaseTree(); // save tree to SPIFFS - for production stage
+            tree.purgeTree(this->model_name);   // completely remove tree - for development stage 
+            // tree.releaseTree();               // save tree to SPIFFS - for production stage
         }
           
         // clear all Rf_data
@@ -85,13 +78,9 @@ public:
         test_data.purgeData();
         base_data.purgeData();
         if(config.use_validation) validation_data.purgeData();
-        
-        // clear sub-data
-        for(auto& data : dataList){
-            data.first.purgeData();
-        }
 
-        node_predictor.re_train()
+        // re_train node predictor after each training session
+        node_predictor.re_train();
     }
 
     void MakeForest(){
@@ -108,24 +97,27 @@ public:
         node_data n_data(config.min_split, config.max_depth,0);
 
         Serial.print("building sub_tree: ");
+        
+        // Load train_data once for all trees
+        train_data.loadData();
+        
         for(uint8_t i = 0; i < config.num_trees; i++){
-            dataList[i].first.loadData();
             Serial.printf("%d, ", i);
             Rf_tree tree(i);
             tree.nodes.reserve(estimatedNodes); // Reserve memory for nodes based on prediction
             queue_nodes.clear(); // Clear queue for each tree
 
-            buildTree(tree, dataList[i].first);
+            buildTree(tree, dataList[i]);
 
             n_data.total_nodes += tree.countNodes();
             
             tree.isLoaded = true; 
-            tree.releaseTree(); // Save tree to SPIFFS
+            tree.releaseTree(this->model_name); // Save tree to SPIFFS
             root.push_back(tree);
-            
-            // Release sub-data after tree creation
-            dataList[i].first.releaseData(true);
         }
+        
+        // Release train_data after all trees are built
+        train_data.releaseData(); // Keep metadata but release sample data
         n_data.total_nodes /= config.num_trees; // Average nodes per tree
         node_predictor.buffer.push_back(n_data); // Add node data to predictor buffer
 
@@ -133,75 +125,63 @@ public:
     }
   private:
     // ----------------------------------------------------------------------------------
-    // Split data into training and testing sets
+    // Split data into training and testing sets. create them from base_data in SPIFFS to avoid peak RAM usage
     void splitData() {
         Serial.println("<-- split data -->");
     
-        uint16_t totalSamples = config.num_samples;
-        uint16_t trainSize = static_cast<uint16_t>(totalSamples * config.train_ratio);
+        size_t maxID = config.num_samples;  // total number of samples
+        uint16_t trainSize = static_cast<uint16_t>(maxID * config.train_ratio);
         uint16_t testSize;
-        if(config.use_validation){
-            testSize = static_cast<uint16_t>((totalSamples - trainSize) * 0.5);
-        }else{
-            testSize = totalSamples - trainSize; // No validation set, use all remaining for testing
-        }
-        uint16_t validationSize = totalSamples - trainSize - testSize;
+        if(config.use_validation)  testSize = static_cast<uint16_t>((maxID - trainSize) * 0.5);
+        else  testSize = maxID - trainSize; // No validation set, use all remaining for testing
+        uint16_t validationSize = maxID - trainSize - testSize;
         
-        sampleID_set train_sampleIDs;
-        sampleID_set test_sampleIDs;
-        sampleID_set validation_sampleIDs;
-        train_sampleIDs.reserve(totalSamples);
-        test_sampleIDs.reserve(totalSamples);
-        validation_sampleIDs.reserve(totalSamples);
 
-
+        // create train_data 
+        sampleID_set train_sampleIDs(maxID);
         while (train_sampleIDs.size() < trainSize) {
-            uint16_t sampleId = static_cast<uint16_t>(esp_random() % totalSamples);
-            train_sampleIDs.insert(sampleId);
+            uint16_t sampleId = static_cast<uint16_t>(esp_random() % maxID);
+            train_sampleIDs.push_back(sampleId); 
         }
-
+        train_data.allSamples = base_data.loadData(train_sampleIDs); // Load only training samples
+        train_data.isLoaded = true;
+        train_data.filename = "/train_data.bin";
+        train_data.releaseData(false); // Write to binary SPIFFS, clear RAM
+        Serial.println("Train data loaded and released.");
+        // Serial.print("all samples: ");
+        // for(auto id : train_sampleIDs) Serial.printf("%d, ", id);
+        // Serial.println();
+        
+        // create test_data
+        sampleID_set test_sampleIDs(maxID);
         while(test_sampleIDs.size() < testSize) {
-            uint16_t i = static_cast<uint16_t>(esp_random() % totalSamples);
+            uint16_t i = static_cast<uint16_t>(esp_random() % maxID);
             if (!train_sampleIDs.contains(i)) {
-                test_sampleIDs.insert(i);
+                test_sampleIDs.push_back(i);
             }
         }
-        test_sampleIDs.fit();
+        test_data.allSamples = base_data.loadData(test_sampleIDs); // Load only testing samples
+        test_data.isLoaded = true;
+        test_data.filename = "/test_data.bin";
+        test_data.releaseData(false); // Write to binary SPIFFS, clear RAM
+        Serial.println("Test data loaded and released.");
 
-        if(config.use_validation) {
-            // Create validation set from remaining samples    
+        // create validation_data
+        if(config.use_validation){
+            sampleID_set validation_sampleIDs(maxID);
             while(validation_sampleIDs.size() < validationSize) {
-                uint16_t i = static_cast<uint16_t>(esp_random() % totalSamples);
+                uint16_t i = static_cast<uint16_t>(esp_random() % maxID);
                 if (!train_sampleIDs.contains(i) && !test_sampleIDs.contains(i)) {
-                    validation_sampleIDs.insert(i);
+                    validation_sampleIDs.push_back(i);
                 }
             }
-            validation_sampleIDs.fit();
-        }
-
-        if(config.use_validation) {
-            validation_data.isLoaded = true;
-        }
-        train_data.isLoaded = true;
-        test_data.isLoaded = true;
-
-        train_data.allSamples = base_data.loadData(train_sampleIDs); // Load only training samples
-        memory_tracker.log();   // check heap fragmentation at highest RAM usage point
-        train_sampleIDs.clear(); // Clear sample IDs set to free memory
-        train_sampleIDs.fit(); // Fit the set to release unused memory
-        train_data.releaseData(false); // Write to binary SPIFFS, clear RAM
-
-        test_data.allSamples = base_data.loadData(test_sampleIDs); // Load only testing samples
-        test_sampleIDs.clear(); // Clear sample IDs set to free memory
-        test_sampleIDs.fit(); // Fit the set to release unused memory
-        test_data.releaseData(false); // Write to binary SPIFFS, clear RAM
-
-        if(config.use_validation) {
             validation_data.allSamples = base_data.loadData(validation_sampleIDs); // Load only validation samples
-            validation_sampleIDs.clear(); // Clear sample IDs set to free memory
-            validation_sampleIDs.fit(); // Fit the set to release unused memory
+            validation_data.isLoaded = true;
+            validation_data.filename = "/valid_data.bin";
             validation_data.releaseData(false); // Write to binary SPIFFS, clear RAM
+            Serial.println("Validation data loaded and released.");
         }
+        memory_tracker.log("split data");
     }
 
     // ---------------------------------------------------------------------------------
@@ -209,62 +189,64 @@ public:
         Serial.println("<- clones data ->");
         dataList.clear();
         dataList.reserve(config.num_trees);
-        uint16_t numSample = train_backup.size();
-        uint16_t numSubSample = numSample * config.boostrap_ratio;
-        uint16_t oob_size = numSample - numSubSample;
-
-        b_vector<uint16_t> inBagSamplesVec;
-        inBagSamplesVec.reserve(numSubSample);
-
-        sampleID_set inBagSamples;
-        inBagSamples.reserve(numSubSample);
-        oob_set.reserve(oob_size);
-        Rf_data sub_data;
-        sub_data.allSamples.reserve(numSubSample);
-        sub_data.flag = SUB_DATA;
-
-        for (uint8_t i = 0; i < config.num_trees; i++) {
-            Serial.printf("creating dataset for sub-tree : %d\n", i);
-
-            sub_data.allSamples.clear();
-            oob_set.clear();
-
-            sub_data.index = i;
-            sub_data.isLoaded = true;
-
-            while(inBagSamples.size() < numSubSample) {
-                uint16_t idx = static_cast<uint16_t>(esp_random() % numSample);
-                uint16_t sampleId = train_backup[idx];
-                
-                if(inBagSamples.insert(sampleId)) { // Only insert if not already present
-                    inBagSamplesVec.push_back(sampleId);
-                }
-            }
-            sub_data.allSamples = train_data.loadData(inBagSamplesVec); // Load only in-bag samples
-            inBagSamplesVec.clear(); // Clear vector to free memory
-            sub_data.allSamples.fit();
-            if(config.use_boostrap) {
-                sub_data.boostrapData(numSample, config.num_samples);
-            }
-            sub_data.releaseData(false); // Save as binary
-            
-            // Create OOB set with samples not used in this tree
-            for (uint16_t id : train_backup) {
-                if (inBagSamples.find(id) == inBagSamples.end()) {
-                    oob_set.insert(id);
-                }
-            }
-            inBagSamples.clear(); // Clear in-bag samples set for next iteration
-            dataList.push_back(make_pair(sub_data, oob_set));
-            memory_tracker.log();
+        uint16_t numSample = train_data.size();
+        uint16_t numSubSample;
+        if(config.use_boostrap) {
+            numSubSample = numSample; // Bootstrap sampling with replacement
+            Serial.println("Using bootstrap sampling with replacement.");
+        } else {
+            // Sub-sampling without replacement
+            numSubSample = static_cast<uint16_t>(numSample * config.boostrap_ratio); 
+            Serial.println("No bootstrap, using unique samples IDs");
         }
+        // Serial.printf("Total samples: %d, Sub-sample size: %d\n", numSample, numSubSample);
+
+        // Seed random number generator with current time + some entropy
+        uint32_t seed = millis() ^ ESP.getCycleCount() ^ esp_random();
+        srand(seed);
+
+        Serial.println("creating dataset for sub-tree : ");
+        for (uint8_t i = 0; i < config.num_trees; i++) {
+            Serial.printf("%d, ", i);
+            // Create a new ID_vector for this tree
+            ID_vector<uint16_t,2> treeDataset;
+            treeDataset.reserve(numSubSample);
+
+            // Add some randomness per tree to further diversify
+            uint32_t tree_seed = seed + i * 1000 + millis();
+            
+            uint32_t attempts = 0;
+            while(treeDataset.size() < numSubSample && attempts < numSubSample * 10) {
+                // Use multiple sources of randomness
+                uint32_t rand_val = (esp_random() ^ (tree_seed * (attempts + 1))) + ESP.getCycleCount();
+                uint16_t idx = static_cast<uint16_t>(rand_val % numSample);
+                if(!config.use_boostrap) {
+                    // Without replacement, ensure unique samples
+                    if(treeDataset.contains(idx)) {
+                        attempts++;
+                        continue;
+                    }
+                }
+                treeDataset.push_back(idx);
+                attempts++;
+            }
+            dataList.push_back(std::move(treeDataset));
+            
+            // Serial.printf("dataset size: %d\n", dataList[i].size());
+            // Serial.printf("unique IDs: %d\n", dataList[i].unique_size());
+            // Serial.print("sample IDs: ");
+            // for(auto id : dataList[i]) Serial.printf("%d, ", id);
+            // Serial.println();
+        }
+        Serial.println();
+        memory_tracker.log("after clones data");  
     }
         
     // ------------------------------------------------------------------------------
     // read dataset parameters from /dataset_dp.csv and write to config
-    void first_scan(const char* path) {
+    void first_scan(const String& path) {
         // Read dataset parameters from /dataset_params.csv
-        File file = SPIFFS.open(path, "r");
+        File file = SPIFFS.open(path.c_str(), "r");
         if (!file) {
             Serial.println("❌ Failed to open data_params file.");
             return;
@@ -407,6 +389,7 @@ public:
         for(uint8_t i = min_maxDepth; i <= max_maxDepth; i = i+2) {
             config.max_depth_range.push_back(i);
         }
+        memory_tracker.log("first scan");
 
         if(config.min_split_range.empty()) config.min_split_range.push_back(config.min_split); // Ensure at least one value
         if(config.max_depth_range.empty()) config.max_depth_range.push_back(config.max_depth); // Ensure at least one value
@@ -417,7 +400,7 @@ public:
     void clearForest() {
         // Process trees one by one to avoid heap issues
         for (size_t i = 0; i < root.size(); i++) {
-            root[i].purgeTree(); 
+            root[i].purgeTree(this->model_name);
             // Force yield to allow garbage collection
             yield();        
             delay(10);
@@ -438,18 +421,18 @@ public:
         uint16_t totalSamples;
         
         NodeStats(uint8_t numLabels) : majorityLabel(0), totalSamples(0) {
-            for(int i = 0; i < numLabels; i++) labelCounts[i] = 0;
+            labelCounts.reserve(numLabels);
+            labelCounts.fill(0);
         }
         
-        void analyzeSamples(const b_vector<uint16_t>& sampleIDs, sample_set& allSamples, uint8_t numLabels) {
+        void analyzeSamples(const ID_vector<uint16_t,2>& sampleIDs, uint8_t numLabels, const Rf_data& data) {
             totalSamples = sampleIDs.size();
             uint16_t maxCount = 0;
             
             // Single pass through sample IDs for efficiency
             for (const auto& sampleID : sampleIDs) {
-                auto it = allSamples.find(sampleID);
-                if (it != allSamples.end()) {
-                    uint8_t label = it->second.label;
+                if (sampleID < data.size()) {  // Direct index bounds check
+                    uint8_t label = data.allSamples[sampleID].label;  // Direct indexing
                     labels.insert(label);
                     if (label < numLabels && label < 32) { // Bounds check
                         labelCounts[label]++;
@@ -464,18 +447,17 @@ public:
     };
 
     // Memory-efficient findBestSplit that works directly with sample IDs
-    SplitInfo findBestSplit(const b_vector<uint16_t>& sampleIDs, sample_set& allSamples, 
+    SplitInfo findBestSplit(const ID_vector<uint16_t,2>& sampleIDs, 
                                 const unordered_set<uint16_t>& selectedFeatures, bool use_Gini, uint8_t numLabels) {
         SplitInfo bestSplit;
         uint32_t totalSamples = sampleIDs.size();
         if (totalSamples < 2) return bestSplit; // Cannot split less than 2 samples
 
-        // Calculate base impurity
+        // Calculate base impurity using direct indexing
         vector<uint16_t> baseLabelCounts(numLabels, 0);
         for (const auto& sampleID : sampleIDs) {
-            auto it = allSamples.find(sampleID);
-            if (it != allSamples.end() && it->second.label < numLabels) {
-                baseLabelCounts[it->second.label]++;
+            if (sampleID < train_data.size() && train_data.allSamples[sampleID].label < numLabels) {
+                baseLabelCounts[train_data.allSamples[sampleID].label]++;
             }
         }
 
@@ -504,11 +486,10 @@ public:
             vector<uint16_t> counts(4 * numLabels, 0);
             uint32_t value_totals[4] = {0};
 
-            // Build contingency table
+            // Build contingency table using direct indexing
             for (const auto& sampleID : sampleIDs) {
-                auto it = allSamples.find(sampleID);
-                if (it != allSamples.end()) {
-                    const Rf_sample& sample = it->second;
+                if (sampleID < train_data.size()) {  // Direct index bounds check
+                    const Rf_sample& sample = train_data.allSamples[sampleID];  // Direct indexing
                     if (featureID < sample.features.size() && sample.label < numLabels) {
                         uint8_t featureValue = sample.features[featureID];
                         if (featureValue < 4) {
@@ -583,33 +564,28 @@ public:
     }
 
     // Breadth-first tree building for optimal node layout - MEMORY OPTIMIZED
-    void buildTree(Rf_tree& tree, Rf_data& data) {
+    void buildTree(Rf_tree& tree, ID_vector<uint16_t,2>& sampleIDs) {
         tree.nodes.clear();
-        if (data.allSamples.empty()) return;
+        if (sampleIDs.empty()) return;
 
         uint32_t initialRAM = ESP.getFreeHeap();
     
-        // Create root node and initial sample ID list
+        // Create root node and initial sample ID list (all samples from the ID_vector)
         Tree_node rootNode;
         tree.nodes.push_back(rootNode);
         
-        b_vector<uint16_t> rootSampleIDs;
-        rootSampleIDs.reserve(data.allSamples.size());
-        for (const auto& entry : data.allSamples) {
-            rootSampleIDs.push_back(entry.first);
-        }
-
+        // Use the ID_vector directly for root node - no need to extract IDs
+        ID_vector<uint16_t,2> rootSampleIDs = sampleIDs; // Copy all sample IDs and move to root nod
         queue_nodes.push_back(NodeToBuild(0, std::move(rootSampleIDs), 0));
-        memory_tracker.log(false); // Log memory usage after initial setup
         
         // Process nodes breadth-first with periodic cleanup
         while (!queue_nodes.empty()) {
             NodeToBuild current = std::move(queue_nodes.front());
             queue_nodes.erase(0); // Remove first element
             
-            // Analyze node samples efficiently
+            // Analyze node samples efficiently using direct indexing
             NodeStats stats(config.num_labels);
-            stats.analyzeSamples(current.sampleIDs, data.allSamples, config.num_labels);
+            stats.analyzeSamples(current.sampleIDs, config.num_labels, train_data);
             bool shouldBeLeaf = false;
             uint8_t leafLabel = stats.majorityLabel;
             
@@ -639,8 +615,8 @@ public:
                 uint16_t idx = static_cast<uint16_t>(esp_random() % config.num_features);
                 selectedFeatures.insert(idx);
             } 
-            // Use memory-efficient split finding
-            SplitInfo bestSplit = findBestSplit(current.sampleIDs, data.allSamples, 
+            // Use memory-efficient split finding with train_data.allSamples
+            SplitInfo bestSplit = findBestSplit(current.sampleIDs, 
                                                    selectedFeatures, config.use_gini, config.num_labels);
             float gain_threshold = config.use_gini ? config.impurity_threshold/2 : config.impurity_threshold;
             
@@ -658,7 +634,7 @@ public:
             tree.nodes[current.nodeIndex].setIsLeaf(false);
             
             // Split sample IDs for children (memory efficient with pre-allocation)
-            b_vector<uint16_t> leftSampleIDs, rightSampleIDs;
+            ID_vector<uint16_t,2> leftSampleIDs, rightSampleIDs;
             // Pre-estimate split sizes to avoid reallocations
             uint16_t estimatedLeftSize = current.sampleIDs.size() / 2;
             uint16_t estimatedRightSize = current.sampleIDs.size() - estimatedLeftSize;
@@ -666,9 +642,8 @@ public:
             rightSampleIDs.reserve(estimatedRightSize);
             
             for (const auto& sampleID : current.sampleIDs) {
-                auto it = data.allSamples.find(sampleID);
-                if (it != data.allSamples.end()) {
-                    if (it->second.features[bestSplit.featureID] <= bestSplit.threshold) {
+                if (sampleID < train_data.size()) {  // Direct index bounds check
+                    if (train_data.allSamples[sampleID].features[bestSplit.featureID] <= bestSplit.threshold) {
                         leftSampleIDs.push_back(sampleID);
                     } else {
                         rightSampleIDs.push_back(sampleID);
@@ -714,6 +689,7 @@ public:
                 tree.nodes[rightChildIndex].setFeatureID(0);
             }
         }
+        memory_tracker.log("tree creation",false);
     }
 
     uint8_t predClassSample(Rf_sample& s){
@@ -753,107 +729,113 @@ public:
         }
         return mostPredict;
     }
-
-    // hellper function: evaluate the entire forest, using OOB_score : iterate over all samples in 
-    // the train set and evaluate by trees whose OOB set contains its ID
+    
+    
+    // Helper function: evaluate the entire forest using OOB score and validation
+    // Iterates over all samples in training data and evaluates using trees that didn't see each sample
     float get_training_evaluation_index(){
         Serial.println("Get training evaluation index... ");
 
-        // chunk size for processing
-        uint16_t buffer_chunk;
-        if(train_backup.size() == 0){
-            Serial.println("❌ No training samples available for evaluation!");
+        // Check if we have trained trees and data
+        if(dataList.empty() || root.empty()){
+            Serial.println("❌ No trained trees available for evaluation!");
             return 0.0f;
-        } else buffer_chunk = train_backup.size() / 4;
-        if(buffer_chunk < 130) buffer_chunk = 130; 
+        }
 
-        // early preparing resources
+        // Determine chunk size for memory-efficient processing
+        uint16_t buffer_chunk = train_data.size() / 4;
+        if(buffer_chunk < 130) buffer_chunk = 130;
+        if(buffer_chunk > train_data.size()) buffer_chunk = train_data.size();
+
+        // Pre-allocate evaluation resources
         sample_set train_samples_buffer;
-        b_vector<uint16_t> sampleIDs_bag;
+        sampleID_set sampleIDs_bag;
         b_vector<uint8_t, SMALL> activeTrees;
         unordered_map<uint8_t, uint8_t> oobPredictClass;
 
         train_samples_buffer.reserve(buffer_chunk);
-        sampleIDs_bag.reserve(buffer_chunk);
         activeTrees.reserve(config.num_trees);
         oobPredictClass.reserve(config.num_labels);
 
-        // Initialize OOB and validation matrices
-        b_vector<uint16_t, SMALL> oob_tp(config.num_labels, 0); 
-        b_vector<uint16_t, SMALL> oob_fp(config.num_labels, 0);
-        b_vector<uint16_t, SMALL> oob_fn(config.num_labels, 0);
-        b_vector<uint16_t, SMALL> valid_tp(config.num_labels, 0);
-        b_vector<uint16_t, SMALL> valid_fp(config.num_labels, 0);
-        b_vector<uint16_t, SMALL> valid_fn(config.num_labels, 0);
+        // Initialize confusion matrix components for OOB and validation
+        uint8_t oobPredictVotes[config.num_labels];
+        uint8_t validPredictVotes[config.num_labels];
+        uint16_t oob_tp[config.num_labels];
+        uint16_t oob_fp[config.num_labels];
+        uint16_t oob_fn[config.num_labels];
+        uint16_t valid_tp[config.num_labels];
+        uint16_t valid_fp[config.num_labels];
+        uint16_t valid_fn[config.num_labels];
+
+        // Initialize arrays
+        memset(oob_tp, 0, sizeof(oob_tp));
+        memset(oob_fp, 0, sizeof(oob_fp));
+        memset(oob_fn, 0, sizeof(oob_fn));
+        memset(valid_tp, 0, sizeof(valid_tp));
+        memset(valid_fp, 0, sizeof(valid_fp));
+        memset(valid_fn, 0, sizeof(valid_fn));
 
         uint16_t oob_correct = 0, oob_total = 0, valid_correct = 0, valid_total = 0;
-        uint16_t start_pos = 0 , end_pos = 0;
 
+        // Load forest into memory for evaluation
         loadForest();
-        memory_tracker.log();
-        train_backup.sort();
+        memory_tracker.log("get training eval index");
 
-        // OOB part 
-        for(start_pos = 0; start_pos < train_backup.size(); start_pos += buffer_chunk){
-            end_pos = start_pos + buffer_chunk;
-            if(end_pos > train_backup.size()) end_pos = train_backup.size();
+        // Process training samples in chunks for OOB evaluation
+        for(uint16_t start_pos = 0; start_pos < train_data.size(); start_pos += buffer_chunk){
+            uint16_t end_pos = start_pos + buffer_chunk;
+            if(end_pos > train_data.size()) end_pos = train_data.size();
 
+            // Create chunk of sample IDs
             sampleIDs_bag.clear();
+            sampleIDs_bag.set_ID_range(start_pos, end_pos);
             for(uint16_t i = start_pos; i < end_pos; i++){
-                sampleIDs_bag.push_back(train_backup[i]);
+                sampleIDs_bag.push_back(i);
             }
-            train_samples_buffer.clear();
-            train_samples_buffer.fit();
+
+            // Load samples for this chunk
             train_samples_buffer = train_data.loadData(sampleIDs_bag);
             if(train_samples_buffer.empty()){
-                Serial.println("❌ No training samples found in the buffer!");
-                Serial.println("Switching to plan B: loading all training data into RAM...");
-                releaseForest();
-                bool preloaded = train_data.isLoaded;
-                if(!preloaded) train_data.loadData(); // FIX: load only if not already loaded
-                train_samples_buffer = train_data.allSamples;
-                if(train_samples_buffer.empty()){
-                    Serial.println("❌ No training samples found in RAM!");
-                    return 0.0f;
-                }
-                // reset OOB matrices and counters
-                for(uint16_t i=0;i<config.num_labels;i++){ oob_tp[i]=oob_fp[i]=oob_fn[i]=0; }
-                oob_correct = 0; oob_total = 0;
-
-                // End chunk loop; process the full set once
-                end_pos = train_backup.size();
-                if(!preloaded) train_data.releaseData(true);
-                memory_tracker.log();
-                loadForest();
+                Serial.println("❌ Failed to load training samples chunk!");
+                continue;
             }
 
-            for(const auto& sample : train_samples_buffer){      
+            // Process each sample in the chunk
+            for(uint16_t idx = 0; idx < train_samples_buffer.size(); idx++){
+                const Rf_sample& sampleData = train_samples_buffer[idx];
+                uint16_t sampleID = start_pos + idx; // Calculate actual sample ID
+                uint8_t actualLabel = sampleData.label;
+
+                // Find trees that didn't use this sample (OOB trees)
                 activeTrees.clear();
-                oobPredictClass.clear();    
-
-                uint16_t sampleId = sample.first;
-                uint8_t actualLabel = sample.second.label;
-                
-                for(uint8_t i = 0; i < config.num_trees; i++){
-                    if(dataList[i].second.find(sampleId) != dataList[i].second.end()){
-                        activeTrees.push_back(i);
+                for(uint8_t treeIdx = 0; treeIdx < config.num_trees && treeIdx < dataList.size(); treeIdx++){
+                    // Check if this sample ID is NOT in the tree's training data
+                    if(!dataList[treeIdx].contains(sampleID)){
+                        activeTrees.push_back(treeIdx);
                     }
                 }
+
                 if(activeTrees.empty()){
-                    continue;
+                    continue; // No OOB trees for this sample
                 }
 
-                uint16_t oobTotalPredict = 0; 
+                // Get OOB predictions
+                oobPredictClass.clear();
+                uint16_t oobTotalPredict = 0;
+
                 for(const uint8_t& treeIdx : activeTrees){
-                    uint8_t predict = root[treeIdx].predictSample(sample.second);
-                    if(predict < config.num_labels){
-                        oobPredictClass[predict]++;
-                        oobTotalPredict++;
+                    if(treeIdx < root.size()){
+                        uint8_t predict = root[treeIdx].predictSample(sampleData);
+                        if(predict < config.num_labels){
+                            oobPredictClass[predict]++;
+                            oobTotalPredict++;
+                        }
                     }
                 }
-                
+
                 if(oobTotalPredict == 0) continue;
-                
+
+                // Find majority vote
                 uint8_t oobPredictedLabel = 255;
                 uint16_t maxVotes = 0;
                 for(const auto& predict : oobPredictClass){
@@ -862,12 +844,14 @@ public:
                         oobPredictedLabel = predict.first;
                     }
                 }
-                
+
+                // Check certainty threshold
                 float certainty = static_cast<float>(maxVotes) / oobTotalPredict;
                 if(certainty < config.unity_threshold) {
                     continue;
                 }
-                
+
+                // Update OOB metrics
                 oob_total++;
                 if(oobPredictedLabel == actualLabel){
                     oob_correct++;
@@ -877,19 +861,27 @@ public:
                     if(oobPredictedLabel < config.num_labels) oob_fp[oobPredictedLabel]++;
                 }
             }
-            sampleIDs_bag.fit();
+
+            // Clean up chunk resources
+            train_samples_buffer.clear();
+            train_samples_buffer.fit();
         }
 
+        // Validation evaluation if enabled
         if(config.use_validation){
+            Serial.println("Evaluating on validation set...");
             validation_data.loadData();
-            for(const auto& sample : validation_data.allSamples){
-                uint8_t actualLabel = sample.second.label;
+            
+            for(uint16_t i = 0; i < validation_data.allSamples.size(); i++){
+                const Rf_sample& sampleData = validation_data.allSamples[i];
+                uint8_t actualLabel = sampleData.label;
 
                 unordered_map<uint8_t, uint8_t> validPredictClass;
                 uint16_t validTotalPredict = 0;
 
-                for(uint8_t i = 0; i < config.num_trees; i++){
-                    uint8_t predict = root[i].predictSample(sample.second);
+                // Use all trees for validation prediction
+                for(uint8_t i = 0; i < config.num_trees && i < root.size(); i++){
+                    uint8_t predict = root[i].predictSample(sampleData);
                     if(predict < config.num_labels){
                         validPredictClass[predict]++;
                         validTotalPredict++;
@@ -898,6 +890,7 @@ public:
 
                 if(validTotalPredict == 0) continue;
 
+                // Find majority vote
                 uint8_t validPredictedLabel = 255;
                 uint16_t maxVotes = 0;
                 for(const auto& predict : validPredictClass){
@@ -907,11 +900,13 @@ public:
                     }
                 }
 
+                // Check certainty threshold
                 float certainty = static_cast<float>(maxVotes) / validTotalPredict;
                 if(certainty < config.unity_threshold) {
                     continue;
                 }
 
+                // Update validation metrics
                 valid_total++;
                 if(validPredictedLabel == actualLabel){
                     valid_correct++;
@@ -924,43 +919,47 @@ public:
             validation_data.releaseData(true);
         }
         
-        Serial.printf("Ram before releasing trees: %d\n", ESP.getFreeHeap());
+        Serial.printf("Memory before releasing trees: %d bytes\n", ESP.getFreeHeap());
         releaseForest(); // Release trees from RAM after evaluation
-        Serial.printf("Ram after releasing trees: %d\n", ESP.getFreeHeap());
+        Serial.printf("Memory after releasing trees: %d bytes\n", ESP.getFreeHeap());
 
-        // Calculate the requested metric
+        // Calculate metrics based on training flag
         float oob_result = 0.0f;
         float valid_result = 0.0f;
         float combined_oob_result = 0.0f;
         float combined_valid_result = 0.0f;
         uint8_t training_flag = static_cast<uint8_t>(config.train_flag);
         uint8_t numFlags = 0;
-        
+
         if(oob_total == 0){
             Serial.println("❌ No valid OOB predictions found!");
             return 0.0f;
         }
-        
-        if(training_flag & ACCURACY){
+
+        // Calculate accuracy
+        if(training_flag & 0x01){ // ACCURACY flag
             oob_result = static_cast<float>(oob_correct) / oob_total;
-            valid_result = static_cast<float>(valid_correct) / valid_total;
+            valid_result = (valid_total > 0) ? static_cast<float>(valid_correct) / valid_total : 0.0f;
             Serial.printf("OOB Accuracy: %.3f (%d/%d)\n", oob_result, oob_correct, oob_total);
-            Serial.printf("Validation Accuracy: %.3f (%d/%d)\n", valid_result, valid_correct, valid_total);
+            if(config.use_validation){
+                Serial.printf("Validation Accuracy: %.3f (%d/%d)\n", valid_result, valid_correct, valid_total);
+            }
             combined_oob_result += oob_result;
             combined_valid_result += valid_result;
             numFlags++;
         }
+
+        // Calculate precision
+        if(training_flag & 0x02){ // PRECISION flag
+            float oob_totalPrecision = 0.0f, valid_totalPrecision = 0.0f;
+            uint8_t oob_validLabels = 0, valid_validLabels = 0;
             
-        if(training_flag & PRECISION){
-            float oob_totalPrecision = 0.0f, 
-                    valid_totalPrecision = 0.0f;
-            uint8_t oob_validLabels = 0;
-            uint8_t valid_validLabels = 0;
             for(uint8_t label = 0; label < config.num_labels; label++){
                 uint16_t otp = oob_tp[label];
                 uint16_t ofp = oob_fp[label];
                 uint16_t vtp = valid_tp[label];
                 uint16_t vfp = valid_fp[label];
+                
                 if(otp + ofp > 0){
                     oob_totalPrecision += static_cast<float>(otp) / (otp + ofp);
                     oob_validLabels++;
@@ -970,18 +969,23 @@ public:
                     valid_validLabels++;
                 }
             }
+            
             oob_result = oob_validLabels > 0 ? oob_totalPrecision / oob_validLabels : 0.0f;
             valid_result = valid_validLabels > 0 ? valid_totalPrecision / valid_validLabels : 0.0f;
             Serial.printf("OOB Precision: %.3f\n", oob_result);
-            Serial.printf("Validation Precision: %.3f\n", valid_result);
+            if(config.use_validation){
+                Serial.printf("Validation Precision: %.3f\n", valid_result);
+            }
             combined_oob_result += oob_result;
             combined_valid_result += valid_result;
             numFlags++;
         }
-            
-        if(training_flag & RECALL){
+
+        // Calculate recall
+        if(training_flag & 0x04){ // RECALL flag
             float oob_totalRecall = 0.0f, valid_totalRecall = 0.0f;
             uint8_t oob_validLabels = 0, valid_validLabels = 0;
+            
             for(uint8_t label = 0; label < config.num_labels; label++){
                 uint16_t otp = oob_tp[label];
                 uint16_t ofn = oob_fn[label];
@@ -997,25 +1001,27 @@ public:
                     valid_validLabels++;
                 }
             }
-            valid_result = valid_validLabels > 0 ? valid_totalRecall / valid_validLabels : 0.0f;
+            
             oob_result = oob_validLabels > 0 ? oob_totalRecall / oob_validLabels : 0.0f;
+            valid_result = valid_validLabels > 0 ? valid_totalRecall / valid_validLabels : 0.0f;
             Serial.printf("OOB Recall: %.3f\n", oob_result);
-            Serial.printf("Validation Recall: %.3f\n", valid_result);
+            if(config.use_validation){
+                Serial.printf("Validation Recall: %.3f\n", valid_result);
+            }
             combined_oob_result += oob_result;
             combined_valid_result += valid_result;
             numFlags++;
         }
+
+        // Calculate F1-Score
+        if(training_flag & 0x08){ // F1_SCORE flag
+            float oob_totalF1 = 0.0f, valid_totalF1 = 0.0f;
+            uint8_t oob_validLabels = 0, valid_validLabels = 0;
             
-        if(training_flag & F1_SCORE) {
-            float oob_totalF1 = 0.0f, 
-                    valid_totalF1 = 0.0f;
-            uint8_t oob_validLabels = 0, 
-                    valid_validLabels = 0;
             for(uint8_t label = 0; label < config.num_labels; label++){
                 uint16_t otp = oob_tp[label];
                 uint16_t ofp = oob_fp[label];
                 uint16_t ofn = oob_fn[label];
-
                 uint16_t vtp = valid_tp[label];
                 uint16_t vfp = valid_fp[label];
                 uint16_t vfn = valid_fn[label];
@@ -1039,47 +1045,43 @@ public:
                     }
                 }
             }
+            
             oob_result = oob_validLabels > 0 ? oob_totalF1 / oob_validLabels : 0.0f;
             valid_result = valid_validLabels > 0 ? valid_totalF1 / valid_validLabels : 0.0f;
-            Serial.printf("Validation F1-Score: %.3f\n", valid_result);
             Serial.printf("OOB F1-Score: %.3f\n", oob_result);
+            if(config.use_validation){
+                Serial.printf("Validation F1-Score: %.3f\n", valid_result);
+            }
             combined_oob_result += oob_result;
             combined_valid_result += valid_result;
             numFlags++;
         }
+
+        // Combine results based on configuration
         float result = 0.0f;
-        float oob_score = combined_oob_result / numFlags;
-        float valid_score = combined_valid_result / numFlags;
-        if(config.use_validation) result = oob_score * (1.0f - config.combine_ratio) + valid_score * config.combine_ratio;
-        else result = oob_score; // If no validation, use only OOB score
+        if(numFlags > 0){
+            float oob_score = combined_oob_result / numFlags;
+            float valid_score = combined_valid_result / numFlags;
+            if(config.use_validation && valid_total > 0){
+                result = oob_score * (1.0f - config.combine_ratio) + valid_score * config.combine_ratio;
+                Serial.printf("Combined result (OOB: %.1f%%, Valid: %.1f%%): %.3f\n", 
+                             (1.0f - config.combine_ratio) * 100, config.combine_ratio * 100, result);
+            } else {
+                result = oob_score;
+            }
+        }
 
         return result;
     }
 
+    public:
 
-    void loadForest(){
-        for (auto& tree : root) {
-            if (!tree.isLoaded) {
-                tree.loadTree();
-            }
-        }
-    }
-
-    // releaseForest: Release all trees from RAM into SPIFFS
-    void releaseForest(){
-        for(auto& tree : root) {
-            if (tree.isLoaded) {
-                tree.releaseTree(); // Release the tree from RAM
-            }
-        }
-    }
-  public:
-    // -----------------------------------------------------------------------------------
-    
     // -----------------------------------------------------------------------------------
     // Memory-Efficient Grid Search Training Function
     void training(){
         Serial.println("Starting training with memory-efficient grid search...");
+        int total_combinations = config.min_split_range.size() * config.max_depth_range.size();
+        Serial.printf("Total combinations: %d\n", total_combinations);
 
         float initial_score = get_training_evaluation_index();
 
@@ -1107,6 +1109,139 @@ public:
         }
     }
 
+    void loadForest(){
+        unsigned long start = millis();
+        
+        // Try to load from single forest file first
+        char filename[32];
+        snprintf(filename, sizeof(filename), "/%s_forest.bin", this->model_name.c_str());
+        
+        if(SPIFFS.exists(filename) && !is_loaded){ 
+            // Load from single file (new optimized format)
+            File file = SPIFFS.open(filename, FILE_READ);
+            if(!file) {
+                Serial.printf("❌ Failed to open forest file: %s\n", filename);
+                return;
+            }
+            
+            // Read forest header
+            uint32_t magic;
+            file.read((uint8_t*)&magic, sizeof(magic));
+            if(magic != 0x464F5253) { // "FORS" 
+                Serial.println("❌ Invalid forest file format");
+                file.close();
+                return;
+            }
+            
+            uint8_t treeCount;
+            file.read((uint8_t*)&treeCount, sizeof(treeCount));
+            Serial.printf("Loading %d trees from forest file...\n", treeCount);
+            
+            // Read all trees
+            for(uint8_t i = 0; i < treeCount; i++) {
+                uint8_t treeIndex;
+                file.read((uint8_t*)&treeIndex, sizeof(treeIndex));
+                
+                uint32_t nodeCount;
+                file.read((uint8_t*)&nodeCount, sizeof(nodeCount));
+                
+                // Find the corresponding tree in root vector
+                for(auto& tree : root) {
+                    if(tree.index == treeIndex) {
+                        tree.nodes.clear();
+                        tree.nodes.reserve(nodeCount);
+                        
+                        // Read all nodes
+                        for(uint32_t j = 0; j < nodeCount; j++) {
+                            Tree_node node;
+                            file.read((uint8_t*)&node.packed_data, sizeof(node.packed_data));
+                            tree.nodes.push_back(node);
+                        }
+                        
+                        tree.isLoaded = true;
+                        break;
+                    }
+                }
+            }
+            
+            file.close();
+        } else {
+            // Fallback to individual tree files (legacy format)
+            for (auto& tree : root) {
+                if (!tree.isLoaded) {
+                    tree.loadTree(this->model_name);
+                }
+            }
+        }
+        is_loaded = true;
+        unsigned long end = millis();
+        Serial.printf("Loaded forest in %lu ms\n", end - start);
+    }
+
+    // releaseForest: Release all trees from RAM into SPIFFS (optimized single-file approach)
+    void releaseForest(){
+        if(!is_loaded) {
+            Serial.println("Forest is not loaded in memory, nothing to release.");
+            return;
+        }
+        
+        // Count loaded trees
+        uint8_t loadedCount = 0;
+        for(auto& tree : root) {
+            if (tree.isLoaded) loadedCount++;
+        }
+        
+        if(loadedCount == 0) {
+            Serial.println("No loaded trees to release");
+            return;
+        }
+        
+        // Single file approach - write all trees to one file
+        char filename[32];
+        snprintf(filename, sizeof(filename), "/%s_forest.bin", this->model_name.c_str());
+        
+        unsigned long fileStart = millis();
+        File file = SPIFFS.open(filename, FILE_WRITE);
+        if (!file) {
+            Serial.printf("❌ Failed to create forest file: %s\n", filename);
+            return;
+        }
+        
+        // Write forest header
+        uint32_t magic = 0x464F5253; // "FORS" in hex (forest)
+        file.write((uint8_t*)&magic, sizeof(magic));
+        file.write((uint8_t*)&loadedCount, sizeof(loadedCount));
+        
+        unsigned long writeStart = millis();
+        size_t totalBytes = 0;
+        
+        // Write all trees in sequence
+        uint8_t savedCount = 0;
+        for(auto& tree : root) {
+            if (tree.isLoaded && tree.index != 255 && !tree.nodes.empty()) {
+                // Write tree header
+                file.write((uint8_t*)&tree.index, sizeof(tree.index));
+                uint32_t nodeCount = tree.nodes.size();
+                file.write((uint8_t*)&nodeCount, sizeof(nodeCount));
+                
+                // Write all nodes
+                for (const auto& node : tree.nodes) {
+                    file.write((uint8_t*)&node.packed_data, sizeof(node.packed_data));
+                    totalBytes += sizeof(node.packed_data);
+                }
+                
+                // Clear from RAM
+                tree.nodes.clear();
+                tree.nodes.fit();
+                tree.isLoaded = false;
+                savedCount++;
+            }
+        }
+        
+        file.close();
+        is_loaded = false;
+    }
+
   public:
 
     // New combined prediction metrics function
@@ -1132,10 +1267,11 @@ public:
         }
         // Serial.println("here 1");
         
-        // Single pass over samples
-        for (const auto& kv : data.allSamples) {
-            uint8_t actual = kv.second.label;
-            uint8_t pred = predClassSample(const_cast<Rf_sample&>(kv.second));
+        // Single pass over samples (using direct indexing)
+        for (uint16_t i = 0; i < data.size(); i++) {
+            const Rf_sample& sample = data.allSamples[i];
+            uint8_t actual = sample.label;
+            uint8_t pred = predClassSample(const_cast<Rf_sample&>(sample));
             // Serial.println("here 1.5");
             
             totalPred[actual]++;
@@ -1171,7 +1307,6 @@ public:
             // Serial.printf("Label %d: TP=%d, FP=%d, FN=%d, Prec=%.3f, Rec=%.3f, F1=%.3f\n", 
             //             label, tpv, fpv, fnv, prec, rec, f1);
         }
-        // Serial.println("here 3");
         
         b_vector<b_vector<pair<uint8_t, float>>> result;
         result.push_back(precisions);  // 0: precisions
@@ -1271,18 +1406,16 @@ public:
         testSet.loadData(); // Load test set data if not already loaded
         // std::cout << "SampleID, Predicted, Actual" << std::endl;
         Serial.println("SampleID, Predicted, Actual");
-        for (const auto& kv : testSet.allSamples) {
-            uint16_t sampleId = kv.first;
-            const Rf_sample& sample = kv.second;
+        for (uint16_t i = 0; i < testSet.size(); i++) {
+            const Rf_sample& sample = testSet.allSamples[i];
             uint8_t pred = predClassSample(const_cast<Rf_sample&>(sample));
             // std::cout << sampleId << "  " << (int)pred << " - " << (int)sample.label << std::endl;
-            Serial.printf("%d, %d, %d\n", sampleId, pred, sample.label);
+            Serial.printf("%d, %d, %d\n", i, pred, sample.label);
         }
         testSet.releaseData(true); // Release test set data after use
         releaseForest(); // Release all trees after prediction
     }
 };
-RandomForest* RandomForest::instance_ptr = nullptr;
 
 void setup() {
     Serial.begin(115200);  
@@ -1296,10 +1429,9 @@ void setup() {
     }
     manageSPIFFSFiles();
     delay(1000);
-    Serial.printf("===> ROM left: %d\n", SPIFFS.totalBytes() - SPIFFS.usedBytes());;
 
     // const char* filename = "/walker_fall.bin";    // medium dataset : use_Gini = false | boostrap = true; 92% - sklearn : 85%  (5,3)
-    const char* filename = "/digit_data_nml.bin"; // hard dataset : use_Gini = true/false | boostrap = true; 89/92% - sklearn : 90% (6,5);
+    const char* filename = "digit_data"; // hard dataset : use_Gini = true/false | boostrap = true; 89/92% - sklearn : 90% (6,5);
     RandomForest forest = RandomForest(filename);
 
     // printout size of forest object in stack
@@ -1307,10 +1439,7 @@ void setup() {
 
     forest.MakeForest();
 
-    // float initial_score = forest.predict(forest.test_data, static_cast<Rf_training_flags>(forest.config.train_flag));
-    // Serial.printf("Initial score: %.3f\n", initial_score);
-
-    forest.training(); 
+    forest.training();
 
     auto result = forest.predict(forest.test_data);
     Serial.printf("\nlowest RAM: %d\n", forest.memory_tracker.lowest_ram);
@@ -1380,10 +1509,10 @@ void setup() {
     // check actual prediction time 
     b_vector<float> sample = MAKE_FLOAT_LIST(0,0,0.014528,0.000782722,0.817357,0.277754,0.137853,0.0161738,0,0,0,0,0.252639,0.0556202,0.319129,0.257954,0.0149651,0.0648652,0.0220988,0.00182159,0.877327,0.00550756,0.133955,0.0187333,0.0275399,0,0,0.0248582,0.0363544,0.134907,0.406297,0.14517,0.660452,0.0193004,0.0872476,0.0170596,0.183969,0.0070201,0.0392839,0.00355617,0.0551359,0.124477,0.226905,0.0582358,0.0218746,0.00100708,0.254847,0.617445,0,0,0,0,0.768671,0.0542131,0.301566,0.249534,0.163292,0.215959,0.210117,0.111435,0.00786254,0,0.181712,0.300076,0.0661908,0.000662339,0,0.0419681,0.345039,0.220849,0.830398,0.239182,0.0471657,0.0858931,0.155634,0.120172,0.171163,0.00210992,0.00423227,0.0409593,0.255201,0.133301,0.314904,0.0781977,0.0096404,0.00762942,0.314006,0.42933,0.000130379,0.00131339,0.00315603,0,0.64453,0,0.000782274,0.336626,0,0.0176682,0.0297794,0,0,0,0.0138204,0,0.0573581,0.0521479,0.0586363,0.267836,0.00254183,0.216103,0.916323,0.176272,0,0.0117796,0.0287043,0,0.0182255,0.000955436,0.00278896,0.0780402,0.0260911,0.0408793,0.635657,0.265235,0.100382,0.709452,0.0494404,0.00125326,0.000117986,0,0.00284004,0.00127189,0.358305,0.000972935,0.000117986,0.523924,0,0.553178,0.243659,0.000263824,0.444076,0.185569,0.00661191,0.00721455
 );
-    long unsigned start = millis();
-    String pred = forest.predict2(sample);
-    long unsigned end = millis();
-    Serial.printf("Prediction for sample took %lu ms: %s\n", end - start, pred.c_str());
+    long unsigned start = micros();
+    String pred = forest.predict(sample);
+    long unsigned end = micros();
+    Serial.printf("Prediction for sample took %u us.\n", end - start);
 
 
     // forest.visual_result(forest.test_data); // Optional visualization

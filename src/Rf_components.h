@@ -18,7 +18,7 @@ namespace mcu {
     };
 
     using sampleID_set = mcu::ID_vector<uint16_t>;      // set of unique sample IDs
-    using sample_set = mcu::ChainedUnorderedMap<uint16_t, Rf_sample>; // set of samples
+    using sample_set = mcu::b_vector<Rf_sample>; // set of samples
 
     struct Tree_node{
         uint32_t packed_data; 
@@ -85,12 +85,12 @@ namespace mcu {
 
     struct NodeToBuild {
         uint16_t nodeIndex;
-        b_vector<uint16_t> sampleIDs;  
-        uint16_t depth;
+        ID_vector<uint16_t, 2> sampleIDs;  
+        uint8_t depth;
         
         NodeToBuild() : nodeIndex(0), depth(0) {}
-        NodeToBuild(uint16_t idx, b_vector<uint16_t>&& ids, uint16_t d) 
-            : nodeIndex(idx), sampleIDs(ids), depth(d) {}
+        NodeToBuild(uint16_t idx, ID_vector<uint16_t, 2>&& ids, uint8_t d) 
+            : nodeIndex(idx), sampleIDs(std::move(ids)), depth(d) {}
     };
 
     /*
@@ -141,13 +141,9 @@ namespace mcu {
                 if (index == 255 || nodes.empty()) return;
 
                 char filename[32];  // filename = "/"+ base_name + "tree_" + index + ".bin"
-                snprintf(filename, sizeof(filename), "/%stree_%d.bin", base_name.c_str(), index);
+                snprintf(filename, sizeof(filename), "/%s_tree_%d.bin", base_name.c_str(), index);
                 
-                // Remove existing file if it exists
-                if (SPIFFS.exists(filename)) {
-                    SPIFFS.remove(filename);
-                }
-                
+                // Skip exists/remove check - just overwrite directly for performance
                 File file = SPIFFS.open(filename, FILE_WRITE);
                 if (!file) {
                     Serial.printf("❌ Failed to save tree: %s\n", filename);
@@ -162,9 +158,33 @@ namespace mcu {
                 uint32_t nodeCount = nodes.size();
                 file.write((uint8_t*)&nodeCount, sizeof(nodeCount));
                 
-                // Save all nodes - just save the packed_data since everything is packed into it
-                for (const auto& node : nodes) {
-                    file.write((uint8_t*)&node.packed_data, sizeof(node.packed_data));
+                // Batch write all nodes for better performance
+                if(nodeCount > 0) {
+                    // Calculate total size needed
+                    size_t totalSize = nodeCount * sizeof(nodes[0].packed_data);
+                    
+                    // Create buffer for batch write
+                    uint8_t* buffer = (uint8_t*)malloc(totalSize);
+                    if(buffer) {
+                        // Copy all packed_data to buffer
+                        for(uint32_t i = 0; i < nodeCount; i++) {
+                            memcpy(buffer + (i * sizeof(nodes[0].packed_data)), 
+                                   &nodes[i].packed_data, sizeof(nodes[0].packed_data));
+                        }
+                        
+                        // Single write operation
+                        size_t written = file.write(buffer, totalSize);
+                        free(buffer);
+                        
+                        if(written != totalSize) {
+                            Serial.printf("⚠️ Incomplete write: %d/%d bytes\n", written, totalSize);
+                        }
+                    } else {
+                        // Fallback to individual writes if malloc fails
+                        for (const auto& node : nodes) {
+                            file.write((uint8_t*)&node.packed_data, sizeof(node.packed_data));
+                        }
+                    }
                 }    
                 file.close();
             }
@@ -179,7 +199,7 @@ namespace mcu {
         }
 
         // Load tree from SPIFFS into RAM for ESP32
-        void loadTree(bool re_use = false) {
+        void loadTree(String base_name = "", bool re_use = false) {
             if (isLoaded) return;
             
             if (index == 255) {
@@ -187,8 +207,8 @@ namespace mcu {
                 return;
             }
             
-            char path_to_use[16];
-            snprintf(path_to_use, sizeof(path_to_use), "/tree_%d.bin", index);
+            char path_to_use[32];
+            snprintf(path_to_use, sizeof(path_to_use), "/%s_tree_%d.bin", base_name.c_str(), index);
             
             File file = SPIFFS.open(path_to_use, FILE_READ);
             if (!file) {
@@ -246,6 +266,8 @@ namespace mcu {
             }
         }
 
+
+
         uint8_t predictSample(const Rf_sample& sample) const {
             if (nodes.empty() || !isLoaded) return 0;
             
@@ -283,12 +305,12 @@ namespace mcu {
             isLoaded = false;
         }
 
-        void purgeTree(bool rmf = true) {
+        void purgeTree(String base_name = "", bool rmf = true) {
             nodes.clear();
             nodes.fit(); // Release excess memory
             if(rmf && index != 255) {
-                char filename[16];
-                snprintf(filename, sizeof(filename), "/tree_%d.bin", index);
+                char filename[32];
+                snprintf(filename, sizeof(filename), "/%s_tree_%d.bin", base_name.c_str(), index);
                 if (SPIFFS.exists(filename)) {
                     SPIFFS.remove(filename);
                     // Serial.printf("✅ Tree file removed: %s\n", filename);
@@ -296,6 +318,17 @@ namespace mcu {
             }
             index = 255;
             isLoaded = false;
+        }
+
+        // overload methods : for single_model mode
+        void releaseTree(bool re_use) {
+            releaseTree("", re_use);
+        }
+        void loadTree(bool re_use) {
+            loadTree("", re_use);
+        }
+        void purgeTree(bool rmf) {
+            purgeTree("", rmf);
         }
 
     private:
@@ -321,12 +354,13 @@ namespace mcu {
     */
     class Rf_data {
     public:
-        mcu::b_vector<Rf_sample, mcu::index_size_flag::MEDIUM, 50> allSamples;  // vector of all samples, at least 50 samples
+        sample_set allSamples;  
         String filename = "";
-        bool   isLoaded = false;
+        bool  isLoaded;
+        size_t size_;         
 
-        Rf_data() : isLoaded(false) {}
-        Rf_data(const String& fname) : filename(fname), isLoaded(false) {}
+        Rf_data() : isLoaded(false) , size_(0){}
+        Rf_data(const String& fname) : filename(fname), isLoaded(false), size_(0) {}
 
     private:
         // Load data from CSV format (used only once for initial dataset conversion)
@@ -419,6 +453,7 @@ namespace mcu {
                     break;
                 }
             }
+            size_ = allSamples.size();
             
             Serial.printf("📋 CSV Processing Results:\n");
             Serial.printf("   Lines processed: %d\n", linesProcessed);
@@ -435,6 +470,10 @@ namespace mcu {
         }
 
     public:
+        size_t size() const {
+            return size_;
+        }
+
         void convertCSVtoBinary(String csvFilename, uint8_t numFeatures = 0) {
             loadCSVData(csvFilename, numFeatures);
             releaseData(false); // Save to binary and clear memory
@@ -444,7 +483,6 @@ namespace mcu {
         // save to binary format : label (1 byte) | features (packed : 4 values per byte)
         void releaseData(bool reuse = true) {
             if(!isLoaded) return;
-            // Serial.printf("📂 Saving data to: %s\n", filename.c_str());
             
             if(!reuse){
                 // Remove any existing file
@@ -457,6 +495,7 @@ namespace mcu {
                     Serial.println("❌ Failed to open binary file for writing.");
                     return;
                 }
+                Serial.printf("📂 Saving data to: %s\n", filename.c_str());
 
                 // Write binary header
                 uint32_t numSamples = allSamples.size();
@@ -502,6 +541,7 @@ namespace mcu {
             }
             
             // Clear memory
+            size_ = allSamples.size();
             allSamples.clear();
             allSamples.fit();
             isLoaded = false;
@@ -574,24 +614,26 @@ namespace mcu {
                 // Add to vector - index becomes implicit sample ID
                 allSamples.push_back(s);
             }
+            size_ = allSamples.size();
             allSamples.fit();
             isLoaded = true;
             file.close();
             if(!re_use) {
                 SPIFFS.remove(filename.c_str()); // Remove file after loading in single mode
             }
+            Serial.printf("✅ Data loaded: %s \n", filename.c_str());
         }
 
         // overload : load a chunk of samples by indices from binary file or memory
-        sample_set loadData(const mcu::ID_vector<uint16_t> &sampleIndices_bag) {
+        sample_set loadData(const sampleID_set &sample_IDs) {
             sample_set chunkSamples;
-            bool release = false;
             
             // If data is loaded in memory, extract directly from vector
             if(isLoaded) {
-                for(uint16_t idx : sampleIndices_bag) {
+                chunkSamples.reserve(sample_IDs.size());
+                for(uint16_t idx : sample_IDs) {
                     if(idx < allSamples.size()) {
-                        chunkSamples[idx] = allSamples[idx];
+                        chunkSamples.push_back(allSamples[idx]);
                     }
                 }
                 return chunkSamples;
@@ -615,16 +657,12 @@ namespace mcu {
                 }
 
                 uint16_t packedFeatureBytes = (numFeatures + 3) / 4;
-                chunkSamples.reserve(sampleIndices_bag.size());
-
-                // Use a set for fast lookup
-                sampleID_set sampleIndices_set;
-                for (const auto& idx : sampleIndices_bag) sampleIndices_set.insert(idx);
+                chunkSamples.reserve(sample_IDs.size());
 
                 // Read samples sequentially 
                 for(uint32_t i = 0; i < numSamples; i++) {
                     // Check if this index is requested
-                    if(sampleIndices_set.find(i) == sampleIndices_set.end()) {
+                    if(!sample_IDs.contains(i)) {
                         // Not needed, skip label and features
                         file.seek(file.position() + sizeof(uint8_t) + packedFeatureBytes);
                         continue;
@@ -648,9 +686,11 @@ namespace mcu {
                         s.features.push_back(feature);
                     }
                     s.features.fit();
-                    chunkSamples[i] = s;  // Use vector index as sample ID
+                    
+                    // Add sample to vector (samples will be in file order, not necessarily in requested index order)
+                    chunkSamples.push_back(s);
 
-                    if(chunkSamples.size() >= sampleIndices_bag.size()) break;
+                    if(chunkSamples.size() >= sample_IDs.size()) break;
                 }
                 file.close();
             }
@@ -727,12 +767,6 @@ namespace mcu {
             return true;
         }
 
-        // Get total number of samples
-        uint32_t size() const {
-            return allSamples.size();
-        }
-
-
         // FIXED: Safe data purging
         void purgeData() {
             // Clear in-memory structures first
@@ -774,6 +808,7 @@ namespace mcu {
         float valid_ratio;
         uint8_t train_flag;
         float result_score;
+        bool keep_trees_in_memory; // Performance flag to avoid releasing trees during evaluation
         uint32_t estimatedRAM;
 
         uint16_t num_samples;
@@ -783,6 +818,7 @@ namespace mcu {
         mcu::b_vector<uint8_t, mcu::SMALL> min_split_range;
         mcu::b_vector<uint8_t, mcu::SMALL> max_depth_range;  
         
+        String filename;
         bool isLoaded;
 
         Rf_config() : isLoaded(false) {
@@ -803,16 +839,23 @@ namespace mcu {
             valid_ratio = 0.0;
             train_flag = 0x01; // ACCURACY
             result_score = 0.0;
+            keep_trees_in_memory = true; // Default to keeping trees for better performance
             estimatedRAM = 0;
+            filename = "";
+        }
+
+        void init(const String& fn){
+            filename = fn;
+            isLoaded = false;
         }
 
         // Load configuration from JSON file in SPIFFS
         void loadConfig(bool re_use = true) {
             if (isLoaded) return;
 
-            File file = SPIFFS.open(rf_config_file, FILE_READ);
+            File file = SPIFFS.open(filename.c_str(), FILE_READ);
             if (!file) {
-                Serial.printf("❌ Failed to open config file: %s\n", rf_config_file);
+                Serial.printf("❌ Failed to open config file: %s\n", filename.c_str());
                 Serial.println("Switching to default configuration.");
                 return;
             }
@@ -824,12 +867,12 @@ namespace mcu {
             parseJSONConfig(jsonString);
             isLoaded = true;
             
-            Serial.printf("✅ Config loaded: %s\n", rf_config_file);
+            Serial.printf("✅ Config loaded: %s\n", filename.c_str());
             Serial.printf("   Trees: %d, max_depth: %d, min_split: %d\n", num_trees, max_depth, min_split);
             Serial.printf("   Estimated RAM: %d bytes\n", estimatedRAM);
 
             if(!re_use) {
-                SPIFFS.remove(rf_config_file); // Remove file after loading in single mode
+                SPIFFS.remove(filename.c_str()); // Remove file after loading in single mode
             }
         }
 
@@ -840,20 +883,20 @@ namespace mcu {
                 String existingTimestamp = "";
                 String existingAuthor = "Viettran";
                 
-                if (SPIFFS.exists(rf_config_file)) {
-                    File readFile = SPIFFS.open(rf_config_file, FILE_READ);
+                if (SPIFFS.exists(filename.c_str())) {
+                    File readFile = SPIFFS.open(filename.c_str(), FILE_READ);
                     if (readFile) {
                         String jsonContent = readFile.readString();
                         readFile.close();
                         existingTimestamp = extractStringValue(jsonContent, "timestamp");
                         existingAuthor = extractStringValue(jsonContent, "author");
                     }
-                    SPIFFS.remove(rf_config_file);
+                    SPIFFS.remove(filename.c_str());
                 }
 
-                File file = SPIFFS.open(rf_config_file, FILE_WRITE);
+                File file = SPIFFS.open(filename.c_str(), FILE_WRITE);
                 if (!file) {
-                    Serial.printf("❌ Failed to create config file: %s\n", rf_config_file);
+                    Serial.printf("❌ Failed to create config file: %s\n", filename.c_str());
                     return;
                 }
 
@@ -896,15 +939,15 @@ namespace mcu {
             // Clear from RAM  
             purgeConfig();
             
-            Serial.printf("✅ Config saved to: %s\n", rf_config_file);
+            Serial.printf("✅ Config saved to: %s\n", filename.c_str());
         }
 
         // Update timestamp in the JSON file
         void update_timestamp() {
-            if (!SPIFFS.exists(rf_config_file)) return;
+            if (!SPIFFS.exists(filename.c_str())) return;
             
             // Read existing file
-            File readFile = SPIFFS.open(rf_config_file, FILE_READ);
+            File readFile = SPIFFS.open(filename.c_str(), FILE_READ);
             if (!readFile) return;
             
             String jsonContent = readFile.readString();
@@ -924,8 +967,8 @@ namespace mcu {
                                     jsonContent.substring(valueEnd);
                     
                     // Write updated content
-                    SPIFFS.remove(rf_config_file);
-                    File writeFile = SPIFFS.open(rf_config_file, FILE_WRITE);
+                    SPIFFS.remove(filename.c_str());
+                    File writeFile = SPIFFS.open(filename.c_str(), FILE_WRITE);
                     if (writeFile) {
                         writeFile.print(newContent);
                         writeFile.close();
@@ -1116,7 +1159,7 @@ namespace mcu {
                     
                     // Check for tree files starting from tree_0.bin
                     for(uint8_t i = 0; i < 50; i++) { // Max 50 trees check
-                        String treeFile = "/" + base_name + "tree_" + String(i) + ".bin";
+                        String treeFile = String("/") + base_name + "tree_" + String(i) + ".bin";
                         if (SPIFFS.exists(treeFile.c_str())) {
                             tree_count++;
                         } else {
@@ -1173,6 +1216,18 @@ namespace mcu {
                 cloneFile(old_logFile, new_logFile);
                 SPIFFS.remove(old_logFile.c_str());
 
+                // node predictor file
+                String old_nodePredFile = "/" + old_base_name + "_node_pred.bin";
+                String new_nodePredFile = "/" + base_name + "_node_pred.bin";
+                cloneFile(old_nodePredFile, new_nodePredFile);
+                SPIFFS.remove(old_nodePredFile.c_str());
+
+                // config file
+                String old_configFile = "/" + old_base_name + "_config.json";
+                String new_configFile = "/" + base_name + "_config.json";
+                cloneFile(old_configFile, new_configFile);
+                SPIFFS.remove(old_configFile.c_str());
+
                 // tree files
                 for(uint8_t i = 0; i < 50; i++) { // Max 50 trees check
                     String old_treeFile = "/" + old_base_name + "tree_" + String(i) + ".bin";
@@ -1189,24 +1244,34 @@ namespace mcu {
             }
         }
 
-        // Get binary base file path (/base_name_nml.bin)
+        // for Rf_data: baseData 
         String get_baseFile() const {
             return "/" + base_name + "_nml.bin";
         }
 
-        // generate data_params filename based on base_name
+        // for Rf_config 
         String get_dpFile() const {
             return "/" + base_name + "_dp.csv";
         }
 
-        // generate categorizer filename based on base_name
+        // for Rf_categorizer
         String get_ctgFile() const {
             return "/" + base_name + "_ctg.csv";
         }
 
-        // generate inference log filename based on base_name
+        // for Rf_base 
         String get_inferenceLogFile() const {
             return "/" + base_name + "_infer_log.bin";
+        }
+
+        // for Rf_config
+        String get_configFile() const {
+            return "/" + base_name + "_config.json";
+        }
+
+        // for Rf_node_predictor
+        String get_nodePredictFile() const {
+            return "/" + base_name + "_node_pred.bin";
         }
 
         // Check if base file is in CSV format (always false now as we only use binary)
@@ -1405,5 +1470,1107 @@ namespace mcu {
         }
     };
 
-} // namespace mcu
+    /*
+    ------------------------------------------------------------------------------------------------------------------
+    -------------------------------------------- RF_NODE_PREDCITOR ---------------------------------------------------
+    ------------------------------------------------------------------------------------------------------------------
+    */
+    struct node_data {
+        uint8_t min_split;
+        uint16_t max_depth;
+        uint16_t total_nodes;
+        
+        node_data() : min_split(0), max_depth(0), total_nodes(0) {}
+        node_data(uint8_t min_split, uint16_t max_depth) 
+            : min_split(min_split), max_depth(max_depth), total_nodes(0) {}
+        node_data(uint8_t min_split, uint16_t max_depth, uint16_t total_nodes) 
+            : min_split(min_split), max_depth(max_depth), total_nodes(total_nodes) {}
+    };
 
+    class Rf_node_predictor {
+    public:
+        float coefficients[3];  // bias, min_split_coeff, max_depth_coeff
+        bool is_trained;
+        b_vector<node_data> buffer;
+    private:
+        String filename;
+        String node_predictor_log;
+        
+        float evaluate_formula(const node_data& data) const {
+            if (!is_trained) {
+                return manual_estimate(data); // Use manual estimate if not trained
+            }
+            
+            float result = coefficients[0]; // bias
+            result += coefficients[1] * static_cast<float>(data.min_split);
+            result += coefficients[2] * static_cast<float>(data.max_depth);
+            
+            return result > 10.0f ? result : 10.0f; // ensure reasonable minimum
+        }
+
+        // if failed to load predictor, manual estimate will be used
+        float manual_estimate(const node_data& data) const {
+            if (data.min_split == 0 || data.max_depth == 0) {
+                return 100.0f; // default estimate
+            }
+            // Simple heuristic: more nodes = better accuracy
+            float estimate = 100.0f - data.min_split * 12 + data.max_depth * 3;
+            return estimate < 10.0f ? 10.0f : estimate; // ensure reasonable minimum
+        }
+
+    public:
+        uint8_t accuracy;      // in percentage
+        uint8_t peak_percent;  // number of nodes at depth with maximum number of nodes / total number of nodes in tree
+        
+        Rf_node_predictor() : filename(""), is_trained(false), accuracy(0), peak_percent(0) {
+            for (int i = 0; i < 3; i++) {
+                coefficients[i] = 0.0f;
+            }
+        }
+
+        Rf_node_predictor(const char* fn) : filename(fn), is_trained(false), accuracy(0), peak_percent(0) {
+            for (int i = 0; i < 3; i++) {
+                coefficients[i] = 0.0f;
+            }
+            // get logfile path from filename : "/base_name_node_pred.bin" -> "/base_name_node_log.csv"
+            node_predictor_log = "";
+            if (filename.length() > 0) {
+                const int suf_len = 14; // "_node_pred.bin"
+                if (filename.length() >= suf_len &&
+                    filename.substring(filename.length() - suf_len) == "_node_pred.bin") {
+                    node_predictor_log = filename.substring(0, filename.length() - suf_len) + "_node_log.csv";
+                } else {
+                    // Fallback: strip extension and append _node_log.csv
+                    int dot = filename.lastIndexOf('.');
+                    String base = (dot >= 0) ? filename.substring(0, dot) : filename;
+                    if (base.length() >= 10 && base.substring(base.length() - 10) == "_node_pred") {
+                        base.remove(base.length() - 10);
+                    }
+                    node_predictor_log = base + "_node_log.csv";
+                }
+            }
+        }
+
+        void init(const String& fn) {
+            filename = fn;
+            is_trained = false;
+            for (int i = 0; i < 3; i++) {
+                coefficients[i] = 0.0f;
+            }
+            // get logfile path from filename : "/base_name_node_pred.bin" -> "/base_name_node_log.csv"
+            node_predictor_log = "";
+            if (filename.length() > 0) {
+                const int suf_len = 14; // "_node_pred.bin"
+                if (filename.length() >= suf_len &&
+                    filename.substring(filename.length() - suf_len) == "_node_pred.bin") {
+                    node_predictor_log = filename.substring(0, filename.length() - suf_len) + "_node_log.csv";
+                } else {
+                    // Fallback: strip extension and append _node_log.csv
+                    int dot = filename.lastIndexOf('.');
+                    String base = (dot >= 0) ? filename.substring(0, dot) : filename;
+                    if (base.length() >= 10 && base.substring(base.length() - 10) == "_node_pred") {
+                        base.remove(base.length() - 10);
+                    }
+                    node_predictor_log = base + "_node_log.csv";
+                }
+            }
+            // check if node_log file exists, if not create with header
+            if (node_predictor_log.length() > 0 && !SPIFFS.exists(node_predictor_log.c_str())) {
+                File logFile = SPIFFS.open(node_predictor_log.c_str(), FILE_WRITE);
+                if (logFile) {
+                    logFile.println("min_split,max_depth,total_nodes");
+                    logFile.close();
+                }
+            }
+        }
+        
+        // Load trained model from SPIFFS (updated format without version)
+        bool loadPredictor() {
+            if(is_trained) return true;
+            if (!SPIFFS.exists(filename.c_str())) {
+                Serial.printf("❌ No predictor file found: %s !\n", filename.c_str());
+                Serial.println("Switching to use default predictor.");
+                return false;
+            }
+            
+            File file = SPIFFS.open(filename.c_str(), FILE_READ);
+            if (!file) {
+                Serial.printf("❌ Failed to open predictor file: %s\n", filename.c_str());
+                return false;
+            }
+            
+            // Read and verify magic number
+            uint32_t magic;
+            if (file.read((uint8_t*)&magic, sizeof(magic)) != sizeof(magic) || magic != 0x4E4F4445) {
+                Serial.printf("❌ Invalid predictor file format: %s\n", filename.c_str());
+                file.close();
+                return false;
+            }
+            
+            // Read training status (but don't use it to set is_trained - that's set after successful loading)
+            bool file_is_trained;
+            if (file.read((uint8_t*)&file_is_trained, sizeof(file_is_trained)) != sizeof(file_is_trained)) {
+                Serial.println("❌ Failed to read training status");
+                file.close();
+                return false;
+            }
+            
+            // Read accuracy and peak_percent
+            if (file.read((uint8_t*)&accuracy, sizeof(accuracy)) != sizeof(accuracy)) {
+                Serial.println("❌ Failed to read accuracy");
+                file.close();
+                return false;
+            }
+            
+            if (file.read((uint8_t*)&peak_percent, sizeof(peak_percent)) != sizeof(peak_percent)) {
+                Serial.println("❌ Failed to read peak_percent");
+                file.close();
+                return false;
+            }
+            
+            // Read number of coefficients
+            uint8_t num_coefficients;
+            if (file.read((uint8_t*)&num_coefficients, sizeof(num_coefficients)) != sizeof(num_coefficients) || num_coefficients != 3) {
+                Serial.printf("❌ Invalid coefficient count: %d (expected 3)\n", num_coefficients);
+                file.close();
+                return false;
+            }
+            
+            // Read coefficients
+            if (file.read((uint8_t*)coefficients, sizeof(float) * 3) != sizeof(float) * 3) {
+                Serial.println("❌ Failed to read coefficients");
+                file.close();
+                return false;
+            }
+            
+            file.close();
+            
+            // Only set is_trained to true if the file was actually trained
+            if (file_is_trained) {
+                is_trained = true;
+                
+                // Fix PC version's peak_percent bug where it often saves 0%
+                if (peak_percent == 0) {
+                    peak_percent = 30; // Use reasonable default for binary trees
+                    Serial.printf("⚠️  Fixed peak_percent from 0%% to 30%% (PC version bug)\n");
+                }
+                
+                Serial.printf("✅ Node_predictor loaded: %s (accuracy: %d%%, peak: %d%%)\n", 
+                            filename.c_str(), accuracy, peak_percent);
+                Serial.printf("   Coefficients: bias=%.2f, split=%.2f, depth=%.2f\n", 
+                            coefficients[0], coefficients[1], coefficients[2]);
+            } else {
+                Serial.printf("⚠️  predictor file exists but is not trained: %s\n", filename.c_str());
+                is_trained = false;
+            }
+            
+            return file_is_trained;
+        }
+        
+        // Save trained predictor to SPIFFS
+        bool savePredictor() {
+            // Remove existing file
+            if (SPIFFS.exists(filename.c_str())) {
+                SPIFFS.remove(filename.c_str());
+            }
+            
+            File file = SPIFFS.open(filename.c_str(), FILE_WRITE);
+            if (!file) {
+                Serial.printf("❌ Failed to create node_predictor file: %s\n", filename.c_str());
+                return false;
+            }
+            
+            // Write magic number
+            uint32_t magic = 0x4E4F4445; // "NODE" in hex
+            file.write((uint8_t*)&magic, sizeof(magic));
+            
+            // Write training status
+            file.write((uint8_t*)&is_trained, sizeof(is_trained));
+            
+            // Write accuracy and peak_percent
+            file.write((uint8_t*)&accuracy, sizeof(accuracy));
+            file.write((uint8_t*)&peak_percent, sizeof(peak_percent));
+            
+            // Write number of coefficients
+            uint8_t num_coefficients = 3;
+            file.write((uint8_t*)&num_coefficients, sizeof(num_coefficients));
+            
+            // Write coefficients
+            file.write((uint8_t*)coefficients, sizeof(float) * 3);
+            
+            file.close();
+            
+            Serial.printf("✅ Node_predictor saved: %s (%d bytes, accuracy: %d%%, peak: %d%%)\n", 
+                        filename.c_str(), 
+                        sizeof(magic) + sizeof(is_trained) + sizeof(accuracy) + sizeof(peak_percent) + 
+                        sizeof(num_coefficients) + sizeof(float) * 3, accuracy, peak_percent);
+            return true;
+        }
+        
+        // Predict number of nodes for given parameters
+        uint16_t estimate(const node_data& data) {
+            if(!is_trained) {
+                if(!loadPredictor()){
+                    return manual_estimate(data); // Use manual estimate if predictor is disabled 
+                }
+            }
+            
+            float prediction = evaluate_formula(data);
+            return static_cast<uint16_t>(prediction + 0.5f); // Round to nearest integer
+        }
+        uint16_t estimate(uint8_t min_split, uint16_t max_depth) {
+            node_data data(min_split, max_depth);
+            return estimate(data);
+        }
+        
+        // Retrain the predictor using data from rf_tree_log.csv (synchronized with PC version)
+        bool re_train(bool save_after_retrain = true) {
+            if(!can_retrain()) {
+                Serial.println("❌ No training data available for retraining.");
+                return false;
+            }
+            if(buffer.size() > 0){
+                add_new_samples(buffer);
+            }
+            buffer.clear();
+            buffer.fit();
+
+            File file = SPIFFS.open(node_predictor_log, FILE_READ);
+            if (!file) {
+                Serial.printf("❌ Failed to open training log: %s\n", node_predictor_log);
+                return false;
+            }
+            
+            Serial.println("🔄 Retraining node predictor from CSV data...");
+            
+
+            mcu::b_vector<node_data> training_data;
+            training_data.reserve(50); // Reserve space for training samples
+            
+            String line;
+            bool first_line = true;
+            
+            // Read CSV data
+            while (file.available()) {
+                line = file.readStringUntil('\n');
+                line.trim();
+                
+                if (line.length() == 0 || first_line) {
+                    first_line = false;
+                    continue; // Skip header line
+                }
+                
+                // Parse CSV line: min_split,max_depth,total_nodes
+                node_data sample;
+                int comma1 = line.indexOf(',');
+                int comma2 = line.indexOf(',', comma1 + 1);
+                
+                if (comma1 != -1 && comma2 != -1) {
+                    String min_split_str = line.substring(0, comma1);
+                    String max_depth_str = line.substring(comma1 + 1, comma2);
+                    String total_nodes_str = line.substring(comma2 + 1);
+                    
+                    sample.min_split = min_split_str.toInt();
+                    sample.max_depth = max_depth_str.toInt();
+                    sample.total_nodes = total_nodes_str.toInt();
+                    
+                    // skip invalid samples
+                    if (sample.min_split > 0 && sample.max_depth > 0 && sample.total_nodes > 0) {
+                        training_data.push_back(sample);
+                    }
+                }
+            }
+            file.close();
+            
+            if (training_data.size() < 3) {
+                Serial.printf("❌ Insufficient training data: %d samples (need at least 3)\n", training_data.size());
+                return false;
+            }
+            
+            // Use PC version's trend analysis approach instead of complex regression
+            // Collect all unique min_split and max_depth values
+            mcu::b_vector<uint8_t> unique_min_splits;
+            mcu::b_vector<uint16_t> unique_max_depths;
+            
+            for (const auto& sample : training_data) {
+                // Add unique min_split values
+                bool found_split = false;
+                for (const auto& existing_split : unique_min_splits) {
+                    if (existing_split == sample.min_split) {
+                        found_split = true;
+                        break;
+                    }
+                }
+                if (!found_split) {
+                    unique_min_splits.push_back(sample.min_split);
+                }
+                
+                // Add unique max_depth values
+                bool found_depth = false;
+                for (const auto& existing_depth : unique_max_depths) {
+                    if (existing_depth == sample.max_depth) {
+                        found_depth = true;
+                        break;
+                    }
+                }
+                if (!found_depth) {
+                    unique_max_depths.push_back(sample.max_depth);
+                }
+            }
+            
+            Serial.printf("   Found %d unique min_splits, %d unique max_depths\n", 
+                        unique_min_splits.size(), unique_max_depths.size());
+            
+            // Sort vectors for easier processing
+            // Simple bubble sort for small vectors
+            for (size_t i = 0; i < unique_min_splits.size(); i++) {
+                for (size_t j = i + 1; j < unique_min_splits.size(); j++) {
+                    if (unique_min_splits[i] > unique_min_splits[j]) {
+                        uint8_t temp = unique_min_splits[i];
+                        unique_min_splits[i] = unique_min_splits[j];
+                        unique_min_splits[j] = temp;
+                    }
+                }
+            }
+            
+            for (size_t i = 0; i < unique_max_depths.size(); i++) {
+                for (size_t j = i + 1; j < unique_max_depths.size(); j++) {
+                    if (unique_max_depths[i] > unique_max_depths[j]) {
+                        uint16_t temp = unique_max_depths[i];
+                        unique_max_depths[i] = unique_max_depths[j];
+                        unique_max_depths[j] = temp;
+                    }
+                }
+            }
+            
+            // Calculate effects using a simpler approach without large intermediate vectors
+            // Calculate min_split effect directly
+            float split_effect = 0.0f;
+            if (unique_min_splits.size() >= 2) {
+                // Calculate average nodes for first and last min_split values
+                float first_split_avg = 0.0f;
+                float last_split_avg = 0.0f;
+                int first_split_count = 0;
+                int last_split_count = 0;
+                
+                uint8_t first_split = unique_min_splits[0];
+                uint8_t last_split = unique_min_splits[unique_min_splits.size() - 1];
+                
+                // Calculate averages directly from training data
+                for (const auto& sample : training_data) {
+                    if (sample.min_split == first_split) {
+                        first_split_avg += sample.total_nodes;
+                        first_split_count++;
+                    } else if (sample.min_split == last_split) {
+                        last_split_avg += sample.total_nodes;
+                        last_split_count++;
+                    }
+                }
+                
+                if (first_split_count > 0 && last_split_count > 0) {
+                    first_split_avg /= first_split_count;
+                    last_split_avg /= last_split_count;
+                    
+                    float split_range = static_cast<float>(last_split - first_split);
+                    if (split_range > 0.01f) {
+                        split_effect = (last_split_avg - first_split_avg) / split_range;
+                    }
+                }
+            }
+            
+            // Calculate max_depth effect directly
+            float depth_effect = 0.0f;
+            if (unique_max_depths.size() >= 2) {
+                // Calculate average nodes for first and last max_depth values
+                float first_depth_avg = 0.0f;
+                float last_depth_avg = 0.0f;
+                int first_depth_count = 0;
+                int last_depth_count = 0;
+                
+                uint16_t first_depth = unique_max_depths[0];
+                uint16_t last_depth = unique_max_depths[unique_max_depths.size() - 1];
+                
+                // Calculate averages directly from training data
+                for (const auto& sample : training_data) {
+                    if (sample.max_depth == first_depth) {
+                        first_depth_avg += sample.total_nodes;
+                        first_depth_count++;
+                    } else if (sample.max_depth == last_depth) {
+                        last_depth_avg += sample.total_nodes;
+                        last_depth_count++;
+                    }
+                }
+                
+                if (first_depth_count > 0 && last_depth_count > 0) {
+                    first_depth_avg /= first_depth_count;
+                    last_depth_avg /= last_depth_count;
+                    
+                    float depth_range = static_cast<float>(last_depth - first_depth);
+                    if (depth_range > 0.01f) {
+                        depth_effect = (last_depth_avg - first_depth_avg) / depth_range;
+                    }
+                }
+            }
+            
+            // Calculate overall average as baseline
+            float overall_avg = 0.0f;
+            for (const auto& sample : training_data) {
+                overall_avg += sample.total_nodes;
+            }
+            overall_avg /= training_data.size();
+            
+            // Build the simple linear predictor: nodes = bias + split_coeff * min_split + depth_coeff * max_depth
+            // Calculate bias to center the predictor around the overall average
+            float reference_split = unique_min_splits.empty() ? 3.0f : static_cast<float>(unique_min_splits[0]);
+            float reference_depth = unique_max_depths.empty() ? 6.0f : static_cast<float>(unique_max_depths[0]);
+            
+            coefficients[0] = overall_avg - (split_effect * reference_split) - (depth_effect * reference_depth); // bias
+            coefficients[1] = split_effect; // min_split coefficient
+            coefficients[2] = depth_effect; // max_depth coefficient
+            
+            // Calculate accuracy using PC version's approach exactly
+            float total_error = 0.0f;
+            float total_actual = 0.0f;
+            
+            for (const auto& sample : training_data) {
+                node_data data(sample.min_split, sample.max_depth);
+                float predicted = evaluate_formula(data);
+                float actual = static_cast<float>(sample.total_nodes);
+                float error = fabs(predicted - actual);
+                total_error += error;
+                total_actual += actual;
+            }
+            
+            float mae = total_error / training_data.size(); // Mean Absolute Error
+            float mape = (total_error / total_actual) * 100.0f; // Mean Absolute Percentage Error
+            
+            // PC version returns (100.0f - mape) which gives 0-100, then multiplies by 100 in training code
+            // Let's follow the same logic but fix the overflow issue
+            float get_accuracy_result = fmax(0.0f, 100.0f - mape);
+            accuracy = static_cast<uint8_t>(fmin(255.0f, get_accuracy_result * 100.0f / 100.0f)); // Simplify to match intent
+            
+            // Actually, let's just match the logical intent rather than the bug
+            accuracy = static_cast<uint8_t>(fmin(100.0f, fmax(0.0f, 100.0f - mape)));
+            
+            peak_percent = 30; // A reasonable default for binary tree structures
+            
+            is_trained = true;
+            
+            Serial.printf("✅ Retraining complete! Accuracy: %d%%, Peak: %d%%\n", accuracy, peak_percent);
+            Serial.printf("   Coefficients: bias=%.2f, split=%.2f, depth=%.2f\n", 
+                        coefficients[0], coefficients[1], coefficients[2]);
+            Serial.printf("   MAE: %.2f, MAPE: %.2f%%\n", mae, mape);
+            Serial.printf("   Split effect: %.2f, Depth effect: %.2f\n", split_effect, depth_effect);
+
+            if(save_after_retrain) savePredictor(); // Save the new predictor
+            return true;
+        }
+        /// @brief  add new samples to the beginning of the node_predictor_log file. 
+        // If the file has more than 50 samples (rows, not including header), 
+        // remove the samples at the end of the file (limit the file to the 50 latest samples)
+        void add_new_samples(b_vector<node_data>& new_samples) {
+            // Read all existing lines
+            mcu::b_vector<String> lines;
+            File file = SPIFFS.open(node_predictor_log, FILE_READ);
+            if (file) {
+                while (file.available()) {
+                    String line = file.readStringUntil('\n');
+                    line.trim();
+                    if (line.length() > 0) lines.push_back(line);
+                }
+                file.close();
+            }
+            // Ensure header is present
+            String header = "min_split,max_depth,total_nodes";
+            if (lines.empty() || lines[0] != header) {
+                lines.insert(0, header);
+            }
+            // Remove header for easier manipulation
+            mcu::b_vector<String> data_lines;
+            for (size_t i = 1; i < lines.size(); ++i) {
+                data_lines.push_back(lines[i]);
+            }
+            // Prepend new samples
+            for (int i = new_samples.size() - 1; i >= 0; --i) {
+                const node_data& nd = new_samples[i];
+                String row = String(nd.min_split) + "," + String(nd.max_depth) + "," + String(nd.total_nodes);
+                data_lines.insert(0, row);
+            }
+            // Limit to 50 rows
+            while (data_lines.size() > 50) {
+                data_lines.pop_back();
+            }
+            // Write back to file
+            SPIFFS.remove(node_predictor_log);
+            file = SPIFFS.open(node_predictor_log, FILE_WRITE);
+            if (file) {
+                file.println(header);
+                for (const auto& row : data_lines) {
+                    file.println(row);
+                }
+                file.close();
+            }
+        }
+
+        // Check if training log is available and size of the file is greater than 0
+        bool can_retrain() const {
+            if (!SPIFFS.exists(node_predictor_log)) return false;
+            File file = SPIFFS.open(node_predictor_log, FILE_READ);
+            bool result = file && file.size() > 0;
+            if (file) file.close();
+            return result;
+        }
+    };
+
+    /*
+    ------------------------------------------------------------------------------------------------------------------
+    --------------------------------------------- RF_MEMORY_LOGGER ---------------------------------------------------
+    ------------------------------------------------------------------------------------------------------------------
+    */
+    class Rf_memory_logger {
+    public:
+        uint32_t freeHeap;
+        uint32_t largestBlock;
+        uint32_t starting_time;
+        uint8_t fragmentation;
+        uint32_t lowest_ram;
+        uint32_t lowest_rom; 
+        uint32_t freeDisk;
+        float log_time;
+
+        Rf_memory_logger() : freeHeap(0), largestBlock(0), starting_time(0), fragmentation(0), log_time(0.0f) {
+            lowest_ram = UINT32_MAX;
+            lowest_rom = UINT32_MAX;
+            // clear SPIFFS log file if it exists
+            if(SPIFFS.exists(memory_log_file)){
+                SPIFFS.remove(memory_log_file); 
+            }
+            // write header to log file
+            File logFile = SPIFFS.open(memory_log_file, FILE_WRITE);
+            if (logFile) {
+                logFile.println("Time(s),FreeHeap,Largest_Block,FreeDisk");
+                logFile.close();
+            } 
+        }
+        
+        void init() {
+            starting_time = millis();
+            log("init tracker", false, true); // Initial log without printing
+        }
+
+        void log(const char* msg = "", bool print = true, bool log = true){
+            freeHeap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+            freeDisk = SPIFFS.totalBytes() - SPIFFS.usedBytes();
+
+            if(freeHeap < lowest_ram) lowest_ram = freeHeap;
+            if(freeDisk < lowest_rom) lowest_rom = freeDisk;
+
+            largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+            fragmentation = 100 - (largestBlock * 100 / freeHeap);
+            if(print){       
+                if(msg && strlen(msg) > 0){
+                    Serial.print("🛈 ");
+                    Serial.println(msg);
+                }
+                Serial.print("--> RAM LEFT (heap): ");
+                Serial.println(freeHeap);
+                Serial.print("Largest Free Block: ");
+                Serial.println(largestBlock);
+                Serial.printf("Fragmentation: %d", fragmentation);
+                Serial.println("%");
+            }
+
+            // Log to file with timestamp
+            if(log) {        
+                log_time = (millis() - starting_time)/1000.0f; 
+                File logFile = SPIFFS.open(memory_log_file, FILE_APPEND);
+                if (logFile) {
+                    logFile.printf("%.2f, %u, %u, %u",
+                                    log_time, freeHeap, largestBlock, freeDisk);
+                    if(msg && strlen(msg) > 0){
+                        logFile.printf("\t, %s\n", msg);
+                    } else {
+                        logFile.println();
+                    }
+                    logFile.close();
+                }
+            }
+        }
+    };
+
+    /*
+    ------------------------------------------------------------------------------------------------------------------
+    ----------------------------------------------- RF_CATEGORIZER ---------------------------------------------------
+    ------------------------------------------------------------------------------------------------------------------
+    */
+    // Optional compile-time flag to disable label mapping (saves memory)
+    #ifndef DISABLE_LABEL_MAPPING
+    #define SUPPORT_LABEL_MAPPING 1
+    #else
+    #define SUPPORT_LABEL_MAPPING 0
+    #endif
+
+    // Feature type definitions for CTG v2 format
+    enum FeatureType { FT_DF = 0, FT_DC = 1, FT_CS = 2, FT_CU = 3 };
+    
+    // Packed feature reference structure (2 bytes per feature)
+    struct FeatureRef {
+        uint16_t packed; // bits 15..14: type, bits 13..8: aux, bits 7..0: offset
+        
+        FeatureRef() : packed(0) {}
+        FeatureRef(FeatureType type, uint8_t aux, uint8_t offset) {
+            packed = (static_cast<uint16_t>(type) << 14) | 
+                    ((static_cast<uint16_t>(aux) & 0x3F) << 8) | 
+                    static_cast<uint16_t>(offset);
+        }
+        
+        FeatureType getType() const { return static_cast<FeatureType>(packed >> 14); }
+        uint8_t getAux() const { return (packed >> 8) & 0x3F; }
+        uint8_t getOffset() const { return packed & 0xFF; }
+    };
+
+    class Rf_categorizer {
+    private:
+        uint16_t numFeatures = 0;
+        uint8_t groupsPerFeature = 0;
+        uint8_t numLabels = 0;
+        uint32_t scaleFactor = 50000;
+        String filename = "";
+        bool isLoaded = false;
+
+        // Compact storage arrays
+        mcu::vector<FeatureRef> featureRefs;              // One per feature
+        mcu::vector<uint16_t> sharedPatterns;             // Concatenated pattern edges
+        mcu::vector<uint16_t> allUniqueEdges;             // Concatenated unique edges
+        mcu::vector<uint8_t> allDiscreteValues;           // Concatenated discrete values
+        
+        #if SUPPORT_LABEL_MAPPING
+        mcu::b_vector<String, mcu::SMALL, 8> labelMapping; // Optional label reverse mapping
+        #endif
+        
+        // Helper function to split CSV line
+        mcu::b_vector<String, mcu::SMALL> split(const String& line, char delimiter = ',') {
+            mcu::b_vector<String, mcu::SMALL> result;
+            int start = 0;
+            int end = line.indexOf(delimiter);
+            
+            while (end != -1) {
+                result.push_back(line.substring(start, end));
+                start = end + 1;
+                end = line.indexOf(delimiter, start);
+            }
+            result.push_back(line.substring(start));
+            
+            return result;
+        }
+
+        // Optimized feature categorization
+        uint8_t categorizeFeature(uint16_t featureIdx, float value) const {
+            if (!isLoaded || featureIdx >= numFeatures) {
+                return 0;
+            }
+            
+            const FeatureRef& ref = featureRefs[featureIdx];
+            uint32_t scaledValue = static_cast<uint32_t>(value * scaleFactor + 0.5f);
+            
+            switch (ref.getType()) {
+                case FT_DF:
+                    // Full discrete range: clamp to 0..groupsPerFeature-1
+                    return static_cast<uint8_t>(std::min(static_cast<int>(value), static_cast<int>(groupsPerFeature - 1)));
+                    
+                case FT_DC: {
+                    // Discrete custom values: linear search
+                    uint8_t count = ref.getAux();
+                    uint8_t offset = ref.getOffset();
+                    uint8_t targetValue = static_cast<uint8_t>(value);
+                    
+                    for (uint8_t i = 0; i < count; ++i) {
+                        if (allDiscreteValues[offset + i] == targetValue) {
+                            return i;
+                        }
+                    }
+                    return 0; // Default if not found
+                }
+                
+                case FT_CS: {
+                    // Continuous shared pattern
+                    uint8_t patternId = ref.getAux();
+                    uint16_t baseOffset = patternId * (groupsPerFeature - 1);
+                    
+                    for (uint8_t bin = 0; bin < (groupsPerFeature - 1); ++bin) {
+                        if (scaledValue < sharedPatterns[baseOffset + bin]) {
+                            return bin;
+                        }
+                    }
+                    return groupsPerFeature - 1; // Last bin
+                }
+                
+                case FT_CU: {
+                    // Continuous unique edges
+                    uint8_t edgeCount = ref.getAux();
+                    uint8_t offset = ref.getOffset();
+                    uint16_t baseOffset = offset * (groupsPerFeature - 1);
+                    
+                    for (uint8_t bin = 0; bin < edgeCount; ++bin) {
+                        if (scaledValue < allUniqueEdges[baseOffset + bin]) {
+                            return bin;
+                        }
+                    }
+                    return edgeCount; // Last bin
+                }
+            }
+            
+            return 0; // Fallback
+        }
+         
+    public:
+        Rf_categorizer() = default;
+        
+        Rf_categorizer(const String& csvFilename) : filename(csvFilename), isLoaded(false) {}
+
+        void init(const String& csvFilename) {
+            filename = csvFilename;
+            isLoaded = false;
+        }
+        
+        // Load categorizer data from CTG v2 format
+        bool loadCategorizer(bool re_use = true) {
+            if (!SPIFFS.exists(filename)) {
+                Serial.println("❌ CTG2 file not found: " + filename);
+                return false;
+            }
+            
+            File file = SPIFFS.open(filename, "r");
+            if (!file) {
+                Serial.println("❌ Failed to open CTG2 file: " + filename);
+                return false;
+            }
+            
+            Serial.println("📂 Loading CTG2 from: " + filename);
+            
+            try {
+                // Read header: CTG2,numFeatures,groupsPerFeature,numLabels,numSharedPatterns,scaleFactor
+                if (!file.available()) {
+                    Serial.println("❌ Empty CTG2 file");
+                    file.close();
+                    return false;
+                }
+                
+                String headerLine = file.readStringUntil('\n');
+                headerLine.trim();
+                auto headerParts = split(headerLine, ',');
+                
+                if (headerParts.size() != 6 || headerParts[0] != "CTG2") {
+                    Serial.println("❌ Invalid CTG2 header format");
+                    file.close();
+                    return false;
+                }
+                
+                numFeatures = headerParts[1].toInt();
+                groupsPerFeature = headerParts[2].toInt();
+                numLabels = headerParts[3].toInt();
+                uint16_t numSharedPatterns = headerParts[4].toInt();
+                scaleFactor = headerParts[5].toInt();
+                
+                Serial.println("📊 Features: " + String(numFeatures) + ", Groups: " + String(groupsPerFeature) + 
+                             ", Labels: " + String(numLabels) + ", Patterns: " + String(numSharedPatterns) + 
+                             ", Scale: " + String(scaleFactor));
+                
+                // Clear existing data
+                featureRefs.clear();
+                sharedPatterns.clear();
+                allUniqueEdges.clear();
+                allDiscreteValues.clear();
+                #if SUPPORT_LABEL_MAPPING
+                labelMapping.clear();
+                #endif
+                
+                // Reserve memory
+                featureRefs.reserve(numFeatures);
+                sharedPatterns.reserve(numSharedPatterns * (groupsPerFeature - 1));
+                
+                #if SUPPORT_LABEL_MAPPING
+                labelMapping.reserve(numLabels);
+                // Initialize label mapping with empty strings
+                for (uint8_t i = 0; i < numLabels; i++) {
+                    labelMapping.push_back("");
+                }
+                #endif
+                
+                // Read label mappings: L,normalizedId,originalLabel
+                #if SUPPORT_LABEL_MAPPING
+                while (file.available()) {
+                    String line = file.readStringUntil('\n');
+                    line.trim();
+                    if (line.startsWith("L,")) {
+                        auto parts = split(line, ',');
+                        if (parts.size() >= 3) {
+                            uint8_t id = parts[1].toInt();
+                            String originalLabel = parts[2];
+                            if (id < numLabels) {
+                                labelMapping[id] = originalLabel;
+                            }
+                        }
+                    } else {
+                        // Rewind to read this line again as it's not a label
+                        file.seek(file.position() - line.length() - 1);
+                        break;
+                    }
+                }
+                #else
+                // Skip label lines
+                while (file.available()) {
+                    String line = file.readStringUntil('\n');
+                    line.trim();
+                    if (!line.startsWith("L,")) {
+                        file.seek(file.position() - line.length() - 1);
+                        break;
+                    }
+                }
+                #endif
+                
+                // Read shared patterns: P,patternId,edgeCount,e1,e2,...
+                for (uint16_t i = 0; i < numSharedPatterns; i++) {
+                    if (!file.available()) {
+                        Serial.println("❌ Unexpected end of file reading patterns");
+                        file.close();
+                        return false;
+                    }
+                    
+                    String patternLine = file.readStringUntil('\n');
+                    patternLine.trim();
+                    auto parts = split(patternLine, ',');
+                    
+                    if (parts.size() < 3 || parts[0] != "P") {
+                        Serial.println("❌ Invalid pattern line format");
+                        file.close();
+                        return false;
+                    }
+                    
+                    uint16_t patternId = parts[1].toInt();
+                    uint16_t edgeCount = parts[2].toInt();
+                    
+                    if (parts.size() != (3 + edgeCount)) {
+                        Serial.println("❌ Pattern edge count mismatch");
+                        file.close();
+                        return false;
+                    }
+                    
+                    // Store edges in shared pattern array
+                    for (uint16_t j = 0; j < edgeCount; j++) {
+                        sharedPatterns.push_back(parts[3 + j].toInt());
+                    }
+                }
+                
+                // Read feature definitions
+                for (uint16_t i = 0; i < numFeatures; i++) {
+                    if (!file.available()) {
+                        Serial.println("❌ Unexpected end of file reading features");
+                        file.close();
+                        return false;
+                    }
+                    
+                    String featureLine = file.readStringUntil('\n');
+                    featureLine.trim();
+                    auto parts = split(featureLine, ',');
+                    
+                    if (parts.size() < 1) {
+                        Serial.println("❌ Invalid feature line");
+                        file.close();
+                        return false;
+                    }
+                    
+                    if (parts[0] == "DF") {
+                        // Discrete full range
+                        featureRefs.push_back(FeatureRef(FT_DF, 0, 0));
+                    } 
+                    else if (parts[0] == "DC") {
+                        // Discrete custom values
+                        if (parts.size() < 2) {
+                            Serial.println("❌ Invalid DC line format");
+                            file.close();
+                            return false;
+                        }
+                        
+                        uint8_t count = parts[1].toInt();
+                        if (parts.size() != (2 + count)) {
+                            Serial.println("❌ DC value count mismatch");
+                            file.close();
+                            return false;
+                        }
+                        
+                        uint8_t offset = allDiscreteValues.size();
+                        for (uint8_t j = 0; j < count; j++) {
+                            allDiscreteValues.push_back(parts[2 + j].toInt());
+                        }
+                        
+                        featureRefs.push_back(FeatureRef(FT_DC, count, offset));
+                    }
+                    else if (parts[0] == "CS") {
+                        // Continuous shared pattern
+                        if (parts.size() != 2) {
+                            Serial.println("❌ Invalid CS line format");
+                            file.close();
+                            return false;
+                        }
+                        
+                        uint16_t patternId = parts[1].toInt();
+                        featureRefs.push_back(FeatureRef(FT_CS, patternId, 0));
+                    }
+                    else if (parts[0] == "CU") {
+                        // Continuous unique edges
+                        if (parts.size() < 2) {
+                            Serial.println("❌ Invalid CU line format");
+                            file.close();
+                            return false;
+                        }
+                        
+                        uint8_t edgeCount = parts[1].toInt();
+                        if (parts.size() != (2 + edgeCount)) {
+                            Serial.println("❌ CU edge count mismatch");
+                            file.close();
+                            return false;
+                        }
+                        
+                        uint8_t offset = allUniqueEdges.size() / (groupsPerFeature - 1);
+                        for (uint8_t j = 0; j < edgeCount; j++) {
+                            allUniqueEdges.push_back(parts[2 + j].toInt());
+                        }
+                        
+                        featureRefs.push_back(FeatureRef(FT_CU, edgeCount, offset));
+                    }
+                    else {
+                        Serial.println("❌ Unknown feature type: " + parts[0]);
+                        file.close();
+                        return false;
+                    }
+                }
+                
+                file.close();
+                isLoaded = true;
+                
+                Serial.println("✅ CTG2 loaded successfully!");
+                Serial.println("   Memory usage: " + String(memoryUsage()) + " bytes");
+                
+                // Clean up file if not reusing
+                if (!re_use) {
+                    SPIFFS.remove(filename);
+                }
+                
+                return true;
+                
+            } catch (...) {
+                Serial.println("❌ Error parsing CTG2 file");
+                file.close();
+                return false;
+            }
+        }
+        
+        
+        // Release loaded data from memory
+        void releaseCategorizer(bool re_use = true) {
+            if (!isLoaded) {
+                Serial.println("🧹 Categorizer already released");
+                return;
+            }
+            
+            // Clear all data structures
+            featureRefs.clear();
+            sharedPatterns.clear();
+            allUniqueEdges.clear();
+            allDiscreteValues.clear();
+            #if SUPPORT_LABEL_MAPPING
+            labelMapping.clear();
+            #endif
+            
+            isLoaded = false;
+            Serial.println("🧹 Categorizer data released from memory");
+        }
+        // Categorize an entire sample
+        mcu::packed_vector<2, SMALL> categorizeSample(const mcu::b_vector<float>& sample) const {
+            if(sample.size() != numFeatures) {
+                Serial.println("❌ Sample size mismatch. Expected " + String(numFeatures) + 
+                             " features, got " + String(sample.size()));
+                return mcu::packed_vector<2, SMALL>();
+            }
+            mcu::packed_vector<2, SMALL> result;
+            
+            if (!isLoaded) {
+                Serial.println("❌ Categorizer not loaded");
+                return result;
+            }
+            
+            if (sample.size() != numFeatures) {
+                Serial.println("❌ Input sample size mismatch. Expected " + String(numFeatures) + 
+                             " features, got " + String(sample.size()));
+                return result;
+            }
+            
+            result.reserve(numFeatures);
+            
+            for (uint16_t i = 0; i < numFeatures; ++i) {
+                result.push_back(categorizeFeature(i, sample[i]));
+            }
+            
+            return result;
+        }
+        
+        // Debug methods
+        void printInfo() const {
+            Serial.println("=== Rf_categorizer Categorizer Info ===");
+            Serial.println("File: " + filename);
+            Serial.println("Loaded: " + String(isLoaded ? "Yes" : "No"));
+            Serial.println("Features: " + String(numFeatures));
+            Serial.println("Groups per feature: " + String(groupsPerFeature));
+            Serial.println("Labels: " + String(numLabels));
+            Serial.println("Scale factor: " + String(scaleFactor));
+            Serial.println("Memory usage: " + String(memoryUsage()) + " bytes");
+            
+            #if SUPPORT_LABEL_MAPPING
+            if (isLoaded && labelMapping.size() > 0) {
+                Serial.println("Label mappings:");
+                for (uint8_t i = 0; i < labelMapping.size(); i++) {
+                    if (labelMapping[i].length() > 0) {
+                        Serial.printf("  %d -> %s\n", i, labelMapping[i].c_str());
+                    } else {
+                        Serial.printf("  %d: (empty)\n", i);
+                    }
+                }
+            }
+            #endif
+            
+            Serial.println("=================================");
+        }
+        
+        size_t memoryUsage() const {
+            size_t usage = 0;
+            
+            // Basic members
+            usage += sizeof(numFeatures) + sizeof(groupsPerFeature) + sizeof(numLabels) + 
+                    sizeof(scaleFactor) + sizeof(isLoaded);
+            usage += filename.length();
+            
+            // Core data structures
+            usage += featureRefs.size() * sizeof(FeatureRef);
+            usage += sharedPatterns.size() * sizeof(uint16_t);
+            usage += allUniqueEdges.size() * sizeof(uint16_t);
+            usage += allDiscreteValues.size() * sizeof(uint8_t);
+            
+            #if SUPPORT_LABEL_MAPPING
+            // Label mappings
+            for (const auto& label : labelMapping) {
+                usage += label.length() + sizeof(String);
+            }
+            #endif
+            
+            return usage;
+        }
+
+        String inline getOriginalLabel(uint8_t normalizedLabel) const {
+            if (normalizedLabel < labelMapping.size()) {
+                return labelMapping[normalizedLabel];
+            }
+            return String(normalizedLabel);
+        }
+    };
+} // namespace mcu

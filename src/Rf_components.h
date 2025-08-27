@@ -1158,7 +1158,7 @@ namespace mcu {
                     uint8_t tree_count = 0;
                     
                     // Check for tree files starting from tree_0.bin
-                    for(uint8_t i = 0; i < 50; i++) { // Max 50 trees check
+                    for(uint8_t i = 0; i < 100; i++) { // Max 100 trees check
                         String treeFile = String("/") + base_name + "tree_" + String(i) + ".bin";
                         if (SPIFFS.exists(treeFile.c_str())) {
                             tree_count++;
@@ -2135,8 +2135,10 @@ namespace mcu {
         uint8_t groupsPerFeature = 0;
         uint8_t numLabels = 0;
         uint32_t scaleFactor = 50000;
+    public:
         String filename = "";
         bool isLoaded = false;
+    private:
 
         // Compact storage arrays
         mcu::vector<FeatureRef> featureRefs;              // One per feature

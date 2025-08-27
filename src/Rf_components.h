@@ -85,7 +85,7 @@ namespace mcu {
 
     struct NodeToBuild {
         uint16_t nodeIndex;
-        ID_vector<uint16_t, 2> sampleIDs;  
+        ID_vector<uint16_t, 2> sampleIDs;  // default 16 bytes at 2 bits per value default constructor
         uint8_t depth;
         
         NodeToBuild() : nodeIndex(0), depth(0) {}
@@ -101,7 +101,7 @@ namespace mcu {
 
     class Rf_tree {
     public:
-        mcu::b_vector<Tree_node> nodes;  // Vector-based tree storage
+        mcu::b_vector<Tree_node,SMALL> nodes;  // Vector-based tree storage
         uint8_t index;
         bool isLoaded;
 
@@ -2069,7 +2069,7 @@ namespace mcu {
             fragmentation = 100 - (largestBlock * 100 / freeHeap);
             if(print){       
                 if(msg && strlen(msg) > 0){
-                    Serial.print("🛈 ");
+                    Serial.print("📋 ");
                     Serial.println(msg);
                 }
                 Serial.print("--> RAM LEFT (heap): ");

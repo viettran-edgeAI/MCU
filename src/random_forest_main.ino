@@ -1,4 +1,77 @@
 #include "Rf_components.h"
+#define SUPPORT_LABEL_MAPPING
+
+// Deterministic RNG utilities (PCG32) and helpers
+struct PCG32 {
+    uint64_t state = 0x853c49e6748fea9bULL;
+    uint64_t inc   = 0xda3e39cb94b95bdbULL;
+
+    void seed(uint64_t initstate, uint64_t initseq) {
+        state = 0U;
+        inc = (initseq << 1u) | 1u;
+        next();
+        state += initstate;
+        next();
+    }
+
+    inline uint32_t next() {
+        uint64_t oldstate = state;
+        state = oldstate * 6364136223846793005ULL + inc;
+        uint32_t xorshifted = static_cast<uint32_t>(((oldstate >> 18u) ^ oldstate) >> 27u);
+        uint32_t rot = static_cast<uint32_t>(oldstate >> 59u);
+        return (xorshifted >> rot) | (xorshifted << ((-rot) & 31));
+    }
+
+    // unbiased bounded integer in [0, bound-1]
+    inline uint32_t bounded(uint32_t bound) {
+        if (bound == 0) return 0;
+        uint32_t threshold = -bound % bound;
+        while (true) {
+            uint32_t r = next();
+            if (r >= threshold) return r % bound;
+        }
+    }
+};
+
+// SplitMix64 for sub-seed derivation
+static inline uint64_t splitmix64(uint64_t x) {
+    x += 0x9e3779b97f4a7c15ULL;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
+}
+
+// FNV-1a 64-bit hash over a sequence of uint16_t values
+static inline uint64_t fnv1a64_ids(const mcu::ID_vector<uint16_t,2>& ids) {
+    const uint64_t FNV_offset = 1469598103934665603ULL;
+    const uint64_t FNV_prime  = 1099511628211ULL;
+    uint64_t hash = FNV_offset;
+    for (size_t i = 0; i < ids.size(); ++i) {
+        uint16_t v = ids[i];
+        hash ^= static_cast<uint64_t>(v & 0xFF);
+        hash *= FNV_prime;
+        hash ^= static_cast<uint64_t>((v >> 8) & 0xFF);
+        hash *= FNV_prime;
+    }
+    // also mix the size to distinguish different lengths
+    hash ^= static_cast<uint64_t>(ids.size() & 0xFF);
+    hash *= FNV_prime;
+    hash ^= static_cast<uint64_t>((ids.size() >> 8) & 0xFF);
+    hash *= FNV_prime;
+    return hash;
+}
+
+// Name-based 64-bit hash (FNV-1a) for default seeding
+static inline uint64_t fnv1a64_bytes(const char* data) {
+    const uint64_t FNV_offset = 1469598103934665603ULL;
+    const uint64_t FNV_prime  = 1099511628211ULL;
+    uint64_t hash = FNV_offset;
+    for (const unsigned char* p = (const unsigned char*)data; *p; ++p) {
+        hash ^= *p;
+        hash *= FNV_prime;
+    }
+    return hash;
+}
 
 using namespace mcu;
 
@@ -27,16 +100,48 @@ public:
     Rf_node_predictor  node_predictor; // Node predictor number of nodes required for a tree based on min_split and max_depth
 private:
     vector<Rf_tree, SMALL> root;                     // b_vector storing root nodes of trees (now manages SPIFFS filenames)
-    vector<ID_vector<uint16_t,2>, SMALL> dataList; // each ID_vector stores sample IDs of a sub_dataset, reference to index of allSamples vector in train_data
+    b_vector<ID_vector<uint16_t,2>, SMALL> dataList; // each ID_vector stores sample IDs of a sub_dataset, reference to index of allSamples vector in train_data
     b_vector<NodeToBuild, SMALL, 20> queue_nodes; // Queue for breadth-first tree building
 
     bool optimal_mode = false;  
     bool is_loaded = false;
+
+    // RNG state
+    static uint64_t s_global_seed;
+    static bool s_has_global_seed;
+    uint64_t base_seed = 0;   // effective seed for this instance
+    PCG32 rng;                // instance RNG
+
+    // derive a per-tree RNG deterministically
+    inline PCG32 derive_rng(uint64_t stream, uint64_t nonce = 0) const {
+        PCG32 r;
+        uint64_t s = splitmix64(base_seed ^ (stream * 0x9e3779b97f4a7c15ULL + nonce));
+        uint64_t inc = splitmix64(base_seed + (stream << 1) + 0x632be59bd9b4e019ULL);
+        r.seed(s, inc);
+        return r;
+    }
+
 public:
+    // Allow user to configure a global seed before constructing the forest
+    static void setGlobalRandomSeed(uint64_t seed) {
+        s_global_seed = seed;
+        s_has_global_seed = true;
+    }
 
     RandomForest(){};
     RandomForest(const char* base_name){
         model_name = String(base_name);
+
+        // Initialize deterministic RNG (use global seed if provided)
+        if (s_has_global_seed) {
+            base_seed = s_global_seed;
+        } else {
+            // Non-deterministic default seed (user can set global seed to override)
+            uint64_t hw = (static_cast<uint64_t>(esp_random()) << 32) ^ static_cast<uint64_t>(esp_random());
+            uint64_t cyc = static_cast<uint64_t>(ESP.getCycleCount());
+            base_seed = splitmix64(hw ^ cyc ^ fnv1a64_bytes(model_name.c_str()));
+        }
+        rng.seed(base_seed, base_seed ^ 0xda3e39cb94b95bdbULL);
 
         // initial components
         memory_tracker.init();
@@ -47,6 +152,7 @@ public:
 
         // load resources
         config.loadConfig();  // load config file
+        config.num_trees = 50;
         first_scan(base.get_dpFile());   // load data parameters into config
         categorizer.loadCategorizer(); // load categorizer
         node_predictor.loadPredictor(); // load node predictor
@@ -96,11 +202,14 @@ public:
         queue_nodes.reserve(min(120, estimatedNodes * node_predictor.peak_percent / 100)); // Conservative estimate
         node_data n_data(config.min_split, config.max_depth,0);
 
+        // memory usage of queue_nodes
+        Serial.printf(" RAM of queue_nodes: %d bytes\n", queue_nodes.cap() * sizeof(NodeToBuild));
+
         Serial.print("building sub_tree: ");
         
         // Load train_data once for all trees
         train_data.loadData();
-        
+        memory_tracker.log("before forest creation");
         for(uint8_t i = 0; i < config.num_trees; i++){
             Serial.printf("%d, ", i);
             Rf_tree tree(i);
@@ -128,7 +237,7 @@ public:
     // Split data into training and testing sets. create them from base_data in SPIFFS to avoid peak RAM usage
     void splitData() {
         Serial.println("<-- split data -->");
-    
+        
         size_t maxID = config.num_samples;  // total number of samples
         uint16_t trainSize = static_cast<uint16_t>(maxID * config.train_ratio);
         uint16_t testSize;
@@ -140,7 +249,7 @@ public:
         // create train_data 
         sampleID_set train_sampleIDs(maxID);
         while (train_sampleIDs.size() < trainSize) {
-            uint16_t sampleId = static_cast<uint16_t>(esp_random() % maxID);
+            uint16_t sampleId = static_cast<uint16_t>(rng.bounded(static_cast<uint32_t>(maxID)));
             train_sampleIDs.push_back(sampleId); 
         }
         train_data.allSamples = base_data.loadData(train_sampleIDs); // Load only training samples
@@ -148,14 +257,11 @@ public:
         train_data.filename = "/train_data.bin";
         train_data.releaseData(false); // Write to binary SPIFFS, clear RAM
         Serial.println("Train data loaded and released.");
-        // Serial.print("all samples: ");
-        // for(auto id : train_sampleIDs) Serial.printf("%d, ", id);
-        // Serial.println();
         
         // create test_data
         sampleID_set test_sampleIDs(maxID);
         while(test_sampleIDs.size() < testSize) {
-            uint16_t i = static_cast<uint16_t>(esp_random() % maxID);
+            uint16_t i = static_cast<uint16_t>(rng.bounded(static_cast<uint32_t>(maxID)));
             if (!train_sampleIDs.contains(i)) {
                 test_sampleIDs.push_back(i);
             }
@@ -170,7 +276,7 @@ public:
         if(config.use_validation){
             sampleID_set validation_sampleIDs(maxID);
             while(validation_sampleIDs.size() < validationSize) {
-                uint16_t i = static_cast<uint16_t>(esp_random() % maxID);
+                uint16_t i = static_cast<uint16_t>(rng.bounded(static_cast<uint32_t>(maxID)));
                 if (!train_sampleIDs.contains(i) && !test_sampleIDs.contains(i)) {
                     validation_sampleIDs.push_back(i);
                 }
@@ -199,49 +305,88 @@ public:
             numSubSample = static_cast<uint16_t>(numSample * config.boostrap_ratio); 
             Serial.println("No bootstrap, using unique samples IDs");
         }
-        // Serial.printf("Total samples: %d, Sub-sample size: %d\n", numSample, numSubSample);
 
-        // Seed random number generator with current time + some entropy
-        uint32_t seed = millis() ^ ESP.getCycleCount() ^ esp_random();
-        srand(seed);
+        // Track hashes of each tree dataset to avoid duplicates across trees
+        unordered_set<uint64_t> seen_hashes;
+        seen_hashes.reserve(config.num_trees * 2);
 
         Serial.println("creating dataset for sub-tree : ");
         for (uint8_t i = 0; i < config.num_trees; i++) {
             Serial.printf("%d, ", i);
-            // Create a new ID_vector for this tree
-            ID_vector<uint16_t,2> treeDataset;
-            treeDataset.reserve(numSubSample);
 
-            // Add some randomness per tree to further diversify
-            uint32_t tree_seed = seed + i * 1000 + millis();
-            
-            uint32_t attempts = 0;
-            while(treeDataset.size() < numSubSample && attempts < numSubSample * 10) {
-                // Use multiple sources of randomness
-                uint32_t rand_val = (esp_random() ^ (tree_seed * (attempts + 1))) + ESP.getCycleCount();
-                uint16_t idx = static_cast<uint16_t>(rand_val % numSample);
-                if(!config.use_boostrap) {
-                    // Without replacement, ensure unique samples
-                    if(treeDataset.contains(idx)) {
-                        attempts++;
-                        continue;
+            // Create a new ID_vector for this tree
+            // ID_vector stores sample IDs as bits, so we need to set bits at sample positions
+            ID_vector<uint16_t,2> treeDataset;
+            treeDataset.reserve(numSample);
+
+            // Derive a deterministic per-tree RNG; retry with nonce if duplicate detected
+            uint64_t nonce = 0;
+            while (true) {
+                treeDataset.clear();
+                PCG32 trng = derive_rng(/*stream*/ i, nonce);
+
+                if (config.use_boostrap) {
+                    // Bootstrap sampling: allow duplicates, track occurrence count
+                    for (uint16_t j = 0; j < numSubSample; ++j) {
+                        uint16_t idx = static_cast<uint16_t>(trng.bounded(numSample));
+                        // For ID_vector with 2 bits per value, we can store up to count 3
+                        // Add the sample ID, which will increment its count in the bit array
+                        treeDataset.push_back(idx);
+                    }
+                } else {
+                    // Sample without replacement using partial Fisher-Yates
+                    // Build an index array 0..numSample-1 (small uint16_t)
+                    std::vector<uint16_t> arr;
+                    arr.resize(numSample);
+                    for (uint16_t t = 0; t < numSample; ++t) arr[t] = t;
+                    for (uint16_t t = 0; t < numSubSample; ++t) {
+                        uint16_t j = static_cast<uint16_t>(t + trng.bounded(numSample - t));
+                        uint16_t tmp = arr[t];
+                        arr[t] = arr[j];
+                        arr[j] = tmp;
+                        // For unique sampling, just set bit once (count = 1)
+                        treeDataset.push_back(arr[t]);
                     }
                 }
-                treeDataset.push_back(idx);
-                attempts++;
+
+                // Check for duplicate dataset across trees
+                uint64_t h = fnv1a64_ids(treeDataset);
+                if (seen_hashes.find(h) == seen_hashes.end()) {
+                    seen_hashes.insert(h);
+                    break; // unique, accept
+                }
+                // Otherwise, bump nonce and try a different deterministic variation
+                nonce++;
+                if (nonce > 8) {
+                    // Fallback tweak: rotate a few indices deterministically
+                    // Since ID_vector is a bit array, we need to modify the underlying data carefully
+                    auto temp_vec = treeDataset;  // Copy current state
+                    treeDataset.clear();
+                    
+                    // Re-add samples with slight modifications
+                    for (uint16_t k = 0; k < min(5, (int)temp_vec.size()); ++k) {
+                        // Get a sample ID and modify it slightly
+                        uint16_t original_id = k < temp_vec.size() ? k : 0; // Simplified access
+                        uint16_t modified_id = static_cast<uint16_t>((original_id + k + i) % numSample);
+                        treeDataset.push_back(modified_id);
+                    }
+                    
+                    // Add remaining samples from original
+                    for (uint16_t k = 5; k < min(numSubSample, (int)temp_vec.size()); ++k) {
+                        uint16_t id = k % numSample; // Simplified access
+                        treeDataset.push_back(id);
+                    }
+                    
+                    // accept after tweak
+                    seen_hashes.insert(fnv1a64_ids(treeDataset));
+                    break;
+                }
             }
             dataList.push_back(std::move(treeDataset));
-            
-            // Serial.printf("dataset size: %d\n", dataList[i].size());
-            // Serial.printf("unique IDs: %d\n", dataList[i].unique_size());
-            // Serial.print("sample IDs: ");
-            // for(auto id : dataList[i]) Serial.printf("%d, ", id);
-            // Serial.println();
         }
         Serial.println();
         memory_tracker.log("after clones data");  
-    }
-        
+    }  
     // ------------------------------------------------------------------------------
     // read dataset parameters from /dataset_dp.csv and write to config
     void first_scan(const String& path) {
@@ -377,8 +522,8 @@ public:
         if (min_maxDepth >= max_maxDepth) min_maxDepth = max_maxDepth - 2;
         if (min_maxDepth < 4) min_maxDepth = 4;
 
-        config.min_split = (min_minSplit + max_minSplit) / 2 + 2;
-        config.max_depth = (min_maxDepth + max_maxDepth) / 2 - 6;
+        config.min_split = (min_minSplit + max_minSplit) / 2 ;
+        config.max_depth = (min_maxDepth + max_maxDepth) / 2 ;
 
         Serial.printf("Setting minSplit to %u and maxDepth to %u based on dataset size.\n", 
                      config.min_split, config.max_depth);
@@ -406,6 +551,13 @@ public:
             delay(10);
         }
         root.clear();
+        // Remove old forest file to ensure clean slate
+        char oldForestFile[32];
+        snprintf(oldForestFile, sizeof(oldForestFile), "/%s_forest.bin", this->model_name.c_str());
+        if(SPIFFS.exists(oldForestFile)) {
+            SPIFFS.remove(oldForestFile);
+            Serial.printf("🗑️ Removed old forest file: %s\n", oldForestFile);
+        }
     }
     
     typedef struct SplitInfo {
@@ -610,11 +762,15 @@ public:
 
             unordered_set<uint16_t> selectedFeatures;
             selectedFeatures.reserve(num_selected_features);
+            // Sample features without replacement using Floyd's algorithm
+            uint16_t N = static_cast<uint16_t>(config.num_features);
+            uint16_t K = num_selected_features > N ? N : num_selected_features;
+            for (uint16_t j = N - K; j < N; ++j) {
+                uint16_t t = static_cast<uint16_t>(rng.bounded(j + 1));
+                if (selectedFeatures.find(t) == selectedFeatures.end()) selectedFeatures.insert(t);
+                else selectedFeatures.insert(j);
+            }
             
-            while (selectedFeatures.size() < num_selected_features) {
-                uint16_t idx = static_cast<uint16_t>(esp_random() % config.num_features);
-                selectedFeatures.insert(idx);
-            } 
             // Use memory-efficient split finding with train_data.allSamples
             SplitInfo bestSplit = findBestSplit(current.sampleIDs, 
                                                    selectedFeatures, config.use_gini, config.num_labels);
@@ -633,13 +789,11 @@ public:
             tree.nodes[current.nodeIndex].setThreshold(bestSplit.threshold);
             tree.nodes[current.nodeIndex].setIsLeaf(false);
             
-            // Split sample IDs for children (memory efficient with pre-allocation)
+            // Split sample IDs for children 
             ID_vector<uint16_t,2> leftSampleIDs, rightSampleIDs;
-            // Pre-estimate split sizes to avoid reallocations
-            uint16_t estimatedLeftSize = current.sampleIDs.size() / 2;
-            uint16_t estimatedRightSize = current.sampleIDs.size() - estimatedLeftSize;
-            leftSampleIDs.reserve(estimatedLeftSize);
-            rightSampleIDs.reserve(estimatedRightSize);
+            size_t max_current_ID = current.sampleIDs.maxID();
+            leftSampleIDs.reserve(max_current_ID);
+            rightSampleIDs.reserve(max_current_ID);
             
             for (const auto& sampleID : current.sampleIDs) {
                 if (sampleID < train_data.size()) {  // Direct index bounds check
@@ -650,10 +804,6 @@ public:
                     }
                 }
             }
-            
-            // Shrink vectors to actual size to save memory
-            leftSampleIDs.fit();
-            rightSampleIDs.fit();
             
             // Create child nodes (breadth-first: left child, then right child)
             uint16_t leftChildIndex = tree.nodes.size();
@@ -689,6 +839,7 @@ public:
                 tree.nodes[rightChildIndex].setFeatureID(0);
             }
         }
+        tree.nodes.fit();
         memory_tracker.log("tree creation",false);
     }
 
@@ -730,7 +881,6 @@ public:
         return mostPredict;
     }
     
-    
     // Helper function: evaluate the entire forest using OOB score and validation
     // Iterates over all samples in training data and evaluates using trees that didn't see each sample
     float get_training_evaluation_index(){
@@ -760,20 +910,14 @@ public:
         // Initialize confusion matrix components for OOB and validation
         uint8_t oobPredictVotes[config.num_labels];
         uint8_t validPredictVotes[config.num_labels];
-        uint16_t oob_tp[config.num_labels];
-        uint16_t oob_fp[config.num_labels];
-        uint16_t oob_fn[config.num_labels];
-        uint16_t valid_tp[config.num_labels];
-        uint16_t valid_fp[config.num_labels];
-        uint16_t valid_fn[config.num_labels];
 
-        // Initialize arrays
-        memset(oob_tp, 0, sizeof(oob_tp));
-        memset(oob_fp, 0, sizeof(oob_fp));
-        memset(oob_fn, 0, sizeof(oob_fn));
-        memset(valid_tp, 0, sizeof(valid_tp));
-        memset(valid_fp, 0, sizeof(valid_fp));
-        memset(valid_fn, 0, sizeof(valid_fn));
+        // using b_vector instead of stack array to avoid stack overflow 
+        b_vector<uint16_t, SMALL, 4> oob_tp(config.num_labels,0);
+        b_vector<uint16_t, SMALL, 4> oob_fp(config.num_labels,0);
+        b_vector<uint16_t, SMALL, 4> oob_fn(config.num_labels,0);
+        b_vector<uint16_t, SMALL, 4> valid_tp(config.num_labels,0);
+        b_vector<uint16_t, SMALL, 4> valid_fp(config.num_labels,0);
+        b_vector<uint16_t, SMALL, 4> valid_fn(config.num_labels,0);
 
         uint16_t oob_correct = 0, oob_total = 0, valid_correct = 0, valid_total = 0;
 
@@ -1088,6 +1232,8 @@ public:
         float best_score = initial_score;
         Serial.printf("Initial score: %.3f\n", initial_score);
 
+        int loop_count = 0;
+
         for(auto min_split : config.min_split_range){
             for(auto max_depth : config.max_depth_range){
                 config.min_split = min_split;
@@ -1105,18 +1251,40 @@ public:
                     // Save the best forest to SPIFFS
                     releaseForest(); // Release current trees from RAM
                 }
+                if(loop_count++ > 3) return;
             }
         }
     }
-
+    
     void loadForest(){
+        // Safety check: Don't load if already loaded
+        if(is_loaded) {
+            Serial.println("✅ Forest already loaded in memory");
+            return;
+        }
+        
+        // Safety check: Ensure forest exists
+        if(root.empty()) {
+            Serial.println("❌ No trees in forest to load!");
+            return;
+        }
+        
+        // Memory safety check
+        size_t freeMemory = ESP.getFreeHeap();
+        size_t minMemoryRequired = 20000; // 20KB minimum threshold
+        if(freeMemory < minMemoryRequired) {
+            Serial.printf("❌ Insufficient memory to load forest (need %d bytes, have %d)\n", 
+                         minMemoryRequired, freeMemory);
+            return;
+        }
+        
         unsigned long start = millis();
         
         // Try to load from single forest file first
         char filename[32];
         snprintf(filename, sizeof(filename), "/%s_forest.bin", this->model_name.c_str());
         
-        if(SPIFFS.exists(filename) && !is_loaded){ 
+        if(SPIFFS.exists(filename)){ 
             // Load from single file (new optimized format)
             File file = SPIFFS.open(filename, FILE_READ);
             if(!file) {
@@ -1124,9 +1292,14 @@ public:
                 return;
             }
             
-            // Read forest header
+            // Read forest header with error checking
             uint32_t magic;
-            file.read((uint8_t*)&magic, sizeof(magic));
+            if(file.read((uint8_t*)&magic, sizeof(magic)) != sizeof(magic)) {
+                Serial.println("❌ Failed to read magic number");
+                file.close();
+                return;
+            }
+            
             if(magic != 0x464F5253) { // "FORS" 
                 Serial.println("❌ Invalid forest file format");
                 file.close();
@@ -1134,65 +1307,180 @@ public:
             }
             
             uint8_t treeCount;
-            file.read((uint8_t*)&treeCount, sizeof(treeCount));
+            if(file.read((uint8_t*)&treeCount, sizeof(treeCount)) != sizeof(treeCount)) {
+                Serial.println("❌ Failed to read tree count");
+                file.close();
+                return;
+            }
+            
             Serial.printf("Loading %d trees from forest file...\n", treeCount);
             
-            // Read all trees
+            // Read all trees with comprehensive error checking
+            uint8_t successfullyLoaded = 0;
             for(uint8_t i = 0; i < treeCount; i++) {
+                // Memory check during loading
+                if(ESP.getFreeHeap() < 10000) { // 10KB safety buffer
+                    Serial.printf("❌ Insufficient memory during tree loading (have %d bytes)\n", ESP.getFreeHeap());
+                    break;
+                }
+                
                 uint8_t treeIndex;
-                file.read((uint8_t*)&treeIndex, sizeof(treeIndex));
+                if(file.read((uint8_t*)&treeIndex, sizeof(treeIndex)) != sizeof(treeIndex)) {
+                    Serial.printf("❌ Failed to read tree index for tree %d\n", i);
+                    break;
+                }
                 
                 uint32_t nodeCount;
-                file.read((uint8_t*)&nodeCount, sizeof(nodeCount));
+                if(file.read((uint8_t*)&nodeCount, sizeof(nodeCount)) != sizeof(nodeCount)) {
+                    Serial.printf("❌ Failed to read node count for tree %d\n", treeIndex);
+                    break;
+                }
+                
+                // Validate node count
+                if(nodeCount == 0 || nodeCount > 2047) {
+                    Serial.printf("❌ Invalid node count %d for tree %d\n", nodeCount, treeIndex);
+                    // Skip this tree's data
+                    file.seek(file.position() + nodeCount * sizeof(uint32_t));
+                    continue;
+                }
                 
                 // Find the corresponding tree in root vector
+                bool treeFound = false;
                 for(auto& tree : root) {
                     if(tree.index == treeIndex) {
+                        // Memory check before loading this tree
+                        size_t requiredMemory = nodeCount * sizeof(Tree_node);
+                        if(ESP.getFreeHeap() < requiredMemory + 5000) { // 5KB safety buffer per tree
+                            Serial.printf("❌ Insufficient memory to load tree %d (need %d bytes, have %d)\n", 
+                                        treeIndex, requiredMemory, ESP.getFreeHeap());
+                            file.close();
+                            return;
+                        }
+                        
                         tree.nodes.clear();
                         tree.nodes.reserve(nodeCount);
                         
-                        // Read all nodes
+                        // Read all nodes for this tree with error checking
+                        bool nodeReadSuccess = true;
                         for(uint32_t j = 0; j < nodeCount; j++) {
                             Tree_node node;
-                            file.read((uint8_t*)&node.packed_data, sizeof(node.packed_data));
+                            if(file.read((uint8_t*)&node.packed_data, sizeof(node.packed_data)) != sizeof(node.packed_data)) {
+                                Serial.printf("❌ Failed to read node %d for tree %d\n", j, treeIndex);
+                                nodeReadSuccess = false;
+                                break;
+                            }
                             tree.nodes.push_back(node);
                         }
                         
-                        tree.isLoaded = true;
+                        if(nodeReadSuccess) {
+                            tree.nodes.fit();
+                            tree.isLoaded = true;
+                            successfullyLoaded++;
+                        } else {
+                            // Clean up failed tree
+                            tree.nodes.clear();
+                            tree.nodes.fit();
+                            tree.isLoaded = false;
+                        }
+                        treeFound = true;
                         break;
                     }
+                }
+                
+                if(!treeFound) {
+                    Serial.printf("⚠️ Tree %d not found in forest structure, skipping\n", treeIndex);
+                    // Skip the node data for this tree
+                    file.seek(file.position() + nodeCount * sizeof(uint32_t));
                 }
             }
             
             file.close();
+            
+            if(successfullyLoaded == 0) {
+                Serial.println("❌ No trees successfully loaded from forest file!");
+                return;
+            }
+            
         } else {
             // Fallback to individual tree files (legacy format)
+            Serial.println("Using legacy individual tree files...");
+            uint8_t successfullyLoaded = 0;
             for (auto& tree : root) {
                 if (!tree.isLoaded) {
-                    tree.loadTree(this->model_name);
+                    // Memory check before loading each tree
+                    if(ESP.getFreeHeap() < 15000) { // 15KB threshold per tree
+                        Serial.printf("❌ Insufficient memory to load more trees (have %d bytes)\n", ESP.getFreeHeap());
+                        break;
+                    }
+                    try {
+                        tree.loadTree(this->model_name);
+                        if(tree.isLoaded) successfullyLoaded++;
+                    } catch (...) {
+                        Serial.printf("❌ Exception loading tree %d\n", tree.index);
+                        tree.isLoaded = false;
+                    }
                 }
             }
+            
+            if(successfullyLoaded == 0) {
+                Serial.println("❌ No trees successfully loaded from individual files!");
+                return;
+            }
         }
+        
+        // Verify trees are actually loaded
+        uint8_t loadedTrees = 0;
+        uint32_t totalNodes = 0;
+        for(const auto& tree : root) {
+            if(tree.isLoaded && !tree.nodes.empty()) {
+                loadedTrees++;
+                totalNodes += tree.nodes.size();
+            }
+        }
+        
+        if(loadedTrees == 0) {
+            Serial.println("❌ No trees successfully loaded!");
+            is_loaded = false;
+            return;
+        }
+        
         is_loaded = true;
         unsigned long end = millis();
-        Serial.printf("Loaded forest in %lu ms\n", end - start);
+        Serial.printf("✅ Loaded %d/%d trees (%d nodes) in %lu ms (RAM: %d bytes)\n", 
+                     loadedTrees, root.size(), totalNodes, end - start, ESP.getFreeHeap());
     }
 
     // releaseForest: Release all trees from RAM into SPIFFS (optimized single-file approach)
     void releaseForest(){
         if(!is_loaded) {
-            Serial.println("Forest is not loaded in memory, nothing to release.");
+            Serial.println("✅ Forest is not loaded in memory, nothing to release.");
             return;
         }
         
         // Count loaded trees
         uint8_t loadedCount = 0;
+        uint32_t totalNodes = 0;
         for(auto& tree : root) {
-            if (tree.isLoaded) loadedCount++;
+            if (tree.isLoaded && !tree.nodes.empty()) {
+                loadedCount++;
+                totalNodes += tree.nodes.size();
+            }
         }
         
         if(loadedCount == 0) {
-            Serial.println("No loaded trees to release");
+            Serial.println("✅ No loaded trees to release");
+            is_loaded = false;
+            return;
+        }
+        
+        // Check available SPIFFS space before writing
+        size_t totalFS = SPIFFS.totalBytes();
+        size_t usedFS = SPIFFS.usedBytes();
+        size_t freeFS = totalFS - usedFS;
+        size_t estimatedSize = totalNodes * sizeof(uint32_t) + 100; // nodes + headers
+        
+        if(freeFS < estimatedSize) {
+            Serial.printf("❌ Insufficient SPIFFS space (need ~%d bytes, have %d)\n", estimatedSize, freeFS);
             return;
         }
         
@@ -1209,38 +1497,92 @@ public:
         
         // Write forest header
         uint32_t magic = 0x464F5253; // "FORS" in hex (forest)
-        file.write((uint8_t*)&magic, sizeof(magic));
-        file.write((uint8_t*)&loadedCount, sizeof(loadedCount));
+        if(file.write((uint8_t*)&magic, sizeof(magic)) != sizeof(magic)) {
+            Serial.println("❌ Failed to write magic number");
+            file.close();
+            SPIFFS.remove(filename);
+            return;
+        }
+        
+        if(file.write((uint8_t*)&loadedCount, sizeof(loadedCount)) != sizeof(loadedCount)) {
+            Serial.println("❌ Failed to write tree count");
+            file.close();
+            SPIFFS.remove(filename);
+            return;
+        }
         
         unsigned long writeStart = millis();
         size_t totalBytes = 0;
         
-        // Write all trees in sequence
+        // Write all trees in sequence with error checking
         uint8_t savedCount = 0;
         for(auto& tree : root) {
             if (tree.isLoaded && tree.index != 255 && !tree.nodes.empty()) {
                 // Write tree header
-                file.write((uint8_t*)&tree.index, sizeof(tree.index));
-                uint32_t nodeCount = tree.nodes.size();
-                file.write((uint8_t*)&nodeCount, sizeof(nodeCount));
-                
-                // Write all nodes
-                for (const auto& node : tree.nodes) {
-                    file.write((uint8_t*)&node.packed_data, sizeof(node.packed_data));
-                    totalBytes += sizeof(node.packed_data);
+                if(file.write((uint8_t*)&tree.index, sizeof(tree.index)) != sizeof(tree.index)) {
+                    Serial.printf("❌ Failed to write tree index %d\n", tree.index);
+                    break;
                 }
                 
-                // Clear from RAM
-                tree.nodes.clear();
-                tree.nodes.fit();
-                tree.isLoaded = false;
+                uint32_t nodeCount = tree.nodes.size();
+                if(file.write((uint8_t*)&nodeCount, sizeof(nodeCount)) != sizeof(nodeCount)) {
+                    Serial.printf("❌ Failed to write node count for tree %d\n", tree.index);
+                    break;
+                }
+                
+                // Write all nodes with progress tracking
+                bool writeSuccess = true;
+                for (uint32_t i = 0; i < tree.nodes.size(); i++) {
+                    const auto& node = tree.nodes[i];
+                    if(file.write((uint8_t*)&node.packed_data, sizeof(node.packed_data)) != sizeof(node.packed_data)) {
+                        Serial.printf("❌ Failed to write node %d for tree %d\n", i, tree.index);
+                        writeSuccess = false;
+                        break;
+                    }
+                    totalBytes += sizeof(node.packed_data);
+                    
+                    // Check for memory issues during write
+                    if(ESP.getFreeHeap() < 5000) { // 5KB safety threshold
+                        Serial.printf("⚠️ Low memory during write (tree %d, node %d)\n", tree.index, i);
+                    }
+                }
+                
+                if(!writeSuccess) {
+                    Serial.printf("❌ Failed to save tree %d completely\n", tree.index);
+                    break;
+                }
+                
                 savedCount++;
             }
         }
         
         file.close();
+        
+        // Verify file was written correctly
+        if(savedCount != loadedCount) {
+            Serial.printf("❌ Save incomplete: %d/%d trees saved\n", savedCount, loadedCount);
+            SPIFFS.remove(filename);
+            return;
+        }
+        
+        // Only clear trees from RAM after successful save
+        uint8_t clearedCount = 0;
+        for(auto& tree : root) {
+            if (tree.isLoaded) {
+                tree.nodes.clear();
+                tree.nodes.fit();
+                tree.isLoaded = false;
+                clearedCount++;
+            }
+        }
+        
         is_loaded = false;
+        
+        unsigned long end = millis();
+        Serial.printf("✅ Released %d trees (%d bytes) to SPIFFS in %lu ms (RAM: %d bytes)\n", 
+                     clearedCount, totalBytes, end - fileStart, ESP.getFreeHeap());
     }
+
 
   public:
 
@@ -1255,15 +1597,16 @@ public:
         // Serial.println("here 0");
       
         // Counters for each label
-        unordered_map<uint8_t, uint32_t> tp, fp, fn, totalPred, correctPred;
+        unordered_map<uint8_t, uint32_t> tp, fp, fn, totalActual;
+        uint32_t totalSamples = 0;
+        uint32_t totalCorrect = 0;
         
         // Initialize counters for all actual labels
         for (uint8_t label=0; label < config.num_labels; label++) {
             tp[label] = 0;
             fp[label] = 0; 
             fn[label] = 0;
-            totalPred[label] = 0;
-            correctPred[label] = 0;
+            totalActual[label] = 0;
         }
         // Serial.println("here 1");
         
@@ -1274,11 +1617,12 @@ public:
             uint8_t pred = predClassSample(const_cast<Rf_sample&>(sample));
             // Serial.println("here 1.5");
             
-            totalPred[actual]++;
+            totalActual[actual]++;
+            totalSamples++;
             
             if (pred == actual) {
                 tp[actual]++;
-                correctPred[actual]++;
+                totalCorrect++;
             } else {
                 if (pred < config.num_labels && pred >=0) {
                     fp[pred]++;
@@ -1291,21 +1635,27 @@ public:
         // Build metric vectors using ONLY actual labels
         b_vector<pair<uint8_t, float>> precisions, recalls, f1s, accuracies;
         
+        // Calculate overall accuracy (same for all labels in multi-class)
+        float overallAccuracy = (totalSamples == 0) ? 0.0f : float(totalCorrect) / totalSamples;
+        
         for (uint8_t label = 0; label < config.num_labels; label++) {
             uint32_t tpv = tp[label], fpv = fp[label], fnv = fn[label];
             
             float prec = (tpv + fpv == 0) ? 0.0f : float(tpv) / (tpv + fpv);
             float rec  = (tpv + fnv == 0) ? 0.0f : float(tpv) / (tpv + fnv);
             float f1   = (prec + rec == 0.0f) ? 0.0f : 2.0f * prec * rec / (prec + rec);
-            float acc  = (totalPred[label] == 0) ? 0.0f : float(correctPred[label]) / totalPred[label];
+            
+            // Per-label accuracy: use overall accuracy (standard approach)
+            // Alternative: per-class accuracy = (TP + TN) / Total, but requires calculating TN
+            float acc = overallAccuracy;  // Same overall accuracy for all labels
             
             precisions.push_back(make_pair(label, prec));
             recalls.push_back(make_pair(label, rec));
             f1s.push_back(make_pair(label, f1));
             accuracies.push_back(make_pair(label, acc));
             
-            // Serial.printf("Label %d: TP=%d, FP=%d, FN=%d, Prec=%.3f, Rec=%.3f, F1=%.3f\n", 
-            //             label, tpv, fpv, fnv, prec, rec, f1);
+            // Serial.printf("Label %d: TP=%d, FP=%d, FN=%d, Prec=%.3f, Rec=%.3f, F1=%.3f, Acc=%.3f\n", 
+            //             label, tpv, fpv, fnv, prec, rec, f1, acc);
         }
         
         b_vector<b_vector<pair<uint8_t, float>>> result;
@@ -1417,22 +1767,28 @@ public:
     }
 };
 
+// Define static members
+uint64_t RandomForest::s_global_seed = 0ULL;
+bool RandomForest::s_has_global_seed = false;
+
 void setup() {
     Serial.begin(115200);  
     while (!Serial);       // <-- Waits for Serial monitor to connect (important for USB CDC)
 
     delay(2000);
+    long unsigned start = millis();
 
     if (!SPIFFS.begin(true)) {
         Serial.println("SPIFFS mount failed");
         return;
     }
-    manageSPIFFSFiles();
+    // manageSPIFFSFiles();
     delay(1000);
 
     // const char* filename = "/walker_fall.bin";    // medium dataset : use_Gini = false | boostrap = true; 92% - sklearn : 85%  (5,3)
     const char* filename = "digit_data"; // hard dataset : use_Gini = true/false | boostrap = true; 89/92% - sklearn : 90% (6,5);
     RandomForest forest = RandomForest(filename);
+    forest.setGlobalRandomSeed(42); // for reproducibility
 
     // printout size of forest object in stack
     Serial.printf("RandomForest object size: %d bytes\n", sizeof(forest));
@@ -1506,16 +1862,20 @@ void setup() {
     Serial.printf("Average F1-Score: %.3f\n", avgF1);
     Serial.printf("Average Accuracy: %.3f\n", avgAccuracy);
 
-    // check actual prediction time 
-    b_vector<float> sample = MAKE_FLOAT_LIST(0,0,0.014528,0.000782722,0.817357,0.277754,0.137853,0.0161738,0,0,0,0,0.252639,0.0556202,0.319129,0.257954,0.0149651,0.0648652,0.0220988,0.00182159,0.877327,0.00550756,0.133955,0.0187333,0.0275399,0,0,0.0248582,0.0363544,0.134907,0.406297,0.14517,0.660452,0.0193004,0.0872476,0.0170596,0.183969,0.0070201,0.0392839,0.00355617,0.0551359,0.124477,0.226905,0.0582358,0.0218746,0.00100708,0.254847,0.617445,0,0,0,0,0.768671,0.0542131,0.301566,0.249534,0.163292,0.215959,0.210117,0.111435,0.00786254,0,0.181712,0.300076,0.0661908,0.000662339,0,0.0419681,0.345039,0.220849,0.830398,0.239182,0.0471657,0.0858931,0.155634,0.120172,0.171163,0.00210992,0.00423227,0.0409593,0.255201,0.133301,0.314904,0.0781977,0.0096404,0.00762942,0.314006,0.42933,0.000130379,0.00131339,0.00315603,0,0.64453,0,0.000782274,0.336626,0,0.0176682,0.0297794,0,0,0,0.0138204,0,0.0573581,0.0521479,0.0586363,0.267836,0.00254183,0.216103,0.916323,0.176272,0,0.0117796,0.0287043,0,0.0182255,0.000955436,0.00278896,0.0780402,0.0260911,0.0408793,0.635657,0.265235,0.100382,0.709452,0.0494404,0.00125326,0.000117986,0,0.00284004,0.00127189,0.358305,0.000972935,0.000117986,0.523924,0,0.553178,0.243659,0.000263824,0.444076,0.185569,0.00661191,0.00721455
-);
-    long unsigned start = micros();
-    String pred = forest.predict(sample);
-    long unsigned end = micros();
-    Serial.printf("Prediction for sample took %u us.\n", end - start);
+    // // check actual prediction time 
+    // b_vector<float> sample = MAKE_FLOAT_LIST(0,0.000454539,0,0,0,0.510392,0.145854,0,0.115446,0,0.00516406,0.0914579,0.565657,0.523204,0.315898,0.0548166,0,0.310198,0.0193819,0,0,0.0634356,0.45749,0.00122793,0.493418,0.314128,0.150056,0.106594,0.321845,0.0745179,0.282953,0.353358,0,0.254502,0.502515,0.000288011,0,0,0.0756328,0.00226037,0.382164,0.261311,0.300058,0.261635,0.313706,0,0.0501838,0.450812,0.0947562,0.000373078,0.00211045,0.0744771,0.462151,0.715595,0.269004,0.0449925,0,0,0.00212813,0.000589888,0.420681,0.0574298,0.0717421,0,0.313605,0.339293,0.0629904,0.0675315,0.0618258,0.069364,0.41181,0.223367,0.0892957,0.0317173,0.0412844,0.000333441,0.733433,0.035459,0.000471556,0.00492559,0.103231,0.255209,0.411744,0.154244,0.0670255,0,0.0747003,0.271415,0.740801,0.0413177,0.000545948,0.00293495,0.31086,0.000711829,0.000690576,0.00328563,0.0109791,0,0.00179087,0.05755,0.281221,0.0908081,0.139806,0.0358642,0.0303179,0.0455232,0.000940401,0.000496404,0.933685,0.0312803,0.108249,0.0307203,0.0946534,0.0618412,0.0974416,0.0649112,0.677713,0.00266646,0.0009506,0.0560812,0.492166,0.0329419,0.0117499,0.0216917,0.379698,0.0638361,0.344801,0.00247299,0.568132,0.00436328,0.00107975,0.0635284,0.379419,0.000722445,0.000700875,0.0521259,0.635661,0.068638,0.299062,0.0238965,0.00382694,0.00504611,0.163862,0.0285841);
+    // forest.loadForest();
+    // long unsigned start = micros();
+    // String pred = forest.predict(sample);
+    // long unsigned end = micros();
+    // Serial.printf("Prediction for sample took %u us. label %s.\n", end - start, pred.c_str());
 
 
     // forest.visual_result(forest.test_data); // Optional visualization
+
+
+    long unsigned end = millis();
+    Serial.printf("\nTotal time: %lu ms\n", end - start);
 }
 
 void loop() {

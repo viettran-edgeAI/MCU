@@ -1203,6 +1203,10 @@ namespace mcu {
     // vector with small buffer optimization (SBO)
     template<typename T, index_size_flag SizeFlag = index_size_flag::MEDIUM, size_t sboSize = 0>
     class b_vector : hash_kernel {
+        // assert if sboSize > max for index type
+        static_assert(sboSize == 0 || sboSize <= (std::is_same<typename vector_index_type<SizeFlag>::type, uint8_t>::value ? 255 :
+                                                  std::is_same<typename vector_index_type<SizeFlag>::type, uint16_t>::value ? 65535 : 2000000000),
+                      "sboSize exceeds maximum for the chosen index type");
     private:
         using vector_index_type = typename vector_index_type<SizeFlag>::type;
         
@@ -3689,6 +3693,11 @@ namespace mcu {
                 if(id == min_id_) break; // Avoid underflow
             }
             throw std::out_of_range("ID_vector::maxID() internal error");
+        }
+
+        size_t cap() const {
+            index_type range = (size_t)max_id_  -  (size_t)min_id_ + 1;
+            return range;
         }
 
         // takeout normalized vector of IDs (ascending order, no repetitions)

@@ -85,12 +85,13 @@ namespace mcu {
 
     struct NodeToBuild {
         uint16_t nodeIndex;
-        ID_vector<uint16_t, 2> sampleIDs;  // default 16 bytes at 2 bits per value default constructor
+        uint16_t begin;   // inclusive
+        uint16_t end;     // exclusive
         uint8_t depth;
         
-        NodeToBuild() : nodeIndex(0), depth(0) {}
-        NodeToBuild(uint16_t idx, ID_vector<uint16_t, 2>&& ids, uint8_t d) 
-            : nodeIndex(idx), sampleIDs(std::move(ids)), depth(d) {}
+        NodeToBuild() : nodeIndex(0), begin(0), end(0), depth(0) {}
+        NodeToBuild(uint16_t idx, uint16_t b, uint16_t e, uint8_t d) 
+            : nodeIndex(idx), begin(b), end(e), depth(d) {}
     };
 
     /*
@@ -101,7 +102,7 @@ namespace mcu {
 
     class Rf_tree {
     public:
-        mcu::b_vector<Tree_node,SMALL> nodes;  // Vector-based tree storage
+        mcu::b_vector<Tree_node> nodes;  // Vector-based tree storage
         uint8_t index;
         bool isLoaded;
 

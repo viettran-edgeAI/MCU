@@ -101,7 +101,7 @@ public:
 private:
     vector<Rf_tree, SMALL> root;                     // b_vector storing root nodes of trees (now manages SPIFFS filenames)
     b_vector<ID_vector<uint16_t,2>, SMALL> dataList; // each ID_vector stores sample IDs of a sub_dataset, reference to index of allSamples vector in train_data
-    b_vector<NodeToBuild, SMALL, 20> queue_nodes; // Queue for breadth-first tree building
+    b_vector<NodeToBuild> queue_nodes; // Queue for breadth-first tree building
 
     bool optimal_mode = false;  
     bool is_loaded = false;
@@ -152,7 +152,7 @@ public:
 
         // load resources
         config.loadConfig();  // load config file
-        config.num_trees = 50;
+        config.num_trees = 18;
         first_scan(base.get_dpFile());   // load data parameters into config
         categorizer.loadCategorizer(); // load categorizer
         node_predictor.loadPredictor(); // load node predictor
@@ -161,6 +161,11 @@ public:
         String baseData = "/base_data.bin";         // make a copy of base data to avoid accidental deletion
         cloneFile(base.get_baseFile().c_str(), baseData.c_str());
         base_data.filename = baseData;
+        // memory_tracker.log("before base_data load");
+        // base_data.loadData();
+        // memory_tracker.log("after base_data load");
+        // base_data.releaseData();
+        // memory_tracker.log("after base_data release");
         
         // data separation
         dataList.reserve(config.num_trees);
@@ -195,12 +200,15 @@ public:
         Serial.println("START MAKING FOREST...");
 
         // pre_allocate nessessary resources
+        memory_tracker.log("before root reserve");
         root.reserve(config.num_trees);
+        memory_tracker.log("after root reserve");
         queue_nodes.clear();
         queue_nodes.fit();
         uint16_t estimatedNodes = node_predictor.estimate(config.min_split, config.max_depth) * 100 / node_predictor.accuracy;
         queue_nodes.reserve(min(120, estimatedNodes * node_predictor.peak_percent / 100)); // Conservative estimate
         node_data n_data(config.min_split, config.max_depth,0);
+        memory_tracker.log("after queue_nodes reserve");
 
         // memory usage of queue_nodes
         Serial.printf(" RAM of queue_nodes: %d bytes\n", queue_nodes.cap() * sizeof(NodeToBuild));
@@ -209,7 +217,7 @@ public:
         
         // Load train_data once for all trees
         train_data.loadData();
-        memory_tracker.log("before forest creation");
+        memory_tracker.log("after train_data load");
         for(uint8_t i = 0; i < config.num_trees; i++){
             Serial.printf("%d, ", i);
             Rf_tree tree(i);
@@ -372,7 +380,7 @@ public:
                     }
                     
                     // Add remaining samples from original
-                    for (uint16_t k = 5; k < min(numSubSample, (int)temp_vec.size()); ++k) {
+                    for (uint16_t k = 5; k < min(numSubSample, (uint16_t)temp_vec.size()); ++k) {
                         uint16_t id = k % numSample; // Simplified access
                         treeDataset.push_back(id);
                     }
@@ -387,6 +395,7 @@ public:
         Serial.println();
         memory_tracker.log("after clones data");  
     }  
+    
     // ------------------------------------------------------------------------------
     // read dataset parameters from /dataset_dp.csv and write to config
     void first_scan(const String& path) {
@@ -497,12 +506,23 @@ public:
             }
         }
         // this->lowest_distribution = lowest_distribution / 100.0f; // Store as fraction
+        float expected_valid_samples = 0.0f;
         
-        // Check if validation should be disabled due to low sample count
-        if (lowest_distribution * numSamples * config.valid_ratio < 10) {
-            config.use_validation = false;
-            Serial.println("⚖️ Setting use_validation to false due to low sample count in validation set.");
-            config.train_ratio = 0.7f; // Adjust train ratio to compensate
+        if (config.use_validation) {
+            if (config.valid_ratio > 0.0f) {
+                // Use explicit valid_ratio if set
+                expected_valid_samples = (lowest_distribution / 100.0f) * numSamples * config.valid_ratio;
+            } else {
+                // Assume remaining samples after training are split 50/50 between test and validation
+                float remaining_ratio = 1.0f - config.train_ratio;
+                expected_valid_samples = (lowest_distribution / 100.0f) * numSamples * (remaining_ratio * 0.5f);
+            }
+            
+            if (expected_valid_samples < 5.0f) {  // Need at least 5 samples per minority class for meaningful validation
+                config.use_validation = false;
+                Serial.printf("⚖️ Setting use_validation to false due to low sample count in validation set (%.1f expected samples for minority class).\n", expected_valid_samples);
+                config.train_ratio = 0.7f; // Adjust train ratio to compensate
+            }
         }
         Serial.println();
 
@@ -522,8 +542,8 @@ public:
         if (min_maxDepth >= max_maxDepth) min_maxDepth = max_maxDepth - 2;
         if (min_maxDepth < 4) min_maxDepth = 4;
 
-        config.min_split = (min_minSplit + max_minSplit) / 2 ;
-        config.max_depth = (min_maxDepth + max_maxDepth) / 2 ;
+        config.min_split = (min_minSplit + max_minSplit) / 2 - 2;
+        config.max_depth = (min_maxDepth + max_maxDepth) / 2 + 6;
 
         Serial.printf("Setting minSplit to %u and maxDepth to %u based on dataset size.\n", 
                      config.min_split, config.max_depth);
@@ -577,16 +597,17 @@ public:
             labelCounts.fill(0);
         }
         
-        void analyzeSamples(const ID_vector<uint16_t,2>& sampleIDs, uint8_t numLabels, const Rf_data& data) {
-            totalSamples = sampleIDs.size();
+        // New: analyze a slice [begin,end) over a shared indices array
+        void analyzeSamplesRange(const b_vector<uint16_t, MEDIUM, 8>& indices, uint16_t begin, uint16_t end,
+                                 uint8_t numLabels, const Rf_data& data) {
+            totalSamples = (begin < end) ? (end - begin) : 0;
             uint16_t maxCount = 0;
-            
-            // Single pass through sample IDs for efficiency
-            for (const auto& sampleID : sampleIDs) {
-                if (sampleID < data.size()) {  // Direct index bounds check
-                    uint8_t label = data.allSamples[sampleID].label;  // Direct indexing
+            for (uint16_t k = begin; k < end; ++k) {
+                uint16_t sampleID = indices[k];
+                if (sampleID < data.size()) {
+                    uint8_t label = data.allSamples[sampleID].label;
                     labels.insert(label);
-                    if (label < numLabels && label < 32) { // Bounds check
+                    if (label < numLabels && label < 32) {
                         labelCounts[label]++;
                         if (labelCounts[label] > maxCount) {
                             maxCount = labelCounts[label];
@@ -598,18 +619,19 @@ public:
         }
     };
 
-    // Memory-efficient findBestSplit that works directly with sample IDs
-    SplitInfo findBestSplit(const ID_vector<uint16_t,2>& sampleIDs, 
-                                const unordered_set<uint16_t>& selectedFeatures, bool use_Gini, uint8_t numLabels) {
+    // New: Range-based variant operating on a shared indices array
+    SplitInfo findBestSplitRange(const b_vector<uint16_t, MEDIUM, 8>& indices, uint16_t begin, uint16_t end,
+                                 const unordered_set<uint16_t>& selectedFeatures, bool use_Gini, uint8_t numLabels) {
         SplitInfo bestSplit;
-        uint32_t totalSamples = sampleIDs.size();
-        if (totalSamples < 2) return bestSplit; // Cannot split less than 2 samples
+        uint32_t totalSamples = (begin < end) ? (end - begin) : 0;
+        if (totalSamples < 2) return bestSplit;
 
-        // Calculate base impurity using direct indexing
+        // Base label counts
         vector<uint16_t> baseLabelCounts(numLabels, 0);
-        for (const auto& sampleID : sampleIDs) {
-            if (sampleID < train_data.size() && train_data.allSamples[sampleID].label < numLabels) {
-                baseLabelCounts[train_data.allSamples[sampleID].label]++;
+        for (uint16_t k = begin; k < end; ++k) {
+            uint16_t sid = indices[k];
+            if (sid < train_data.size() && train_data.allSamples[sid].label < numLabels) {
+                baseLabelCounts[train_data.allSamples[sid].label]++;
             }
         }
 
@@ -622,7 +644,7 @@ public:
                     baseImpurity -= p * p;
                 }
             }
-        } else { // Entropy
+        } else {
             baseImpurity = 0.0f;
             for (uint8_t i = 0; i < numLabels; i++) {
                 if (baseLabelCounts[i] > 0) {
@@ -632,31 +654,27 @@ public:
             }
         }
 
-        // Iterate through the randomly selected features
         for (const auto& featureID : selectedFeatures) {
-            // Use a flat vector for the contingency table
             vector<uint16_t> counts(4 * numLabels, 0);
             uint32_t value_totals[4] = {0};
 
-            // Build contingency table using direct indexing
-            for (const auto& sampleID : sampleIDs) {
-                if (sampleID < train_data.size()) {  // Direct index bounds check
-                    const Rf_sample& sample = train_data.allSamples[sampleID];  // Direct indexing
+            for (uint16_t k = begin; k < end; ++k) {
+                uint16_t sid = indices[k];
+                if (sid < train_data.size()) {
+                    const Rf_sample& sample = train_data.allSamples[sid];
                     if (featureID < sample.features.size() && sample.label < numLabels) {
-                        uint8_t featureValue = sample.features[featureID];
-                        if (featureValue < 4) {
-                            counts[featureValue * numLabels + sample.label]++;
-                            value_totals[featureValue]++;
+                        uint8_t fv = sample.features[featureID];
+                        if (fv < 4) {
+                            counts[fv * numLabels + sample.label]++;
+                            value_totals[fv]++;
                         }
                     }
                 }
             }
 
-            // Test split thresholds (0, 1, 2)
             for (uint8_t threshold = 0; threshold < 3; threshold++) {
                 uint32_t leftTotal = 0, rightTotal = 0;
                 vector<uint16_t> leftCounts(numLabels, 0), rightCounts(numLabels, 0);
-                
                 for (uint8_t value = 0; value < 4; value++) {
                     for (uint8_t label = 0; label < numLabels; label++) {
                         uint16_t count = counts[value * numLabels + label];
@@ -669,42 +687,24 @@ public:
                         }
                     }
                 }
-
                 if (leftTotal == 0 || rightTotal == 0) continue;
 
-                // Calculate weighted impurity
                 float leftImpurity = 0.0f, rightImpurity = 0.0f;
-                
                 if (use_Gini) {
-                    leftImpurity = 1.0f;
-                    rightImpurity = 1.0f;
+                    leftImpurity = 1.0f; rightImpurity = 1.0f;
                     for (uint8_t i = 0; i < numLabels; i++) {
-                        if (leftCounts[i] > 0) {
-                            float p = static_cast<float>(leftCounts[i]) / leftTotal;
-                            leftImpurity -= p * p;
-                        }
-                        if (rightCounts[i] > 0) {
-                            float p = static_cast<float>(rightCounts[i]) / rightTotal;
-                            rightImpurity -= p * p;
-                        }
+                        if (leftCounts[i] > 0) { float p = static_cast<float>(leftCounts[i]) / leftTotal; leftImpurity -= p * p; }
+                        if (rightCounts[i] > 0) { float p = static_cast<float>(rightCounts[i]) / rightTotal; rightImpurity -= p * p; }
                     }
-                } else { // Entropy
+                } else {
                     for (uint8_t i = 0; i < numLabels; i++) {
-                        if (leftCounts[i] > 0) {
-                            float p = static_cast<float>(leftCounts[i]) / leftTotal;
-                            leftImpurity -= p * log2f(p);
-                        }
-                        if (rightCounts[i] > 0) {
-                            float p = static_cast<float>(rightCounts[i]) / rightTotal;
-                            rightImpurity -= p * log2f(p);
-                        }
+                        if (leftCounts[i] > 0) { float p = static_cast<float>(leftCounts[i]) / leftTotal; leftImpurity -= p * log2f(p); }
+                        if (rightCounts[i] > 0) { float p = static_cast<float>(rightCounts[i]) / rightTotal; rightImpurity -= p * log2f(p); }
                     }
                 }
-
                 float weightedImpurity = (static_cast<float>(leftTotal) / totalSamples) * leftImpurity + 
-                                       (static_cast<float>(rightTotal) / totalSamples) * rightImpurity;
+                                          (static_cast<float>(rightTotal) / totalSamples) * rightImpurity;
                 float gain = baseImpurity - weightedImpurity;
-
                 if (gain > bestSplit.gain) {
                     bestSplit.gain = gain;
                     bestSplit.featureID = featureID;
@@ -722,47 +722,47 @@ public:
 
         uint32_t initialRAM = ESP.getFreeHeap();
     
-        // Create root node and initial sample ID list (all samples from the ID_vector)
+        // Create root node and initial sample index list once per tree
         Tree_node rootNode;
         tree.nodes.push_back(rootNode);
+
+        // Build a single contiguous index array for this tree
+        b_vector<uint16_t, MEDIUM, 8> indices;
+        indices.reserve(sampleIDs.size());
+        for (const auto& sid : sampleIDs) indices.push_back(sid);
         
-        // Use the ID_vector directly for root node - no need to extract IDs
-        ID_vector<uint16_t,2> rootSampleIDs = sampleIDs; // Copy all sample IDs and move to root nod
-        queue_nodes.push_back(NodeToBuild(0, std::move(rootSampleIDs), 0));
+        // Root covers the whole slice
+        queue_nodes.push_back(NodeToBuild(0, 0, static_cast<uint16_t>(indices.size()), 0));
         
-        // Process nodes breadth-first with periodic cleanup
+        // Process nodes breadth-first with minimal allocations
         while (!queue_nodes.empty()) {
             NodeToBuild current = std::move(queue_nodes.front());
-            queue_nodes.erase(0); // Remove first element
+            queue_nodes.erase(0);
             
-            // Analyze node samples efficiently using direct indexing
+            // Analyze node samples over the slice
             NodeStats stats(config.num_labels);
-            stats.analyzeSamples(current.sampleIDs, config.num_labels, train_data);
+            stats.analyzeSamplesRange(indices, current.begin, current.end, config.num_labels, train_data);
             bool shouldBeLeaf = false;
             uint8_t leafLabel = stats.majorityLabel;
             
-            // Determine if this should be a leaf
             if (stats.labels.size() == 1) {
                 shouldBeLeaf = true;
                 leafLabel = *stats.labels.begin();
             } else if (stats.totalSamples < config.min_split || current.depth >= config.max_depth) {
                 shouldBeLeaf = true;
-                // leafLabel already set to majority label
             }
             if (shouldBeLeaf) {
-                // Configure as leaf node
                 tree.nodes[current.nodeIndex].setIsLeaf(true);
                 tree.nodes[current.nodeIndex].setLabel(leafLabel);
                 tree.nodes[current.nodeIndex].setFeatureID(0);
-                continue; // Skip to next node
+                continue;
             }
-            // Find best split for internal node
+            
+            // Random feature subset
             uint8_t num_selected_features = static_cast<uint8_t>(sqrt(config.num_features));
             if (num_selected_features == 0) num_selected_features = 1;
-
             unordered_set<uint16_t> selectedFeatures;
             selectedFeatures.reserve(num_selected_features);
-            // Sample features without replacement using Floyd's algorithm
             uint16_t N = static_cast<uint16_t>(config.num_features);
             uint16_t K = num_selected_features > N ? N : num_selected_features;
             for (uint16_t j = N - K; j < N; ++j) {
@@ -771,13 +771,12 @@ public:
                 else selectedFeatures.insert(j);
             }
             
-            // Use memory-efficient split finding with train_data.allSamples
-            SplitInfo bestSplit = findBestSplit(current.sampleIDs, 
-                                                   selectedFeatures, config.use_gini, config.num_labels);
+            // Find best split on the slice
+            SplitInfo bestSplit = findBestSplitRange(indices, current.begin, current.end,
+                                                     selectedFeatures, config.use_gini, config.num_labels);
             float gain_threshold = config.use_gini ? config.impurity_threshold/2 : config.impurity_threshold;
             
             if (bestSplit.gain <= gain_threshold) {
-                // Make it a leaf with majority label (already calculated)
                 tree.nodes[current.nodeIndex].setIsLeaf(true);
                 tree.nodes[current.nodeIndex].setLabel(leafLabel);
                 tree.nodes[current.nodeIndex].setFeatureID(0);
@@ -789,51 +788,42 @@ public:
             tree.nodes[current.nodeIndex].setThreshold(bestSplit.threshold);
             tree.nodes[current.nodeIndex].setIsLeaf(false);
             
-            // Split sample IDs for children 
-            ID_vector<uint16_t,2> leftSampleIDs, rightSampleIDs;
-            size_t max_current_ID = current.sampleIDs.maxID();
-            leftSampleIDs.reserve(max_current_ID);
-            rightSampleIDs.reserve(max_current_ID);
-            
-            for (const auto& sampleID : current.sampleIDs) {
-                if (sampleID < train_data.size()) {  // Direct index bounds check
-                    if (train_data.allSamples[sampleID].features[bestSplit.featureID] <= bestSplit.threshold) {
-                        leftSampleIDs.push_back(sampleID);
-                    } else {
-                        rightSampleIDs.push_back(sampleID);
+            // In-place partition of indices[current.begin, current.end)
+            uint16_t iLeft = current.begin;
+            for (uint16_t k = current.begin; k < current.end; ++k) {
+                uint16_t sid = indices[k];
+                if (sid < train_data.size() && 
+                    train_data.allSamples[sid].features[bestSplit.featureID] <= bestSplit.threshold) {
+                    if (k != iLeft) {
+                        uint16_t tmp = indices[iLeft];
+                        indices[iLeft] = indices[k];
+                        indices[k] = tmp;
                     }
+                    ++iLeft;
                 }
             }
+            uint16_t leftBegin = current.begin;
+            uint16_t leftEnd = iLeft;
+            uint16_t rightBegin = iLeft;
+            uint16_t rightEnd = current.end;
             
-            // Create child nodes (breadth-first: left child, then right child)
             uint16_t leftChildIndex = tree.nodes.size();
             uint16_t rightChildIndex = leftChildIndex + 1;
-            
-            // Set left child index in parent (right child index is automatically left + 1)
             tree.nodes[current.nodeIndex].setLeftChildIndex(leftChildIndex);
             
-            // Add left child node
-            Tree_node leftChild;
-            tree.nodes.push_back(leftChild);
+            Tree_node leftChild; tree.nodes.push_back(leftChild);
+            Tree_node rightChild; tree.nodes.push_back(rightChild);
             
-            // Add right child node  
-            Tree_node rightChild;
-            tree.nodes.push_back(rightChild);
-            
-            // Queue children for processing (maintain breadth-first order)
-            if (!leftSampleIDs.empty()) {
-                queue_nodes.push_back(NodeToBuild(leftChildIndex, std::move(leftSampleIDs), current.depth + 1));
+            if (leftEnd > leftBegin) {
+                queue_nodes.push_back(NodeToBuild(leftChildIndex, leftBegin, leftEnd, current.depth + 1));
             } else {
-                // Empty left child becomes a leaf with majority label
                 tree.nodes[leftChildIndex].setIsLeaf(true);
                 tree.nodes[leftChildIndex].setLabel(leafLabel);
                 tree.nodes[leftChildIndex].setFeatureID(0);
             }
-            
-            if (!rightSampleIDs.empty()) {
-                queue_nodes.push_back(NodeToBuild(rightChildIndex, std::move(rightSampleIDs), current.depth + 1));
+            if (rightEnd > rightBegin) {
+                queue_nodes.push_back(NodeToBuild(rightChildIndex, rightBegin, rightEnd, current.depth + 1));
             } else {
-                // Empty right child becomes a leaf with majority label
                 tree.nodes[rightChildIndex].setIsLeaf(true);
                 tree.nodes[rightChildIndex].setLabel(leafLabel);
                 tree.nodes[rightChildIndex].setFeatureID(0);
@@ -1456,6 +1446,7 @@ public:
             Serial.println("✅ Forest is not loaded in memory, nothing to release.");
             return;
         }
+        memory_tracker.log("before release forest");
         
         // Count loaded trees
         uint8_t loadedCount = 0;
@@ -1577,6 +1568,7 @@ public:
         }
         
         is_loaded = false;
+        memory_tracker.log("aftef release forest");
         
         unsigned long end = millis();
         Serial.printf("✅ Released %d trees (%d bytes) to SPIFFS in %lu ms (RAM: %d bytes)\n", 
@@ -1776,7 +1768,6 @@ void setup() {
     while (!Serial);       // <-- Waits for Serial monitor to connect (important for USB CDC)
 
     delay(2000);
-    long unsigned start = millis();
 
     if (!SPIFFS.begin(true)) {
         Serial.println("SPIFFS mount failed");
@@ -1784,7 +1775,7 @@ void setup() {
     }
     // manageSPIFFSFiles();
     delay(1000);
-
+    long unsigned start_forest = millis();
     // const char* filename = "/walker_fall.bin";    // medium dataset : use_Gini = false | boostrap = true; 92% - sklearn : 85%  (5,3)
     const char* filename = "digit_data"; // hard dataset : use_Gini = true/false | boostrap = true; 89/92% - sklearn : 90% (6,5);
     RandomForest forest = RandomForest(filename);
@@ -1795,7 +1786,7 @@ void setup() {
 
     forest.MakeForest();
 
-    forest.training();
+    // forest.training();
 
     auto result = forest.predict(forest.test_data);
     Serial.printf("\nlowest RAM: %d\n", forest.memory_tracker.lowest_ram);
@@ -1863,19 +1854,20 @@ void setup() {
     Serial.printf("Average Accuracy: %.3f\n", avgAccuracy);
 
     // // check actual prediction time 
-    // b_vector<float> sample = MAKE_FLOAT_LIST(0,0.000454539,0,0,0,0.510392,0.145854,0,0.115446,0,0.00516406,0.0914579,0.565657,0.523204,0.315898,0.0548166,0,0.310198,0.0193819,0,0,0.0634356,0.45749,0.00122793,0.493418,0.314128,0.150056,0.106594,0.321845,0.0745179,0.282953,0.353358,0,0.254502,0.502515,0.000288011,0,0,0.0756328,0.00226037,0.382164,0.261311,0.300058,0.261635,0.313706,0,0.0501838,0.450812,0.0947562,0.000373078,0.00211045,0.0744771,0.462151,0.715595,0.269004,0.0449925,0,0,0.00212813,0.000589888,0.420681,0.0574298,0.0717421,0,0.313605,0.339293,0.0629904,0.0675315,0.0618258,0.069364,0.41181,0.223367,0.0892957,0.0317173,0.0412844,0.000333441,0.733433,0.035459,0.000471556,0.00492559,0.103231,0.255209,0.411744,0.154244,0.0670255,0,0.0747003,0.271415,0.740801,0.0413177,0.000545948,0.00293495,0.31086,0.000711829,0.000690576,0.00328563,0.0109791,0,0.00179087,0.05755,0.281221,0.0908081,0.139806,0.0358642,0.0303179,0.0455232,0.000940401,0.000496404,0.933685,0.0312803,0.108249,0.0307203,0.0946534,0.0618412,0.0974416,0.0649112,0.677713,0.00266646,0.0009506,0.0560812,0.492166,0.0329419,0.0117499,0.0216917,0.379698,0.0638361,0.344801,0.00247299,0.568132,0.00436328,0.00107975,0.0635284,0.379419,0.000722445,0.000700875,0.0521259,0.635661,0.068638,0.299062,0.0238965,0.00382694,0.00504611,0.163862,0.0285841);
-    // forest.loadForest();
-    // long unsigned start = micros();
-    // String pred = forest.predict(sample);
-    // long unsigned end = micros();
-    // Serial.printf("Prediction for sample took %u us. label %s.\n", end - start, pred.c_str());
+    b_vector<float> sample = MAKE_FLOAT_LIST(0,0.000454539,0,0,0,0.510392,0.145854,0,0.115446,0,0.00516406,0.0914579,0.565657,0.523204,0.315898,0.0548166,0,0.310198,0.0193819,0,0,0.0634356,0.45749,0.00122793,0.493418,0.314128,0.150056,0.106594,0.321845,0.0745179,0.282953,0.353358,0,0.254502,0.502515,0.000288011,0,0,0.0756328,0.00226037,0.382164,0.261311,0.300058,0.261635,0.313706,0,0.0501838,0.450812,0.0947562,0.000373078,0.00211045,0.0744771,0.462151,0.715595,0.269004,0.0449925,0,0,0.00212813,0.000589888,0.420681,0.0574298,0.0717421,0,0.313605,0.339293,0.0629904,0.0675315,0.0618258,0.069364,0.41181,0.223367,0.0892957,0.0317173,0.0412844,0.000333441,0.733433,0.035459,0.000471556,0.00492559,0.103231,0.255209,0.411744,0.154244,0.0670255,0,0.0747003,0.271415,0.740801,0.0413177,0.000545948,0.00293495,0.31086,0.000711829,0.000690576,0.00328563,0.0109791,0,0.00179087,0.05755,0.281221,0.0908081,0.139806,0.0358642,0.0303179,0.0455232,0.000940401,0.000496404,0.933685,0.0312803,0.108249,0.0307203,0.0946534,0.0618412,0.0974416,0.0649112,0.677713,0.00266646,0.0009506,0.0560812,0.492166,0.0329419,0.0117499,0.0216917,0.379698,0.0638361,0.344801,0.00247299,0.568132,0.00436328,0.00107975,0.0635284,0.379419,0.000722445,0.000700875,0.0521259,0.635661,0.068638,0.299062,0.0238965,0.00382694,0.00504611,0.163862,0.0285841);
+    forest.loadForest();
+    long unsigned start = micros();
+    String pred = forest.predict(sample);
+    long unsigned end = micros();
+    Serial.printf("Prediction for sample took %u us. label %s.\n", end - start, pred.c_str());
+    forest.releaseForest();
 
 
     // forest.visual_result(forest.test_data); // Optional visualization
 
 
-    long unsigned end = millis();
-    Serial.printf("\nTotal time: %lu ms\n", end - start);
+    long unsigned end_forest = millis();
+    Serial.printf("\nTotal time: %lu ms\n", end_forest - start_forest);
 }
 
 void loop() {

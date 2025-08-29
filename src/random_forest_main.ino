@@ -1,78 +1,6 @@
 #include "Rf_components.h"
 #define SUPPORT_LABEL_MAPPING
 
-// Deterministic RNG utilities (PCG32) and helpers
-struct PCG32 {
-    uint64_t state = 0x853c49e6748fea9bULL;
-    uint64_t inc   = 0xda3e39cb94b95bdbULL;
-
-    void seed(uint64_t initstate, uint64_t initseq) {
-        state = 0U;
-        inc = (initseq << 1u) | 1u;
-        next();
-        state += initstate;
-        next();
-    }
-
-    inline uint32_t next() {
-        uint64_t oldstate = state;
-        state = oldstate * 6364136223846793005ULL + inc;
-        uint32_t xorshifted = static_cast<uint32_t>(((oldstate >> 18u) ^ oldstate) >> 27u);
-        uint32_t rot = static_cast<uint32_t>(oldstate >> 59u);
-        return (xorshifted >> rot) | (xorshifted << ((-rot) & 31));
-    }
-
-    // unbiased bounded integer in [0, bound-1]
-    inline uint32_t bounded(uint32_t bound) {
-        if (bound == 0) return 0;
-        uint32_t threshold = -bound % bound;
-        while (true) {
-            uint32_t r = next();
-            if (r >= threshold) return r % bound;
-        }
-    }
-};
-
-// SplitMix64 for sub-seed derivation
-static inline uint64_t splitmix64(uint64_t x) {
-    x += 0x9e3779b97f4a7c15ULL;
-    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
-    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
-    return x ^ (x >> 31);
-}
-
-// FNV-1a 64-bit hash over a sequence of uint16_t values
-static inline uint64_t fnv1a64_ids(const mcu::ID_vector<uint16_t,2>& ids) {
-    const uint64_t FNV_offset = 1469598103934665603ULL;
-    const uint64_t FNV_prime  = 1099511628211ULL;
-    uint64_t hash = FNV_offset;
-    for (size_t i = 0; i < ids.size(); ++i) {
-        uint16_t v = ids[i];
-        hash ^= static_cast<uint64_t>(v & 0xFF);
-        hash *= FNV_prime;
-        hash ^= static_cast<uint64_t>((v >> 8) & 0xFF);
-        hash *= FNV_prime;
-    }
-    // also mix the size to distinguish different lengths
-    hash ^= static_cast<uint64_t>(ids.size() & 0xFF);
-    hash *= FNV_prime;
-    hash ^= static_cast<uint64_t>((ids.size() >> 8) & 0xFF);
-    hash *= FNV_prime;
-    return hash;
-}
-
-// Name-based 64-bit hash (FNV-1a) for default seeding
-static inline uint64_t fnv1a64_bytes(const char* data) {
-    const uint64_t FNV_offset = 1469598103934665603ULL;
-    const uint64_t FNV_prime  = 1099511628211ULL;
-    uint64_t hash = FNV_offset;
-    for (const unsigned char* p = (const unsigned char*)data; *p; ++p) {
-        hash ^= *p;
-        hash *= FNV_prime;
-    }
-    return hash;
-}
-
 using namespace mcu;
 
 typedef enum Rf_training_flags : uint8_t{
@@ -93,12 +21,13 @@ public:
     Rf_data test_data;
     Rf_data validation_data; // validation data, used for evaluating the model
 
+private:
     Rf_base base;
     Rf_config config;
+    Rf_random random_generator;
     Rf_categorizer categorizer; 
     Rf_memory_logger memory_tracker;
     Rf_node_predictor  node_predictor; // Node predictor number of nodes required for a tree based on min_split and max_depth
-private:
     vector<Rf_tree, SMALL> root;                     // b_vector storing root nodes of trees (now manages SPIFFS filenames)
     b_vector<ID_vector<uint16_t,2>, SMALL> dataList; // each ID_vector stores sample IDs of a sub_dataset, reference to index of allSamples vector in train_data
     b_vector<NodeToBuild> queue_nodes; // Queue for breadth-first tree building
@@ -106,46 +35,17 @@ private:
     bool optimal_mode = false;  
     bool is_loaded = false;
 
-    // RNG state
-    static uint64_t s_global_seed;
-    static bool s_has_global_seed;
-    uint64_t base_seed = 0;   // effective seed for this instance
-    PCG32 rng;                // instance RNG
+    // Random Number Generator (internal only)
 
-    // derive a per-tree RNG deterministically
-    inline PCG32 derive_rng(uint64_t stream, uint64_t nonce = 0) const {
-        PCG32 r;
-        uint64_t s = splitmix64(base_seed ^ (stream * 0x9e3779b97f4a7c15ULL + nonce));
-        uint64_t inc = splitmix64(base_seed + (stream << 1) + 0x632be59bd9b4e019ULL);
-        r.seed(s, inc);
-        return r;
-    }
 
 public:
-    // Allow user to configure a global seed before constructing the forest
-    static void setGlobalRandomSeed(uint64_t seed) {
-        s_global_seed = seed;
-        s_has_global_seed = true;
-    }
-
     RandomForest(){};
-    RandomForest(const char* base_name){
-        model_name = String(base_name);
-
-        // Initialize deterministic RNG (use global seed if provided)
-        if (s_has_global_seed) {
-            base_seed = s_global_seed;
-        } else {
-            // Non-deterministic default seed (user can set global seed to override)
-            uint64_t hw = (static_cast<uint64_t>(esp_random()) << 32) ^ static_cast<uint64_t>(esp_random());
-            uint64_t cyc = static_cast<uint64_t>(ESP.getCycleCount());
-            base_seed = splitmix64(hw ^ cyc ^ fnv1a64_bytes(model_name.c_str()));
-        }
-        rng.seed(base_seed, base_seed ^ 0xda3e39cb94b95bdbULL);
+    RandomForest(const char* model_name, uint64_t random_seed = 42) : random_generator(random_seed, true) {
+        model_name = String(model_name);
 
         // initial components
         memory_tracker.init();
-        base.init(base_name); // Initialize base with the provided base name
+        base.init(model_name); // Initialize base with the provided base name
         config.init(base.get_configFile());
         categorizer.init(base.get_ctgFile());
         node_predictor.init(base.get_nodePredictFile());
@@ -257,7 +157,7 @@ public:
         // create train_data 
         sampleID_set train_sampleIDs(maxID);
         while (train_sampleIDs.size() < trainSize) {
-            uint16_t sampleId = static_cast<uint16_t>(rng.bounded(static_cast<uint32_t>(maxID)));
+            uint16_t sampleId = static_cast<uint16_t>(random_generator.bounded(static_cast<uint32_t>(maxID)));
             train_sampleIDs.push_back(sampleId); 
         }
         train_data.allSamples = base_data.loadData(train_sampleIDs); // Load only training samples
@@ -269,7 +169,7 @@ public:
         // create test_data
         sampleID_set test_sampleIDs(maxID);
         while(test_sampleIDs.size() < testSize) {
-            uint16_t i = static_cast<uint16_t>(rng.bounded(static_cast<uint32_t>(maxID)));
+            uint16_t i = static_cast<uint16_t>(random_generator.bounded(static_cast<uint32_t>(maxID)));
             if (!train_sampleIDs.contains(i)) {
                 test_sampleIDs.push_back(i);
             }
@@ -284,7 +184,7 @@ public:
         if(config.use_validation){
             sampleID_set validation_sampleIDs(maxID);
             while(validation_sampleIDs.size() < validationSize) {
-                uint16_t i = static_cast<uint16_t>(rng.bounded(static_cast<uint32_t>(maxID)));
+                uint16_t i = static_cast<uint16_t>(random_generator.bounded(static_cast<uint32_t>(maxID)));
                 if (!train_sampleIDs.contains(i) && !test_sampleIDs.contains(i)) {
                     validation_sampleIDs.push_back(i);
                 }
@@ -331,12 +231,12 @@ public:
             uint64_t nonce = 0;
             while (true) {
                 treeDataset.clear();
-                PCG32 trng = derive_rng(/*stream*/ i, nonce);
+                auto tree_rng = random_generator.deriveRNG(i, nonce);
 
                 if (config.use_boostrap) {
                     // Bootstrap sampling: allow duplicates, track occurrence count
                     for (uint16_t j = 0; j < numSubSample; ++j) {
-                        uint16_t idx = static_cast<uint16_t>(trng.bounded(numSample));
+                        uint16_t idx = static_cast<uint16_t>(tree_rng.bounded(numSample));
                         // For ID_vector with 2 bits per value, we can store up to count 3
                         // Add the sample ID, which will increment its count in the bit array
                         treeDataset.push_back(idx);
@@ -348,7 +248,7 @@ public:
                     arr.resize(numSample);
                     for (uint16_t t = 0; t < numSample; ++t) arr[t] = t;
                     for (uint16_t t = 0; t < numSubSample; ++t) {
-                        uint16_t j = static_cast<uint16_t>(t + trng.bounded(numSample - t));
+                        uint16_t j = static_cast<uint16_t>(t + tree_rng.bounded(numSample - t));
                         uint16_t tmp = arr[t];
                         arr[t] = arr[j];
                         arr[j] = tmp;
@@ -358,7 +258,7 @@ public:
                 }
 
                 // Check for duplicate dataset across trees
-                uint64_t h = fnv1a64_ids(treeDataset);
+                uint64_t h = random_generator.hashIDVector(treeDataset);
                 if (seen_hashes.find(h) == seen_hashes.end()) {
                     seen_hashes.insert(h);
                     break; // unique, accept
@@ -386,7 +286,7 @@ public:
                     }
                     
                     // accept after tweak
-                    seen_hashes.insert(fnv1a64_ids(treeDataset));
+                    seen_hashes.insert(random_generator.hashIDVector(treeDataset));
                     break;
                 }
             }
@@ -766,7 +666,7 @@ public:
             uint16_t N = static_cast<uint16_t>(config.num_features);
             uint16_t K = num_selected_features > N ? N : num_selected_features;
             for (uint16_t j = N - K; j < N; ++j) {
-                uint16_t t = static_cast<uint16_t>(rng.bounded(j + 1));
+                uint16_t t = static_cast<uint16_t>(random_generator.bounded(j + 1));
                 if (selectedFeatures.find(t) == selectedFeatures.end()) selectedFeatures.insert(t);
                 else selectedFeatures.insert(j);
             }
@@ -1759,10 +1659,6 @@ public:
     }
 };
 
-// Define static members
-uint64_t RandomForest::s_global_seed = 0ULL;
-bool RandomForest::s_has_global_seed = false;
-
 void setup() {
     Serial.begin(115200);  
     while (!Serial);       // <-- Waits for Serial monitor to connect (important for USB CDC)
@@ -1778,8 +1674,7 @@ void setup() {
     long unsigned start_forest = millis();
     // const char* filename = "/walker_fall.bin";    // medium dataset : use_Gini = false | boostrap = true; 92% - sklearn : 85%  (5,3)
     const char* filename = "digit_data"; // hard dataset : use_Gini = true/false | boostrap = true; 89/92% - sklearn : 90% (6,5);
-    RandomForest forest = RandomForest(filename);
-    forest.setGlobalRandomSeed(42); // for reproducibility
+    RandomForest forest = RandomForest(filename, 42); // reproducible by default (can omit random_seed)
 
     // printout size of forest object in stack
     Serial.printf("RandomForest object size: %d bytes\n", sizeof(forest));

@@ -22,47 +22,29 @@ namespace mcu {
         unsigned size() const { return size_; }
     };
 
-    #define MAKE_INT_LIST(...)   \
-        min_init_list<int>((const int[]){__VA_ARGS__},  \
-        sizeof((int[]){__VA_ARGS__})/sizeof(int))
-    #define MAKE_FLOAT_LIST(...) \
-        min_init_list<float>((const float[]){__VA_ARGS__}, \
-        sizeof((float[]){__VA_ARGS__})/sizeof(float))
-    #define MAKE_CHAR_LIST(...)  \
-        min_init_list<const char*>((const char*[]){__VA_ARGS__},\
-        sizeof((const char*[]){__VA_ARGS__})/sizeof(const char*))
-    // Define a simple initializer list for strings (standard c++ and arduino compatible)
-    #if defined(ARDUINO)
-    #define MAKE_STRING_LIST(...) \
-        min_init_list<String>((const String[]){__VA_ARGS__}, \
-        sizeof((String[]){__VA_ARGS__})/sizeof(String))
-    #else
-    #define MAKE_STRING_LIST(...) \
-        min_init_list<std::string>((const std::string[]){__VA_ARGS__}, \
-        sizeof((std::string[]){__VA_ARGS__})/sizeof(std::string))
-    #endif
+    // Generic macro that works with any type
+    #define MAKE_LIST(type, ...) \
+        min_init_list<type>((const type[]){__VA_ARGS__}, \
+        sizeof((type[]){__VA_ARGS__})/sizeof(type))
 
-    #define MAKE_BOOL_LIST(...) \
-        min_init_list<bool>((const bool[]){__VA_ARGS__}, \
-        sizeof((bool[]){__VA_ARGS__})/sizeof(bool)) 
-    #define MAKE_UINT8_LIST(...) \
-        min_init_list<uint8_t>((const uint8_t[]){__VA_ARGS__}, \
-        sizeof((uint8_t[]){__VA_ARGS__})/sizeof(uint8_t))           
-    #define MAKE_UINT16_LIST(...) \
-        min_init_list<uint16_t>((const uint16_t[]){__VA_ARGS__}, \
-        sizeof((uint16_t[]){__VA_ARGS__})/sizeof(uint16_t))
-    #define MAKE_UINT32_LIST(...) \
-        min_init_list<uint32_t>((const uint32_t[]){__VA_ARGS__}, \
-        sizeof((uint32_t[]){__VA_ARGS__})/sizeof(uint32_t))     
-    #define MAKE_UINT64_LIST(...) \
-        min_init_list<uint64_t>((const uint64_t[]){__VA_ARGS__}, \
-        sizeof((uint64_t[]){__VA_ARGS__})/sizeof(uint64_t))     
-    #define MAKE_SIZE_T_LIST(...) \
-        min_init_list<size_t>((const size_t[]){__VA_ARGS__}, \
-        sizeof((size_t[]){__VA_ARGS__})/sizeof(size_t))
-    #define MAKE_DOUBLE_LIST(...) \
-        min_init_list<double>((const double[]){__VA_ARGS__}, \
-        sizeof((double[]){__VA_ARGS__})/sizeof(double))
+    // Convenience macros for common types (kept for backward compatibility)
+    #define MAKE_INT_LIST(...)     MAKE_LIST(int, __VA_ARGS__)
+    #define MAKE_FLOAT_LIST(...)   MAKE_LIST(float, __VA_ARGS__)
+    #define MAKE_CHAR_LIST(...)    MAKE_LIST(const char*, __VA_ARGS__)
+    #define MAKE_BOOL_LIST(...)    MAKE_LIST(bool, __VA_ARGS__)
+    #define MAKE_UINT8_LIST(...)   MAKE_LIST(uint8_t, __VA_ARGS__)
+    #define MAKE_UINT16_LIST(...)  MAKE_LIST(uint16_t, __VA_ARGS__)
+    #define MAKE_UINT32_LIST(...)  MAKE_LIST(uint32_t, __VA_ARGS__)
+    #define MAKE_UINT64_LIST(...)  MAKE_LIST(uint64_t, __VA_ARGS__)
+    #define MAKE_SIZE_T_LIST(...)  MAKE_LIST(size_t, __VA_ARGS__)
+    #define MAKE_DOUBLE_LIST(...)  MAKE_LIST(double, __VA_ARGS__)
+    
+    // String handling (platform-specific)
+    #if defined(ARDUINO)
+    #define MAKE_STRING_LIST(...)  MAKE_LIST(String, __VA_ARGS__)
+    #else
+    #define MAKE_STRING_LIST(...)  MAKE_LIST(std::string, __VA_ARGS__)
+    #endif
 
     enum class index_size_flag{
         TINY,
@@ -72,7 +54,7 @@ namespace mcu {
     };
 
     template<index_size_flag Flag>
-    struct vector_index_type;
+    struct vector_index_type;       // for vector classes
 
     template<>
     struct vector_index_type<index_size_flag::TINY> {
@@ -88,7 +70,7 @@ namespace mcu {
     };
     template<>
     struct vector_index_type<index_size_flag::LARGE> {
-        using type = uint32_t;
+        using type = size_t;
     };
 
     // #define SMALL_SIZE index_size_flag::SMALL
@@ -100,7 +82,7 @@ namespace mcu {
     static constexpr index_size_flag MEDIUM = index_size_flag::MEDIUM;
     static constexpr index_size_flag LARGE  = index_size_flag::LARGE;
 
-    template<typename T>
+    template<typename T>        // for another class 
     struct index_type {
         using type = typename conditional_t<
             sizeof(T) <= 1,

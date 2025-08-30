@@ -1562,7 +1562,7 @@ namespace mcu {
                 if(VECTOR_MAX_CAP == 255)
                     doubled = capacity_ ? capacity_ + 20 : 1;
                 else
-                    doubled = capacity_ ? capacity_ * 2 : 1;
+                    doubled = capacity_ ? capacity_ + 100 : 1;
                 if (doubled > VECTOR_MAX_CAP) doubled = VECTOR_MAX_CAP;
                 
                 if (doubled > SBO_SIZE && !using_heap) {
@@ -2665,6 +2665,84 @@ namespace mcu {
             }
             return *this;
         }
+        // Range constructor - copy from another packed_vector within specified range
+        // SAME TYPE VERSION: Only accepts source with identical template parameters
+        // Parameters:
+        //   source: The source packed_vector to copy from (same BitsPerElement and SizeFlag)
+        //   start_index: Starting index (inclusive) in the source vector
+        //   end_index: Ending index (exclusive) in the source vector
+        // Behavior:
+        //   - Creates a new vector containing elements [start_index, end_index)
+        //   - If start_index >= source.size() or start_index > end_index, creates empty vector
+        //   - If end_index > source.size(), it's clamped to source.size()
+        //   - Capacity is set to the range size (or 1 if empty)
+        //   - Memory efficient: only allocates space needed for the range
+        //   - Values are clamped using MAX_VALUE for safety
+        packed_vector(const packed_vector& source, vector_index_type start_index, vector_index_type end_index) {
+            if (start_index > end_index || start_index >= source.get_size()) {
+                // Invalid range - create empty vector with capacity 1
+                packed_data = PackedArray<BitsPerElement>(calc_bytes(1));
+                set_size_capacity(0, 1);
+                return;
+            }
+            
+            // Clamp end_index to source size
+            if (end_index > source.get_size()) {
+                end_index = source.get_size();
+            }
+            
+            vector_index_type range_size = end_index - start_index;
+            vector_index_type new_capacity = range_size > 0 ? range_size : 1;
+            
+            packed_data = PackedArray<BitsPerElement>(calc_bytes(new_capacity));
+            set_size_capacity(range_size, new_capacity);
+            
+            // Copy elements from source range with value clamping
+            for (vector_index_type i = 0; i < range_size; ++i) {
+                uint8_t value = source.packed_data.get_unsafe(start_index + i);
+                packed_data.set_unsafe(i, value & MAX_VALUE);
+            }
+        }
+        
+        // Templated range constructor - copy from another packed_vector with potentially different BitsPerElement
+        // CROSS TYPE VERSION: Accepts source with different template parameters
+        // This allows copying between vectors with different bit sizes with automatic value clamping
+        // Parameters:
+        //   source: The source packed_vector to copy from (can have different BitsPerElement/SizeFlag)
+        //   start_index: Starting index (inclusive) in the source vector
+        //   end_index: Ending index (exclusive) in the source vector
+        // Safety mechanisms:
+        //   - Values are automatically clamped to destination's MAX_VALUE using bitwise AND
+        //   - Type safety enforced at compile time through template parameters
+        //   - Same bounds checking as non-templated version
+        template<uint8_t SourceBitsPerElement, index_size_flag SourceSizeFlag = SizeFlag>
+        packed_vector(const packed_vector<SourceBitsPerElement, SourceSizeFlag>& source, 
+                     vector_index_type start_index, vector_index_type end_index) {
+            if (start_index > end_index || start_index >= source.size()) {
+                // Invalid range - create empty vector with capacity 1
+                packed_data = PackedArray<BitsPerElement>(calc_bytes(1));
+                set_size_capacity(0, 1);
+                return;
+            }
+            
+            // Clamp end_index to source size
+            if (end_index > source.size()) {
+                end_index = source.size();
+            }
+            
+            vector_index_type range_size = end_index - start_index;
+            vector_index_type new_capacity = range_size > 0 ? range_size : 1;
+            
+            packed_data = PackedArray<BitsPerElement>(calc_bytes(new_capacity));
+            set_size_capacity(range_size, new_capacity);
+            
+            // Copy elements from source range with value clamping for different bit sizes
+            for (vector_index_type i = 0; i < range_size; ++i) {
+                uint8_t value = source[start_index + i];  // Use public operator[] for safety
+                packed_data.set_unsafe(i, value & MAX_VALUE);
+            }
+        }
+        
 
         // Iterator class for packed_vector
         class iterator {
@@ -2826,11 +2904,6 @@ namespace mcu {
             if (get_size() == 0) throw std::out_of_range("packed_vector::front");
             return packed_data.get_unsafe(0);
         }
-        
-        // uint8_t back() const {
-        //     if (size_ == 0) throw std::out_of_range("packed_vector::back");
-        //     return packed_data.get(size_ - 1);
-        // }
         
         // Resize like std::vector
         void resize(vector_index_type newSize, uint8_t value = 0) {
@@ -3703,7 +3776,8 @@ namespace mcu {
         // takeout normalized vector of IDs (ascending order, no repetitions)
     };
 
-/*  ------------------------------------------------------------------------------------------------------------------
+    /*
+    ------------------------------------------------------------------------------------------------------------------
     ---------------------------------------------- CHAINED UNORDERED MAP -------------------------------------------------
     ----------------------------------------------------------------------------------------------------------------------
     */

@@ -2678,7 +2678,8 @@ namespace mcu {
         //   - Capacity is set to the range size (or 1 if empty)
         //   - Memory efficient: only allocates space needed for the range
         //   - Values are clamped using MAX_VALUE for safety
-        packed_vector(const packed_vector& source, vector_index_type start_index, vector_index_type end_index) {
+        // NOTE: Use size_t for indices to avoid truncation when destination index type is small.
+        packed_vector(const packed_vector& source, size_t start_index, size_t end_index) {
             if (start_index > end_index || start_index >= source.get_size()) {
                 // Invalid range - create empty vector with capacity 1
                 packed_data = PackedArray<BitsPerElement>(calc_bytes(1));
@@ -2687,18 +2688,20 @@ namespace mcu {
             }
             
             // Clamp end_index to source size
-            if (end_index > source.get_size()) {
-                end_index = source.get_size();
+            if (end_index > static_cast<size_t>(source.get_size())) {
+                end_index = static_cast<size_t>(source.get_size());
             }
             
-            vector_index_type range_size = end_index - start_index;
+            size_t range_size_sz = end_index - start_index;
+            // Clamp to destination capacity type limits
+            vector_index_type range_size = static_cast<vector_index_type>(range_size_sz > static_cast<size_t>(VECTOR_MAX_CAP) ? VECTOR_MAX_CAP : range_size_sz);
             vector_index_type new_capacity = range_size > 0 ? range_size : 1;
             
             packed_data = PackedArray<BitsPerElement>(calc_bytes(new_capacity));
             set_size_capacity(range_size, new_capacity);
             
             // Copy elements from source range with value clamping
-            for (vector_index_type i = 0; i < range_size; ++i) {
+            for (size_t i = 0; i < static_cast<size_t>(range_size); ++i) {
                 uint8_t value = source.packed_data.get_unsafe(start_index + i);
                 packed_data.set_unsafe(i, value & MAX_VALUE);
             }
@@ -2717,8 +2720,8 @@ namespace mcu {
         //   - Same bounds checking as non-templated version
         template<uint8_t SourceBitsPerElement, index_size_flag SourceSizeFlag = SizeFlag>
         packed_vector(const packed_vector<SourceBitsPerElement, SourceSizeFlag>& source, 
-                     vector_index_type start_index, vector_index_type end_index) {
-            if (start_index > end_index || start_index >= source.size()) {
+                     size_t start_index, size_t end_index) {
+            if (start_index > end_index || start_index >= static_cast<size_t>(source.size())) {
                 // Invalid range - create empty vector with capacity 1
                 packed_data = PackedArray<BitsPerElement>(calc_bytes(1));
                 set_size_capacity(0, 1);
@@ -2726,18 +2729,19 @@ namespace mcu {
             }
             
             // Clamp end_index to source size
-            if (end_index > source.size()) {
-                end_index = source.size();
+            if (end_index > static_cast<size_t>(source.size())) {
+                end_index = static_cast<size_t>(source.size());
             }
             
-            vector_index_type range_size = end_index - start_index;
+            size_t range_size_sz = end_index - start_index;
+            vector_index_type range_size = static_cast<vector_index_type>(range_size_sz > static_cast<size_t>(VECTOR_MAX_CAP) ? VECTOR_MAX_CAP : range_size_sz);
             vector_index_type new_capacity = range_size > 0 ? range_size : 1;
             
             packed_data = PackedArray<BitsPerElement>(calc_bytes(new_capacity));
             set_size_capacity(range_size, new_capacity);
             
             // Copy elements from source range with value clamping for different bit sizes
-            for (vector_index_type i = 0; i < range_size; ++i) {
+            for (size_t i = 0; i < static_cast<size_t>(range_size); ++i) {
                 uint8_t value = source[start_index + i];  // Use public operator[] for safety
                 packed_data.set_unsafe(i, value & MAX_VALUE);
             }

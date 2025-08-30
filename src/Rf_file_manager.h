@@ -4,12 +4,13 @@
 #include <SPIFFS.h>
 #include <FS.h>
 
-#define rf_ctg_file             "/rf_categorizer.bin"
-#define inference_log           "/rf_inference_log.bin"
-#define rf_config_file          "/rf_esp32_config.json"
+#define base_data_file           "/base_data.bin"
+// #define rf_ctg_file             "/rf_categorizer.bin"
+// #define inference_log           "/rf_inference_log.bin"
+// #define rf_config_file          "/rf_esp32_config.json"
 #define memory_log_file         "/rf_memory_log.csv"
-#define node_predictor_log      "/rf_tree_log.csv"
-#define node_predictor_file     "/node_predictor.bin"
+// #define node_predictor_log      "/rf_tree_log.csv"
+// #define node_predictor_file     "/node_predictor.bin"
 
 
 /**

@@ -19,7 +19,11 @@ namespace mcu {
 
     using sampleID_set = mcu::ID_vector<uint16_t>;      // set of unique sample IDs
     using sample_set = mcu::b_vector<Rf_sample>; // set of samples
-
+    /*
+    ------------------------------------------------------------------------------------------------------------------
+    ---------------------------------------------------- RF_TREE -----------------------------------------------------
+    ------------------------------------------------------------------------------------------------------------------
+    */
     struct Tree_node{
         uint32_t packed_data; 
         
@@ -94,11 +98,6 @@ namespace mcu {
             : nodeIndex(idx), begin(b), end(e), depth(d) {}
     };
 
-    /*
-    ------------------------------------------------------------------------------------------------------------------
-    ---------------------------------------------------- RF_TREE -----------------------------------------------------
-    ------------------------------------------------------------------------------------------------------------------
-    */
 
     class Rf_tree {
     public:
@@ -354,14 +353,210 @@ namespace mcu {
     ------------------------------------------------------------------------------------------------------------------
     */
     class Rf_data {
-    public:
-        sample_set allSamples;  
-        String filename = "";
-        bool  isLoaded;
-        size_t size_;         
+    private:
+        static constexpr size_t MAX_CHUNKS_SIZE = 8192; // max length of each packed array in bytes
 
-        Rf_data() : isLoaded(false) , size_(0){}
-        Rf_data(const String& fname) : filename(fname), isLoaded(false), size_(0) {}
+        // Chunked packed storage - eliminates both heap overhead per sample and large contiguous allocations
+        mcu::vector<mcu::packed_vector<2, mcu::LARGE>> sampleChunks;  // Multiple chunks of packed features
+        mcu::b_vector<uint8_t> allLabels;              // Labels storage (still contiguous for simplicity)
+        uint16_t bitsPerSample;                        // Number of bits per sample (numFeatures * 2)
+        uint16_t samplesEachChunk;                     // Maximum samples per chunk
+        size_t size_;  
+        String filename = "";
+    public:
+        bool isLoaded;      
+
+        Rf_data() : isLoaded(false), size_(0), bitsPerSample(0), samplesEachChunk(0) {}
+        // Constructor with filename and numFeatures - properly initializes chunk parameters
+        Rf_data(const String& fname, uint16_t numFeatures) 
+            : filename(fname), isLoaded(false), size_(0) {
+            bitsPerSample = numFeatures * 2;
+            updateSamplesEachChunk();
+        }
+
+        void init(const String& fname, uint16_t numFeatures) {
+            filename = fname;
+            bitsPerSample = numFeatures * 2;
+            updateSamplesEachChunk();
+            Serial.printf("ℹ️ Rf_data initialized: %s with %d features (%d bits/sample, %d samples/chunk)\n", 
+                          filename.c_str(), numFeatures, bitsPerSample, samplesEachChunk);
+            isLoaded = false;
+            size_ = 0;
+            sampleChunks.clear();
+            allLabels.clear();
+        }
+        // Iterator class (returns Rf_sample by value for read-only querying)
+        class iterator {
+        private:
+            Rf_data* data_;
+            size_t index_;
+
+        public:
+            iterator(Rf_data* data, size_t index) : data_(data), index_(index) {}
+
+            Rf_sample operator*() const {
+                return data_->getSample(index_);
+            }
+
+            iterator& operator++() {
+                ++index_;
+                return *this;
+            }
+
+            iterator operator++(int) {
+                iterator temp = *this;
+                ++index_;
+                return temp;
+            }
+
+            bool operator==(const iterator& other) const {
+                return data_ == other.data_ && index_ == other.index_;
+            }
+
+            bool operator!=(const iterator& other) const {
+                return !(*this == other);
+            }
+        };
+
+        // Iterator support
+        iterator begin() { return iterator(this, 0); }
+        iterator end() { return iterator(this, size_); }
+
+        // Array access operator (return by value; read-only usage in algorithms)
+        Rf_sample operator[](size_t index) {
+            return getSample(index);
+        }
+
+        // Const version of array access operator
+        Rf_sample operator[](size_t index) const {
+            return getSample(index);
+        }
+
+    private:
+        // Validate that the Rf_data has been properly initialized
+        bool isProperlyInitialized() const {
+            return bitsPerSample > 0 && samplesEachChunk > 0;
+        }
+
+        // Calculate maximum samples per chunk based on bitsPerSample
+        void updateSamplesEachChunk() {
+            if (bitsPerSample > 0) {
+                // Each sample needs bitsPerSample bits, MAX_CHUNKS_SIZE is in bytes (8 bits each)
+                samplesEachChunk = (MAX_CHUNKS_SIZE * 8) / bitsPerSample;
+                if (samplesEachChunk == 0) samplesEachChunk = 1; // At least 1 sample per chunk
+            }
+        }
+
+        // Get chunk index and local index within chunk for a given sample index
+        mcu::pair<size_t, size_t> getChunkLocation(size_t sampleIndex) const {
+            size_t chunkIndex = sampleIndex / samplesEachChunk;
+            size_t localIndex = sampleIndex % samplesEachChunk;
+            return mcu::make_pair(chunkIndex, localIndex);
+        }
+
+        // Ensure we have enough chunks to store the given number of samples
+        void ensureChunkCapacity(size_t totalSamples) {
+            size_t requiredChunks = (totalSamples + samplesEachChunk - 1) / samplesEachChunk;
+            while (sampleChunks.size() < requiredChunks) {
+                mcu::packed_vector<2, mcu::LARGE> newChunk;
+                // Reserve space for elements (each feature is 1 element in packed_vector<2>)
+                size_t elementsPerSample = bitsPerSample / 2;  // numFeatures
+                newChunk.reserve(samplesEachChunk * elementsPerSample);
+                sampleChunks.push_back(newChunk); // Add new empty chunk
+            }
+        }
+
+        // Helper method to reconstruct Rf_sample from chunked packed storage
+        Rf_sample getSample(size_t sampleIndex) const {
+            if (!isProperlyInitialized()) {
+                Serial.println("❌ Rf_data not properly initialized. Use constructor with numFeatures or loadData from another Rf_data.");
+                return Rf_sample();
+            }
+            
+            Rf_sample sample;
+            sample.label = allLabels[sampleIndex];
+            
+            uint16_t numFeatures = bitsPerSample / 2;
+            sample.features.clear();
+            sample.features.reserve(numFeatures);
+            
+            auto location = getChunkLocation(sampleIndex);
+            size_t chunkIndex = location.first;
+            size_t localIndex = location.second;
+            
+            if (chunkIndex >= sampleChunks.size()) {
+                Serial.printf("❌ Invalid chunk index %d for sample %d\n", chunkIndex, sampleIndex);
+                return sample;
+            }
+            
+            size_t elementsPerSample = bitsPerSample / 2;  // numFeatures
+            size_t startElementIndex = localIndex * elementsPerSample;
+            
+            // Extract each feature as one element from the packed_vector<2>
+            for (uint16_t featureIdx = 0; featureIdx < numFeatures; featureIdx++) {
+                size_t elementIndex = startElementIndex + featureIdx;
+                uint8_t featureValue = 0;
+                
+                // Get 2-bit value directly from one element
+                if (elementIndex < sampleChunks[chunkIndex].size()) {
+                    featureValue = sampleChunks[chunkIndex][elementIndex];
+                }
+                sample.features.push_back(featureValue);
+            }
+            sample.features.fit();
+            return sample;
+        }
+
+        // Helper method to store Rf_sample in chunked packed storage
+        void storeSample(const Rf_sample& sample, size_t sampleIndex) {
+            if (!isProperlyInitialized()) {
+                Serial.println("❌ Rf_data not properly initialized. Use constructor with numFeatures or loadData from another Rf_data.");
+                return;
+            }
+            
+            // Store label
+            // Ensure size() reflects the highest written index. The b_vector::resize
+            // changes capacity only in this library; use push_back to grow size.
+            if (sampleIndex == allLabels.size()) {
+                // Appending in order (fast path)
+                allLabels.push_back(sample.label);
+            } else if (sampleIndex < allLabels.size()) {
+                // Overwrite existing position
+                allLabels[sampleIndex] = sample.label;
+            } else {
+                // Rare case: out-of-order insert; fill gaps with 0
+                allLabels.reserve(sampleIndex + 1);
+                allLabels.fill(0);
+                allLabels.push_back(sample.label);
+            }
+            
+            // Ensure we have enough chunks
+            ensureChunkCapacity(sampleIndex + 1);
+            
+            auto location = getChunkLocation(sampleIndex);
+            size_t chunkIndex = location.first;
+            size_t localIndex = location.second;
+            
+            // Store features in packed format within the specific chunk
+            size_t elementsPerSample = bitsPerSample / 2;  // numFeatures
+            size_t startElementIndex = localIndex * elementsPerSample;
+            size_t requiredSizeInChunk = startElementIndex + elementsPerSample;
+            
+            if (sampleChunks[chunkIndex].size() < requiredSizeInChunk) {
+                sampleChunks[chunkIndex].resize(requiredSizeInChunk);
+            }
+            
+            // Store each feature as one element in the packed_vector<2>
+            for (size_t featureIdx = 0; featureIdx < sample.features.size(); featureIdx++) {
+                size_t elementIndex = startElementIndex + featureIdx;
+                uint8_t featureValue = sample.features[featureIdx] & 0x03; // 2-bit mask
+                
+                // Store 2-bit value directly as one element
+                if (elementIndex < sampleChunks[chunkIndex].size()) {
+                    sampleChunks[chunkIndex].set(elementIndex, featureValue);
+                }
+            }
+        }
 
     private:
         // Load data from CSV format (used only once for initial dataset conversion)
@@ -390,12 +585,31 @@ namespace mcu {
                 numFeatures = commaCount;
             }
 
+            // Set bitsPerSample and calculate chunk parameters only if not already initialized
+            if (bitsPerSample == 0) {
+                bitsPerSample = numFeatures * 2;
+                updateSamplesEachChunk();
+            } else {
+                // Validate that the provided numFeatures matches the initialized bitsPerSample
+                uint16_t expectedFeatures = bitsPerSample / 2;
+                if (numFeatures != expectedFeatures) {
+                    Serial.printf("❌ Feature count mismatch: initialized for %d features, CSV has %d\n", 
+                                expectedFeatures, numFeatures);
+                    file.close();
+                    return;
+                }
+            }
+
             Serial.printf("📊 Loading CSV: %s (expecting %d features per sample)\n", csvFilename.c_str(), numFeatures);
+            Serial.printf("📦 Chunk configuration: %d samples per chunk (%d bytes max)\n", samplesEachChunk, MAX_CHUNKS_SIZE);
             
             uint16_t linesProcessed = 0;
             uint16_t emptyLines = 0;
             uint16_t validSamples = 0;
             uint16_t invalidSamples = 0;
+            
+            // Pre-allocate for efficiency
+            allLabels.reserve(1000); // Initial capacity
             
             while (file.available()) {
                 String line = file.readStringUntil('\n');
@@ -445,25 +659,29 @@ namespace mcu {
                 
                 s.features.fit();
 
-                // Add sample to vector - index becomes implicit sample ID
-                allSamples.push_back(s);
+                // Store in chunked packed format
+                storeSample(s, validSamples);
                 validSamples++;
                 
-                if (allSamples.size() >= 50000) {
+                if (validSamples >= 50000) {
                     Serial.println("⚠️  Reached sample limit (50000)");
                     break;
                 }
             }
-            size_ = allSamples.size();
+            size_ = validSamples;
             
             Serial.printf("📋 CSV Processing Results:\n");
             Serial.printf("   Lines processed: %d\n", linesProcessed);
             Serial.printf("   Empty lines: %d\n", emptyLines);
             Serial.printf("   Valid samples: %d\n", validSamples);
             Serial.printf("   Invalid samples: %d\n", invalidSamples);
-            Serial.printf("   Total samples in memory: %d\n", allSamples.size());
+            Serial.printf("   Total samples in memory: %d\n", size_);
+            Serial.printf("   Chunks used: %d\n", sampleChunks.size());
             
-            allSamples.fit();
+            allLabels.fit();
+            for (auto& chunk : sampleChunks) {
+                chunk.fit();
+            }
             file.close();
             isLoaded = true;
             SPIFFS.remove(csvFilename);
@@ -473,6 +691,46 @@ namespace mcu {
     public:
         size_t size() const {
             return size_;
+        }
+
+        // Fast accessors for training-time hot paths (avoid reconstructing Rf_sample)
+        inline uint16_t num_features() const { return bitsPerSample / 2; }
+
+        inline uint8_t getLabel(size_t sampleIndex) const {
+            if (sampleIndex >= size_) return 0;
+            return allLabels[sampleIndex];
+        }
+
+        inline uint8_t getFeature(size_t sampleIndex, uint16_t featureIndex) const {
+            if (!isProperlyInitialized()) return 0;
+            uint16_t nf = bitsPerSample / 2;
+            if (featureIndex >= nf || sampleIndex >= size_) return 0;
+            auto loc = getChunkLocation(sampleIndex);
+            size_t chunkIndex = loc.first;
+            size_t localIndex = loc.second;
+            if (chunkIndex >= sampleChunks.size()) return 0;
+            size_t elementsPerSample = nf;
+            size_t startElementIndex = localIndex * elementsPerSample;
+            size_t elementIndex = startElementIndex + featureIndex;
+            if (elementIndex >= sampleChunks[chunkIndex].size()) return 0;
+            return sampleChunks[chunkIndex][elementIndex];
+        }
+
+        // Reserve space for a specified number of samples
+        void reserve(size_t numSamples) {
+            if (!isProperlyInitialized()) {
+                Serial.println("❌ Cannot reserve space: Rf_data not properly initialized");
+                return;
+            }
+
+            // Reserve space for labels
+            allLabels.reserve(numSamples);
+
+            // Ensure we have enough chunks for the requested number of samples
+            ensureChunkCapacity(numSamples);
+
+            Serial.printf("📦 Reserved space for %d samples (%d chunks)\n", 
+                        numSamples, sampleChunks.size());
         }
 
         void convertCSVtoBinary(String csvFilename, uint8_t numFeatures = 0) {
@@ -499,13 +757,8 @@ namespace mcu {
                 Serial.printf("📂 Saving data to: %s\n", filename.c_str());
 
                 // Write binary header
-                uint32_t numSamples = allSamples.size();
-                uint16_t numFeatures = 0;
-                
-                // Determine number of features from first sample
-                if(numSamples > 0) {
-                    numFeatures = allSamples[0].features.size();
-                }
+                uint32_t numSamples = size_;
+                uint16_t numFeatures = bitsPerSample / 2;
                 
                 file.write((uint8_t*)&numSamples, sizeof(numSamples));
                 file.write((uint8_t*)&numFeatures, sizeof(numFeatures));
@@ -514,8 +767,9 @@ namespace mcu {
                 uint16_t packedFeatureBytes = (numFeatures + 3) / 4;
 
                 // Write samples WITHOUT sample IDs (using vector indices)
-                for (uint32_t i = 0; i < allSamples.size(); i++) {
-                    const Rf_sample& s = allSamples[i];
+                for (uint32_t i = 0; i < size_; i++) {
+                    // Reconstruct sample from chunked packed storage
+                    Rf_sample s = getSample(i);
                     
                     // Write label only (no sample ID needed)
                     file.write(&s.label, sizeof(s.label));
@@ -541,10 +795,11 @@ namespace mcu {
                 file.close();
             }
             
-            // Clear memory
-            size_ = allSamples.size();
-            allSamples.clear();
-            allSamples.fit();
+            // Clear chunked memory
+            sampleChunks.clear();
+            sampleChunks.fit();
+            allLabels.clear();
+            allLabels.fit();
             isLoaded = false;
         }
 
@@ -572,12 +827,21 @@ namespace mcu {
                 return;
             }
 
+            if(numFeatures * 2 != bitsPerSample) {
+                Serial.printf("❌ Feature count mismatch: expected %d features, file has %d\n", 
+                            bitsPerSample / 2, numFeatures);
+                file.close();
+                return;
+            }
+            size_ = numSamples;
+
             // Calculate packed bytes needed for features (4 values per byte)
             uint16_t packedFeatureBytes = (numFeatures + 3) / 4;
             
-            // Reserve space in vector
-            allSamples.clear();
-            allSamples.reserve(numSamples);
+            // Reserve space for chunked storage
+            allLabels.clear();
+            allLabels.reserve(numSamples);
+            sampleChunks.clear();
             
             // Read samples sequentially (no sample IDs stored)
             for(uint32_t i = 0; i < numSamples; i++) {
@@ -612,98 +876,153 @@ namespace mcu {
                 }
                 s.features.fit();
                 
-                // Add to vector - index becomes implicit sample ID
-                allSamples.push_back(s);
+                // Store in chunked packed format
+                storeSample(s, i);
             }
-            size_ = allSamples.size();
-            allSamples.fit();
+            
+            allLabels.fit();
+            for (auto& chunk : sampleChunks) {
+                chunk.fit();
+            }
             isLoaded = true;
             file.close();
             if(!re_use) {
                 SPIFFS.remove(filename.c_str()); // Remove file after loading in single mode
             }
-            Serial.printf("✅ Data loaded: %s \n", filename.c_str());
+            // Serial.printf("✅ Data loaded: %s (using %d chunks)\n", filename.c_str(), sampleChunks.size());
         }
 
-        // overload : load a chunk of samples by indices from binary file or memory
-        sample_set loadData(const sampleID_set &sample_IDs) {
-            sample_set chunkSamples;
-            
-            // If data is loaded in memory, extract directly from vector
-            if(isLoaded) {
-                chunkSamples.reserve(sample_IDs.size());
-                for(uint16_t idx : sample_IDs) {
-                    if(idx < allSamples.size()) {
-                        chunkSamples.push_back(allSamples[idx]);
-                    }
-                }
-                return chunkSamples;
+        // overloaded loadData method to load samples from source SPIFFS file
+        void loadData(const Rf_data& source, const sampleID_set& sample_IDs) {
+            if (source.filename.length() == 0) {
+                Serial.println("❌ Source Rf_data has no filename specified for SPIFFS loading.");
+                return;
             }
+
+            if (!SPIFFS.exists(source.filename.c_str())) {
+                Serial.printf("❌ Source file does not exist: %s\n", source.filename.c_str());
+                return;
+            }
+
+            File file = SPIFFS.open(source.filename.c_str(), FILE_READ);
+            if (!file) {
+                Serial.printf("❌ Failed to open source file: %s\n", source.filename.c_str());
+                return;
+            }
+
+            // Read binary header
+            uint32_t numSamples;
+            uint16_t numFeatures;
             
-            // Data not in memory, need to load from file
-            if(SPIFFS.exists(filename.c_str())) {
-                File file = SPIFFS.open(filename.c_str(), FILE_READ);
-                if (!file) {
-                    Serial.println("❌ Failed to open binary file for reading.");
-                    return chunkSamples;
-                }
-
-                uint32_t numSamples;
-                uint16_t numFeatures;
-                if(file.read((uint8_t*)&numSamples, sizeof(numSamples)) != sizeof(numSamples) ||
-                file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
-                    Serial.println("❌ Failed to read binary header.");
-                    file.close();
-                    return chunkSamples;
-                }
-
-                uint16_t packedFeatureBytes = (numFeatures + 3) / 4;
-                chunkSamples.reserve(sample_IDs.size());
-
-                // Read samples sequentially 
-                for(uint32_t i = 0; i < numSamples; i++) {
-                    // Check if this index is requested
-                    if(!sample_IDs.contains(i)) {
-                        // Not needed, skip label and features
-                        file.seek(file.position() + sizeof(uint8_t) + packedFeatureBytes);
-                        continue;
-                    }
-
-                    Rf_sample s;
-                    // Read label
-                    if(file.read(&s.label, sizeof(s.label)) != sizeof(s.label)) break;
-
-                    // Read packed features
-                    s.features.clear();
-                    s.features.reserve(numFeatures);
-                    uint8_t packedBuffer[packedFeatureBytes];
-                    if(file.read(packedBuffer, packedFeatureBytes) != packedFeatureBytes) break;
-
-                    for(uint16_t j = 0; j < numFeatures; j++) {
-                        uint16_t byteIndex = j / 4;
-                        uint8_t bitOffset = (j % 4) * 2;
-                        uint8_t mask = 0x03 << bitOffset;
-                        uint8_t feature = (packedBuffer[byteIndex] & mask) >> bitOffset;
-                        s.features.push_back(feature);
-                    }
-                    s.features.fit();
-                    
-                    // Add sample to vector (samples will be in file order, not necessarily in requested index order)
-                    chunkSamples.push_back(s);
-
-                    if(chunkSamples.size() >= sample_IDs.size()) break;
-                }
+            if(file.read((uint8_t*)&numSamples, sizeof(numSamples)) != sizeof(numSamples) ||
+            file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
+                Serial.println("❌ Failed to read binary header from source file.");
                 file.close();
+                return;
             }
-            return chunkSamples;
+
+            // Clear current data and initialize parameters
+            sampleChunks.clear();
+            allLabels.clear();
+            bitsPerSample = numFeatures * 2;
+            updateSamplesEachChunk();
+
+            // Calculate packed bytes needed for features (4 values per byte)
+            uint16_t packedFeatureBytes = (numFeatures + 3) / 4;
+            size_t sampleDataSize = sizeof(uint8_t) + packedFeatureBytes; // label + packed features
+            
+            // Reserve space for requested samples
+            size_t numRequestedSamples = sample_IDs.size();
+            allLabels.reserve(numRequestedSamples);
+            
+            Serial.printf("📦 Loading %d samples from SPIFFS: %s\n", numRequestedSamples, source.filename.c_str());
+            
+            size_t addedSamples = 0;
+            // Since sample_IDs are sorted in ascending order, we can read efficiently
+            for(uint16_t sampleIdx : sample_IDs) {
+                if(sampleIdx >= numSamples) {
+                    Serial.printf("❌ Sample ID %d exceeds file sample count %d\n", sampleIdx, numSamples);
+                    continue;
+                }
+                
+                // Calculate file position for this sample
+                size_t headerSize = sizeof(uint32_t) + sizeof(uint16_t);
+                size_t sampleFilePos = headerSize + (sampleIdx * sampleDataSize);
+                
+                // Seek to the sample position
+                if (!file.seek(sampleFilePos)) {
+                    Serial.printf("❌ Failed to seek to sample %d position %d\n", sampleIdx, sampleFilePos);
+                    continue;
+                }
+                
+                Rf_sample s;
+                
+                // Read label
+                if(file.read(&s.label, sizeof(s.label)) != sizeof(s.label)) {
+                    Serial.printf("❌ Failed to read label for sample %d\n", sampleIdx);
+                    continue;
+                }
+                
+                // Read packed features
+                s.features.clear();
+                s.features.reserve(numFeatures);
+                
+                uint8_t packedBuffer[packedFeatureBytes];
+                if(file.read(packedBuffer, packedFeatureBytes) != packedFeatureBytes) {
+                    Serial.printf("❌ Failed to read packed features for sample %d\n", sampleIdx);
+                    continue;
+                }
+                
+                // Unpack features from bytes
+                for(uint16_t j = 0; j < numFeatures; j++) {
+                    uint16_t byteIndex = j / 4;
+                    uint8_t bitOffset = (j % 4) * 2;
+                    uint8_t mask = 0x03 << bitOffset;
+                    uint8_t feature = (packedBuffer[byteIndex] & mask) >> bitOffset;
+                    s.features.push_back(feature);
+                }
+                s.features.fit();
+                
+                // Store in chunked packed format using addedSamples as the new index
+                storeSample(s, addedSamples);
+                addedSamples++;
+            }
+            
+            size_ = addedSamples;
+            allLabels.fit();
+            for (auto& chunk : sampleChunks) {
+                chunk.fit();
+            }
+            isLoaded = true;
+            file.close();
+            
+            Serial.printf("✅ Loaded %d samples from SPIFFS file: %s (using %d chunks)\n", 
+                        addedSamples, source.filename.c_str(), sampleChunks.size());
         }
         
         // add new sample to the end of the dataset
         bool add_new_sample(const Rf_sample& sample) {
-            // If data is loaded, add to in-memory vector
+            // If data is loaded, add to in-memory chunked packed storage
             if (isLoaded) {
-                allSamples.push_back(sample);
-                allSamples.fit();
+                // Set bitsPerSample if not set yet
+                if (bitsPerSample == 0) {
+                    bitsPerSample = sample.features.size() * 2;
+                    updateSamplesEachChunk();
+                }
+                
+                // Validate feature count
+                if (sample.features.size() * 2 != bitsPerSample) {
+                    Serial.printf("❌ Feature count mismatch: expected %d, got %d\n", 
+                                bitsPerSample / 2, sample.features.size());
+                    return false;
+                }
+                
+                storeSample(sample, size_);
+                size_++;
+                allLabels.fit();
+                for (auto& chunk : sampleChunks) {
+                    chunk.fit();
+                }
                 releaseData(false); // Save to SPIFFS
                 return true;
             }
@@ -743,6 +1062,11 @@ namespace mcu {
                 uint32_t numSamples = 1;
                 file.write((uint8_t*)&numSamples, sizeof(numSamples));
                 file.write((uint8_t*)&numFeatures, sizeof(numFeatures));
+                
+                // Set bitsPerSample for future use
+                bitsPerSample = numFeatures * 2;
+                updateSamplesEachChunk();
+                size_ = 1;
             }
 
             if (!file) {
@@ -771,9 +1095,14 @@ namespace mcu {
         // FIXED: Safe data purging
         void purgeData() {
             // Clear in-memory structures first
-            allSamples.clear();
-            allSamples.fit();
+            sampleChunks.clear();
+            sampleChunks.fit();
+            allLabels.clear();
+            allLabels.fit();
             isLoaded = false;
+            size_ = 0;
+            bitsPerSample = 0;
+            samplesEachChunk = 0;
 
             // Then remove the SPIFFS file if one was specified
             if (filename.length() > 0 && SPIFFS.exists(filename.c_str())) {
@@ -782,7 +1111,6 @@ namespace mcu {
             }
         }
     };
-
 
     /*
     ------------------------------------------------------------------------------------------------------------------
@@ -2714,5 +3042,5 @@ namespace mcu {
             return h;
         }
     };
-    
+
 } // namespace mcu

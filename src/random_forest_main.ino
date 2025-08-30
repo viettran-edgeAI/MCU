@@ -21,13 +21,14 @@ public:
     Rf_data test_data;
     Rf_data validation_data; // validation data, used for evaluating the model
 
-private:
     Rf_base base;
     Rf_config config;
     Rf_random random_generator;
     Rf_categorizer categorizer; 
     Rf_memory_logger memory_tracker;
     Rf_node_predictor  node_predictor; // Node predictor number of nodes required for a tree based on min_split and max_depth
+
+private:
     vector<Rf_tree, SMALL> root;                     // b_vector storing root nodes of trees (now manages SPIFFS filenames)
     b_vector<ID_vector<uint16_t,2>, SMALL> dataList; // each ID_vector stores sample IDs of a sub_dataset, reference to index of allSamples vector in train_data
     b_vector<NodeToBuild> queue_nodes; // Queue for breadth-first tree building
@@ -41,7 +42,7 @@ private:
 public:
     RandomForest(){};
     RandomForest(const char* model_name, uint64_t random_seed = 42) : random_generator(random_seed, true) {
-        model_name = String(model_name);
+        this->model_name = String(model_name);
 
         // initial components
         memory_tracker.init();
@@ -57,16 +58,10 @@ public:
         categorizer.loadCategorizer(); // load categorizer
         node_predictor.loadPredictor(); // load node predictor
 
-        // load base data 
-        String baseData = "/base_data.bin";         // make a copy of base data to avoid accidental deletion
-        cloneFile(base.get_baseFile().c_str(), baseData.c_str());
-        base_data.filename = baseData;
-        // memory_tracker.log("before base_data load");
-        // base_data.loadData();
-        // memory_tracker.log("after base_data load");
-        // base_data.releaseData();
-        // memory_tracker.log("after base_data release");
-        
+        // init base data (make a clone of base_data to avoid modifying original)
+        cloneFile(base.get_baseFile().c_str(), base_data_file);
+        base_data.init(base_data_file, config.num_features);
+
         // data separation
         dataList.reserve(config.num_trees);
         memory_tracker.log("forest init");
@@ -100,24 +95,20 @@ public:
         Serial.println("START MAKING FOREST...");
 
         // pre_allocate nessessary resources
-        memory_tracker.log("before root reserve");
         root.reserve(config.num_trees);
-        memory_tracker.log("after root reserve");
         queue_nodes.clear();
         queue_nodes.fit();
         uint16_t estimatedNodes = node_predictor.estimate(config.min_split, config.max_depth) * 100 / node_predictor.accuracy;
         queue_nodes.reserve(min(120, estimatedNodes * node_predictor.peak_percent / 100)); // Conservative estimate
         node_data n_data(config.min_split, config.max_depth,0);
-        memory_tracker.log("after queue_nodes reserve");
-
-        // memory usage of queue_nodes
-        Serial.printf(" RAM of queue_nodes: %d bytes\n", queue_nodes.cap() * sizeof(NodeToBuild));
 
         Serial.print("building sub_tree: ");
         
         // Load train_data once for all trees
+        long unsigned a1 = micros();
         train_data.loadData();
-        memory_tracker.log("after train_data load");
+        long unsigned a2 = micros();
+        Serial.printf("Train data loaded in %lu us\n", a2 - a1);
         for(uint8_t i = 0; i < config.num_trees; i++){
             Serial.printf("%d, ", i);
             Rf_tree tree(i);
@@ -137,6 +128,8 @@ public:
         train_data.releaseData(); // Keep metadata but release sample data
         n_data.total_nodes /= config.num_trees; // Average nodes per tree
         node_predictor.buffer.push_back(n_data); // Add node data to predictor buffer
+
+        Serial.printf("Total nodes: %d, Average nodes per tree: %d\n", n_data.total_nodes * config.num_trees, n_data.total_nodes);
 
         Serial.printf("RAM after forest creation: %d\n", ESP.getFreeHeap());
     }
@@ -160,9 +153,10 @@ public:
             uint16_t sampleId = static_cast<uint16_t>(random_generator.bounded(static_cast<uint32_t>(maxID)));
             train_sampleIDs.push_back(sampleId); 
         }
-        train_data.allSamples = base_data.loadData(train_sampleIDs); // Load only training samples
-        train_data.isLoaded = true;
-        train_data.filename = "/train_data.bin";
+        train_data.init("/train_data.bin", config.num_features);
+        train_data.loadData(base_data, train_sampleIDs); 
+
+
         train_data.releaseData(false); // Write to binary SPIFFS, clear RAM
         Serial.println("Train data loaded and released.");
         
@@ -174,9 +168,8 @@ public:
                 test_sampleIDs.push_back(i);
             }
         }
-        test_data.allSamples = base_data.loadData(test_sampleIDs); // Load only testing samples
-        test_data.isLoaded = true;
-        test_data.filename = "/test_data.bin";
+        test_data.init("/test_data.bin", config.num_features);
+        test_data.loadData(base_data, test_sampleIDs); // Load only test samples
         test_data.releaseData(false); // Write to binary SPIFFS, clear RAM
         Serial.println("Test data loaded and released.");
 
@@ -189,9 +182,8 @@ public:
                     validation_sampleIDs.push_back(i);
                 }
             }
-            validation_data.allSamples = base_data.loadData(validation_sampleIDs); // Load only validation samples
-            validation_data.isLoaded = true;
-            validation_data.filename = "/valid_data.bin";
+            validation_data.init("/validation_data.bin", config.num_features);
+            validation_data.loadData(base_data, validation_sampleIDs); // Load only validation samples
             validation_data.releaseData(false); // Write to binary SPIFFS, clear RAM
             Serial.println("Validation data loaded and released.");
         }
@@ -505,7 +497,7 @@ public:
             for (uint16_t k = begin; k < end; ++k) {
                 uint16_t sampleID = indices[k];
                 if (sampleID < data.size()) {
-                    uint8_t label = data.allSamples[sampleID].label;
+                    uint8_t label = data.getLabel(sampleID);
                     labels.insert(label);
                     if (label < numLabels && label < 32) {
                         labelCounts[label]++;
@@ -530,8 +522,9 @@ public:
         vector<uint16_t> baseLabelCounts(numLabels, 0);
         for (uint16_t k = begin; k < end; ++k) {
             uint16_t sid = indices[k];
-            if (sid < train_data.size() && train_data.allSamples[sid].label < numLabels) {
-                baseLabelCounts[train_data.allSamples[sid].label]++;
+            if (sid < train_data.size()) {
+                uint8_t lbl = train_data.getLabel(sid);
+                if (lbl < numLabels) baseLabelCounts[lbl]++;
             }
         }
 
@@ -561,11 +554,11 @@ public:
             for (uint16_t k = begin; k < end; ++k) {
                 uint16_t sid = indices[k];
                 if (sid < train_data.size()) {
-                    const Rf_sample& sample = train_data.allSamples[sid];
-                    if (featureID < sample.features.size() && sample.label < numLabels) {
-                        uint8_t fv = sample.features[featureID];
+                    uint8_t lbl = train_data.getLabel(sid);
+                    if (lbl < numLabels) {
+                        uint8_t fv = train_data.getFeature(sid, featureID);
                         if (fv < 4) {
-                            counts[fv * numLabels + sample.label]++;
+                            counts[fv * numLabels + lbl]++;
                             value_totals[fv]++;
                         }
                     }
@@ -693,7 +686,7 @@ public:
             for (uint16_t k = current.begin; k < current.end; ++k) {
                 uint16_t sid = indices[k];
                 if (sid < train_data.size() && 
-                    train_data.allSamples[sid].features[bestSplit.featureID] <= bestSplit.threshold) {
+                    train_data.getFeature(sid, bestSplit.featureID) <= bestSplit.threshold) {
                     if (k != iLeft) {
                         uint16_t tmp = indices[iLeft];
                         indices[iLeft] = indices[k];
@@ -788,7 +781,7 @@ public:
         if(buffer_chunk > train_data.size()) buffer_chunk = train_data.size();
 
         // Pre-allocate evaluation resources
-        sample_set train_samples_buffer;
+        Rf_data train_samples_buffer;
         sampleID_set sampleIDs_bag;
         b_vector<uint8_t, SMALL> activeTrees;
         unordered_map<uint8_t, uint8_t> oobPredictClass;
@@ -828,8 +821,8 @@ public:
             }
 
             // Load samples for this chunk
-            train_samples_buffer = train_data.loadData(sampleIDs_bag);
-            if(train_samples_buffer.empty()){
+            train_samples_buffer.loadData(train_data, sampleIDs_bag);
+            if(train_samples_buffer.size() == 0){
                 Serial.println("❌ Failed to load training samples chunk!");
                 continue;
             }
@@ -895,19 +888,16 @@ public:
                     if(oobPredictedLabel < config.num_labels) oob_fp[oobPredictedLabel]++;
                 }
             }
-
-            // Clean up chunk resources
-            train_samples_buffer.clear();
-            train_samples_buffer.fit();
         }
+        train_samples_buffer.purgeData();
 
         // Validation evaluation if enabled
         if(config.use_validation){
             Serial.println("Evaluating on validation set...");
             validation_data.loadData();
             
-            for(uint16_t i = 0; i < validation_data.allSamples.size(); i++){
-                const Rf_sample& sampleData = validation_data.allSamples[i];
+            for(uint16_t i = 0; i < validation_data.size(); i++){
+                const Rf_sample& sampleData = validation_data[i];
                 uint8_t actualLabel = sampleData.label;
 
                 unordered_map<uint8_t, uint8_t> validPredictClass;
@@ -1504,7 +1494,7 @@ public:
         
         // Single pass over samples (using direct indexing)
         for (uint16_t i = 0; i < data.size(); i++) {
-            const Rf_sample& sample = data.allSamples[i];
+            const Rf_sample& sample = data[i];
             uint8_t actual = sample.label;
             uint8_t pred = predClassSample(const_cast<Rf_sample&>(sample));
             // Serial.println("here 1.5");
@@ -1649,7 +1639,7 @@ public:
         // std::cout << "SampleID, Predicted, Actual" << std::endl;
         Serial.println("SampleID, Predicted, Actual");
         for (uint16_t i = 0; i < testSet.size(); i++) {
-            const Rf_sample& sample = testSet.allSamples[i];
+            const Rf_sample& sample = testSet[i];
             uint8_t pred = predClassSample(const_cast<Rf_sample&>(sample));
             // std::cout << sampleId << "  " << (int)pred << " - " << (int)sample.label << std::endl;
             Serial.printf("%d, %d, %d\n", i, pred, sample.label);

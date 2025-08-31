@@ -10,6 +10,8 @@
 #include <sys/stat.h>
 #include <ctime>
 #include <chrono>
+#include <iomanip>
+#include <algorithm>
 #ifdef _WIN32
 #include <direct.h>
 #define mkdir _mkdir
@@ -17,11 +19,17 @@
 
 #include "pc_components.h"
 
-
-#include <iomanip>
-#include <algorithm>
+#define VERSION "1.2.0"
+#define temp_base_data "base_data.csv"
 
 using namespace mcu;
+
+std::string extract_model_name(const std::string& data_path) {
+    size_t last_slash = data_path.find_last_of("/\\");
+    std::string filename = (last_slash != std::string::npos) ? data_path.substr(last_slash + 1) : data_path;
+    size_t first_underscore = filename.find("_nml");
+    return (first_underscore != std::string::npos) ? filename.substr(0, first_underscore) : filename;
+}
 
 
 
@@ -47,25 +55,20 @@ public:
     // RandomForest(){};
     RandomForest(){
         config.init(); // Load configuration from model_config.json
-        first_scan(config.data_path);
-        //extract model name from data_path : "../data_processing/data/result/digit_data_nml.csv" -> digit_data
-        std::string data_path = config.data_path;
-        size_t last_slash = data_path.find_last_of("/\\");
-        std::string filename = (last_slash != std::string::npos) ? data_path.substr(last_slash + 1) : data_path;
-        size_t first_underscore = filename.find('_');
-        model_name = (first_underscore != std::string::npos) ? filename.substr(0, first_underscore) : filename;
-        std::cout << "📝 Model name extracted: " << model_name << std::endl;
-
-        base_data.loadCSVData(config.data_path, config.num_features);
-
-        config.unity_threshold  = 1.25f / static_cast<float>(config.num_labels);
-        if(config.num_features == 2) config.unity_threshold = 0.4f;
+        model_name = extract_model_name(config.data_path);
+        std::cout << "🌲 Model name: " << model_name << std::endl;
+        
+        // Create a backup copy of the original CSV data
+        createDataBackup(config.data_path, temp_base_data);
+        
+        first_scan(temp_base_data);
+        base_data.loadCSVData(temp_base_data, config.num_features);
         
         // Check for unity_threshold override
         if (!config.overwrite[2]) {
             // Apply automatic calculation only if not overridden
             config.unity_threshold  = 1.25f / static_cast<float>(config.num_labels);
-            if(config.num_features == 2) config.unity_threshold = 0.4f;
+            if(config.num_features == 2) config.unity_threshold = 0.6f;
         } else {
             std::cout << "🔧 Using unity_threshold override: " << config.unity_threshold << std::endl;
         }
@@ -92,6 +95,11 @@ public:
         }  
         // Clear data safely
         dataList.clear();
+        
+        // Delete temporary backup file
+        if (std::remove(temp_base_data) == 0) {
+            std::cout << "🗑️ Removed temporary backup file: " << temp_base_data << std::endl;
+        }
     }
 
     void MakeForest(){
@@ -127,10 +135,10 @@ public:
             if(depth > maxDepth) maxDepth = depth;
             if(depth < minDepth) minDepth = depth;
             
-            // std::cout << "Tree " << (int)i << ": " 
-            //           << nodeCount << " nodes (" 
-            //           << leafCount << " leaves), depth " 
-            //           << depth << "\n";
+            std::cout << "Tree " << (int)i << ": " 
+                      << nodeCount << " nodes (" 
+                      << leafCount << " leaves), depth " 
+                      << depth << "\n";
         }
         
         std::cout << "----------------------------------------\n";
@@ -145,6 +153,30 @@ public:
     }
     
     private:
+    // Create a backup copy of the original CSV data to avoid damaging the original
+    void createDataBackup(const std::string& source_path, const std::string& backup_filename) {
+        std::ifstream source(source_path, std::ios::binary);
+        if (!source.is_open()) {
+            std::cout << "⚠️ Warning: Could not open source file for backup: " << source_path << std::endl;
+            return;
+        }
+        
+        std::ofstream backup(backup_filename, std::ios::binary);
+        if (!backup.is_open()) {
+            std::cout << "⚠️ Warning: Could not create backup file: " << backup_filename << std::endl;
+            source.close();
+            return;
+        }
+        
+        // Copy the file
+        backup << source.rdbuf();
+        
+        source.close();
+        backup.close();
+        
+        std::cout << "📋 Created data backup: " << backup_filename << std::endl;
+    }
+
     // ----------------------------------------------------------------------------------
     // Split data into training and testing sets (or validation if enabled)
     void splitData(float trainRatio) {
@@ -170,6 +202,7 @@ public:
                 test_sampleIDs.push_back(i);
             }
         }
+
         // create validation_data
         sampleID_set validation_sampleIDs(maxID);
         if(config.use_validation) {
@@ -795,12 +828,12 @@ public:
             tree.nodes[current.nodeIndex].setThreshold(bestSplit.threshold);
             tree.nodes[current.nodeIndex].setIsLeaf(false);
             
-            // In-place partition of indices[current.begin, current.end)
+            // In-place partition of indices[current.begin, current.end) using the best feature
             uint16_t iLeft = current.begin;
             for (uint16_t k = current.begin; k < current.end; ++k) {
                 uint16_t sid = indices[k];
-                if (sid < train_data.allSamples.size() && 
-                    train_data.allSamples[sid].features[k] <= bestSplit.threshold) {
+                if (sid < train_data.allSamples.size() &&
+                    train_data.allSamples[sid].features[bestSplit.featureID] <= bestSplit.threshold) {
                     if (k != iLeft) {
                         uint16_t tmp = indices[iLeft];
                         indices[iLeft] = indices[k];
@@ -1135,114 +1168,153 @@ public:
 
     // K-fold cross validation evaluation
     float get_cross_validation_score() {
-        // uint8_t k_folds = config.k_fold;
-        // if (k_folds < 2) k_folds = 4; // Default to 4-fold if not properly set
+        uint8_t k_folds = config.k_fold;
+        if (k_folds < 2) k_folds = 4; // Default to 4-fold if not properly set
         
-        // // Create vector of all training sample IDs for k-fold split
-        // b_vector<uint16_t> allTrainIDs;
-        // allTrainIDs.reserve(train_data.allSamples.size());
-        // for (const auto& sample : train_data.allSamples) {
-        //     allTrainIDs.push_back(sample.first);
-        // }
+        // Create vector of all training sample indices for k-fold split
+        b_vector<uint16_t> allTrainIndices;
+        allTrainIndices.reserve(train_data.allSamples.size());
+        for (uint16_t i = 0; i < train_data.allSamples.size(); i++) {
+            allTrainIndices.push_back(i);
+        }
         
-        // // Shuffle the sample IDs for random k-fold split
-        // std::random_device rd;
-        // std::mt19937 gen(rd());
-        // std::uniform_int_distribution<uint16_t> dis(0, UINT16_MAX);
-        // for (uint16_t i = allTrainIDs.size() - 1; i > 0; i--) {
-        //     uint16_t j = dis(gen) % (i + 1);
-        //     uint16_t temp = allTrainIDs[i];
-        //     allTrainIDs[i] = allTrainIDs[j];
-        //     allTrainIDs[j] = temp;
-        // }
+        // Shuffle the sample indices for random k-fold split using our custom RNG
+        for (uint16_t i = allTrainIndices.size() - 1; i > 0; i--) {
+            uint16_t j = static_cast<uint16_t>(rng.bounded(i + 1));
+            uint16_t temp = allTrainIndices[i];
+            allTrainIndices[i] = allTrainIndices[j];
+            allTrainIndices[j] = temp;
+        }
         
-        // uint16_t fold_size = allTrainIDs.size() / k_folds;
-        // float total_cv_score = 0.0f;
-        // uint8_t valid_folds = 0;
+        uint16_t fold_size = allTrainIndices.size() / k_folds;
+        float total_cv_score = 0.0f;
+        uint8_t valid_folds = 0;
         
-        // // Perform k-fold cross validation
-        // for (uint8_t fold = 0; fold < k_folds; fold++) {
-        //     // Create train and test sets for this fold
-        //     Rf_data cv_train_data, cv_test_data;
+        // Store original dataList to restore after CV
+        auto original_dataList = dataList;
+        
+        // Perform k-fold cross validation
+        for (uint8_t fold = 0; fold < k_folds; fold++) {
+            // Create train and test index sets for this fold
+            b_vector<uint16_t> cv_train_indices, cv_test_indices;
             
-        //     uint16_t test_start = fold * fold_size;
-        //     uint16_t test_end = (fold == k_folds - 1) ? allTrainIDs.size() : (fold + 1) * fold_size;
+            uint16_t test_start = fold * fold_size;
+            uint16_t test_end = (fold == k_folds - 1) ? allTrainIndices.size() : (fold + 1) * fold_size;
             
-        //     // Split data into train and test for this fold
-        //     for (uint16_t i = 0; i < allTrainIDs.size(); i++) {
-        //         uint16_t sampleID = allTrainIDs[i];
-        //         const Rf_sample& sample = train_data.allSamples[sampleID];
+            // Split indices into train and test for this fold
+            for (uint16_t i = 0; i < allTrainIndices.size(); i++) {
+                uint16_t sampleIndex = allTrainIndices[i];
+                if (sampleIndex < train_data.allSamples.size()) {
+                    if (i >= test_start && i < test_end) {
+                        cv_test_indices.push_back(sampleIndex);
+                    } else {
+                        cv_train_indices.push_back(sampleIndex);
+                    }
+                }
+            }
+            
+            if (cv_train_indices.empty() || cv_test_indices.empty()) {
+                continue; // Skip this fold if empty
+            }
+            
+            // Rebuild dataList for this CV fold using cv_train_indices
+            dataList.clear();
+            dataList.reserve(config.num_trees);
+            
+            uint16_t cv_train_size = cv_train_indices.size();
+            uint16_t bootstrap_sample_size = config.use_bootstrap ? 
+                static_cast<uint16_t>(cv_train_size * config.boostrap_ratio) : cv_train_size;
+            
+            // Create bootstrap samples from cv_train_indices for each tree
+            for (uint8_t tree_idx = 0; tree_idx < config.num_trees; tree_idx++) {
+                ID_vector<uint16_t,2> cv_tree_dataset;
+                cv_tree_dataset.reserve(bootstrap_sample_size);
                 
-        //         if (i >= test_start && i < test_end) {
-        //             cv_test_data.allSamples[sampleID] = sample;
-        //         } else {
-        //             cv_train_data.allSamples[sampleID] = sample;
-        //         }
-        //     }
-            
-        //     if (cv_train_data.allSamples.empty() || cv_test_data.allSamples.empty()) {
-        //         continue; // Skip this fold if empty
-        //     }
-            
-        //     // Temporarily store original dataList and rebuild for this fold
-        //     auto original_dataList = dataList;
-        //     dataList.clear();
-            
-        //     // Create bootstrap samples from cv_train_data
-        //     uint16_t numSample = cv_train_data.allSamples.size();
-        //     uint16_t bootstrap_sample_size = config.use_bootstrap ? numSample : static_cast<uint16_t>(numSample * config.boostrap_ratio);
-            
-        //     b_vector<uint16_t> cvTrainIDs;
-        //     cvTrainIDs.reserve(numSample);
-        //     for (const auto& sample : cv_train_data.allSamples) {
-        //         cvTrainIDs.push_back(sample.first);
-        //     }
-            
-        //     std::uniform_int_distribution<uint16_t> cv_dis(0, numSample - 1);
-        //     for (uint8_t tree_idx = 0; tree_idx < config.num_trees; tree_idx++) {
-        //         Rf_data sub_data;
-        //         sub_data.allSamples.reserve(bootstrap_sample_size);
+                auto tree_rng = rng.deriveRNG(fold * 1000 + tree_idx);
                 
-        //         for (uint16_t j = 0; j < bootstrap_sample_size; j++) {
-        //             uint16_t original_idx = cv_dis(gen);
-        //             uint16_t original_sampleId = cvTrainIDs[original_idx];
-        //             sub_data.allSamples[j] = cv_train_data.allSamples[original_sampleId];
-        //         }
-        //         sub_data.allSamples.fit();
+                if (config.use_bootstrap) {
+                    // Bootstrap sampling: allow duplicates
+                    for (uint16_t j = 0; j < bootstrap_sample_size; j++) {
+                        uint16_t idx_in_cv_train = static_cast<uint16_t>(tree_rng.bounded(cv_train_size));
+                        uint16_t actual_sample_idx = cv_train_indices[idx_in_cv_train];
+                        cv_tree_dataset.push_back(actual_sample_idx);
+                    }
+                } else {
+                    // Random sampling without replacement
+                    vector<uint16_t> indices_copy = cv_train_indices;
+                    
+                    for (uint16_t t = 0; t < bootstrap_sample_size; t++) {
+                        uint16_t j = static_cast<uint16_t>(t + tree_rng.bounded(cv_train_size - t));
+                        uint16_t tmp = indices_copy[t];
+                        indices_copy[t] = indices_copy[j];
+                        indices_copy[j] = tmp;
+                        cv_tree_dataset.push_back(indices_copy[t]);
+                    }
+                }
                 
-        //         // Create empty OOB set for cross validation (not used)
-        //         OOB_set empty_oob;
-        //         dataList.push_back(make_pair(sub_data, empty_oob));
-        //     }
+                dataList.push_back(std::move(cv_tree_dataset));
+            }
             
-        //     // Build forest for this fold
-        //     rebuildForest();
+            // Ensure root vector has correct size before rebuilding
+            if (root.size() != config.num_trees) {
+                root.clear();
+                root.reserve(config.num_trees);
+                for(uint8_t i = 0; i < config.num_trees; i++){
+                    root.push_back(Rf_tree(""));
+                }
+            }
             
-        //     // Evaluate on cv_test_data
-        //     float fold_score = predict(cv_test_data, static_cast<Rf_training_flags>(config.training_flag));
-        //     total_cv_score += fold_score;
-        //     valid_folds++;
+            // Build forest for this fold
+            rebuildForest();
             
-        //     // Restore original dataList
-        //     dataList = original_dataList;
-        // }
-        // return (valid_folds > 0) ? (total_cv_score / valid_folds) : 0.0f;
-        return 0;
+            // Create test data object for evaluation using cv_test_indices
+            Rf_data cv_test_data;
+            cv_test_data.allSamples.reserve(cv_test_indices.size());
+            for (uint16_t idx : cv_test_indices) {
+                if (idx < train_data.allSamples.size()) {
+                    cv_test_data.allSamples.push_back(train_data.allSamples[idx]);
+                }
+            }
+            
+            // Evaluate on cv_test_data using the specified training flag
+            float fold_score = predict(cv_test_data, config.training_flag);
+            total_cv_score += fold_score;
+            valid_folds++;
+        }
+        
+        // Restore original dataList
+        dataList = original_dataList;
+        
+        return (valid_folds > 0) ? (total_cv_score / valid_folds) : 0.0f;
     }
         
     void rebuildForest() {
+        // Ensure root vector has correct size
+        if (root.size() != config.num_trees) {
+            root.clear();
+            root.reserve(config.num_trees);
+            for(uint8_t i = 0; i < config.num_trees; i++){
+                root.push_back(Rf_tree(""));
+            }
+        }
+        
         // Clear existing trees properly
         for (uint8_t i = 0; i < root.size(); i++) {
             root[i].purgeTree(); // Clear the vector-based tree
         }
+        
+        // Build trees only if we have valid dataList
+        if (dataList.size() != config.num_trees) {
+            std::cout << "❌ DataList size mismatch: " << dataList.size() << " vs " << (int)config.num_trees << "\n";
+            return;
+        }
+        
         for(uint8_t i = 0; i < config.num_trees; i++){
             // Build new tree using vector approach
-            Rf_tree& tree = root[i];
-            tree.purgeTree(); // Ensure complete cleanup
-            build_tree(tree, dataList[i]);
+            build_tree(root[i], dataList[i]);
             
             // Verify tree was built successfully
-            if (tree.nodes.empty()) {
+            if (root[i].nodes.empty()) {
                 std::cout << "❌ Failed to build tree " << (int)i << "\n";
                 continue;
             }
@@ -1649,7 +1721,6 @@ public:
 int main() {
     auto start = std::chrono::high_resolution_clock::now();
     std::cout << "Random Forest PC Training\n";
-    // std::string data_path = "/home/viettran/Arduino/libraries/STL_MCU/tools/data_processing/data/result/digit_data_nml.csv"; 
     RandomForest forest = RandomForest();
     // Build initial forest
     forest.MakeForest();

@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <ctime>
 #include <chrono>
+#include <filesystem>
 #ifdef _WIN32
 #include <direct.h>
 #define mkdir _mkdir
@@ -36,9 +37,9 @@ struct Rf_sample{
     uint8_t label;                     // label of the sample 
 };
 
-using OOB_set = ChainedUnorderedSet<uint16_t>; // OOB set type
-using sampleID_set = ChainedUnorderedSet<uint16_t>; // Sample ID set type
-using sample_set = ChainedUnorderedMap<uint16_t, Rf_sample>; // set of samples
+using sampleID_set = ID_vector<uint16_t>; // Sample ID set type
+using sample_set = b_vector<Rf_sample>; // set of samples
+
 
 struct Tree_node{
     uint32_t packed_data; 
@@ -103,6 +104,16 @@ struct Tree_node{
     // Note: setRightChildIndex is not needed since right = left + 1
 };
 
+struct NodeToBuild {
+    uint16_t nodeIndex;
+    uint16_t begin;   // inclusive
+    uint16_t end;     // exclusive
+    uint8_t depth;
+    
+    NodeToBuild() : nodeIndex(0), begin(0), end(0), depth(0) {}
+    NodeToBuild(uint16_t idx, uint16_t b, uint16_t e, uint8_t d) 
+        : nodeIndex(idx), begin(b), end(e), depth(d) {}
+};
 class Rf_tree {
   public:
     b_vector<Tree_node> nodes;  // Vector-based tree storage
@@ -271,10 +282,14 @@ class Rf_tree {
 };
 
 class Rf_data {
-  public:
-    ChainedUnorderedMap<uint16_t, Rf_sample> allSamples;    // all sample and it's ID 
-
-    Rf_data(){}
+public:
+    b_vector<Rf_sample> allSamples;    // Simple vector storage for all samples
+    std::string filename = "";
+ 
+    Rf_data() {}  
+    
+    // Constructor with filename
+    Rf_data(const std::string& fname) : filename(fname) {}
 
     // Load data from CSV format (used only once for initial dataset conversion)
     void loadCSVData(std::string csvFilename, uint8_t numFeatures) {
@@ -343,7 +358,7 @@ class Rf_data {
             
             s.features.fit();
 
-            allSamples[sampleID] = s;
+            allSamples.push_back(s);
             sampleID++;
             validSamples++;
         }
@@ -355,7 +370,6 @@ class Rf_data {
         std::cout << "   Invalid samples: " << invalidSamples << std::endl;
         std::cout << "   Total samples in memory: " << allSamples.size() << std::endl;
         
-        allSamples.fit();
         file.close();
         std::cout << "✅ CSV data loaded successfully." << std::endl;
     }
@@ -1097,5 +1111,156 @@ public:
         return std::max(0.0f, 100.0f - mape); // Return accuracy as percentage
     }
 };
+
+/*
+------------------------------------------------------------------------------------------------------------------
+-------------------------------------------------- RF_RANDOM -----------------------------------------------------
+------------------------------------------------------------------------------------------------------------------
+*/
+class Rf_random {
+private:
+    struct PCG32 {
+        uint64_t state = 0x853c49e6748fea9bULL;
+        uint64_t inc   = 0xda3e39cb94b95bdbULL;
+
+        inline void seed(uint64_t initstate, uint64_t initseq) {
+            state = 0U;
+            inc = (initseq << 1u) | 1u;
+            next();
+            state += initstate;
+            next();
+        }
+
+        inline uint32_t next() {
+            uint64_t oldstate = state;
+            state = oldstate * 6364136223846793005ULL + inc;
+            uint32_t xorshifted = static_cast<uint32_t>(((oldstate >> 18u) ^ oldstate) >> 27u);
+            uint32_t rot = static_cast<uint32_t>(oldstate >> 59u);
+            return (xorshifted >> rot) | (xorshifted << ((-rot) & 31));
+        }
+
+        inline uint32_t bounded(uint32_t bound) {
+            if (bound == 0) return 0;
+            uint32_t threshold = -bound % bound;
+            while (true) {
+                uint32_t r = next();
+                if (r >= threshold) return r % bound;
+            }
+        }
+    };
+
+    static constexpr uint64_t FNV_OFFSET = 1469598103934665603ULL;
+    static constexpr uint64_t FNV_PRIME  = 1099511628211ULL;
+    static constexpr uint64_t SMIX_C1 = 0x9e3779b97f4a7c15ULL;
+    static constexpr uint64_t SMIX_C2 = 0xbf58476d1ce4e5b9ULL;
+    static constexpr uint64_t SMIX_C3 = 0x94d049bb133111ebULL;
+
+    // Avoid ODR by using function-local statics for global seed state
+    static uint64_t &global_seed() { static uint64_t v = 0ULL; return v; }
+    static bool &has_global() { static bool v = false; return v; }
+
+    uint64_t base_seed = 0;
+    PCG32 engine;
+
+    inline uint64_t splitmix64(uint64_t x) const {
+        x += SMIX_C1;
+        x = (x ^ (x >> 30)) * SMIX_C2;
+        x = (x ^ (x >> 27)) * SMIX_C3;
+        return x ^ (x >> 31);
+    }
+
+public:
+    Rf_random() {
+        if (has_global()) {
+            base_seed = global_seed();
+        } else {
+            // Use high-resolution clock for entropy on PC
+            auto now = std::chrono::high_resolution_clock::now();
+            auto duration = now.time_since_epoch();
+            uint64_t hw = static_cast<uint64_t>(duration.count());
+            uint64_t cyc = static_cast<uint64_t>(std::random_device{}());
+            base_seed = splitmix64(hw ^ cyc);
+        }
+        engine.seed(base_seed, base_seed ^ 0xda3e39cb94b95bdbULL);
+    }
+
+    Rf_random(uint64_t seed, bool use_provided_seed) {
+        if (use_provided_seed) {
+            base_seed = seed;
+        } else if (has_global()) {
+            base_seed = global_seed();
+        } else {
+            // Use high-resolution clock for entropy on PC
+            auto now = std::chrono::high_resolution_clock::now();
+            auto duration = now.time_since_epoch();
+            uint64_t hw = static_cast<uint64_t>(duration.count());
+            uint64_t cyc = static_cast<uint64_t>(std::random_device{}());
+            base_seed = splitmix64(hw ^ cyc ^ seed);
+        }
+        engine.seed(base_seed, base_seed ^ 0xda3e39cb94b95bdbULL);
+    }
+
+    // Global seed control
+    static void setGlobalSeed(uint64_t seed) { global_seed() = seed; has_global() = true; }
+    static void clearGlobalSeed() { has_global() = false; }
+    static bool hasGlobalSeed() { return has_global(); }
+
+    // Basic API
+    inline uint32_t next() { return engine.next(); }
+    inline uint32_t bounded(uint32_t bound) { return engine.bounded(bound); }
+    inline float nextFloat() { return static_cast<float>(next()) / static_cast<float>(UINT32_MAX); }
+    inline double nextDouble() { return static_cast<double>(next()) / static_cast<double>(UINT32_MAX); }
+
+    void seed(uint64_t new_seed) {
+        base_seed = new_seed;
+        engine.seed(base_seed, base_seed ^ 0xda3e39cb94b95bdbULL);
+    }
+    inline uint64_t getBaseSeed() const { return base_seed; }
+
+    // Deterministic substreams
+    Rf_random deriveRNG(uint64_t stream, uint64_t nonce = 0) const {
+        uint64_t s = splitmix64(base_seed ^ (stream * SMIX_C1 + nonce));
+        uint64_t inc = splitmix64(base_seed + (stream << 1) + 0x632be59bd9b4e019ULL);
+        Rf_random r;
+        r.base_seed = s;
+        r.engine.seed(s, inc);
+        return r;
+    }
+
+    // Hash helpers (FNV-1a)
+    static inline uint64_t hashString(const char* data) {
+        uint64_t h = FNV_OFFSET;
+        for (const unsigned char* p = reinterpret_cast<const unsigned char*>(data); *p; ++p) { 
+            h ^= *p; 
+            h *= FNV_PRIME; 
+        }
+        return h;
+    }
+    static inline uint64_t hashBytes(const uint8_t* data, size_t len) {
+        uint64_t h = FNV_OFFSET;
+        for (size_t i = 0; i < len; ++i) { 
+            h ^= data[i]; 
+            h *= FNV_PRIME; 
+        }
+        return h;
+    }
+    template <class IdVec>
+    static uint64_t hashIDVector(const IdVec& ids) {
+        uint64_t h = FNV_OFFSET;
+        for (size_t i = 0; i < ids.size(); ++i) {
+            uint16_t v = ids[i];
+            h ^= static_cast<uint64_t>(v & 0xFF);
+            h *= FNV_PRIME;
+            h ^= static_cast<uint64_t>((v >> 8) & 0xFF);
+            h *= FNV_PRIME;
+        }
+        h ^= static_cast<uint64_t>(ids.size() & 0xFF);
+        h *= FNV_PRIME;
+        h ^= static_cast<uint64_t>((ids.size() >> 8) & 0xFF);
+        h *= FNV_PRIME;
+        return h;
+    }
+};
+
 
 

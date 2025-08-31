@@ -27,25 +27,36 @@ using namespace mcu;
 
 class RandomForest{
 public:
-    Rf_data a;      // base data / baseFile
+    Rf_data base_data;      // base data / baseFile
     Rf_data train_data;
     Rf_data test_data;
     Rf_data validation_data; // validation data, used for evaluating the model
 
-    Rf_config config;
+    std::string model_name;
 
+    Rf_config config;
     b_vector<float> peak_nodes;
 
 private:
     vector<Rf_tree, SMALL> root;                     // b_vector storing root nodes of trees (now manages SPIFFS filenames)
-    vector<pair<Rf_data, OOB_set>> dataList; // b_vector of pairs: Rf_data and OOB set for each tree
+    b_vector<ID_vector<uint16_t,2>, SMALL> dataList; // list of training data sample IDs for each tree
+    Rf_random rng;
 
 public:
+
     // RandomForest(){};
     RandomForest(){
-        config.init(); // Load configuration from default path
+        config.init(); // Load configuration from model_config.json
         first_scan(config.data_path);
-        a.loadCSVData(config.data_path, config.num_features);
+        //extract model name from data_path : "../data_processing/data/result/digit_data_nml.csv" -> digit_data
+        std::string data_path = config.data_path;
+        size_t last_slash = data_path.find_last_of("/\\");
+        std::string filename = (last_slash != std::string::npos) ? data_path.substr(last_slash + 1) : data_path;
+        size_t first_underscore = filename.find('_');
+        model_name = (first_underscore != std::string::npos) ? filename.substr(0, first_underscore) : filename;
+        std::cout << "📝 Model name extracted: " << model_name << std::endl;
+
+        base_data.loadCSVData(config.data_path, config.num_features);
 
         config.unity_threshold  = 1.25f / static_cast<float>(config.num_labels);
         if(config.num_features == 2) config.unity_threshold = 0.4f;
@@ -90,7 +101,7 @@ public:
         for(uint8_t i = 0; i < config.num_trees; i++){
             // For PC training, no SPIFFS filename needed
             Rf_tree tree("");
-            build_tree(tree, dataList[i].first, config.min_split, config.max_depth, config.use_gini);
+            build_tree(tree, dataList[i]);
             root.push_back(tree);
         }
     }
@@ -137,61 +148,49 @@ public:
     // ----------------------------------------------------------------------------------
     // Split data into training and testing sets (or validation if enabled)
     void splitData(float trainRatio) {
-        uint16_t totalSamples = this->a.allSamples.size();
-        uint16_t trainSize = static_cast<uint16_t>(totalSamples * trainRatio);
+        size_t maxID = config.num_samples;  // total number of samples
+        uint16_t trainSize = static_cast<uint16_t>(maxID * config.train_ratio);
         uint16_t testSize;
-        if(this->config.use_validation){
-            testSize = static_cast<uint16_t>((totalSamples - trainSize) * 0.5);
-        }else{
-            testSize = totalSamples - trainSize; // No validation set, use all remaining for testing
+        if(config.use_validation)  testSize = static_cast<uint16_t>((maxID - trainSize) * 0.5);
+        else  testSize = maxID - trainSize; // No validation set, use all remaining for testing
+        uint16_t validationSize = maxID - trainSize - testSize;
+        
+        // create train_data 
+        sampleID_set train_sampleIDs(maxID);
+        while (train_sampleIDs.size() < trainSize) {
+            uint16_t sampleId = static_cast<uint16_t>(rng.bounded(static_cast<uint32_t>(maxID)));
+            train_sampleIDs.push_back(sampleId); 
         }
-        uint16_t validationSize = totalSamples - trainSize - testSize;
-        
-        // Create vectors to hold all sample IDs for shuffling
-        b_vector<uint16_t> allSampleIDs;
-        allSampleIDs.reserve(totalSamples);
-        for(const auto& sample : this->a.allSamples) {
-            allSampleIDs.push_back(sample.first);
-        }
-        
-        // Shuffle the sample IDs for random split using PC random
-        std::random_device rd;
-        std::mt19937 gen(rd());
-        std::uniform_int_distribution<uint16_t> dis(0, UINT16_MAX);
-        for(uint16_t i = totalSamples - 1; i > 0; i--) {
-            uint16_t j = dis(gen) % (i + 1);
-            uint16_t temp = allSampleIDs[i];
-            allSampleIDs[i] = allSampleIDs[j];
-            allSampleIDs[j] = temp;
-        }
-        
-        // Clear and reserve space for each dataset
-        train_data.allSamples.clear();
-        test_data.allSamples.clear();
-        if(config.use_validation) validation_data.allSamples.clear();
-        
-        train_data.allSamples.reserve(trainSize);
-        test_data.allSamples.reserve(testSize);
-        if(config.use_validation) validation_data.allSamples.reserve(validationSize);
 
-        // Split samples based on shuffled indices
-        for(uint16_t i = 0; i < totalSamples; i++) {
-            uint16_t sampleID = allSampleIDs[i];
-            const Rf_sample& sample = this->a.allSamples[sampleID];
-            
-            if(i < trainSize) {
-                train_data.allSamples[sampleID] = sample;
-            } else if(i < trainSize + testSize) {
-                test_data.allSamples[sampleID] = sample;
-            } else if(config.use_validation && i < trainSize + testSize + validationSize) {
-                validation_data.allSamples[sampleID] = sample;
+        // create test_data
+        sampleID_set test_sampleIDs(maxID);
+        while(test_sampleIDs.size() < testSize) {
+            uint16_t i = static_cast<uint16_t>(rng.bounded(static_cast<uint32_t>(maxID)));
+            if (!train_sampleIDs.contains(i)) {
+                test_sampleIDs.push_back(i);
             }
         }
-        
-        // Fit the containers to optimize memory usage
-        train_data.allSamples.fit();
-        test_data.allSamples.fit();
-        if(config.use_validation) validation_data.allSamples.fit();
+        // create validation_data
+        sampleID_set validation_sampleIDs(maxID);
+        if(config.use_validation) {
+            while(validation_sampleIDs.size() < validationSize) {
+                uint16_t i = static_cast<uint16_t>(rng.bounded(static_cast<uint32_t>(maxID)));
+                if (!train_sampleIDs.contains(i) && !test_sampleIDs.contains(i)) {
+                    validation_sampleIDs.push_back(i);
+                }
+            }
+        }
+
+
+        for (uint16_t id  = 0; id < maxID; id++) {
+            if(train_sampleIDs.contains(id)) {
+                train_data.allSamples.push_back(base_data.allSamples[id]);
+            } else if(test_sampleIDs.contains(id)) {
+                test_data.allSamples.push_back(base_data.allSamples[id]);
+            } else if(config.use_validation) {
+                validation_data.allSamples.push_back(base_data.allSamples[id]);
+            }
+        }
     }
 
     // ---------------------------------------------------------------------------------
@@ -200,54 +199,72 @@ public:
         // Clear previous data
         dataList.clear();
         dataList.reserve(config.num_trees);
-        uint16_t numSample = train_data.allSamples.size();  
-        
-        // The target size for a bootstrap sample is the same as the original training set size.
-        uint16_t bootstrap_sample_size = config.use_bootstrap ? numSample : static_cast<uint16_t>(numSample * config.boostrap_ratio);
+        uint16_t numSample = config.num_samples * config.train_ratio;
+        uint16_t numSubSample;
+        if(config.use_bootstrap) numSubSample = static_cast<uint16_t>(numSample * config.boostrap_ratio);
+        else numSubSample = numSample; // use all training data if not bootstrap
 
-        // Create a b_vector of all sample IDs for efficient random access
-        b_vector<uint16_t> allSampleIds;
-        allSampleIds.reserve(numSample);
-        for (const auto& sample : train_data.allSamples) {
-            allSampleIds.push_back(sample.first);
-        }
-
-        // Create a single random number generator for the whole process for efficiency.
-        std::random_device rd;
-        std::mt19937 gen(rd());
-        std::uniform_int_distribution<uint16_t> dis(0, numSample - 1);
+        // Track hashes of each tree dataset to avoid duplicates across trees
+        unordered_set<uint64_t> seen_hashes;
+        seen_hashes.reserve(config.num_trees * 2);
 
         for (uint8_t i = 0; i < config.num_trees; i++) {
-            Rf_data sub_data;
-            sampleID_set inBagSamples;
-            
-            // Reserve space for efficiency.
-            sub_data.allSamples.reserve(bootstrap_sample_size);
-            inBagSamples.reserve(bootstrap_sample_size);
+            ID_vector<uint16_t,2> treeDataset;
+            treeDataset.reserve(numSample);
 
-            // Perform standard bootstrap sampling: sample N times WITH replacement.
-            // Note: We are adding samples to a map, so we need to use new unique IDs for duplicates.
-            for(uint16_t j = 0; j < bootstrap_sample_size; j++){
-                uint16_t original_idx = dis(gen);
-                uint16_t original_sampleId = allSampleIds[original_idx];     
-                
-                // The original sample ID is tracked for the OOB set.
-                inBagSamples.insert(original_sampleId);
-                
-                // We add the sample with a new, unique ID (j) to allow for duplicates in the data.
-                sub_data.allSamples[j] = train_data.allSamples[original_sampleId];
-            }
-            sub_data.allSamples.fit();
-            
-            // Create OOB set with samples not used in this tree's bootstrap sample.
-            OOB_set oob_set;
-            oob_set.reserve(numSample); // Reserve worst-case
-            for (uint16_t id : allSampleIds) {
-                if (inBagSamples.find(id) == inBagSamples.end()) {
-                    oob_set.insert(id);
+            // Derive a deterministic per-tree RNG; retry with nonce if duplicate detected
+            uint64_t nonce = 0;
+            while (true) {
+                treeDataset.clear();
+                auto tree_rng = rng.deriveRNG(i, nonce);
+
+                if (config.use_bootstrap) {
+                    // Bootstrap sampling: allow duplicates, track occurrence count
+                    for (uint16_t j = 0; j < numSubSample; ++j) {
+                        uint16_t idx = static_cast<uint16_t>(tree_rng.bounded(numSample));
+                        treeDataset.push_back(idx);
+                    }
+                } else {
+                    vector<uint16_t> arr(numSample,0);
+                    arr.resize(numSample);
+                    for (uint16_t t = 0; t < numSample; ++t) arr[t] = t;
+                    for (uint16_t t = 0; t < numSubSample; ++t) {
+                        uint16_t j = static_cast<uint16_t>(t + tree_rng.bounded(numSample - t));
+                        uint16_t tmp = arr[t];
+                        arr[t] = arr[j];
+                        arr[j] = tmp;
+                        treeDataset.push_back(arr[t]);
+                    }
+                }
+                // Check for duplicate dataset across trees
+                uint64_t h = rng.hashIDVector(treeDataset);
+                if (seen_hashes.find(h) == seen_hashes.end()) {
+                    seen_hashes.insert(h);
+                    break; // unique, accept
+                }
+                nonce++;
+                if (nonce > 8) {
+                    auto temp_vec = treeDataset;  // Copy current state
+                    treeDataset.clear();
+                    
+                    // Re-add samples with slight modifications
+                    for (uint16_t k = 0; k < std::min(5, (int)temp_vec.size()); ++k) {
+                        // Get a sample ID and modify it slightly
+                        uint16_t original_id = k < temp_vec.size() ? k : 0; // Simplified access
+                        uint16_t modified_id = static_cast<uint16_t>((original_id + k + i) % numSample);
+                        treeDataset.push_back(modified_id);
+                    }
+                    
+                    // Add remaining samples from original
+                    for (uint16_t k = 5; k < std::min(numSubSample, (uint16_t)temp_vec.size()); ++k) {
+                        uint16_t id = k % numSample; // Simplified access
+                        treeDataset.push_back(id);
+                    }
+                    seen_hashes.insert(rng.hashIDVector(treeDataset));
+                    break;
                 }
             }
-            dataList.push_back(make_pair(sub_data, oob_set)); // Store pair of subset data and OOB set
+            dataList.push_back(std::move(treeDataset));
         }
     }
 
@@ -566,33 +583,68 @@ public:
         uint8_t threshold = 0;
     } SplitInfo;
 
-    // OPTIMIZED: Finds the best feature and threshold to split on in a more efficient manner.
-    SplitInfo findBestSplit(Rf_data& data, const unordered_set<uint16_t>& selectedFeatures, bool use_Gini) {
-        SplitInfo bestSplit;
-        uint32_t totalSamples = data.allSamples.size();
-        if (totalSamples < 2) return bestSplit; // Cannot split less than 2 samples
+    struct NodeStats {
+        unordered_set<uint8_t> labels;
+        b_vector<uint16_t, SMALL> labelCounts; 
+        uint8_t majorityLabel;
+        uint16_t totalSamples;
+        
+        NodeStats(uint8_t numLabels) : majorityLabel(0), totalSamples(0) {
+            labelCounts.reserve(numLabels);
+            labelCounts.fill(0);
+        }
+        
+        // New: analyze a slice [begin,end) over a shared indices array
+        void analyzeSamplesRange(const b_vector<uint16_t, MEDIUM, 8>& indices, uint16_t begin, uint16_t end,
+                                 uint8_t numLabels, const Rf_data& data) {
+            totalSamples = (begin < end) ? (end - begin) : 0;
+            uint16_t maxCount = 0;
+            for (uint16_t k = begin; k < end; ++k) {
+                uint16_t sampleID = indices[k];
+                if (sampleID < data.allSamples.size()) {
+                    uint8_t label = data.allSamples[sampleID].label;
+                    labels.insert(label);
+                    if (label < numLabels && label < 32) {
+                        labelCounts[label]++;
+                        if (labelCounts[label] > maxCount) {
+                            maxCount = labelCounts[label];
+                            majorityLabel = label;
+                        }
+                    }
+                }
+            }
+        }
+    };
 
-        // Use vector instead of VLA for safety and standard compliance.
-        vector<uint16_t> baseLabelCounts(config.num_labels, 0);
-        for (const auto& entry : data.allSamples) {
-            // Bounds check to prevent memory corruption
-            if (entry.second.label < config.num_labels) {
-                baseLabelCounts[entry.second.label]++;
+    // New: Range-based variant operating on a shared indices array
+    SplitInfo findBestSplitRange(const b_vector<uint16_t, MEDIUM, 8>& indices, uint16_t begin, uint16_t end,
+                                 const unordered_set<uint16_t>& selectedFeatures, bool use_Gini, uint8_t numLabels) {
+        SplitInfo bestSplit;
+        uint32_t totalSamples = (begin < end) ? (end - begin) : 0;
+        if (totalSamples < 2) return bestSplit;
+
+        // Base label counts
+        vector<uint16_t> baseLabelCounts(numLabels, 0);
+        for (uint16_t k = begin; k < end; ++k) {
+            uint16_t sid = indices[k];
+            if (sid < train_data.allSamples.size()) {
+                uint8_t lbl = train_data.allSamples[sid].label;
+                if (lbl < numLabels) baseLabelCounts[lbl]++;
             }
         }
 
         float baseImpurity;
         if (use_Gini) {
             baseImpurity = 1.0f;
-            for (uint8_t i = 0; i < config.num_labels; i++) {
+            for (uint8_t i = 0; i < numLabels; i++) {
                 if (baseLabelCounts[i] > 0) {
                     float p = static_cast<float>(baseLabelCounts[i]) / totalSamples;
                     baseImpurity -= p * p;
                 }
             }
-        } else { // Entropy
+        } else {
             baseImpurity = 0.0f;
-            for (uint8_t i = 0; i < config.num_labels; i++) {
+            for (uint8_t i = 0; i < numLabels; i++) {
                 if (baseLabelCounts[i] > 0) {
                     float p = static_cast<float>(baseLabelCounts[i]) / totalSamples;
                     baseImpurity -= p * log2f(p);
@@ -600,82 +652,57 @@ public:
             }
         }
 
-        // Iterate through the randomly selected features
         for (const auto& featureID : selectedFeatures) {
-            // Use a flat vector for the contingency table to avoid non-standard 2D VLAs.
-            vector<uint16_t> counts(4 * config.num_labels, 0);
+            vector<uint16_t> counts(4 * numLabels, 0);
             uint32_t value_totals[4] = {0};
 
-            for (const auto& entry : data.allSamples) {
-                const Rf_sample& sample = entry.second;
-                uint8_t feature_val = sample.features[featureID];
-                // Bounds check for both feature value and label
-                if (feature_val < 4 && sample.label < config.num_labels) {
-                    counts[feature_val * config.num_labels + sample.label]++;
-                    value_totals[feature_val]++;
+            for (uint16_t k = begin; k < end; ++k) {
+                uint16_t sid = indices[k];
+                if (sid < train_data.allSamples.size()) {
+                    uint8_t lbl = train_data.allSamples[sid].label;
+                    if (lbl < numLabels) {
+                        uint8_t fv = train_data.allSamples[sid].features[featureID];
+                        if (fv < 4) {
+                            counts[fv * numLabels + lbl]++;
+                            value_totals[fv]++;
+                        }
+                    }
                 }
             }
 
-            // Test all possible binary splits (thresholds 0, 1, 2)
-            for (uint8_t threshold = 0; threshold <= 2; threshold++) {
-                // Use vector for safety.
-                vector<uint16_t> left_counts(config.num_labels, 0);
-                vector<uint16_t> right_counts(config.num_labels, 0);
-                uint32_t left_total = 0;
-                uint32_t right_total = 0;
-
-                // Aggregate counts for left/right sides from the contingency table
-                for (uint8_t val = 0; val < 4; val++) {
-                    if (val <= threshold) {
-                        for (uint8_t label = 0; label < config.num_labels; label++) {
-                            left_counts[label] += counts[val * config.num_labels + label];
+            for (uint8_t threshold = 0; threshold < 3; threshold++) {
+                uint32_t leftTotal = 0, rightTotal = 0;
+                vector<uint16_t> leftCounts(numLabels, 0), rightCounts(numLabels, 0);
+                for (uint8_t value = 0; value < 4; value++) {
+                    for (uint8_t label = 0; label < numLabels; label++) {
+                        uint16_t count = counts[value * numLabels + label];
+                        if (value <= threshold) {
+                            leftCounts[label] += count;
+                            leftTotal += count;
+                        } else {
+                            rightCounts[label] += count;
+                            rightTotal += count;
                         }
-                        left_total += value_totals[val];
-                    } else {
-                        for (uint8_t label = 0; label < config.num_labels; label++) {
-                            right_counts[label] += counts[val * config.num_labels + label];
-                        }
-                        right_total += value_totals[val];
                     }
                 }
+                if (leftTotal == 0 || rightTotal == 0) continue;
 
-                if (left_total == 0 || right_total == 0) continue;
-
-                // Calculate impurity for left and right splits
-                float leftImpurity, rightImpurity;
+                float leftImpurity = 0.0f, rightImpurity = 0.0f;
                 if (use_Gini) {
-                    leftImpurity = 1.0f;
-                    rightImpurity = 1.0f;
-                    for (uint8_t i = 0; i < config.num_labels; i++) {
-                        if (left_counts[i] > 0) {
-                            float p = static_cast<float>(left_counts[i]) / left_total;
-                            leftImpurity -= p * p;
-                        }
-                        if (right_counts[i] > 0) {
-                            float p = static_cast<float>(right_counts[i]) / right_total;
-                            rightImpurity -= p * p;
-                        }
+                    leftImpurity = 1.0f; rightImpurity = 1.0f;
+                    for (uint8_t i = 0; i < numLabels; i++) {
+                        if (leftCounts[i] > 0) { float p = static_cast<float>(leftCounts[i]) / leftTotal; leftImpurity -= p * p; }
+                        if (rightCounts[i] > 0) { float p = static_cast<float>(rightCounts[i]) / rightTotal; rightImpurity -= p * p; }
                     }
-                } else { // Entropy
-                    leftImpurity = 0.0f;
-                    rightImpurity = 0.0f;
-                    for (uint8_t i = 0; i < config.num_labels; i++) {
-                        if (left_counts[i] > 0) {
-                            float p = static_cast<float>(left_counts[i]) / left_total;
-                            leftImpurity -= p * log2f(p);
-                        }
-                        if (right_counts[i] > 0) {
-                            float p = static_cast<float>(right_counts[i]) / right_total;
-                            rightImpurity -= p * log2f(p);
-                        }
+                } else {
+                    for (uint8_t i = 0; i < numLabels; i++) {
+                        if (leftCounts[i] > 0) { float p = static_cast<float>(leftCounts[i]) / leftTotal; leftImpurity -= p * log2f(p); }
+                        if (rightCounts[i] > 0) { float p = static_cast<float>(rightCounts[i]) / rightTotal; rightImpurity -= p * log2f(p); }
                     }
                 }
-
-                float weightedImpurity = (static_cast<float>(left_total) / totalSamples * leftImpurity) +
-                                         (static_cast<float>(right_total) / totalSamples * rightImpurity);
-                
+                float weightedImpurity = (static_cast<float>(leftTotal) / totalSamples) * leftImpurity + 
+                                          (static_cast<float>(rightTotal) / totalSamples) * rightImpurity;
                 float gain = baseImpurity - weightedImpurity;
-
                 if (gain > bestSplit.gain) {
                     bestSplit.gain = gain;
                     bestSplit.featureID = featureID;
@@ -685,135 +712,78 @@ public:
         }
         return bestSplit;
     }
-    
+
     // Breadth-first tree building for optimal node layout
 
-    void build_tree(Rf_tree& tree, Rf_data& data, uint8_t min_split, uint16_t max_depth, bool use_Gini) {
+    void build_tree(Rf_tree& tree,  ID_vector<uint16_t,2>& sampleIDs) {
         tree.nodes.clear();
-        if (data.allSamples.empty()) return;
-        
-        // Structure to hold node building information
-        struct NodeToBuild {
-            uint16_t nodeIndex;
-            Rf_data nodeData;
-            uint16_t depth;
-            
-            NodeToBuild() : nodeIndex(0), depth(0) {}
-            NodeToBuild(uint16_t idx, Rf_data data, uint16_t d) 
-                : nodeIndex(idx), nodeData(std::move(data)), depth(d) {}
-        };
+        if (train_data.allSamples.empty()) return;
         
         // Queue for breadth-first processing
-        b_vector<NodeToBuild> queue;
-        queue.reserve(200); // Reserve space for efficiency
+        b_vector<NodeToBuild> queue_nodes;
+        queue_nodes.reserve(200); // Reserve space for efficiency
+
+        // Build a single contiguous index array for this tree
+        b_vector<uint16_t, MEDIUM, 8> indices;
+        indices.reserve(sampleIDs.size());
+        for (const auto& sid : sampleIDs) indices.push_back(sid);
         
         // Create root node
         Tree_node rootNode;
         tree.nodes.push_back(rootNode);
-        queue.push_back(NodeToBuild(0, data, 0));
+        queue_nodes.push_back(NodeToBuild(0, 0, static_cast<uint16_t>(indices.size()), 0));
 
         // ---- BFS queue peak tracking (for ESP32 RAM estimation) ----
         size_t peak_queue_size = 0;
         auto track_peak = [&](size_t cur) {
             if (cur > peak_queue_size) peak_queue_size = cur;
         };
-        track_peak(queue.size());
+        track_peak(queue_nodes.size());
         // ------------------------------------------------------------
         
-        // Process nodes breadth-first
-        while (!queue.empty()) {
-            NodeToBuild current = queue.front();
-            queue.erase(0);
+        // Process nodes breadth-first with minimal allocations
+        while (!queue_nodes.empty()) {
+            NodeToBuild current = std::move(queue_nodes.front());
+            queue_nodes.erase(0);
             
-            // Check stopping conditions for this node
-            unordered_set<uint8_t> labels;
-            for (const auto& [key, val] : current.nodeData.allSamples) {
-                labels.insert(val.label);
-            }
-            
+            // Analyze node samples over the slice
+            NodeStats stats(config.num_labels);
+            stats.analyzeSamplesRange(indices, current.begin, current.end, config.num_labels, train_data);
             bool shouldBeLeaf = false;
-            uint8_t leafLabel = 0;
+            uint8_t leafLabel = stats.majorityLabel;
             
-            // More lenient stopping conditions for binary classification
-            if (labels.size() == 1) {
-                // Only stop if completely pure
+            if (stats.labels.size() == 1) {
                 shouldBeLeaf = true;
-                leafLabel = *labels.begin();
-            } else if (current.nodeData.allSamples.size() < min_split) {
-                // Respect minimum split size
-                shouldBeLeaf = true;
-            } else if (current.depth >= max_depth) {
-                // Respect maximum depth
+                leafLabel = *stats.labels.begin();
+            } else if (stats.totalSamples < config.min_split || current.depth >= config.max_depth) {
                 shouldBeLeaf = true;
             }
-            
-            // Find majority label for potential leaf
-            uint16_t labelCounts[config.num_labels] = {0};
-            for (const auto& entry : current.nodeData.allSamples) {
-                if (entry.second.label < config.num_labels) {
-                    labelCounts[entry.second.label]++;
-                }
-            }
-            uint16_t maxCount = 0;
-            for (uint8_t i = 0; i < config.num_labels; i++) {
-                if (labelCounts[i] > maxCount) {
-                    maxCount = labelCounts[i];
-                    leafLabel = i;
-                }
-            }
-
             if (shouldBeLeaf) {
-                // Configure as leaf node
                 tree.nodes[current.nodeIndex].setIsLeaf(true);
                 tree.nodes[current.nodeIndex].setLabel(leafLabel);
                 tree.nodes[current.nodeIndex].setFeatureID(0);
                 continue;
             }
             
-            // Enhanced feature selection for binary classification
+            // Random feature subset
             uint8_t num_selected_features = static_cast<uint8_t>(sqrt(config.num_features));
             if (num_selected_features == 0) num_selected_features = 1;
-            
-            // For binary classification with few features, be more aggressive
-            if (config.num_labels == 2 && config.num_features <= 10) {
-                num_selected_features = std::min(config.num_features, (uint8_t)(config.num_features * 0.8));
-            }
-
             unordered_set<uint16_t> selectedFeatures;
             selectedFeatures.reserve(num_selected_features);
-            std::random_device rd;
-            std::mt19937 gen(rd());
-            std::uniform_int_distribution<uint16_t> feature_dis(0, config.num_features - 1);
-            while (selectedFeatures.size() < num_selected_features) {
-                uint16_t idx = feature_dis(gen);
-                selectedFeatures.insert(idx);
+            uint16_t N = static_cast<uint16_t>(config.num_features);
+            uint16_t K = num_selected_features > N ? N : num_selected_features;
+            for (uint16_t j = N - K; j < N; ++j) {
+                uint16_t t = static_cast<uint16_t>(rng.bounded(j + 1));
+                if (selectedFeatures.find(t) == selectedFeatures.end()) selectedFeatures.insert(t);
+                else selectedFeatures.insert(j);
             }
             
-            SplitInfo bestSplit = findBestSplit(current.nodeData, selectedFeatures, use_Gini);
+            // Find best split on the slice
+            SplitInfo bestSplit = findBestSplitRange(indices, current.begin, current.end,
+                                                     selectedFeatures, config.use_gini, config.num_labels);
+            float gain_threshold = config.use_gini ? config.impurity_threshold/2 : config.impurity_threshold;
             
-            // More lenient gain threshold for binary classification
-            float gain_threshold = config.impurity_threshold;
-            if (config.num_labels == 2) {
-                // Reduce threshold for binary classification to allow more splits
-                gain_threshold = std::min(config.impurity_threshold, 0.005f);
-                if (use_Gini) {
-                    gain_threshold = std::min(gain_threshold, 0.0025f);
-                }
-            } else {
-                gain_threshold = use_Gini ? config.impurity_threshold/2 : config.impurity_threshold;
-            }
-            
-            // Debug output for troubleshooting
-            if (current.depth == 0 && bestSplit.gain <= gain_threshold) {
-                std::cout << "⚠️ Root node would be leaf - gain: " << bestSplit.gain 
-                        << ", threshold: " << gain_threshold 
-                        << ", samples: " << current.nodeData.allSamples.size()
-                        << ", labels: " << labels.size() << std::endl;
-            }
-
-            // 
             if (bestSplit.gain <= gain_threshold) {
-                // Make it a leaf with majority label
                 tree.nodes[current.nodeIndex].setIsLeaf(true);
                 tree.nodes[current.nodeIndex].setLabel(leafLabel);
                 tree.nodes[current.nodeIndex].setFeatureID(0);
@@ -825,51 +795,55 @@ public:
             tree.nodes[current.nodeIndex].setThreshold(bestSplit.threshold);
             tree.nodes[current.nodeIndex].setIsLeaf(false);
             
-            // Split data for children
-            Rf_data leftData, rightData;
-            for (const auto& sample : current.nodeData.allSamples) {
-                if (sample.second.features[bestSplit.featureID] <= bestSplit.threshold) {
-                    leftData.allSamples[sample.first] = sample.second;
-                } else {
-                    rightData.allSamples[sample.first] = sample.second;
+            // In-place partition of indices[current.begin, current.end)
+            uint16_t iLeft = current.begin;
+            for (uint16_t k = current.begin; k < current.end; ++k) {
+                uint16_t sid = indices[k];
+                if (sid < train_data.allSamples.size() && 
+                    train_data.allSamples[sid].features[k] <= bestSplit.threshold) {
+                    if (k != iLeft) {
+                        uint16_t tmp = indices[iLeft];
+                        indices[iLeft] = indices[k];
+                        indices[k] = tmp;
+                    }
+                    ++iLeft;
                 }
             }
+            uint16_t leftBegin = current.begin;
+            uint16_t leftEnd = iLeft;
+            uint16_t rightBegin = iLeft;
+            uint16_t rightEnd = current.end;
             
-            // Ensure both children have samples before proceeding
-            if (leftData.allSamples.empty() || rightData.allSamples.empty()) {
-                // Split didn't actually separate data - make this a leaf
-                tree.nodes[current.nodeIndex].setIsLeaf(true);
-                tree.nodes[current.nodeIndex].setLabel(leafLabel);
-                tree.nodes[current.nodeIndex].setFeatureID(0);
-                continue;
-            }
-            
-            // Create child nodes
             uint16_t leftChildIndex = tree.nodes.size();
             uint16_t rightChildIndex = leftChildIndex + 1;
-            
             tree.nodes[current.nodeIndex].setLeftChildIndex(leftChildIndex);
             
-            Tree_node leftChild;
-            tree.nodes.push_back(leftChild);
+            Tree_node leftChild; tree.nodes.push_back(leftChild);
+            Tree_node rightChild; tree.nodes.push_back(rightChild);
             
-            Tree_node rightChild;
-            tree.nodes.push_back(rightChild);
-            
-            // Queue children for processing
-            queue.push_back(NodeToBuild(leftChildIndex, std::move(leftData), current.depth + 1));
-            track_peak(queue.size());
-            queue.push_back(NodeToBuild(rightChildIndex, std::move(rightData), current.depth + 1));
-            track_peak(queue.size());
+            if (leftEnd > leftBegin) {
+                queue_nodes.push_back(NodeToBuild(leftChildIndex, leftBegin, leftEnd, current.depth + 1));
+            } else {
+                tree.nodes[leftChildIndex].setIsLeaf(true);
+                tree.nodes[leftChildIndex].setLabel(leafLabel);
+                tree.nodes[leftChildIndex].setFeatureID(0);
+            }
+            if (rightEnd > rightBegin) {
+                queue_nodes.push_back(NodeToBuild(rightChildIndex, rightBegin, rightEnd, current.depth + 1));
+            } else {
+                tree.nodes[rightChildIndex].setIsLeaf(true);
+                tree.nodes[rightChildIndex].setLabel(leafLabel);
+                tree.nodes[rightChildIndex].setFeatureID(0);
+            }
         }
-
+        
         // Print BFS queue peak after the tree is built
         float peak_nodes_percent = (float)peak_queue_size / (float)tree.nodes.size() * 100.0f;
         peak_nodes.push_back(peak_nodes_percent);
     }
 
 
-    uint8_t predClassSample(Rf_sample& s){
+    uint8_t predClassSample(const Rf_sample& s){
         int16_t totalPredict = 0;
         unordered_map<uint8_t, uint8_t> predictClass;
         
@@ -926,18 +900,19 @@ public:
         uint16_t min_votes_required = std::max(1, (int)(config.num_trees * 0.15f)); // At least 15% of trees
 
         // OOB evaluation with enhanced reliability
+        uint16_t sampleId = 0;
         for(const auto& sample : train_data.allSamples){                
-            uint16_t sampleId = sample.first;
         
             // Find all trees whose OOB set contains this sampleId
             b_vector<uint8_t, SMALL> activeTrees;
             activeTrees.reserve(config.num_trees);
             
             for(uint8_t i = 0; i < config.num_trees; i++){
-                if(dataList[i].second.find(sampleId) != dataList[i].second.end()){
+                if(!dataList[i].contains(sampleId)){
                     activeTrees.push_back(i);
                 }
             }
+            sampleId++;
             
             // Enhanced reliability check: require minimum vote count
             if(activeTrees.size() < min_votes_required){
@@ -950,12 +925,12 @@ public:
             oob_votes_histogram[vote_bucket]++;
             
             // Predict using only the OOB trees for this sample
-            uint8_t actualLabel = sample.second.label;
+            uint8_t actualLabel = sample.label;
             unordered_map<uint8_t, uint8_t> oobPredictClass;
             uint16_t oobTotalPredict = 0;
             
             for(const uint8_t& treeIdx : activeTrees){
-                uint8_t predict = root[treeIdx].predictSample(sample.second);
+                uint8_t predict = root[treeIdx].predictSample(sample);
                 if(predict < config.num_labels){
                     oobPredictClass[predict]++;
                     oobTotalPredict++;
@@ -999,16 +974,17 @@ public:
         }
 
         // Validation evaluation (unchanged)
+        sampleId = 0;
         if(this->config.use_validation){   
             for(const auto& sample : validation_data.allSamples){
-                uint16_t sampleId = sample.first;
-                uint8_t actualLabel = sample.second.label;
+                uint8_t actualLabel = sample.label;
+                sampleId++;
 
                 unordered_map<uint8_t, uint8_t> validPredictClass;
                 uint16_t validTotalPredict = 0;
 
                 for(uint8_t i = 0; i < config.num_trees; i++){
-                    uint8_t predict = root[i].predictSample(sample.second);
+                    uint8_t predict = root[i].predictSample(sample);
                     if(predict < config.num_labels){
                         validPredictClass[predict]++;
                         validTotalPredict++;
@@ -1159,99 +1135,99 @@ public:
 
     // K-fold cross validation evaluation
     float get_cross_validation_score() {
-        uint8_t k_folds = config.k_fold;
-        if (k_folds < 2) k_folds = 4; // Default to 4-fold if not properly set
+        // uint8_t k_folds = config.k_fold;
+        // if (k_folds < 2) k_folds = 4; // Default to 4-fold if not properly set
         
-        // Create vector of all training sample IDs for k-fold split
-        b_vector<uint16_t> allTrainIDs;
-        allTrainIDs.reserve(train_data.allSamples.size());
-        for (const auto& sample : train_data.allSamples) {
-            allTrainIDs.push_back(sample.first);
-        }
+        // // Create vector of all training sample IDs for k-fold split
+        // b_vector<uint16_t> allTrainIDs;
+        // allTrainIDs.reserve(train_data.allSamples.size());
+        // for (const auto& sample : train_data.allSamples) {
+        //     allTrainIDs.push_back(sample.first);
+        // }
         
-        // Shuffle the sample IDs for random k-fold split
-        std::random_device rd;
-        std::mt19937 gen(rd());
-        std::uniform_int_distribution<uint16_t> dis(0, UINT16_MAX);
-        for (uint16_t i = allTrainIDs.size() - 1; i > 0; i--) {
-            uint16_t j = dis(gen) % (i + 1);
-            uint16_t temp = allTrainIDs[i];
-            allTrainIDs[i] = allTrainIDs[j];
-            allTrainIDs[j] = temp;
-        }
+        // // Shuffle the sample IDs for random k-fold split
+        // std::random_device rd;
+        // std::mt19937 gen(rd());
+        // std::uniform_int_distribution<uint16_t> dis(0, UINT16_MAX);
+        // for (uint16_t i = allTrainIDs.size() - 1; i > 0; i--) {
+        //     uint16_t j = dis(gen) % (i + 1);
+        //     uint16_t temp = allTrainIDs[i];
+        //     allTrainIDs[i] = allTrainIDs[j];
+        //     allTrainIDs[j] = temp;
+        // }
         
-        uint16_t fold_size = allTrainIDs.size() / k_folds;
-        float total_cv_score = 0.0f;
-        uint8_t valid_folds = 0;
+        // uint16_t fold_size = allTrainIDs.size() / k_folds;
+        // float total_cv_score = 0.0f;
+        // uint8_t valid_folds = 0;
         
-        // Perform k-fold cross validation
-        for (uint8_t fold = 0; fold < k_folds; fold++) {
-            // Create train and test sets for this fold
-            Rf_data cv_train_data, cv_test_data;
+        // // Perform k-fold cross validation
+        // for (uint8_t fold = 0; fold < k_folds; fold++) {
+        //     // Create train and test sets for this fold
+        //     Rf_data cv_train_data, cv_test_data;
             
-            uint16_t test_start = fold * fold_size;
-            uint16_t test_end = (fold == k_folds - 1) ? allTrainIDs.size() : (fold + 1) * fold_size;
+        //     uint16_t test_start = fold * fold_size;
+        //     uint16_t test_end = (fold == k_folds - 1) ? allTrainIDs.size() : (fold + 1) * fold_size;
             
-            // Split data into train and test for this fold
-            for (uint16_t i = 0; i < allTrainIDs.size(); i++) {
-                uint16_t sampleID = allTrainIDs[i];
-                const Rf_sample& sample = train_data.allSamples[sampleID];
+        //     // Split data into train and test for this fold
+        //     for (uint16_t i = 0; i < allTrainIDs.size(); i++) {
+        //         uint16_t sampleID = allTrainIDs[i];
+        //         const Rf_sample& sample = train_data.allSamples[sampleID];
                 
-                if (i >= test_start && i < test_end) {
-                    cv_test_data.allSamples[sampleID] = sample;
-                } else {
-                    cv_train_data.allSamples[sampleID] = sample;
-                }
-            }
+        //         if (i >= test_start && i < test_end) {
+        //             cv_test_data.allSamples[sampleID] = sample;
+        //         } else {
+        //             cv_train_data.allSamples[sampleID] = sample;
+        //         }
+        //     }
             
-            if (cv_train_data.allSamples.empty() || cv_test_data.allSamples.empty()) {
-                continue; // Skip this fold if empty
-            }
+        //     if (cv_train_data.allSamples.empty() || cv_test_data.allSamples.empty()) {
+        //         continue; // Skip this fold if empty
+        //     }
             
-            // Temporarily store original dataList and rebuild for this fold
-            auto original_dataList = dataList;
-            dataList.clear();
+        //     // Temporarily store original dataList and rebuild for this fold
+        //     auto original_dataList = dataList;
+        //     dataList.clear();
             
-            // Create bootstrap samples from cv_train_data
-            uint16_t numSample = cv_train_data.allSamples.size();
-            uint16_t bootstrap_sample_size = config.use_bootstrap ? numSample : static_cast<uint16_t>(numSample * config.boostrap_ratio);
+        //     // Create bootstrap samples from cv_train_data
+        //     uint16_t numSample = cv_train_data.allSamples.size();
+        //     uint16_t bootstrap_sample_size = config.use_bootstrap ? numSample : static_cast<uint16_t>(numSample * config.boostrap_ratio);
             
-            b_vector<uint16_t> cvTrainIDs;
-            cvTrainIDs.reserve(numSample);
-            for (const auto& sample : cv_train_data.allSamples) {
-                cvTrainIDs.push_back(sample.first);
-            }
+        //     b_vector<uint16_t> cvTrainIDs;
+        //     cvTrainIDs.reserve(numSample);
+        //     for (const auto& sample : cv_train_data.allSamples) {
+        //         cvTrainIDs.push_back(sample.first);
+        //     }
             
-            std::uniform_int_distribution<uint16_t> cv_dis(0, numSample - 1);
-            for (uint8_t tree_idx = 0; tree_idx < config.num_trees; tree_idx++) {
-                Rf_data sub_data;
-                sub_data.allSamples.reserve(bootstrap_sample_size);
+        //     std::uniform_int_distribution<uint16_t> cv_dis(0, numSample - 1);
+        //     for (uint8_t tree_idx = 0; tree_idx < config.num_trees; tree_idx++) {
+        //         Rf_data sub_data;
+        //         sub_data.allSamples.reserve(bootstrap_sample_size);
                 
-                for (uint16_t j = 0; j < bootstrap_sample_size; j++) {
-                    uint16_t original_idx = cv_dis(gen);
-                    uint16_t original_sampleId = cvTrainIDs[original_idx];
-                    sub_data.allSamples[j] = cv_train_data.allSamples[original_sampleId];
-                }
-                sub_data.allSamples.fit();
+        //         for (uint16_t j = 0; j < bootstrap_sample_size; j++) {
+        //             uint16_t original_idx = cv_dis(gen);
+        //             uint16_t original_sampleId = cvTrainIDs[original_idx];
+        //             sub_data.allSamples[j] = cv_train_data.allSamples[original_sampleId];
+        //         }
+        //         sub_data.allSamples.fit();
                 
-                // Create empty OOB set for cross validation (not used)
-                OOB_set empty_oob;
-                dataList.push_back(make_pair(sub_data, empty_oob));
-            }
+        //         // Create empty OOB set for cross validation (not used)
+        //         OOB_set empty_oob;
+        //         dataList.push_back(make_pair(sub_data, empty_oob));
+        //     }
             
-            // Build forest for this fold
-            rebuildForest();
+        //     // Build forest for this fold
+        //     rebuildForest();
             
-            // Evaluate on cv_test_data
-            float fold_score = predict(cv_test_data, static_cast<Rf_training_flags>(config.training_flag));
-            total_cv_score += fold_score;
-            valid_folds++;
+        //     // Evaluate on cv_test_data
+        //     float fold_score = predict(cv_test_data, static_cast<Rf_training_flags>(config.training_flag));
+        //     total_cv_score += fold_score;
+        //     valid_folds++;
             
-            // Restore original dataList
-            dataList = original_dataList;
-        }
-        
-        return (valid_folds > 0) ? (total_cv_score / valid_folds) : 0.0f;
+        //     // Restore original dataList
+        //     dataList = original_dataList;
+        // }
+        // return (valid_folds > 0) ? (total_cv_score / valid_folds) : 0.0f;
+        return 0;
     }
         
     void rebuildForest() {
@@ -1263,7 +1239,7 @@ public:
             // Build new tree using vector approach
             Rf_tree& tree = root[i];
             tree.purgeTree(); // Ensure complete cleanup
-            build_tree(tree, dataList[i].first, config.min_split, config.max_depth, config.use_gini);
+            build_tree(tree, dataList[i]);
             
             // Verify tree was built successfully
             if (tree.nodes.empty()) {
@@ -1584,9 +1560,9 @@ public:
         }
         
         // Single pass over samples
-        for (const auto& kv : data.allSamples) {
-            uint8_t actual = kv.second.label;
-            uint8_t pred = predClassSample(const_cast<Rf_sample&>(kv.second));
+        for (const auto& sample : data.allSamples) {
+            uint8_t actual = sample.label;
+            uint8_t pred = predClassSample(sample);
             
             totalPred[actual]++;
             

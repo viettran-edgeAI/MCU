@@ -94,13 +94,33 @@ The `split_ratio` parameter controls how the dataset is divided:
 
 #### B. Evaluation Strategy
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `use_validation` | boolean | false | Use validation set for evaluation. Uses `valid_ratio` from `split_ratio` |
-| `cross_validation` | boolean | true | Use k-fold cross-validation instead of OOB evaluation |
-| `k_folds` | integer | 4 | Number of folds for cross-validation |
+| Parameter | Type | Default | Options | Description |
+|-----------|------|---------|---------|-------------|
+| `training_score` | string | "oob_score" | ["oob_score", "valid_score", "k-fold_score"] | Method for evaluating model performance during training |
+| `k_folds` | integer | 4 | | Number of folds for k-fold cross-validation |
 
-> **Recommendation:** Use cross-validation for small datasets, validation for large datasets. The split ratios are now independently configurable through the `split_ratio` parameter.
+##### Training Score Methods:
+
+1. **`"oob_score"`** (default):
+   - Uses Out-of-Bag validation with bootstrap sampling
+   - No separate validation set required
+   - Memory efficient, good for small datasets
+   - Uses only `train_ratio` and `test_ratio` from split configuration
+
+2. **`"valid_score"`**:
+   - Uses separate validation set for evaluation
+   - More reliable for larger datasets
+   - Requires all three ratios: `train_ratio`, `test_ratio`, `valid_ratio`
+   - Automatically falls back to `oob_score` if validation set too small
+
+3. **`"k-fold_score"`**:
+   - Uses k-fold cross validation
+   - Most robust evaluation method
+   - Slower training but better generalization estimates
+   - Ideal for final model validation
+   - Uses only training data (ignores validation split)
+
+> **Recommendation:** Use `oob_score` for quick training, `valid_score` for large datasets, `k-fold_score` for small datasets.
 
 #### C. Advanced Override System
 
@@ -119,7 +139,6 @@ The override system allows you to control automatic parameter optimization with 
 | `min_split` | disabled, enabled | Minimum samples required to split a node |
 | `max_depth` | disabled, enabled | Maximum tree depth |
 | `unity_threshold` | disabled, enabled | Consensus threshold for tree decisions |
-| `combine_ratio` | disabled, enabled | Ratio for combining OOB and validation scores |
 | `train_flag` | disabled, overwrite, stacked | Training optimization flags |
 
 ##### Training Flags System
@@ -177,9 +196,8 @@ Training flags specify which metrics to optimize during model training:
         "test_ratio": 0.2,
         "valid_ratio": 0.0
     },
-    "cross_validation": {"value": true},
+    "training_score": {"value": "k-fold_score"},
     "k_folds": {"value": 5},
-    "use_validation": {"value": false},
     "train_flag": {
         "value": "F1_SCORE",
         "status": "stacked"
@@ -196,8 +214,7 @@ Training flags specify which metrics to optimize during model training:
         "test_ratio": 0.15,
         "valid_ratio": 0.15
     },
-    "cross_validation": {"value": false},
-    "use_validation": {"value": true},
+    "training_score": {"value": "valid_score"},
     "train_flag": {
         "value": "ACCURACY",
         "status": "disabled"
@@ -215,7 +232,7 @@ Training flags specify which metrics to optimize during model training:
         "valid_ratio": 0.0
     },
     "use_bootstrap": {"value": false},
-    "use_validation": {"value": false},
+    "training_score": {"value": "oob_score"},
     "max_depth": {
         "value": 8,
         "status": "enabled"
@@ -235,17 +252,21 @@ Training flags specify which metrics to optimize during model training:
 - **Reduce `num_trees`**: Fewer trees = less memory, but may reduce accuracy
 - **Disable `use_bootstrap`**: Saves 38% RAM and SPIFFS storage
 - **Enable `max_depth` override**: Limit tree depth to control memory usage
-- **Optimize split ratios**: Higher training ratio (0.8+) for memory-constrained scenarios
+- **Use `oob_score`**: Most memory-efficient evaluation method
 
 ### Accuracy Optimization
 - **Increase `num_trees`**: More trees generally improve accuracy (up to a point)
-- **Use appropriate evaluation**: Cross-validation for small datasets, validation for large
+- **Choose appropriate `training_score`**: 
+  - `oob_score` for quick training
+  - `valid_score` for large datasets
+  - `k-fold_score` for robust evaluation
 - **Tune `train_flag`**: Match optimization target to your use case
-- **Balanced split ratios**: Use 70/15/15 or 60/20/20 splits for comprehensive evaluation
+- **Balanced split ratios**: Use 70/15/15 for validation or 75/25/0 for OOB evaluation
 
 ### Training Speed
+- **Use `oob_score`**: Fastest evaluation method
 - **Disable parameter ranges**: Enable overrides for `min_split` and `max_depth` to skip hyperparameter search
-- **Reduce `k_folds`**: Fewer folds = faster cross-validation
+- **Reduce `k_folds`**: Fewer folds = faster k-fold cross-validation
 - **Smaller datasets**: Consider data reduction techniques if training is too slow
 
 ## Integration with ESP32
@@ -302,9 +323,9 @@ This directory includes specialized transfer tools for uploading pre-trained mod
 - **Binary tree serialization**: Compact storage format for SPIFFS
 
 ### Evaluation Methods
-- **Out-of-Bag (OOB)**: Uses bootstrap samples for unbiased evaluation
-- **Validation Set**: Hold-out evaluation with configurable ratio
-- **K-fold Cross-Validation**: Robust evaluation for small datasets
+- **Out-of-Bag (OOB)**: Uses bootstrap samples for unbiased evaluation (`training_score: "oob_score"`)
+- **Validation Set**: Hold-out evaluation with configurable ratio (`training_score: "valid_score"`)
+- **K-fold Cross-Validation**: Robust evaluation for small datasets (`training_score: "k-fold_score"`)
 
 ### Hyperparameter Optimization
 - **Grid Search**: Systematic exploration of parameter combinations
@@ -313,7 +334,41 @@ This directory includes specialized transfer tools for uploading pre-trained mod
 
 ## Recent Improvements
 
-### v2024.09 Updates
+### v2024.09.2 Updates (Current)
+
+#### Major Configuration Overhaul
+- **Unified Training Score System**: Replaced `use_validation`, `cross_validation`, and `combine_ratio` with single `training_score` parameter
+- **Simplified Evaluation**: Three clear options: `"oob_score"`, `"valid_score"`, `"k-fold_score"`
+- **Cleaner Configuration**: Removed complex ratio combining logic for better user experience
+- **Automatic Fallback**: `valid_score` automatically switches to `oob_score` when validation set too small
+
+### Migration Guide from v2024.09.1
+
+If you're upgrading from the previous version, update your `model_config.json`:
+
+**Old Configuration (v2024.09.1):**
+```json
+{
+    "use_validation": {"value": true},
+    "cross_validation": {"value": false},
+    "combine_ratio": {"value": 0.7, "status": "disabled"}
+}
+```
+
+**New Configuration (v2024.09.2):**
+```json
+{
+    "training_score": {"value": "valid_score"}
+}
+```
+
+**Migration Rules:**
+- `cross_validation: true` → `training_score: "k-fold_score"`
+- `use_validation: true, cross_validation: false` → `training_score: "valid_score"`
+- `use_validation: false, cross_validation: false` → `training_score: "oob_score"`
+- Remove `combine_ratio` parameter (no longer needed)
+
+### v2024.09.1 Updates
 
 #### Bug Fixes
 - **Critical Tree Building Fix**: Fixed feature indexing bug in `build_tree()` partitioning logic that was causing poor model accuracy

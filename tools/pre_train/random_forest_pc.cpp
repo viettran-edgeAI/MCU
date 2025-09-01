@@ -56,27 +56,14 @@ private:
 public:
 
     // RandomForest(){};
-    RandomForest() {
-        config.init(); // Load configuration from model_config.json first
+    RandomForest() : config(config_path) {
         rng = Rf_random(config.random_seed, true); // Initialize RNG with loaded seed
         model_name = extract_model_name(config.data_path);
         std::cout << "🌲 Model name: " << model_name << std::endl;
         generateFilePaths();
-        
-        // Create a backup copy of the original CSV data
-        createDataBackup(config.data_path, temp_base_data);
-        
-        first_scan(temp_base_data);
+        createDataBackup(config.data_path, temp_base_data);     // create a backup to avoid damaging the original data
+        config.init(temp_base_data); // Load configuration from model_config.json first
         base_data.loadCSVData(temp_base_data, config.num_features);
-        
-        // Check for unity_threshold override
-        if (!config.overwrite[2]) {
-            // Apply automatic calculation only if not overridden
-            config.unity_threshold  = 1.25f / static_cast<float>(config.num_labels);
-            if(config.num_features == 2) config.unity_threshold = 0.6f;
-        } else {
-            std::cout << "🔧 Using unity_threshold override: " << config.unity_threshold << std::endl;
-        }
         
         // OOB.reserve(numTree);
         dataList.reserve(config.num_trees);
@@ -107,7 +94,7 @@ public:
         float pre_ac = pre.get_accuracy();
         // Fix: get_accuracy() already returns percentage (0-100), don't multiply by 100 again
         pre.accuracy = static_cast<uint8_t>(std::min(100.0f, std::max(0.0f, pre_ac)));
-        std::cout << "node predictor accuracy: " << pre_ac << "% (stored as: " << (int)pre.accuracy << "%)" << std::endl;
+        std::cout << "node predictor accuracy: " << pre_ac << std::endl;
         pre.save_model(node_predictor_path);
     }
 
@@ -192,13 +179,12 @@ public:
         result_config_path = result_folder + model_name + "_config.json";
     }
 
-    // ----------------------------------------------------------------------------------
     // Split data into training and testing sets (or validation if enabled)
     void splitData(float trainRatio) {
         size_t maxID = config.num_samples;  // total number of samples
         uint16_t trainSize = static_cast<uint16_t>(maxID * config.train_ratio);
         uint16_t testSize = static_cast<uint16_t>(maxID * config.test_ratio);
-        uint16_t validationSize = config.use_validation ? static_cast<uint16_t>(maxID * config.valid_ratio) : 0;
+        uint16_t validationSize = (config.training_score == "valid_score") ? static_cast<uint16_t>(maxID * config.valid_ratio) : 0;
         
         // create train_data 
         sampleID_set train_sampleIDs(maxID);
@@ -218,7 +204,7 @@ public:
 
         // create validation_data
         sampleID_set validation_sampleIDs(maxID);
-        if(config.use_validation) {
+        if(config.training_score == "valid_score") {
             while(validation_sampleIDs.size() < validationSize) {
                 uint16_t i = static_cast<uint16_t>(rng.bounded(static_cast<uint32_t>(maxID)));
                 if (!train_sampleIDs.contains(i) && !test_sampleIDs.contains(i)) {
@@ -234,7 +220,7 @@ public:
                 train_data.allSamples.push_back(base_data.allSamples[id]);
             } else if(test_sampleIDs.contains(id)) {
                 test_data.allSamples.push_back(base_data.allSamples[id]);
-            } else if(config.use_validation) {
+            } else if(config.training_score == "valid_score") {
                 validation_data.allSamples.push_back(base_data.allSamples[id]);
             }
         }
@@ -316,314 +302,6 @@ public:
             }
             dataList.push_back(std::move(treeDataset));
         }
-    }
-
-    // ------------------------------------------------------------------------------
-    // Quickly scan through the original dataset to retrieve and set the necessary parameters
-    void first_scan(std::string data_path, bool header = false) {
-        // For PC training, use standard file I/O instead of SPIFFS
-        std::ifstream file(data_path);
-        if (!file.is_open()) {
-            std::cout << "❌ Failed to open file: " << data_path << "\n";
-            return;
-        }
-
-        unordered_map<uint8_t, uint16_t> labelCounts;
-        unordered_set<uint8_t> featureValues;
-
-        uint16_t numSamples = 0;
-        uint16_t maxFeatures = 0;
-
-        // Skip header if specified
-        if (header) {
-            std::string headerLine;
-            std::getline(file, headerLine);
-        }
-
-        std::string line;
-        while (std::getline(file, line)) {
-            // Trim whitespace
-            line.erase(0, line.find_first_not_of(" \t\r\n"));
-            line.erase(line.find_last_not_of(" \t\r\n") + 1);
-            if (line.empty()) continue;
-
-            std::stringstream ss(line);
-            std::string token;
-            int featureIndex = 0;
-            bool malformed = false;
-
-            while (std::getline(ss, token, ',')) {
-                token.erase(0, token.find_first_not_of(" \t"));
-                token.erase(token.find_last_not_of(" \t") + 1);
-                
-                if (token.empty()) {
-                    malformed = true;
-                    break;
-                }
-
-                int numValue = std::stoi(token);
-                if (featureIndex == 0) {
-                    labelCounts[numValue]++;
-                } else {
-                    featureValues.insert(numValue);
-                    uint16_t featurePos = featureIndex - 1;
-                    if (featurePos + 1 > maxFeatures) {
-                        maxFeatures = featurePos + 1;
-                    }
-                }
-                featureIndex++;
-            }
-
-            if (!malformed) {
-                numSamples++;
-                if (numSamples >= 10000) break;
-            }
-        }
-
-        config.num_features = maxFeatures;
-        config.num_samples = numSamples;
-        config.num_labels = labelCounts.size();
-
-        // Dataset summary
-        std::cout << "📊 Dataset Summary:\n";
-        std::cout << "  Total samples: " << numSamples << "\n";
-        std::cout << "  Total features: " << maxFeatures << "\n";
-        std::cout << "  Unique labels: " << labelCounts.size() << "\n";
-
-        // Analyze label distribution and set appropriate training flags
-        if (labelCounts.size() > 0) {
-            uint16_t minorityCount = numSamples;
-            uint16_t majorityCount = 0;
-
-            for (auto& it : labelCounts) {
-                uint16_t count = it.second;
-                if (count > majorityCount) {
-                    majorityCount = count;
-                }
-                if (count < minorityCount) {
-                    minorityCount = count;
-                }
-            }
-
-            float maxImbalanceRatio = 0.0f;
-            if (minorityCount > 0) {
-                maxImbalanceRatio = (float)majorityCount / minorityCount;
-            }
-
-            // Set training flags based on class imbalance
-            if (!config.overwrite[4]) {
-                // Apply automatic selection only if not overridden
-                if (maxImbalanceRatio > 10.0f) {
-                    config.training_flag = Rf_training_flags::RECALL;
-                    std::cout << "📉 Imbalanced dataset (ratio: " << maxImbalanceRatio << "). Setting trainFlag to RECALL.\n";
-                } else if (maxImbalanceRatio > 3.0f) {
-                    config.training_flag = Rf_training_flags::F1_SCORE;
-                    std::cout << "⚖️ Moderately imbalanced dataset (ratio: " << maxImbalanceRatio << "). Setting trainFlag to F1_SCORE.\n";
-                } else if (maxImbalanceRatio > 1.5f) {
-                    config.training_flag = Rf_training_flags::PRECISION;
-                    std::cout << "🟨 Slight imbalance (ratio: " << maxImbalanceRatio << "). Setting trainFlag to PRECISION.\n";
-                } else {
-                    config.training_flag = Rf_training_flags::ACCURACY;
-                    std::cout << "✅ Balanced dataset (ratio: " << maxImbalanceRatio << "). Setting trainFlag to ACCURACY.\n";
-                }
-            } else {
-                // Check if it's stacked mode or overwrite mode
-                bool isStacked = false;
-                // Re-check the config file for stacked mode (we need this info here)
-                std::ifstream check_file("model_config.json");
-                if (check_file.is_open()) {
-                    std::string check_content, check_line;
-                    while (std::getline(check_file, check_line)) {
-                        check_content += check_line;
-                    }
-                    check_file.close();
-                    
-                    size_t pos = check_content.find("\"train_flag\"");
-                    if (pos != std::string::npos) {
-                        size_t status_pos = check_content.find("\"status\":", pos);
-                        if (status_pos != std::string::npos && status_pos < check_content.find("}", pos)) {
-                            size_t start = check_content.find("\"", status_pos + 9) + 1;
-                            size_t end = check_content.find("\"", start);
-                            if (start != std::string::npos && end != std::string::npos) {
-                                std::string status = check_content.substr(start, end - start);
-                                isStacked = (status == "stacked");
-                            }
-                        }
-                    }
-                }
-                
-                if (isStacked) {
-                    // Stacked mode: combine user flags with auto-detected flags
-                    uint8_t user_flags = static_cast<uint8_t>(config.training_flag); // User flags from init()
-                    uint8_t auto_flags = 0;
-                    
-                    // Determine automatic flags based on dataset
-                    if (maxImbalanceRatio > 10.0f) {
-                        auto_flags = RECALL;
-                        std::cout << "📉 Imbalanced dataset (ratio: " << maxImbalanceRatio << "). Auto-detected flag: RECALL.\n";
-                    } else if (maxImbalanceRatio > 3.0f) {
-                        auto_flags = F1_SCORE;
-                        std::cout << "⚖️ Moderately imbalanced dataset (ratio: " << maxImbalanceRatio << "). Auto-detected flag: F1_SCORE.\n";
-                    } else if (maxImbalanceRatio > 1.5f) {
-                        auto_flags = PRECISION;
-                        std::cout << "🟨 Slight imbalance (ratio: " << maxImbalanceRatio << "). Auto-detected flag: PRECISION.\n";
-                    } else {
-                        auto_flags = ACCURACY;
-                        std::cout << "✅ Balanced dataset (ratio: " << maxImbalanceRatio << "). Auto-detected flag: ACCURACY.\n";
-                    }
-                    
-                    // Combine user flags with auto-detected flags
-                    uint8_t combined_flags = user_flags | auto_flags;
-                    config.training_flag = static_cast<Rf_training_flags>(combined_flags);
-                    std::cout << "🔗 Stacked train_flags: " << flagsToString(combined_flags) 
-                              << " (user: " << flagsToString(user_flags) << " + auto: " << flagsToString(auto_flags) << ")\n";
-                } else {
-                    // Overwrite mode: user flags completely replace automatic detection
-                    std::cout << "🔧 Using train_flag overwrite: " << flagsToString(config.training_flag) << " (dataset ratio: " << maxImbalanceRatio << ")\n";
-                }
-            }
-        }
-
-        std::cout << "  Label distribution:\n";
-        float lowestDistribution = 100.0f;
-        for (auto& label : labelCounts) {
-            float percent = (float)label.second / numSamples * 100.0f;
-            if (percent < lowestDistribution) {
-                lowestDistribution = percent;
-            }
-            std::cout << "    Label " << (int)label.first << ": " << label.second << " samples (" << percent << "%)\n";
-        }
-        
-        // config.lowest_distribution = lowestDistribution / 100.0f; // Store as fraction
-        
-        // Check if validation should be disabled due to low sample count
-        if(config.use_validation){
-            if (lowestDistribution * numSamples * config.valid_ratio < 10) {
-                config.use_validation = false;
-                std::cout << "⚖️ Setting use_validation to false due to low sample count in validation set.\n";
-                config.train_ratio = 0.75f; // Adjust train ratio to compensate
-            }
-        }
-
-        std::cout << "Feature values: ";
-        for (uint8_t val : featureValues) {
-            std::cout << (int)val << " ";
-        }
-        std::cout << "\n";
-        
-        // Calculate optimal parameters based on dataset size
-        int baseline_minsplit_ratio = 100 * (config.num_samples / 500 + 1); 
-        if (baseline_minsplit_ratio > 500) baseline_minsplit_ratio = 500; 
-        uint8_t min_minSplit = std::min(2, (int)(config.num_samples / baseline_minsplit_ratio));
-        int dynamic_max_split = std::min(min_minSplit + 6, (int)(log2(config.num_samples) / 4 + config.num_features / 25.0f));
-        uint8_t max_minSplit = std::min(24, dynamic_max_split); // Cap at 24 to prevent overly simple trees.
-        if (max_minSplit <= min_minSplit) max_minSplit = min_minSplit + 4; // Ensure a valid range.
-
-
-        int base_maxDepth = std::max((int)log2(config.num_samples * 2.0f), (int)(log2(config.num_features) * 2.5f));
-        uint8_t max_maxDepth = std::max(6, base_maxDepth);
-        int dynamic_min_depth = std::max(4, (int)(log2(config.num_features) + 2));
-        uint8_t min_maxDepth = std::min((int)max_maxDepth - 2, dynamic_min_depth); // Ensure a valid range.
-        if (min_maxDepth >= max_maxDepth) min_maxDepth = max_maxDepth - 2;
-        if (min_maxDepth < 4) min_maxDepth = 4;
-
-        // Set default values only if not overridden
-        if (!config.overwrite[0]) {
-            config.min_split = (min_minSplit + max_minSplit + 1) / 2 - 3;
-        }
-        if (!config.overwrite[1]) {
-            config.max_depth = (min_maxDepth + max_maxDepth) / 2 + 6;
-        }
-
-        std::cout << "min minSplit: " << (int)min_minSplit << ", max minSplit: " << (int)max_minSplit << "\n";
-        std::cout << "min maxDepth: " << (int)min_maxDepth << ", max maxDepth: " << (int)max_maxDepth << "\n";
-        
-        // Build ranges based on override status
-        config.min_split_range.clear();
-        config.max_depth_range.clear();
-        
-        if (config.overwrite[0]) {
-            // min_split override is enabled - use only the override value
-            config.min_split_range.push_back(config.min_split);
-            std::cout << "🔧 min_split override active: using fixed value " << (int)config.min_split << "\n";
-        } else {
-            // min_split automatic - build range with step 2
-            uint8_t min_split_step = 2;
-            if(config.overwrite[1] || max_minSplit - min_minSplit < 4) {
-                min_split_step = 1; // If max_depth is overridden, use smaller step for min_split
-            }
-            for(uint8_t i = min_minSplit; i <= max_minSplit; i += min_split_step) {
-                config.min_split_range.push_back(i);
-            }
-        }
-        
-        if (config.overwrite[1]) {
-            // max_depth override is enabled - use only the override value
-            config.max_depth_range.push_back(config.max_depth);
-            std::cout << "🔧 max_depth override active: using fixed value " << (int)config.max_depth << "\n";
-        } else {
-            // max_depth automatic - build range with step 2
-            uint8_t max_depth_step = 2;
-            if(config.overwrite[0]) {
-                max_depth_step = 1; // If min_split is overridden, use smaller step for max_depth
-            }
-            for(uint8_t i = min_maxDepth; i <= max_maxDepth; i += max_depth_step) {
-                config.max_depth_range.push_back(i);
-            }
-        }
-        
-        // Ensure at least one value in each range (fallback safety)
-        if (config.min_split_range.empty()) {
-            config.min_split_range.push_back(config.min_split);
-        }
-        if (config.max_depth_range.empty()) {
-            config.max_depth_range.push_back(config.max_depth);
-        }
-
-        std::cout << "Setting minSplit to " << (int)config.min_split
-                  << " and maxDepth to " << (int)config.max_depth << " based on dataset size.\n";
-        
-        // Debug: Show range sizes
-        std::cout << "📊 Training ranges: min_split_range has " << config.min_split_range.size() 
-                  << " values, max_depth_range has " << config.max_depth_range.size() << " values\n";
-        std::cout << "   min_split values: ";
-        for(size_t i = 0; i < config.min_split_range.size(); i++) {
-            std::cout << (int)config.min_split_range[i];
-            if(i < config.min_split_range.size() - 1) std::cout << ", ";
-        }
-        std::cout << "\n   max_depth values: ";
-        for(size_t i = 0; i < config.max_depth_range.size(); i++) {
-            std::cout << (int)config.max_depth_range[i];
-            if(i < config.max_depth_range.size() - 1) std::cout << ", ";
-        }
-        std::cout << "\n";
-        
-        // Calculate optimal combine_ratio based on dataset characteristics
-        float validation_reliability = 1.0f;
-        if(config.use_validation) {
-            // Lower combine ratio when validation set is small or data is limited
-            float validation_samples = config.num_samples * config.valid_ratio;
-            validation_reliability = std::min(1.0f, validation_samples / 100.0f); // Normalize by 100 samples
-        }
-
-        float dataset_factor = std::min(1.0f, (float)config.num_samples / 1000.0f);
-        float feature_factor = std::min(1.0f, (float)config.num_features / 50.0f);
-        float balance_factor = std::min(1.0f, lowestDistribution / 20.0f); // 20% as good balance threshold
-        
-        // Calculate adaptive combine_ratio
-        if (!config.overwrite[3]) {
-            // Apply automatic calculation only if not overridden
-            config.combine_ratio = 1 - (0.3f + 0.4f * validation_reliability * dataset_factor * feature_factor * balance_factor);
-            config.combine_ratio = std::max(0.2f, std::min(0.8f, config.combine_ratio)); // Clamp between 0.2 and 0.8
-            
-            std::cout << "Auto-calculated combine_ratio: " << config.combine_ratio 
-                      << " (validation_weight=" << config.combine_ratio 
-                      << ", primary_weight=" << (1.0f - config.combine_ratio) << ")\n";
-        } else {
-            std::cout << "🔧 Using combine_ratio override: " << config.combine_ratio << std::endl;
-        }
-        
-        file.close();
     }
 
 
@@ -1028,7 +706,7 @@ public:
 
         // Validation evaluation (unchanged)
         sampleId = 0;
-        if(this->config.use_validation){   
+        if(this->config.training_score == "valid_score"){   
             for(const auto& sample : validation_data.allSamples){
                 uint8_t actualLabel = sample.label;
                 sampleId++;
@@ -1303,8 +981,7 @@ public:
         }
         
         // Restore original dataList
-        dataList = original_dataList;
-        
+        dataList = original_dataList;    
         return (valid_folds > 0) ? (total_cv_score / valid_folds) : 0.0f;
     }
         
@@ -1329,18 +1006,15 @@ public:
         float best_score = -1.0f;
 
         // Determine evaluation mode and number of runs
-        bool use_cv = config.cross_validation;
+        bool use_cv = (config.training_score == "k-fold_score");
         const int num_runs = use_cv ? 1 : 3; // 1 run for CV, 3 runs for OOB/validation
         
         if (use_cv) {
             std::cout << "📊 Using " << (int)config.k_fold << "-fold cross validation for evaluation\n";
+        } else if (config.training_score == "valid_score") {
+            std::cout << "📊 Using validation data for evaluation\n";
         } else {
-            std::cout << "📊 Using OOB ";
-            if (config.use_validation) {
-                std::cout << "and validation data for evaluation\n";
-            } else {
-                std::cout << "for evaluation\n";
-            }
+            std::cout << "📊 Using OOB for evaluation\n";
         }
 
         // Create temporary directory for saving best forests during iterations
@@ -1385,7 +1059,7 @@ public:
                         ClonesData();
                         MakeForest();
                     } else {
-                        // OOB and validation mode
+                        // OOB or validation mode
                         ClonesData();
                         MakeForest();
 
@@ -1393,9 +1067,12 @@ public:
                         float oob_score = scores.first;
                         float validation_score = scores.second;
 
-                        // Combine OOB and validation scores using the adaptive ratio
-                        if(config.use_validation) combined_score = (1.0f - config.combine_ratio) * oob_score + config.combine_ratio * validation_score;
-                        else combined_score = oob_score;
+                        // Use the selected scoring method
+                        if(config.training_score == "valid_score") {
+                            combined_score = validation_score;
+                        } else {
+                            combined_score = oob_score; // Default to oob_score
+                        }
                     }
 
                     // Calculate total_nodes for this parameter combination (sum of all nodes in all trees)
@@ -1550,7 +1227,7 @@ public:
             if(depth > maxTreeDepth) maxTreeDepth = depth;
             if(depth < minTreeDepth) minTreeDepth = depth;
         }
-        config.RAM_usage = totalNodes * 4;
+        config.RAM_usage = (totalNodes + totalLeafNodes) * 4;
         
         // Save individual tree files (use model_name prefix)
         for(uint8_t i = 0; i < config.num_trees; i++){

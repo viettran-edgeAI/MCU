@@ -22,6 +22,7 @@
 #include <algorithm>
 
 #define result_folder "trained_model/"
+#define config_path   "model_config.json"
 
 using namespace mcu;
 
@@ -423,36 +424,36 @@ struct Rf_config{
     size_t RAM_usage = 0;
     int epochs = 20;    // number of epochs for inner training
 
-    float train_ratio = 0.7f; // ratio of training data to total data, default is 0.7
-    float test_ratio = 0.15f; // ratio of test data to total data, default is 0.15  
-    float valid_ratio = 0.15f; // ratio of validation data to total data, default is 0.15
+    float train_ratio = 0.7f; // ratio of training data to total data, automatically set
+    float test_ratio = 0.15f; // ratio of test data to total data, automatically set  
+    float valid_ratio = 0.15f; // ratio of validation data to total data, automatically set
     float boostrap_ratio = 0.632f; // ratio of samples taken from train data to create subdata
 
     b_vector<uint8_t> max_depth_range;      // for training
     b_vector<uint8_t> min_split_range;      // for training 
-    b_vector<bool, SMALL> overwrite{5}; // min_slit-> max_depth-> unity_threshold-> combine_ratio-> training_flag
+    b_vector<bool, SMALL> overwrite{4}; // min_split-> max_depth-> unity_threshold-> training_flag
 
     Rf_training_flags training_flag;
     std::string data_path;
-    std::string config_path = "trained_model/model_config.json"; // path to model configuration file
     
     // model configurations
     float unity_threshold = 0.5f;   // unity_threshold  for classification, effect to precision and recall - default value
     float impurity_threshold = 0.01f; // threshold for impurity, default is 0.01
-    float combine_ratio = 0.5f;      // auto-calculated ratio for combining validation with primary evaluation (OOB/CV)
+    
+    // Training score method: "oob_score", "valid_score", or "k-fold_score"
+    std::string training_score = "oob_score";
 
     bool use_gini = false; // use Gini impurity for training
-    bool use_validation = false; // use validation set for training
     bool use_bootstrap = true; // use bootstrap sampling for training
-    bool cross_validation = false; // use cross validation for evaluation
 
     float result_score = 0.0f; // result score of the model
 
+public:
     // Constructor
     Rf_config() {};
 
-    void init(std::string init_path = "model_config.json"){
-        for (size_t i = 0; i < 5; i++) {
+    Rf_config (std::string init_path = config_path){
+        for (size_t i = 0; i < 4; i++) {
             overwrite[i] = false; // default to not overwriting any parameters
         }
 
@@ -534,33 +535,21 @@ struct Rf_config{
             }
         }
         
-        // Extract use_validation
-        pos = content.find("\"use_validation\"");
+        // Extract training_score
+        pos = content.find("\"training_score\"");
         if (pos != std::string::npos) {
             pos = content.find("\"value\":", pos);
             if (pos != std::string::npos) {
                 pos = content.find(":", pos) + 1;
-                size_t end = content.find(",", pos);
-                if (end == std::string::npos) end = content.find("}", pos);
+                // Find the opening quote of the value
+                pos = content.find("\"", pos) + 1;
+                size_t end = content.find("\"", pos);
                 std::string value = content.substr(pos, end - pos);
-                value.erase(0, value.find_first_not_of(" \t\r\n"));
-                value.erase(value.find_last_not_of(" \t\r\n") + 1);
-                use_validation = (value == "true");
-            }
-        }
-        
-        // Extract cross_validation
-        pos = content.find("\"cross_validation\"");
-        if (pos != std::string::npos) {
-            pos = content.find("\"value\":", pos);
-            if (pos != std::string::npos) {
-                pos = content.find(":", pos) + 1;
-                size_t end = content.find(",", pos);
-                if (end == std::string::npos) end = content.find("}", pos);
-                std::string value = content.substr(pos, end - pos);
-                value.erase(0, value.find_first_not_of(" \t\r\n"));
-                value.erase(value.find_last_not_of(" \t\r\n") + 1);
-                cross_validation = (value == "true");
+                if (value == "oob_score" || value == "valid_score" || value == "k-fold_score") {
+                    training_score = value;
+                } else {
+                    training_score = "oob_score"; // default
+                }
             }
         }
 
@@ -609,7 +598,12 @@ struct Rf_config{
             }
         }
 
-        // Extract split_ratio values
+        // Store split_ratio from JSON for validation against training_score
+        json_train_ratio = 0.0f;
+        json_test_ratio = 0.0f; 
+        json_valid_ratio = 0.0f;
+        json_ratios_found = false;
+        
         pos = content.find("\"split_ratio\"");
         if (pos != std::string::npos) {
             // Find the split_ratio object boundaries
@@ -618,6 +612,7 @@ struct Rf_config{
             
             if (split_start != std::string::npos && split_end != std::string::npos) {
                 std::string split_section = content.substr(split_start, split_end - split_start);
+                json_ratios_found = true;
                 
                 // Extract train_ratio
                 size_t train_pos = split_section.find("\"train_ratio\"");
@@ -628,7 +623,7 @@ struct Rf_config{
                     std::string train_value = split_section.substr(train_pos, train_end - train_pos);
                     train_value.erase(0, train_value.find_first_not_of(" \t\r\n"));
                     train_value.erase(train_value.find_last_not_of(" \t\r\n") + 1);
-                    train_ratio = std::stof(train_value);
+                    json_train_ratio = std::stof(train_value);
                 }
                 
                 // Extract test_ratio
@@ -640,7 +635,7 @@ struct Rf_config{
                     std::string test_value = split_section.substr(test_pos, test_end - test_pos);
                     test_value.erase(0, test_value.find_first_not_of(" \t\r\n"));
                     test_value.erase(test_value.find_last_not_of(" \t\r\n") + 1);
-                    test_ratio = std::stof(test_value);
+                    json_test_ratio = std::stof(test_value);
                 }
                 
                 // Extract valid_ratio
@@ -652,7 +647,7 @@ struct Rf_config{
                     std::string valid_value = split_section.substr(valid_pos, valid_end - valid_pos);
                     valid_value.erase(0, valid_value.find_first_not_of(" \t\r\n"));
                     valid_value.erase(valid_value.find_last_not_of(" \t\r\n") + 1);
-                    valid_ratio = std::stof(valid_value);
+                    json_valid_ratio = std::stof(valid_value);
                 }
             }
         }
@@ -710,9 +705,9 @@ struct Rf_config{
             return "";
         };
 
-        // Initialize overwrite vector: min_split, max_depth, unity_threshold, combine_ratio, train_flag
+        // Initialize overwrite vector: min_split, max_depth, unity_threshold, train_flag
         overwrite.clear();
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < 4; i++) {
             overwrite.push_back(false);
         }
 
@@ -746,19 +741,9 @@ struct Rf_config{
             }
         }
 
-        // Check and extract combine_ratio
-        overwrite[3] = isParameterEnabled("combine_ratio");
-        if (overwrite[3]) {
-            std::string value = extractParameterValue("combine_ratio");
-            if (!value.empty()) {
-                combine_ratio = std::stof(value);
-                std::cout << "⚙️  combine_ratio override enabled: " << combine_ratio << std::endl;
-            }
-        }
-
         // Check and extract train_flag
-        overwrite[4] = isParameterEnabled("train_flag");
-        if (overwrite[4]) {
+        overwrite[3] = isParameterEnabled("train_flag");
+        if (overwrite[3]) {
             std::string value = extractParameterValue("train_flag");
             if (!value.empty()) {
                 bool isStacked = isParameterStacked("train_flag");
@@ -790,30 +775,372 @@ struct Rf_config{
             }
         }
 
-        if(use_validation){
-            train_ratio = 0.6f; // default training ratio
-            valid_ratio = 0.2f; // default validation ratio
-        }else{
-            valid_ratio = 0.0f; // no validation ratio
-        }
-
-        if(use_validation && cross_validation){
-            use_validation = false; // disable validation if cross-validation is used
-            std::cout << "⚠️  Cross-validation is enabled, validation will be disabled." << std::endl;
-        }
+        // Check for invalid configuration cases and apply automatic ratio setting
+        // This will be done after dataset analysis in init() method
         
         std::cout << "✅ Configuration loaded from " << init_path << std::endl;
         std::cout << "   Number of trees: " << (int)num_trees << std::endl;
         std::cout << "   K-fold: " << (int)k_fold << std::endl;
         std::cout << "   Criterion: " << (use_gini ? "gini" : "entropy") << std::endl;
         std::cout << "   Use bootstrap: " << (use_bootstrap ? "true" : "false") << std::endl;
-        std::cout << "   Use validation: " << (use_validation ? "true" : "false") << std::endl;
-        std::cout << "   Cross validation: " << (cross_validation ? "true" : "false") << std::endl;
+        std::cout << "   Training score method: " << training_score << std::endl;
         std::cout << "   Data path: " << data_path << std::endl;
-        std::cout << "   Split ratios: train=" << train_ratio << ", test=" << test_ratio << ", valid=" << valid_ratio << std::endl;
+        if (json_ratios_found) {
+            std::cout << "   JSON split ratios found: train=" << json_train_ratio << ", test=" << json_test_ratio << ", valid=" << json_valid_ratio << " (will be validated)" << std::endl;
+        }
         std::cout << "   Random seed: " << random_seed << std::endl;
     }
 
+    void init(std::string data_path){
+        // For PC training, use standard file I/O instead of SPIFFS
+        std::ifstream file(data_path);
+        if (!file.is_open()) {
+            std::cout << "❌ Failed to open file: " << data_path << "\n";
+            return;
+        }
+
+        unordered_map<uint8_t, uint16_t> labelCounts;
+        unordered_set<uint8_t> featureValues;
+
+        uint16_t numSamples = 0;
+        uint16_t maxFeatures = 0;
+
+        std::string line;
+        while (std::getline(file, line)) {
+            // Trim whitespace
+            line.erase(0, line.find_first_not_of(" \t\r\n"));
+            line.erase(line.find_last_not_of(" \t\r\n") + 1);
+            if (line.empty()) continue;
+
+            std::stringstream ss(line);
+            std::string token;
+            int featureIndex = 0;
+            bool malformed = false;
+
+            while (std::getline(ss, token, ',')) {
+                token.erase(0, token.find_first_not_of(" \t"));
+                token.erase(token.find_last_not_of(" \t") + 1);
+                
+                if (token.empty()) {
+                    malformed = true;
+                    break;
+                }
+
+                int numValue = std::stoi(token);
+                if (featureIndex == 0) {
+                    labelCounts[numValue]++;
+                } else {
+                    featureValues.insert(numValue);
+                    uint16_t featurePos = featureIndex - 1;
+                    if (featurePos + 1 > maxFeatures) {
+                        maxFeatures = featurePos + 1;
+                    }
+                }
+                featureIndex++;
+            }
+
+            if (!malformed) {
+                numSamples++;
+                if (numSamples >= 10000) break;
+            }
+        }
+
+        file.close();
+
+        num_features = maxFeatures;
+        num_samples = numSamples;
+        num_labels = labelCounts.size();
+
+        // Dataset summary
+        std::cout << "📊 Dataset Summary:\n";
+        std::cout << "  Total samples: " << numSamples << "\n";
+        std::cout << "  Total features: " << maxFeatures << "\n";
+        std::cout << "  Unique labels: " << labelCounts.size() << "\n";
+
+        // Automatic ratio configuration based on dataset size
+        float samples_per_label = (float)numSamples / labelCounts.size();
+        if (samples_per_label > 150) {
+            // Large dataset: use 0.7, 0.15, 0.15
+            train_ratio = 0.7f;
+            test_ratio = 0.15f;
+            valid_ratio = 0.15f;
+            std::cout << "📏 Large dataset (samples/label: " << samples_per_label << " > 50). Using ratios: 0.7/0.15/0.15\n";
+        } else {
+            // Small dataset: use 0.6, 0.2, 0.2
+            train_ratio = 0.6f;
+            test_ratio = 0.2f;
+            valid_ratio = 0.2f;
+            std::cout << "📏 Small dataset (samples/label: " << samples_per_label << " ≤ 150). Using ratios: 0.6/0.2/0.2\n";
+        }
+
+        // Validate training_score and split_ratio consistency
+        if (json_ratios_found) {
+            bool mismatch_detected = false;
+            
+            // Check for invalid cases
+            if (training_score == "valid_score" && json_valid_ratio == 0.0f) {
+                std::cout << "⚠️ Invalid configuration: valid_score selected but valid_ratio = 0 in JSON\n";
+                std::cout << "🔧 Keeping training_score as 'valid_score' and adjusting ratios to include validation\n";
+                // Keep training_score as valid_score, but use automatic ratios (which include validation)
+                // The automatic ratios already set above will be used
+                mismatch_detected = false; // Don't use JSON ratios in this case
+            }
+            else if (training_score != "valid_score" && json_valid_ratio > 0.0f) {
+                std::cout << "⚠️ Invalid configuration: " << training_score << " selected but valid_ratio > 0 in JSON\n";
+                mismatch_detected = true;
+            }
+            
+            // If there's a mismatch (only for case 2), use JSON ratios as override
+            if (mismatch_detected) {
+                train_ratio = json_train_ratio;
+                test_ratio = json_test_ratio;
+                valid_ratio = json_valid_ratio;
+                std::cout << "🔧 Using JSON split_ratio as override due to mismatch: train=" << train_ratio 
+                         << ", test=" << test_ratio << ", valid=" << valid_ratio << "\n";
+                         
+                // Adjust training_score to match the ratios
+                if (json_valid_ratio > 0.0f && training_score != "valid_score") {
+                    training_score = "valid_score";
+                    std::cout << "🔧 Adjusted training_score to 'valid_score' to match JSON valid_ratio > 0\n";
+                }
+            }
+        }
+
+        // Final validation and normalization of ratios
+        float total_ratio = train_ratio + test_ratio + valid_ratio;
+        if (abs(total_ratio - 1.0f) > 0.001f) {
+            std::cout << "⚠️ Split ratios don't sum to 1.0 (sum: " << total_ratio << "). Normalizing...\n";
+            train_ratio /= total_ratio;
+            test_ratio /= total_ratio;
+            valid_ratio /= total_ratio;
+        }
+
+        // Analyze label distribution and set appropriate training flags
+        if (labelCounts.size() > 0) {
+            uint16_t minorityCount = numSamples;
+            uint16_t majorityCount = 0;
+
+            for (auto& it : labelCounts) {
+                uint16_t count = it.second;
+                if (count > majorityCount) {
+                    majorityCount = count;
+                }
+                if (count < minorityCount) {
+                    minorityCount = count;
+                }
+            }
+
+            float maxImbalanceRatio = 0.0f;
+            if (minorityCount > 0) {
+                maxImbalanceRatio = (float)majorityCount / minorityCount;
+            }
+
+            // Set training flags based on class imbalance
+            if (!overwrite[3]) {
+                // Apply automatic selection only if not overridden
+                if (maxImbalanceRatio > 10.0f) {
+                    training_flag = Rf_training_flags::RECALL;
+                    std::cout << "📉 Imbalanced dataset (ratio: " << maxImbalanceRatio << "). Setting trainFlag to RECALL.\n";
+                } else if (maxImbalanceRatio > 3.0f) {
+                    training_flag = Rf_training_flags::F1_SCORE;
+                    std::cout << "⚖️ Moderately imbalanced dataset (ratio: " << maxImbalanceRatio << "). Setting trainFlag to F1_SCORE.\n";
+                } else if (maxImbalanceRatio > 1.5f) {
+                    training_flag = Rf_training_flags::PRECISION;
+                    std::cout << "🟨 Slight imbalance (ratio: " << maxImbalanceRatio << "). Setting trainFlag to PRECISION.\n";
+                } else {
+                    training_flag = Rf_training_flags::ACCURACY;
+                    std::cout << "✅ Balanced dataset (ratio: " << maxImbalanceRatio << "). Setting trainFlag to ACCURACY.\n";
+                }
+            } else {
+                // Check if it's stacked mode or overwrite mode
+                bool isStacked = false;
+                // Re-check the config file for stacked mode (we need this info here)
+                std::ifstream check_file("model_json");
+                if (check_file.is_open()) {
+                    std::string check_content, check_line;
+                    while (std::getline(check_file, check_line)) {
+                        check_content += check_line;
+                    }
+                    check_file.close();
+                    
+                    size_t pos = check_content.find("\"train_flag\"");
+                    if (pos != std::string::npos) {
+                        size_t status_pos = check_content.find("\"status\":", pos);
+                        if (status_pos != std::string::npos && status_pos < check_content.find("}", pos)) {
+                            size_t start = check_content.find("\"", status_pos + 9) + 1;
+                            size_t end = check_content.find("\"", start);
+                            if (start != std::string::npos && end != std::string::npos) {
+                                std::string status = check_content.substr(start, end - start);
+                                isStacked = (status == "stacked");
+                            }
+                        }
+                    }
+                }
+                
+                if (isStacked) {
+                    // Stacked mode: combine user flags with auto-detected flags
+                    uint8_t user_flags = static_cast<uint8_t>(training_flag); // User flags from init()
+                    uint8_t auto_flags = 0;
+                    
+                    // Determine automatic flags based on dataset
+                    if (maxImbalanceRatio > 10.0f) {
+                        auto_flags = RECALL;
+                        std::cout << "📉 Imbalanced dataset (ratio: " << maxImbalanceRatio << "). Auto-detected flag: RECALL.\n";
+                    } else if (maxImbalanceRatio > 3.0f) {
+                        auto_flags = F1_SCORE;
+                        std::cout << "⚖️ Moderately imbalanced dataset (ratio: " << maxImbalanceRatio << "). Auto-detected flag: F1_SCORE.\n";
+                    } else if (maxImbalanceRatio > 1.5f) {
+                        auto_flags = PRECISION;
+                        std::cout << "🟨 Slight imbalance (ratio: " << maxImbalanceRatio << "). Auto-detected flag: PRECISION.\n";
+                    } else {
+                        auto_flags = ACCURACY;
+                        std::cout << "✅ Balanced dataset (ratio: " << maxImbalanceRatio << "). Auto-detected flag: ACCURACY.\n";
+                    }
+                    
+                    // Combine user flags with auto-detected flags
+                    uint8_t combined_flags = user_flags | auto_flags;
+                    training_flag = static_cast<Rf_training_flags>(combined_flags);
+                    std::cout << "🔗 Stacked train_flags: " << flagsToString(combined_flags) 
+                              << " (user: " << flagsToString(user_flags) << " + auto: " << flagsToString(auto_flags) << ")\n";
+                } else {
+                    // Overwrite mode: user flags completely replace automatic detection
+                    std::cout << "🔧 Using train_flag overwrite: " << flagsToString(training_flag) << " (dataset ratio: " << maxImbalanceRatio << ")\n";
+                }
+            }
+        }
+
+        std::cout << "  Label distribution:\n";
+        float lowestDistribution = 100.0f;
+        for (auto& label : labelCounts) {
+            float percent = (float)label.second / numSamples * 100.0f;
+            if (percent < lowestDistribution) {
+                lowestDistribution = percent;
+            }
+            std::cout << "    Label " << (int)label.first << ": " << label.second << " samples (" << percent << "%)\n";
+        }
+        
+        // Check if validation should be disabled due to low sample count (only if using valid_score)
+        if(training_score == "valid_score"){
+            float min_validation_samples = lowestDistribution / 100.0f * numSamples * valid_ratio;
+            if (min_validation_samples < 10) {
+                std::cout << "⚖️ Switching to oob_score due to low sample count in validation set (min class would have " 
+                         << min_validation_samples << " samples).\n";
+                training_score = "oob_score";
+                // Recalculate ratios without validation
+                if (samples_per_label > 150) {
+                    train_ratio = 0.85f;  // Redistribute validation ratio to training
+                    test_ratio = 0.15f;
+                    valid_ratio = 0.0f;
+                } else {
+                    train_ratio = 0.8f;   // Redistribute validation ratio to training
+                    test_ratio = 0.2f;
+                    valid_ratio = 0.0f;
+                }
+                std::cout << "📏 Adjusted ratios after removing validation: train=" << train_ratio 
+                         << ", test=" << test_ratio << ", valid=" << valid_ratio << "\n";
+            }
+        }
+
+        std::cout << "🎯 Final split ratios: train=" << train_ratio << ", test=" << test_ratio 
+                  << ", valid=" << valid_ratio << " (method: " << training_score << ")\n";
+        
+        // Calculate optimal parameters based on dataset size
+        int baseline_minsplit_ratio = 100 * (num_samples / 500 + 1); 
+        if (baseline_minsplit_ratio > 500) baseline_minsplit_ratio = 500; 
+        uint8_t min_minSplit = std::min(2, (int)(num_samples / baseline_minsplit_ratio));
+        int dynamic_max_split = std::min(min_minSplit + 6, (int)(log2(num_samples) / 4 + num_features / 25.0f));
+        uint8_t max_minSplit = std::min(24, dynamic_max_split); // Cap at 24 to prevent overly simple trees.
+        if (max_minSplit <= min_minSplit) max_minSplit = min_minSplit + 4; // Ensure a valid range.
+
+
+        int base_maxDepth = std::max((int)log2(num_samples * 2.0f), (int)(log2(num_features) * 2.5f));
+        uint8_t max_maxDepth = std::max(6, base_maxDepth);
+        int dynamic_min_depth = std::max(4, (int)(log2(num_features) + 2));
+        uint8_t min_maxDepth = std::min((int)max_maxDepth - 2, dynamic_min_depth); // Ensure a valid range.
+        if (min_maxDepth >= max_maxDepth) min_maxDepth = max_maxDepth - 2;
+        if (min_maxDepth < 4) min_maxDepth = 4;
+
+        // Set default values only if not overridden
+        if (!overwrite[0]) {
+            min_split = (min_minSplit + max_minSplit + 1) / 2 ;
+        }
+        if (!overwrite[1]) {
+            max_depth = (min_maxDepth + max_maxDepth) / 2 ;
+        }
+        std::cout << "min_split range: " << (int)min_minSplit << " - " << (int)max_minSplit << std::endl;
+        std::cout << "max_depth range: " << (int)min_maxDepth << " - " << (int)max_maxDepth << std::endl;
+        
+        // Build ranges based on override status
+        min_split_range.clear();
+        max_depth_range.clear();
+        
+        if (overwrite[0]) {
+            // min_split override is enabled - use only the override value
+            min_split_range.push_back(min_split);
+            std::cout << "🔧 min_split override active: using fixed value " << (int)min_split << "\n";
+        } else {
+            // min_split automatic - build range with step 2
+            uint8_t min_split_step = 2;
+            if(overwrite[1] || max_minSplit - min_minSplit < 4) {
+                min_split_step = 1; // If max_depth is overridden, use smaller step for min_split
+            }
+            for(uint8_t i = min_minSplit; i <= max_minSplit; i += min_split_step) {
+                min_split_range.push_back(i);
+            }
+        }
+        
+        if (overwrite[1]) {
+            // max_depth override is enabled - use only the override value
+            max_depth_range.push_back(max_depth);
+            std::cout << "🔧 max_depth override active: using fixed value " << (int)max_depth << "\n";
+        } else {
+            // max_depth automatic - build range with step 2
+            uint8_t max_depth_step = 2;
+            if(overwrite[0]) {
+                max_depth_step = 1; // If min_split is overridden, use smaller step for max_depth
+            }
+            for(uint8_t i = min_maxDepth; i <= max_maxDepth; i += max_depth_step) {
+                max_depth_range.push_back(i);
+            }
+        }
+        
+        // Ensure at least one value in each range (fallback safety)
+        if (min_split_range.empty()) {
+            min_split_range.push_back(min_split);
+        }
+        if (max_depth_range.empty()) {
+            max_depth_range.push_back(max_depth);
+        }
+
+        std::cout << "Setting minSplit to " << (int)min_split
+                  << " and maxDepth to " << (int)max_depth << " based on dataset size.\n";
+        
+        // Debug: Show range sizes
+        std::cout << "📊 Training ranges: min_split_range has " << min_split_range.size() 
+                  << " values, max_depth_range has " << max_depth_range.size() << " values\n";
+        std::cout << "   min_split values: ";
+        for(size_t i = 0; i < min_split_range.size(); i++) {
+            std::cout << (int)min_split_range[i];
+            if (i + 1 < min_split_range.size()) std::cout << ", ";
+        }
+        std::cout << "\n   max_depth values: ";
+        for(size_t i = 0; i < max_depth_range.size(); i++) {
+            std::cout << (int)max_depth_range[i];
+            if (i + 1 < max_depth_range.size()) std::cout << ", ";
+        }
+        std::cout << "\n";
+        
+        // Check for unity_threshold override
+        if (!overwrite[2]) {
+            // Apply automatic calculation only if not overridden
+            unity_threshold  = 1.25f / static_cast<float>(num_labels);
+            if(num_features == 2) unity_threshold = 0.6f;
+        } else {
+            std::cout << "🔧 Using unity_threshold override: " << unity_threshold << std::endl;
+        }
+        
+
+    }
     // save config to transfer to esp32 
     void saveConfig(const std::string& path) const {
         std::ofstream config_file(path);
@@ -824,27 +1151,29 @@ struct Rf_config{
         char buf[32];
         std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S%z", &tm_local);
 
+        // Ensure ratios sum to 1.0 (normalize if needed)
+        float total_ratio = train_ratio + test_ratio + valid_ratio;
+        float norm_train_ratio = train_ratio / total_ratio;
+        float norm_test_ratio = test_ratio / total_ratio;
+        float norm_valid_ratio = valid_ratio / total_ratio;
+
         if(config_file.is_open()) {
             config_file << "{\n";
             // data_path in esp32 SPIFFS : "/base_name."
             config_file << "  \"numTrees\": " << (int)num_trees << ",\n";
             config_file << "  \"randomSeed\": " << random_seed << ",\n";
-            config_file << "  \"train_ratio\": " << train_ratio << ",\n";
-            config_file << "  \"test_ratio\": " << test_ratio << ",\n";
-            config_file << "  \"valid_ratio\": " << valid_ratio << ",\n";
+            config_file << "  \"train_ratio\": " << norm_train_ratio << ",\n";
+            config_file << "  \"test_ratio\": " << norm_test_ratio << ",\n";
+            config_file << "  \"valid_ratio\": " << norm_valid_ratio << ",\n";
             config_file << "  \"minSplit\": " << (int)min_split << ",\n";
             config_file << "  \"maxDepth\": " << (int)max_depth << ",\n";
             config_file << "  \"useBootstrap\": " << (use_bootstrap ? "true" : "false") << ",\n";
             config_file << "  \"boostrapRatio\": " << boostrap_ratio << ",\n";
             config_file << "  \"useGini\": " << (use_gini ? "true" : "false") << ",\n";
-            config_file << "  \"useValidation\": " << (use_validation ? "true" : "false") << ",\n";
-            config_file << "  \"crossValidation\": " << (cross_validation ? "true" : "false") << ",\n";
+            config_file << "  \"trainingScore\": \"" << training_score << "\",\n";
             config_file << "  \"k_fold\": " << (int)k_fold << ",\n";
             config_file << "  \"unityThreshold\": " << unity_threshold << ",\n";
             config_file << "  \"impurityThreshold\": " << impurity_threshold << ",\n";
-            config_file << "  \"combineRatio\": " << combine_ratio << ",\n";
-            config_file << "  \"trainRatio\": " << train_ratio << ",\n";
-            config_file << "  \"validRatio\": " << valid_ratio << ",\n";
             config_file << "  \"trainFlag\": \"" << flagsToString(training_flag) << "\",\n";
             config_file << "  \"resultScore\": " << result_score << ",\n";
             config_file << "  \"Estimated RAM (bytes)\": " << RAM_usage <<",\n";
@@ -858,6 +1187,12 @@ struct Rf_config{
         }
     }
 
+private:
+    // Store JSON split ratios for validation purposes only
+    float json_train_ratio = 0.0f;
+    float json_test_ratio = 0.0f;
+    float json_valid_ratio = 0.0f;
+    bool json_ratios_found = false;
 };
 
 struct node_data {
@@ -884,9 +1219,9 @@ public:
     float coefficients[3];    
     b_vector<float> peak_nodes;
 public:
+    bool is_trained;
     uint8_t accuracy; // in percentage
     uint8_t peak_percent;   // number of nodes at depth with maximum number of nodes / total number of nodes in tree
-    bool is_trained;
     
     
     // Helper methods for regression analysis
@@ -1086,7 +1421,6 @@ public:
         size_t total_peak_nodes = peak_nodes.size(); // Fix: use actual number of trees
         for(auto count : percent_count) {
             float percent = total_peak_nodes > 0 ? (float)count/(float)total_peak_nodes * 100.0f : 0.0f; // Fix: calculate actual percentage
-            std::cout << percent << "%, ";
             if(percent < 10.0f && !peak_found) { // Fix: compare with 10.0 instead of 10
                 peak_percent = percent_track;
                 peak_found = true;
@@ -1096,7 +1430,7 @@ public:
         if (!peak_found) { // If no percentage < 10%, use a reasonable default
             peak_percent = 30;
         }
-        std::cout << "✅ Training completed" << std::endl;
+        std::cout << "✅ Successful create node_predictor formula !" << std::endl;
     }
     
     // Predict number of nodes for given parameters
@@ -1200,9 +1534,8 @@ public:
             total_actual += static_cast<float>(sample.total_nodes);
         }
         
-        float mae = total_error / training_data.size(); // Mean Absolute Error
         float mape = (total_error / total_actual) * 100.0f; // Mean Absolute Percentage Error
-        
+
         return std::max(0.0f, 100.0f - mape); // Return accuracy as percentage
     }
 };

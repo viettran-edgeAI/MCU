@@ -1,11 +1,21 @@
 {
     "data_path": {
-        "value": "../data_processing/data/result/cancer_data_nml.csv",
+        "value": "../data_processing/data/result/digit_data_nml.csv",
         "description": "Path to the normalized csv dataset."
+    },
+    "random_seed": {
+        "value":37,
+        "description": "Random seed for Rf_random."
     },
     "num_trees": {
         "value": 20,
         "description": "Number of trees in the random forest. should be < 50"
+    },
+    "split_ratio":{
+        "train_ratio" : 0.75,
+        "test_ratio" : 0.25,
+        "valid_ratio" : 0.0,
+        "description": "Ratios for splitting the dataset into training, testing, and validation sets."
     },
     "use_bootstrap": {
         "value": true,
@@ -28,7 +38,7 @@
         "description": "Whether to use a validation set for hyperparameter tuning. if training score is bad, enabled and change the combine_ratio below"
     },
     "cross_validation": {
-        "value": false,
+        "value": true,
         "options": [true, false],
         "description": "Whether to use cross-validation for model evaluation."
     },
@@ -37,13 +47,13 @@
         "description": "Number of folds for cross-validation."
     },
     "min_split": {
-        "value": 3,
+        "value": 5,
         "status": "disabled",
         "status_options": ["disabled", "enabled"],
         "description": "disabled by default. enable to override min_split_range in training process"
     },
     "max_depth": {
-        "value": 12,
+        "value": 13,
         "status": "disabled",
         "status_options": ["disabled", "enabled"],
         "description": "disabled by default. enable to override max_depth_range in training process"

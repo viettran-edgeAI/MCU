@@ -1,4 +1,3 @@
-
 #include <string>
 #include <random>
 #include <iostream>
@@ -43,20 +42,26 @@ public:
     std::string model_name;
 
     Rf_config config;
-    b_vector<float> peak_nodes;
+    node_predictor pre;
 
 private:
     vector<Rf_tree, SMALL> root;                     // b_vector storing root nodes of trees (now manages SPIFFS filenames)
     b_vector<ID_vector<uint16_t,2>, SMALL> dataList; // list of training data sample IDs for each tree
     Rf_random rng;
 
+    std::string node_log_path;
+    std::string node_predictor_path;
+    std::string result_config_path;
+
 public:
 
     // RandomForest(){};
-    RandomForest(){
-        config.init(); // Load configuration from model_config.json
+    RandomForest() {
+        config.init(); // Load configuration from model_config.json first
+        rng = Rf_random(config.random_seed, true); // Initialize RNG with loaded seed
         model_name = extract_model_name(config.data_path);
         std::cout << "🌲 Model name: " << model_name << std::endl;
+        generateFilePaths();
         
         // Create a backup copy of the original CSV data
         createDataBackup(config.data_path, temp_base_data);
@@ -71,11 +76,6 @@ public:
             if(config.num_features == 2) config.unity_threshold = 0.6f;
         } else {
             std::cout << "🔧 Using unity_threshold override: " << config.unity_threshold << std::endl;
-        }
-
-        if(config.use_validation){
-            config.valid_ratio = 0.2f; // default validation ratio
-            config.train_ratio = 0.6f; // default training ratio
         }
         
         // OOB.reserve(numTree);
@@ -100,6 +100,15 @@ public:
         if (std::remove(temp_base_data) == 0) {
             std::cout << "🗑️ Removed temporary backup file: " << temp_base_data << std::endl;
         }
+
+        // train node predictor
+        pre.init(node_log_path);
+        pre.train();
+        float pre_ac = pre.get_accuracy();
+        // Fix: get_accuracy() already returns percentage (0-100), don't multiply by 100 again
+        pre.accuracy = static_cast<uint8_t>(std::min(100.0f, std::max(0.0f, pre_ac)));
+        std::cout << "node predictor accuracy: " << pre_ac << "% (stored as: " << (int)pre.accuracy << "%)" << std::endl;
+        pre.save_model(node_predictor_path);
     }
 
     void MakeForest(){
@@ -135,10 +144,10 @@ public:
             if(depth > maxDepth) maxDepth = depth;
             if(depth < minDepth) minDepth = depth;
             
-            std::cout << "Tree " << (int)i << ": " 
-                      << nodeCount << " nodes (" 
-                      << leafCount << " leaves), depth " 
-                      << depth << "\n";
+            // std::cout << "Tree " << (int)i << ": " 
+            //           << nodeCount << " nodes (" 
+            //           << leafCount << " leaves), depth " 
+            //           << depth << "\n";
         }
         
         std::cout << "----------------------------------------\n";
@@ -177,15 +186,19 @@ public:
         std::cout << "📋 Created data backup: " << backup_filename << std::endl;
     }
 
+    void generateFilePaths() {
+        node_log_path = model_name + "_node_log.csv";
+        node_predictor_path = result_folder + model_name + "_node_pred.bin";
+        result_config_path = result_folder + model_name + "_config.json";
+    }
+
     // ----------------------------------------------------------------------------------
     // Split data into training and testing sets (or validation if enabled)
     void splitData(float trainRatio) {
         size_t maxID = config.num_samples;  // total number of samples
         uint16_t trainSize = static_cast<uint16_t>(maxID * config.train_ratio);
-        uint16_t testSize;
-        if(config.use_validation)  testSize = static_cast<uint16_t>((maxID - trainSize) * 0.5);
-        else  testSize = maxID - trainSize; // No validation set, use all remaining for testing
-        uint16_t validationSize = maxID - trainSize - testSize;
+        uint16_t testSize = static_cast<uint16_t>(maxID * config.test_ratio);
+        uint16_t validationSize = config.use_validation ? static_cast<uint16_t>(maxID * config.valid_ratio) : 0;
         
         // create train_data 
         sampleID_set train_sampleIDs(maxID);
@@ -213,6 +226,7 @@ public:
                 }
             }
         }
+        
 
 
         for (uint16_t id  = 0; id < maxID; id++) {
@@ -232,11 +246,14 @@ public:
         // Clear previous data
         dataList.clear();
         dataList.reserve(config.num_trees);
-        uint16_t numSample = config.num_samples * config.train_ratio;
+        // Use actual train set size for sampling consistency with ESP32
+        const uint16_t numSample = static_cast<uint16_t>(train_data.allSamples.size());
         uint16_t numSubSample;
-        if(config.use_bootstrap) numSubSample = static_cast<uint16_t>(numSample * config.boostrap_ratio);
-        else numSubSample = numSample; // use all training data if not bootstrap
-
+        if (config.use_bootstrap) {
+            numSubSample = numSample; // draw N with replacement
+        } else {
+            numSubSample = static_cast<uint16_t>(numSample * config.boostrap_ratio);
+        }
         // Track hashes of each tree dataset to avoid duplicates across trees
         unordered_set<uint64_t> seen_hashes;
         seen_hashes.reserve(config.num_trees * 2);
@@ -247,13 +264,13 @@ public:
 
             // Derive a deterministic per-tree RNG; retry with nonce if duplicate detected
             uint64_t nonce = 0;
-            while (true) {
+        while (true) {
                 treeDataset.clear();
                 auto tree_rng = rng.deriveRNG(i, nonce);
 
                 if (config.use_bootstrap) {
-                    // Bootstrap sampling: allow duplicates, track occurrence count
-                    for (uint16_t j = 0; j < numSubSample; ++j) {
+            // Bootstrap sampling: allow duplicates; bag draws = numSample
+            for (uint16_t j = 0; j < numSubSample; ++j) {
                         uint16_t idx = static_cast<uint16_t>(tree_rng.bounded(numSample));
                         treeDataset.push_back(idx);
                     }
@@ -261,7 +278,7 @@ public:
                     vector<uint16_t> arr(numSample,0);
                     arr.resize(numSample);
                     for (uint16_t t = 0; t < numSample; ++t) arr[t] = t;
-                    for (uint16_t t = 0; t < numSubSample; ++t) {
+            for (uint16_t t = 0; t < numSubSample; ++t) {
                         uint16_t j = static_cast<uint16_t>(t + tree_rng.bounded(numSample - t));
                         uint16_t tmp = arr[t];
                         arr[t] = arr[j];
@@ -512,10 +529,10 @@ public:
 
         // Set default values only if not overridden
         if (!config.overwrite[0]) {
-            config.min_split = (min_minSplit + max_minSplit + 1) / 2;
+            config.min_split = (min_minSplit + max_minSplit + 1) / 2 - 3;
         }
         if (!config.overwrite[1]) {
-            config.max_depth = (min_maxDepth + max_maxDepth) / 2;
+            config.max_depth = (min_maxDepth + max_maxDepth) / 2 + 6;
         }
 
         std::cout << "min minSplit: " << (int)min_minSplit << ", max minSplit: " << (int)max_minSplit << "\n";
@@ -868,11 +885,15 @@ public:
                 tree.nodes[rightChildIndex].setLabel(leafLabel);
                 tree.nodes[rightChildIndex].setFeatureID(0);
             }
+            if(queue_nodes.size() > peak_queue_size) {
+                peak_queue_size = queue_nodes.size();
+            }
+            track_peak(queue_nodes.size());
         }
         
         // Print BFS queue peak after the tree is built
         float peak_nodes_percent = (float)peak_queue_size / (float)tree.nodes.size() * 100.0f;
-        peak_nodes.push_back(peak_nodes_percent);
+        pre.peak_nodes.push_back(peak_nodes_percent);
     }
 
 
@@ -904,7 +925,6 @@ public:
                 mostPredict = predict.first;
             }
         }
-        
         // Check certainty threshold
         float certainty = static_cast<float>(max) / totalPredict;
         if(certainty < config.unity_threshold) {
@@ -1265,7 +1285,7 @@ public:
             }
             
             // Build forest for this fold
-            rebuildForest();
+            MakeForest();
             
             // Create test data object for evaluation using cv_test_indices
             Rf_data cv_test_data;
@@ -1288,42 +1308,6 @@ public:
         return (valid_folds > 0) ? (total_cv_score / valid_folds) : 0.0f;
     }
         
-    void rebuildForest() {
-        // Ensure root vector has correct size
-        if (root.size() != config.num_trees) {
-            root.clear();
-            root.reserve(config.num_trees);
-            for(uint8_t i = 0; i < config.num_trees; i++){
-                root.push_back(Rf_tree(""));
-            }
-        }
-        
-        // Clear existing trees properly
-        for (uint8_t i = 0; i < root.size(); i++) {
-            root[i].purgeTree(); // Clear the vector-based tree
-        }
-        
-        // Build trees only if we have valid dataList
-        if (dataList.size() != config.num_trees) {
-            std::cout << "❌ DataList size mismatch: " << dataList.size() << " vs " << (int)config.num_trees << "\n";
-            return;
-        }
-        
-        for(uint8_t i = 0; i < config.num_trees; i++){
-            // Build new tree using vector approach
-            build_tree(root[i], dataList[i]);
-            
-            // Verify tree was built successfully
-            if (root[i].nodes.empty()) {
-                std::cout << "❌ Failed to build tree " << (int)i << "\n";
-                continue;
-            }
-        }
-        
-        // Print forest statistics after rebuilding
-        // printForestStatistics();
-    }
-    
   public:
     // -----------------------------------------------------------------------------------
     // Grid Search Training with Multiple Runs
@@ -1331,12 +1315,10 @@ public:
     // Enhanced training with adaptive evaluation strategy
     void training(){
         std::cout << "\n🚀 Training Random Forest...\n";
-        // remove old tree_log.csv if exists
-        std::remove("rf_tree_log.csv");
-        // Create new tree_log.csv with header
-        std::ofstream file("rf_tree_log.csv");
+        std::remove(node_log_path.c_str());
+        std::ofstream file(node_log_path);
         if (!file.is_open()) {
-            std::cerr << "❌ Failed to create tree_log.csv\n";          
+            std::cerr << "❌ Failed to create node_predictor log file\n";          
             return;
         }
         file << "min_split,max_depth,total_nodes\n";
@@ -1380,8 +1362,8 @@ public:
         int avg_nodes;
 
         // Grid search over min_split and max_depth ranges
-        for (uint8_t current_min_split : config.min_split_range) {
-            for (uint16_t current_max_depth : config.max_depth_range) {
+        for ( uint8_t current_min_split : config.min_split_range) {
+            for ( uint16_t current_max_depth : config.max_depth_range) {
                 config.min_split = current_min_split;
                 config.max_depth = current_max_depth;
 
@@ -1401,18 +1383,19 @@ public:
                         
                         // For CV mode, we need to rebuild with current parameters to save
                         ClonesData();
-                        rebuildForest();
+                        MakeForest();
                     } else {
                         // OOB and validation mode
                         ClonesData();
-                        rebuildForest();
+                        MakeForest();
 
                         pair<float, float> scores = get_training_evaluation_index(validation_data);
                         float oob_score = scores.first;
                         float validation_score = scores.second;
 
                         // Combine OOB and validation scores using the adaptive ratio
-                        combined_score = (1.0f - config.combine_ratio) * oob_score + config.combine_ratio * validation_score;
+                        if(config.use_validation) combined_score = (1.0f - config.combine_ratio) * oob_score + config.combine_ratio * validation_score;
+                        else combined_score = oob_score;
                     }
 
                     // Calculate total_nodes for this parameter combination (sum of all nodes in all trees)
@@ -1450,9 +1433,9 @@ public:
                     std::cout.flush();
                 }
                 avg_nodes /= num_runs;
-                // Append min_split, max_depth, total_nodes to rf_tree_log.csv
+                // Append min_split, max_depth, total_nodes to node_predictor log file
                 if(avg_nodes > 0) {
-                    std::ofstream log_file("rf_tree_log.csv", std::ios::app);
+                    std::ofstream log_file(node_log_path, std::ios::app);
                     if (log_file.is_open()) {
                         log_file << (int)config.min_split << "," 
                                  << (int)config.max_depth << "," 
@@ -1506,10 +1489,10 @@ private:
             mkdir(dest_path.c_str(), 0755);
         #endif
         
-        // Copy all tree files
+        // Copy all tree files (now include model_name prefix)
         for(uint8_t i = 0; i < config.num_trees; i++){
-            std::string src_file = source_path + "/tree_" + std::to_string(i) + ".bin";
-            std::string dest_file = dest_path + "/tree_" + std::to_string(i) + ".bin";
+            std::string src_file = source_path + "/" + model_name + "_tree_" + std::to_string(i) + ".bin";
+            std::string dest_file = dest_path + "/" + model_name + "_tree_" + std::to_string(i) + ".bin";
             
             std::ifstream src(src_file, std::ios::binary);
             if (src.is_open()) {
@@ -1521,9 +1504,9 @@ private:
         }
         
         // Copy config files if they exist
-        std::string config_json_src = source_path + rf_config_file;
+        std::string config_json_src = source_path + model_name + "_config.json";
 
-        std::string config_json_dest = dest_path + rf_config_file;
+        std::string config_json_dest = dest_path + model_name + "_config.json";
         
         std::ifstream json_src(config_json_src, std::ios::binary);
         if (json_src.is_open()) {
@@ -1535,6 +1518,9 @@ private:
     }
 
 public:
+    void saveConfig() {
+        config.saveConfig(result_config_path);
+    }
     // Save the trained forest to files
     void saveForest(const std::string& folder_path = result_folder, bool silent = false) {
         if (!silent) {
@@ -1547,7 +1533,6 @@ public:
         #else
             mkdir(folder_path.c_str(), 0755);
         #endif
-        size_t ram_usage ;
         // Calculate forest statistics BEFORE saving (which purges the trees)
         uint32_t totalNodes = 0;
         uint32_t totalLeafNodes = 0;
@@ -1565,17 +1550,17 @@ public:
             if(depth > maxTreeDepth) maxTreeDepth = depth;
             if(depth < minTreeDepth) minTreeDepth = depth;
         }
-        ram_usage = totalNodes * sizeof(Tree_node);
+        config.RAM_usage = totalNodes * 4;
         
-        // Save individual tree files
+        // Save individual tree files (use model_name prefix)
         for(uint8_t i = 0; i < config.num_trees; i++){
-            std::string filename = "tree_" + std::to_string(i) + ".bin";
+            std::string filename = model_name + "_tree_" + std::to_string(i) + ".bin";
             root[i].filename = filename;
             root[i].saveTree(folder_path);
         }
         
         // Save config in both JSON and CSV formats
-        config.saveConfig(ram_usage);
+        config.saveConfig(result_config_path);
     }
     
     // Load the best trained forest from files (trees only, ignores config file)
@@ -1584,9 +1569,9 @@ public:
         
         uint8_t loaded_trees = 0;
         
-        // Load individual tree files
+        // Load individual tree files (expect model_name prefix)
         for(uint8_t i = 0; i < config.num_trees; i++){
-            std::string tree_filename = folder_path + "/tree_" + std::to_string(i) + ".bin";
+            std::string tree_filename = folder_path + "/" + model_name + "_tree_" + std::to_string(i) + ".bin";
             
             // Check if file exists
             std::ifstream check_file(tree_filename);
@@ -1597,7 +1582,7 @@ public:
             check_file.close();
             
             // Load the tree
-            root[i].filename = "tree_" + std::to_string(i) + ".bin";
+            root[i].filename = model_name + "_tree_" + std::to_string(i) + ".bin";
             root[i].loadTree(tree_filename);
             
             // Verify tree was loaded successfully
@@ -1721,9 +1706,10 @@ public:
 int main() {
     auto start = std::chrono::high_resolution_clock::now();
     std::cout << "Random Forest PC Training\n";
-    RandomForest forest = RandomForest();
+    RandomForest forest = RandomForest(); // Use random_seed from config file
     // Build initial forest
     forest.MakeForest();
+    // forest.printForestStatistics();
     
     // Train the forest to find optimal parameters (combine_ratio auto-calculated in first_scan)
     forest.training();
@@ -1790,63 +1776,12 @@ int main() {
 
     float result_score = forest.predict(forest.test_data, static_cast<Rf_training_flags>(forest.config.training_flag));
     forest.config.result_score = result_score;
-    forest.config.saveConfig(forest.config.RAM_usage);
+    forest.saveConfig();
     std::cout << "result score: " << result_score << "\n";
 
-    node_predictor pre;
-    pre.init();
-    pre.train();
-    float pre_ac = pre.get_accuracy();
-    // Fix: get_accuracy() already returns percentage (0-100), don't multiply by 100 again
-    pre.accuracy = static_cast<uint8_t>(std::min(100.0f, std::max(0.0f, pre_ac)));
-    std::cout << "node predictor accuracy: " << pre_ac << "% (stored as: " << (int)pre.accuracy << "%)" << std::endl;
-    pre.save_model(node_predictor_file);
-
+    
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed = end - start;
-    std::cout << "Total training time: " << elapsed.count() << " seconds\n ";
-
-    std::cout << "Peak nodes in forest: ";
-    b_vector<int> percent_count{10};
-    for(auto peak : forest.peak_nodes) {
-        if(peak > 25) percent_count[0]++;
-        if(peak > 26) percent_count[1]++;
-        if(peak > 27) percent_count[2]++;
-        if(peak > 28) percent_count[3]++;
-        if(peak > 29) percent_count[4]++;
-        if(peak > 30) percent_count[5]++;   
-        if(peak > 31) percent_count[6]++;
-        if(peak > 32) percent_count[7]++;
-        if(peak > 33) percent_count[8]++;
-        if(peak > 34) percent_count[9]++;
-    }
-    bool peak_found = false;
-    uint8_t percent_track = 25;
-    size_t total_peak_nodes = forest.peak_nodes.size(); // Fix: use actual number of trees
-    for(auto count : percent_count) {
-        float percent = total_peak_nodes > 0 ? (float)count/(float)total_peak_nodes * 100.0f : 0.0f; // Fix: calculate actual percentage
-        std::cout << percent << "%, ";
-        if(percent < 10.0f && !peak_found) { // Fix: compare with 10.0 instead of 10
-            pre.peak_percent = percent_track;
-            peak_found = true;
-        }
-        percent_track++;
-    }
-    if (!peak_found) { // If no percentage < 10%, use a reasonable default
-        pre.peak_percent = 30;
-    }
-    std::cout << "\nPeak nodes percentage: " << (int)pre.peak_percent << "%\n";
-    forest.peak_nodes.sort();
-    std::cout << "\n max peak: " << forest.peak_nodes.back() << "\n";
-
-    //prinout node_predcitor
-    std::cout << "Node Predictor Model:\n";
-    std::cout << "Accuracy: " << (int)pre.accuracy << "%\n";
-    std::cout << "Peak Percent: " << (int)pre.peak_percent << "%\n";
-    std::cout << "bias: " << pre.coefficients[0] << "\n";
-    std::cout << "Min Split: " << pre.coefficients[1] << "\n";
-    std::cout << "Max Depth: " << pre.coefficients[2] << "\n";
-    
-
+    std::cout << "Total time: " << elapsed.count() << " seconds\n ";
     return 0;
 }

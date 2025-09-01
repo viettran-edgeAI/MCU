@@ -16,7 +16,7 @@ This tool enables pre-training of optimized Random Forest models using normalize
 ## Quick Start
 
 ### Prerequisites
-- C++17 compatible compiler
+- C++17 compiler (required for STL features and constexpr functions)
 - Normalized dataset from data processing pipeline
 
 ### Basic Usage
@@ -67,20 +67,40 @@ The configuration system is divided into two main categories:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `num_trees` | integer | 20 | Number of trees in the forest (recommended: 10-50) |
+| `split_ratio` | object | see below | Dataset splitting ratios for train/test/validation |
 | `use_bootstrap` | boolean | true | Enable bootstrap sampling (disable to save 38% RAM/SPIFFS) |
 | `criterion` | string | "entropy" | Node splitting criterion: `"gini"` or `"entropy"` |
 | `impurity_threshold` | float | 0.1 | Threshold for node impurity (rarely needs adjustment) |
 | `data_path` | string | "../data_processing/data/result/digit_data_nml.csv" | Path to normalized dataset |
 
+##### Split Ratio Configuration
+
+The `split_ratio` parameter controls how the dataset is divided:
+
+```json
+"split_ratio": {
+    "train_ratio": 0.7,
+    "test_ratio": 0.15,
+    "valid_ratio": 0.15,
+    "description": "Ratios for splitting the dataset into training, testing, and validation sets."
+}
+```
+
+- **`train_ratio`**: Proportion of data for training (default: 0.7)
+- **`test_ratio`**: Proportion of data for testing (default: 0.15)
+- **`valid_ratio`**: Proportion of data for validation (default: 0.15)
+
+> **Note:** When `use_validation` is false, only `train_ratio` and `test_ratio` are used. The ratios should sum to 1.0 for optimal data utilization.
+
 #### B. Evaluation Strategy
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `use_validation` | boolean | false | Use validation set (20% of training data). Avoid with small datasets |
+| `use_validation` | boolean | false | Use validation set for evaluation. Uses `valid_ratio` from `split_ratio` |
 | `cross_validation` | boolean | true | Use k-fold cross-validation instead of OOB evaluation |
 | `k_folds` | integer | 4 | Number of folds for cross-validation |
 
-> **Recommendation:** Use cross-validation for small datasets, validation for large datasets.
+> **Recommendation:** Use cross-validation for small datasets, validation for large datasets. The split ratios are now independently configurable through the `split_ratio` parameter.
 
 #### C. Advanced Override System
 
@@ -152,6 +172,11 @@ Training flags specify which metrics to optimize during model training:
 ```json
 {
     "num_trees": {"value": 15},
+    "split_ratio": {
+        "train_ratio": 0.8,
+        "test_ratio": 0.2,
+        "valid_ratio": 0.0
+    },
     "cross_validation": {"value": true},
     "k_folds": {"value": 5},
     "use_validation": {"value": false},
@@ -166,6 +191,11 @@ Training flags specify which metrics to optimize during model training:
 ```json
 {
     "num_trees": {"value": 30},
+    "split_ratio": {
+        "train_ratio": 0.7,
+        "test_ratio": 0.15,
+        "valid_ratio": 0.15
+    },
     "cross_validation": {"value": false},
     "use_validation": {"value": true},
     "train_flag": {
@@ -179,7 +209,13 @@ Training flags specify which metrics to optimize during model training:
 ```json
 {
     "num_trees": {"value": 10},
+    "split_ratio": {
+        "train_ratio": 0.75,
+        "test_ratio": 0.25,
+        "valid_ratio": 0.0
+    },
     "use_bootstrap": {"value": false},
+    "use_validation": {"value": false},
     "max_depth": {
         "value": 8,
         "status": "enabled"
@@ -189,15 +225,23 @@ Training flags specify which metrics to optimize during model training:
 
 ## Performance Tuning
 
+### Data Splitting Strategy
+- **Training Ratio**: Higher values (0.7-0.8) for small datasets, moderate (0.6-0.7) for large datasets
+- **Test Ratio**: 0.15-0.25 for reliable performance estimates
+- **Validation Ratio**: 0.1-0.2 when using validation, 0.0 when using cross-validation only
+- **Balance Check**: Ensure ratios sum to 1.0 for complete data utilization
+
 ### Memory Optimization
 - **Reduce `num_trees`**: Fewer trees = less memory, but may reduce accuracy
 - **Disable `use_bootstrap`**: Saves 38% RAM and SPIFFS storage
 - **Enable `max_depth` override**: Limit tree depth to control memory usage
+- **Optimize split ratios**: Higher training ratio (0.8+) for memory-constrained scenarios
 
 ### Accuracy Optimization
 - **Increase `num_trees`**: More trees generally improve accuracy (up to a point)
 - **Use appropriate evaluation**: Cross-validation for small datasets, validation for large
 - **Tune `train_flag`**: Match optimization target to your use case
+- **Balanced split ratios**: Use 70/15/15 or 60/20/20 splits for comprehensive evaluation
 
 ### Training Speed
 - **Disable parameter ranges**: Enable overrides for `min_split` and `max_depth` to skip hyperparameter search
@@ -267,14 +311,35 @@ This directory includes specialized transfer tools for uploading pre-trained mod
 - **Automatic Range Detection**: Dataset-driven parameter range selection
 - **Override System**: Manual control when needed
 
+## Recent Improvements
+
+### v2024.09 Updates
+
+#### Bug Fixes
+- **Critical Tree Building Fix**: Fixed feature indexing bug in `build_tree()` partitioning logic that was causing poor model accuracy
+- **Cross-Validation Memory Management**: Resolved segmentation faults in `get_cross_validation_score()` due to improper object lifecycle management
+- **Configuration Parsing**: Enhanced JSON parsing robustness for nested configuration objects
+
+#### New Features
+- **Flexible Split Ratios**: Added `split_ratio` configuration with independent `train_ratio`, `test_ratio`, and `valid_ratio` controls
+- **Enhanced Debug Output**: Added configuration display showing parsed split ratios during initialization
+- **Improved Memory Safety**: Better handling of MCU container objects and reduced memory corruption risks
+
+#### Performance Improvements
+- **Cross-Validation Implementation**: Complete implementation of k-fold cross-validation with proper index-based data management
+- **Optimized Data Splitting**: Direct ratio-based splitting instead of remainder calculations
+- **Better Tree Statistics**: Enhanced forest analysis with comprehensive node and depth statistics
+
+> **Important:** These updates require C++17 compiler. Models trained with this version show significantly improved accuracy compared to previous versions due to the tree building bug fix.
+
 ## Troubleshooting
 
 ### Common Issues
 
 1. **Compilation Errors:**
    ```bash
-   # Ensure correct include path
-   g++ -std=c++17 -I../../src -o random_forest_pc random_forest_pc.cpp
+   # Ensure correct include path and C++17 standard
+   g++ -std=c++17 -I../../src -o pre_train random_forest_pc.cpp
    ```
 
 2. **Dataset Not Found:**
@@ -290,14 +355,22 @@ This directory includes specialized transfer tools for uploading pre-trained mod
    - Check dataset balance and adjust `train_flag` accordingly
    - Increase `num_trees` if memory allows
    - Verify data quality and normalization
+   - Ensure split ratios are appropriate for your dataset size
+
+5. **Legacy Issues (Fixed in v2024.09):**
+   - **Tree Building Bug**: Fixed critical feature indexing issue that caused poor accuracy
+   - **Cross-Validation Crashes**: Resolved memory management issues in k-fold validation
+   - **Configuration Parsing**: Enhanced robustness for nested JSON objects like `split_ratio`
 
 ### Debug Output
 
 The training process provides detailed logging:
-- Dataset analysis and class distribution
-- Automatic parameter detection reasoning
-- Training progress with cross-validation scores
-- Final model statistics and memory usage
+- **Configuration Summary**: Displays all parsed parameters including split ratios
+- **Dataset Analysis**: Class distribution and balance analysis
+- **Automatic Parameter Detection**: Shows reasoning behind parameter selection
+- **Training Progress**: Cross-validation scores with progress indicators
+- **Final Model Statistics**: Tree count, nodes, depth, and memory usage
+- **Performance Metrics**: Precision, recall, F1-score, and accuracy for each class
 
 
 For complete integration examples, see the main STL_MCU documentation.

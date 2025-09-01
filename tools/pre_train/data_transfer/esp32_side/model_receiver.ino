@@ -11,10 +11,10 @@
     Serial.println("    • Decision Trees (binary data)");
     Serial.println("==================================================");
  * Files received:
- * - rf_esp32_config.json (model configuration)
- * - node_predictor.bin (memory estimation model)
- * - rf_tree_log.csv (training history and statistics)
- * - tree_0.bin, tree_1.bin, ... tree_N.bin (decision tree data)
+ * - {model_name}_config.json (model configuration)
+ * - {model_name}_node_pred.bin (memory estimation model)
+ * - {model_name}_node_log.csv (training history and statistics)
+ * - {model_name}_tree_0.bin, {model_name}_tree_1.bin, ... {model_name}_tree_N.bin (decision tree data)
  * 
  * The node predictor enables accurate memory usage estimation for 
  * random forest configurations before model creation.
@@ -125,22 +125,15 @@ void listReceivedFiles() {
                 Serial.printf("   📋 %s (%u bytes) - Configuration\n", fileName.c_str(), file.size());
                 configFiles++;
                 fileCount++;
-            } else if (fileName.indexOf("node_predictor") >= 0 && fileName.endsWith(".bin")) {
+            } else if (fileName.indexOf("node_pred") >= 0 && fileName.endsWith(".bin")) {
                 Serial.printf("   🧮 %s (%u bytes) - Node Predictor\n", fileName.c_str(), file.size());
                 predictorFiles++;
                 fileCount++;
-            } else if (fileName.indexOf("rf_tree_log") >= 0 && fileName.endsWith(".csv")) {
+            } else if (fileName.indexOf("node_log") >= 0 && fileName.endsWith(".csv")) {
                 Serial.printf("   📊 %s (%u bytes) - Training Log\n", fileName.c_str(), file.size());
                 logFiles++;
                 fileCount++;
-            } else if (fileName.indexOf("Rf_tree_log") >= 0 && fileName.endsWith(".csv")) {
-                Serial.printf("   📊 %s (%u bytes) - Training Log\n", fileName.c_str(), file.size());
-                logFiles++;
-                fileCount++;
-            } else if (fileName.indexOf("tree_log") >= 0 && fileName.endsWith(".csv")) {
-                Serial.printf("   📊 %s (%u bytes) - Training Log\n", fileName.c_str(), file.size());
-                logFiles++;
-                fileCount++;
+            }
             } else if (fileName.startsWith("/tree_") && fileName.endsWith(".bin")) {
                 // Count tree files but don't list them individually to save space
                 treeFiles++;
@@ -389,16 +382,15 @@ void handleFileInfo() {
     String filePath = "/" + String(receivedFileName);
     
     // For node predictor, save as standard filename for easy access
-    if (strstr(receivedFileName, "node_predictor")) {
+    if (strstr(receivedFileName, "node_pred")) {
         filePath = "/node_predictor.bin";  // Standard location for ESP32 integration
     }
     // For config files, ensure consistent naming
-    else if (strstr(receivedFileName, "rf_esp32_config") && strstr(receivedFileName, ".json")) {
+    else if (strstr(receivedFileName, "_config") && strstr(receivedFileName, ".json")) {
         filePath = "/rf_esp32_config.json";  // Standard config file location
     }
     // For tree log files, ensure consistent naming
-    else if (strstr(receivedFileName, "rf_tree_log") || strstr(receivedFileName, "Rf_tree_log") ||
-             (strstr(receivedFileName, "tree_log") && strstr(receivedFileName, ".csv"))) {
+    else if (strstr(receivedFileName, "node_log") && strstr(receivedFileName, ".csv")) {
         filePath = "/rf_tree_log.csv";  // Standard tree log location
     }
     

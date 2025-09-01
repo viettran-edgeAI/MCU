@@ -3,13 +3,13 @@
 Pre-trained Model Transfer Utility for ESP32
 
 This script transfers pre-trained random forest model files from PC to ESP32.
-Transfers esp32_config.json and all tree_*.bin files while preserving filenames.
+Transfers <model_name>_config.json and all <model_name>_tree_*.bin files while preserving filenames.
 
 Usage:
-  python3 transfer_model.py <serial_port>
+  python3 transfer_model.py <model_name> <serial_port>
 
 Example:
-  python3 transfer_model.py /dev/ttyUSB0
+  python3 transfer_model.py my_model /dev/ttyUSB0
 """
 
 import serial
@@ -41,8 +41,8 @@ CHUNK_DELAY = 50  # delay between chunks in ms
 SERIAL_TIMEOUT = 10  # seconds
 ACK_TIMEOUT = 30    # seconds
 
-def get_model_files():
-    """Get all model files from the trained_model directory."""
+def get_model_files(model_name):
+    """Get all model files from the trained_model directory for given model_name."""
     script_dir = os.path.dirname(__file__)
     model_dir = os.path.join(script_dir, '../..', 'trained_model')
     model_dir = os.path.abspath(model_dir)
@@ -52,35 +52,35 @@ def get_model_files():
     predictor_files = []
     log_files = []
     
-    # Add config file (only JSON version)
-    config_file = os.path.join(model_dir, "rf_esp32_config.json")
+    # Add config file (model-specific JSON)
+    config_file = os.path.join(model_dir, f"{model_name}_config.json")
     if os.path.exists(config_file):
         config_files.append(config_file)
     
     # Add node predictor model file
-    predictor_file = os.path.join(model_dir, "node_predictor.bin")
+    predictor_file = os.path.join(model_dir, f"{model_name}_node_pred.bin")
     if os.path.exists(predictor_file):
         predictor_files.append(predictor_file)
     else:
-        # Try alternative locations for node predictor
-        alt_predictor_path = os.path.join(script_dir, '..', 'node_predictor.bin')
+        # Try alternative locations for node predictor (relative to script)
+        alt_predictor_path = os.path.join(script_dir, '..', f"{model_name}_node_pred.bin")
         if os.path.exists(alt_predictor_path):
             predictor_files.append(os.path.abspath(alt_predictor_path))
     
-    # Add tree log CSV file
-    tree_log_file = os.path.join(script_dir, '..', 'Rf_tree_log.csv')
+    # Add tree log CSV file (model-specific)
+    tree_log_file = os.path.join(script_dir, '..', '..', f"{model_name}_node_log.csv")
     if os.path.exists(tree_log_file):
         log_files.append(os.path.abspath(tree_log_file))
     
-    # Add all tree binary files
-    tree_pattern = os.path.join(model_dir, "tree_*.bin")
+    # Add all tree binary files (model-specific pattern)
+    tree_pattern = os.path.join(model_dir, f"{model_name}_tree_*.bin")
     tree_files = sorted(glob.glob(tree_pattern))
     
     return config_files, tree_files, predictor_files, log_files
 
-def get_all_model_files():
+def get_all_model_files(model_name):
     """Get all model files as a single list (for compatibility)."""
-    config_files, tree_files, predictor_files, log_files = get_model_files()
+    config_files, tree_files, predictor_files, log_files = get_model_files(model_name)
     return config_files + predictor_files + log_files + tree_files
 
 def wait_for_response(ser, expected_response, timeout=ACK_TIMEOUT, verbose=True):
@@ -250,10 +250,10 @@ def transfer_multiple_files(ser, files, title):
     print(f"✅ Completed {title}: {success_count}/{len(files)} files transferred")
     return success_count
 
-def check_model_files():
-    """Check for model files and print a report."""
+def check_model_files(model_name):
+    """Check for model files and print a report for the given model_name."""
     print("\n🔍 Searching for model files...")
-    config_files, tree_files, predictor_files, log_files = get_model_files()
+    config_files, tree_files, predictor_files, log_files = get_model_files(model_name)
     all_files = config_files + predictor_files + log_files + tree_files
     
     if not all_files:
@@ -283,25 +283,26 @@ def check_model_files():
     if tree_files:
         print(f"   🌳 Tree files ({len(tree_files)} trees):")
         tree_total_size = sum(os.path.getsize(f) for f in tree_files)
-        print(f"      • tree_0.bin to tree_{len(tree_files)-1}.bin ({tree_total_size} bytes total)")
+        print(f"      • {model_name}_tree_0.bin to {model_name}_tree_{len(tree_files)-1}.bin ({tree_total_size} bytes total)")
     
     total_size = sum(os.path.getsize(f) for f in all_files)
     print(f"📊 Total size: {total_size} bytes ({total_size/1024:.1f} KB)")
     return True
 
 def main():
-    if len(sys.argv) != 2:
-        print("Usage: python3 transfer_model.py <serial_port>")
-        print("Example: python3 transfer_model.py /dev/ttyUSB0")
+    if len(sys.argv) != 3:
+        print("Usage: python3 transfer_model.py <model_name> <serial_port>")
+        print("Example: python3 transfer_model.py my_model /dev/ttyUSB0")
         return 1
 
-    serial_port = sys.argv[1]
+    model_name = sys.argv[1]
+    serial_port = sys.argv[2]
     
     # Check for model files
-    if not check_model_files():
+    if not check_model_files(model_name):
         return 1
     
-    config_files, tree_files, predictor_files, log_files = get_model_files()
+    config_files, tree_files, predictor_files, log_files = get_model_files(model_name)
     total_files = len(config_files) + len(predictor_files) + len(log_files) + len(tree_files)
     
     print(f"\n🔌 Connecting to ESP32 on {serial_port}...")
@@ -316,7 +317,7 @@ def main():
     try:
         # Start transfer session
         print("\n🚀 Starting model transfer session...")
-        session_name = "model_transfer"
+        session_name = model_name + "_transfer"
         session_bytes = session_name.encode('utf-8')
         payload = struct.pack('B', len(session_bytes)) + session_bytes
         send_command(ser, CMD_START_SESSION, payload)

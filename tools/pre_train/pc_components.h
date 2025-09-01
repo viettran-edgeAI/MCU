@@ -18,17 +18,10 @@
 #define mkdir _mkdir
 #endif
 
-
 #include <iomanip>
 #include <algorithm>
 
-// Define constants for file paths , filename part must match the same trio in Rf_file_manager.h 
-#define rf_config_file "/rf_esp32_config.json"
-#define rf_config_path "trained_model/rf_esp32_config.json"
-#define node_predictor_file "trained_model/node_predictor.bin"
-#define node_predictor_log "rf_tree_log.csv"
-
-#define result_folder "trained_model"
+#define result_folder "trained_model/"
 
 using namespace mcu;
 
@@ -114,6 +107,8 @@ struct NodeToBuild {
     NodeToBuild(uint16_t idx, uint16_t b, uint16_t e, uint8_t d) 
         : nodeIndex(idx), begin(b), end(e), depth(d) {}
 };
+
+
 class Rf_tree {
   public:
     b_vector<Tree_node> nodes;  // Vector-based tree storage
@@ -424,11 +419,13 @@ struct Rf_config{
     uint8_t min_split; 
     uint16_t max_depth;
     uint16_t num_samples;  // number of samples in the base data
+    uint32_t random_seed = 42; // random seed for Rf_random class
     size_t RAM_usage = 0;
     int epochs = 20;    // number of epochs for inner training
 
-    float train_ratio = 0.75; // ratio of training data to total data, default is 0.6
-    float valid_ratio = 0.2f; // ratio of validation data to total data, default is 0.2
+    float train_ratio = 0.7f; // ratio of training data to total data, default is 0.7
+    float test_ratio = 0.15f; // ratio of test data to total data, default is 0.15  
+    float valid_ratio = 0.15f; // ratio of validation data to total data, default is 0.15
     float boostrap_ratio = 0.632f; // ratio of samples taken from train data to create subdata
 
     b_vector<uint8_t> max_depth_range;      // for training
@@ -580,6 +577,21 @@ struct Rf_config{
                 k_fold = static_cast<uint8_t>(std::stoi(value));
             }
         }
+
+        // Extract random_seed
+        pos = content.find("\"random_seed\"");
+        if (pos != std::string::npos) {
+            pos = content.find("\"value\":", pos);
+            if (pos != std::string::npos) {
+                pos = content.find(":", pos) + 1;
+                size_t end = content.find(",", pos);
+                if (end == std::string::npos) end = content.find("}", pos);
+                std::string value = content.substr(pos, end - pos);
+                value.erase(0, value.find_first_not_of(" \t\r\n"));
+                value.erase(value.find_last_not_of(" \t\r\n") + 1);
+                random_seed = static_cast<uint32_t>(std::stoul(value));
+            }
+        }
         
         // Extract data_path
         pos = content.find("\"data_path\"");
@@ -593,6 +605,54 @@ struct Rf_config{
                     if (end != std::string::npos) {
                         data_path = content.substr(pos, end - pos);
                     }
+                }
+            }
+        }
+
+        // Extract split_ratio values
+        pos = content.find("\"split_ratio\"");
+        if (pos != std::string::npos) {
+            // Find the split_ratio object boundaries
+            size_t split_start = content.find("{", pos);
+            size_t split_end = content.find("}", split_start);
+            
+            if (split_start != std::string::npos && split_end != std::string::npos) {
+                std::string split_section = content.substr(split_start, split_end - split_start);
+                
+                // Extract train_ratio
+                size_t train_pos = split_section.find("\"train_ratio\"");
+                if (train_pos != std::string::npos) {
+                    train_pos = split_section.find(":", train_pos) + 1;
+                    size_t train_end = split_section.find(",", train_pos);
+                    if (train_end == std::string::npos) train_end = split_section.find("}", train_pos);
+                    std::string train_value = split_section.substr(train_pos, train_end - train_pos);
+                    train_value.erase(0, train_value.find_first_not_of(" \t\r\n"));
+                    train_value.erase(train_value.find_last_not_of(" \t\r\n") + 1);
+                    train_ratio = std::stof(train_value);
+                }
+                
+                // Extract test_ratio
+                size_t test_pos = split_section.find("\"test_ratio\"");
+                if (test_pos != std::string::npos) {
+                    test_pos = split_section.find(":", test_pos) + 1;
+                    size_t test_end = split_section.find(",", test_pos);
+                    if (test_end == std::string::npos) test_end = split_section.find("}", test_pos);
+                    std::string test_value = split_section.substr(test_pos, test_end - test_pos);
+                    test_value.erase(0, test_value.find_first_not_of(" \t\r\n"));
+                    test_value.erase(test_value.find_last_not_of(" \t\r\n") + 1);
+                    test_ratio = std::stof(test_value);
+                }
+                
+                // Extract valid_ratio
+                size_t valid_pos = split_section.find("\"valid_ratio\"");
+                if (valid_pos != std::string::npos) {
+                    valid_pos = split_section.find(":", valid_pos) + 1;
+                    size_t valid_end = split_section.find(",", valid_pos);
+                    if (valid_end == std::string::npos) valid_end = split_section.find("}", valid_pos);
+                    std::string valid_value = split_section.substr(valid_pos, valid_end - valid_pos);
+                    valid_value.erase(0, valid_value.find_first_not_of(" \t\r\n"));
+                    valid_value.erase(valid_value.find_last_not_of(" \t\r\n") + 1);
+                    valid_ratio = std::stof(valid_value);
                 }
             }
         }
@@ -750,11 +810,13 @@ struct Rf_config{
         std::cout << "   Use validation: " << (use_validation ? "true" : "false") << std::endl;
         std::cout << "   Cross validation: " << (cross_validation ? "true" : "false") << std::endl;
         std::cout << "   Data path: " << data_path << std::endl;
+        std::cout << "   Split ratios: train=" << train_ratio << ", test=" << test_ratio << ", valid=" << valid_ratio << std::endl;
+        std::cout << "   Random seed: " << random_seed << std::endl;
     }
 
     // save config to transfer to esp32 
-    void saveConfig(size_t ram_usage) const {
-        std::ofstream config_file(rf_config_path);
+    void saveConfig(const std::string& path) const {
+        std::ofstream config_file(path);
 
         std::time_t t = std::time(nullptr);
         std::tm tm_local;
@@ -766,6 +828,10 @@ struct Rf_config{
             config_file << "{\n";
             // data_path in esp32 SPIFFS : "/base_name."
             config_file << "  \"numTrees\": " << (int)num_trees << ",\n";
+            config_file << "  \"randomSeed\": " << random_seed << ",\n";
+            config_file << "  \"train_ratio\": " << train_ratio << ",\n";
+            config_file << "  \"test_ratio\": " << test_ratio << ",\n";
+            config_file << "  \"valid_ratio\": " << valid_ratio << ",\n";
             config_file << "  \"minSplit\": " << (int)min_split << ",\n";
             config_file << "  \"maxDepth\": " << (int)max_depth << ",\n";
             config_file << "  \"useBootstrap\": " << (use_bootstrap ? "true" : "false") << ",\n";
@@ -781,14 +847,14 @@ struct Rf_config{
             config_file << "  \"validRatio\": " << valid_ratio << ",\n";
             config_file << "  \"trainFlag\": \"" << flagsToString(training_flag) << "\",\n";
             config_file << "  \"resultScore\": " << result_score << ",\n";
-            config_file << "  \"Estimated RAM (bytes)\": " << ram_usage <<",\n";
+            config_file << "  \"Estimated RAM (bytes)\": " << RAM_usage <<",\n";
             config_file << "  \"timestamp\": \"" << buf << "\",\n";
             config_file << "  \"author\": \"Viettran - tranvaviet@gmail.com\"\n"; 
             config_file << "}";
             config_file.close();
             // std::cout << "✅ Model configuration saved to " << config_path << "\n";
         }else {
-            std::cerr << "❌ Failed to open config file for writing: " << rf_config_path << "\n";
+            std::cerr << "❌ Failed to open config file for writing: " << path << "\n";
         }
     }
 
@@ -815,7 +881,8 @@ public:
     
     // Regression coefficients for the prediction formula
     // Formula: nodes = a0 + a1*min_split + a2*max_depth
-    float coefficients[3];
+    float coefficients[3];    
+    b_vector<float> peak_nodes;
 public:
     uint8_t accuracy; // in percentage
     uint8_t peak_percent;   // number of nodes at depth with maximum number of nodes / total number of nodes in tree
@@ -954,7 +1021,7 @@ public:
     }
     
     // Load training data from CSV file
-    bool init(const std::string& csv_file_path = "rf_tree_log.csv") {
+    bool init(const std::string& csv_file_path) {
         std::ifstream file(csv_file_path);
         if (!file.is_open()) {
             std::cerr << "❌ Failed to open CSV file: " << csv_file_path << std::endl;
@@ -1001,6 +1068,34 @@ public:
     void train() {
         std::cout << "🎯 Training node predictor..." << std::endl;
         compute_coefficients();
+        b_vector<int> percent_count{10};
+        for(auto peak : peak_nodes) {
+            if(peak > 25) percent_count[0]++;
+            if(peak > 26) percent_count[1]++;
+            if(peak > 27) percent_count[2]++;
+            if(peak > 28) percent_count[3]++;
+            if(peak > 29) percent_count[4]++;
+            if(peak > 30) percent_count[5]++;   
+            if(peak > 31) percent_count[6]++;
+            if(peak > 32) percent_count[7]++;
+            if(peak > 33) percent_count[8]++;
+            if(peak > 34) percent_count[9]++;
+        }
+        bool peak_found = false;
+        uint8_t percent_track = 25;  // start from 25% 
+        size_t total_peak_nodes = peak_nodes.size(); // Fix: use actual number of trees
+        for(auto count : percent_count) {
+            float percent = total_peak_nodes > 0 ? (float)count/(float)total_peak_nodes * 100.0f : 0.0f; // Fix: calculate actual percentage
+            std::cout << percent << "%, ";
+            if(percent < 10.0f && !peak_found) { // Fix: compare with 10.0 instead of 10
+                peak_percent = percent_track;
+                peak_found = true;
+            }
+            percent_track++;
+        }
+        if (!peak_found) { // If no percentage < 10%, use a reasonable default
+            peak_percent = 30;
+        }
         std::cout << "✅ Training completed" << std::endl;
     }
     

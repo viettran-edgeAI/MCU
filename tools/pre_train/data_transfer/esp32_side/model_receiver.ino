@@ -2,14 +2,8 @@
  * Pre-trained Model Receiver for ESP32
  * 
  * This sketch receives pre-trained random forest model files from a PC
- * and saves them to SPIFFS with their original filenames.    Serial.println("\n==================================================");
-    Serial.println("🤖 ESP32 Pre-trained Model Receiver");
-    Serial.println("    Ready to receive Random Forest model files");
-    Serial.println("    • Configuration (JSON)");
-    Serial.println("    • Node Predictor (memory estimation)");
-    Serial.println("    • Training Log (CSV)");
-    Serial.println("    • Decision Trees (binary data)");
-    Serial.println("==================================================");
+ * and saves them to SPIFFS with their original filenames.
+ * 
  * Files received:
  * - {model_name}_config.json (model configuration)
  * - {model_name}_node_pred.bin (memory estimation model)
@@ -121,7 +115,7 @@ void listReceivedFiles() {
     while (file) {
         if (!file.isDirectory()) {
             String fileName = file.name();
-            if (fileName.endsWith(".json")) {
+            if (fileName.endsWith(".json") && fileName.indexOf("_config") >= 0) {
                 Serial.printf("   📋 %s (%u bytes) - Configuration\n", fileName.c_str(), file.size());
                 configFiles++;
                 fileCount++;
@@ -133,8 +127,7 @@ void listReceivedFiles() {
                 Serial.printf("   📊 %s (%u bytes) - Training Log\n", fileName.c_str(), file.size());
                 logFiles++;
                 fileCount++;
-            }
-            } else if (fileName.startsWith("/tree_") && fileName.endsWith(".bin")) {
+            } else if (fileName.indexOf("tree_") >= 0 && fileName.endsWith(".bin")) {
                 // Count tree files but don't list them individually to save space
                 treeFiles++;
                 fileCount++;
@@ -151,7 +144,6 @@ void listReceivedFiles() {
     }
     
     if (treeFiles > 0) {
-        Serial.printf("   🌳 %d tree files (tree_0.bin to tree_%d.bin)\n", treeFiles, treeFiles-1);
     }
     
     if (fileCount == 0) {
@@ -356,20 +348,18 @@ void handleFileInfo() {
 
     // Determine file type for better user feedback
     String fileType = "📄 File";
-    if (strstr(receivedFileName, ".json")) {
+    if (strstr(receivedFileName, ".json") && strstr(receivedFileName, "_config")) {
         fileType = "📋 Configuration";
-    } else if (strstr(receivedFileName, "node_predictor") && strstr(receivedFileName, ".bin")) {
+    } else if (strstr(receivedFileName, "node_pred") && strstr(receivedFileName, ".bin")) {
         fileType = "🧮 Node Predictor";
-    } else if (strstr(receivedFileName, "rf_tree_log") && strstr(receivedFileName, ".csv")) {
+    } else if (strstr(receivedFileName, "node_log") && strstr(receivedFileName, ".csv")) {
         fileType = "📊 Training Log";
-    } else if (strstr(receivedFileName, "Rf_tree_log") && strstr(receivedFileName, ".csv")) {
-        fileType = "📊 Training Log";
-    } else if (strstr(receivedFileName, "tree_log") && strstr(receivedFileName, ".csv")) {
-        fileType = "📊 Training Log";
-    } else if (strstr(receivedFileName, ".csv")) {
-        fileType = "📊 CSV Data";
     } else if (strstr(receivedFileName, "tree_") && strstr(receivedFileName, ".bin")) {
         fileType = "🌳 Decision Tree";
+    } else if (strstr(receivedFileName, ".csv")) {
+        fileType = "📊 CSV Data";
+    } else if (strstr(receivedFileName, ".bin")) {
+        fileType = "📄 Binary Data";
     }
 
 
@@ -378,21 +368,18 @@ void handleFileInfo() {
         currentFile.close();
     }
     
-    // Create file path with leading slash for SPIFFS
+    // Create file path with leading slash for SPIFFS - preserve original filename
     String filePath = "/" + String(receivedFileName);
     
-    // For node predictor, save as standard filename for easy access
-    if (strstr(receivedFileName, "node_pred")) {
-        filePath = "/node_predictor.bin";  // Standard location for ESP32 integration
+    // Delete existing file if it exists to ensure clean overwrite
+    if (SPIFFS.exists(filePath)) {
+        Serial.printf("🗑️  Deleting existing file: %s\n", receivedFileName);
+        if (!SPIFFS.remove(filePath)) {
+            Serial.printf("⚠️  Warning: Failed to delete existing file: %s\n", receivedFileName);
+        }
     }
-    // For config files, ensure consistent naming
-    else if (strstr(receivedFileName, "_config") && strstr(receivedFileName, ".json")) {
-        filePath = "/rf_esp32_config.json";  // Standard config file location
-    }
-    // For tree log files, ensure consistent naming
-    else if (strstr(receivedFileName, "node_log") && strstr(receivedFileName, ".csv")) {
-        filePath = "/rf_tree_log.csv";  // Standard tree log location
-    }
+    
+    Serial.printf("📥 Receiving %s: %s (%u bytes)\n", fileType.c_str(), receivedFileName, receivedFileSize);
     
     currentFile = SPIFFS.open(filePath, FILE_WRITE);
     if (!currentFile) {
@@ -471,6 +458,7 @@ void handleFileChunk() {
         currentFile.flush();
         currentFile.close();
         filesReceived++;
+        Serial.printf("✅ Saved: %s (%u bytes)\n", receivedFileName, receivedFileSize);
         setLed(false);
         blinkLed(2, 100);  // Quick success blink
         currentState = State::WAITING_FOR_COMMAND;

@@ -142,12 +142,12 @@ namespace mcu {
         }
 
         // Save tree to SPIFFS for ESP32
-        void releaseTree(String base_name,  bool re_use = false) {
+        void releaseTree(String model_name,  bool re_use = false) {
             if(!re_use){
                 if (index == 255 || nodes.empty()) return;
 
-                char filename[32];  // filename = "/"+ base_name + "tree_" + index + ".bin"
-                snprintf(filename, sizeof(filename), "/%s_tree_%d.bin", base_name.c_str(), index);
+                char filename[32];  // filename = "/"+ model_name + "tree_" + index + ".bin"
+                snprintf(filename, sizeof(filename), "/%s_tree_%d.bin", model_name.c_str(), index);
                 
                 // Skip exists/remove check - just overwrite directly for performance
                 File file = SPIFFS.open(filename, FILE_WRITE);
@@ -205,7 +205,7 @@ namespace mcu {
         }
 
         // Load tree from SPIFFS into RAM for ESP32
-        void loadTree(String base_name = "", bool re_use = false) {
+        void loadTree(String model_name = "", bool re_use = false) {
             if (isLoaded) return;
             
             if (index == 255) {
@@ -214,7 +214,7 @@ namespace mcu {
             }
             
             char path_to_use[32];
-            snprintf(path_to_use, sizeof(path_to_use), "/%s_tree_%d.bin", base_name.c_str(), index);
+            snprintf(path_to_use, sizeof(path_to_use), "/%s_tree_%d.bin", model_name.c_str(), index);
             
             File file = SPIFFS.open(path_to_use, FILE_READ);
             if (!file) {
@@ -311,12 +311,12 @@ namespace mcu {
             isLoaded = false;
         }
 
-        void purgeTree(String base_name = "", bool rmf = true) {
+        void purgeTree(String model_name = "", bool rmf = true) {
             nodes.clear();
             nodes.fit(); // Release excess memory
             if(rmf && index != 255) {
                 char filename[32];
-                snprintf(filename, sizeof(filename), "/%s_tree_%d.bin", base_name.c_str(), index);
+                snprintf(filename, sizeof(filename), "/%s_tree_%d.bin", model_name.c_str(), index);
                 if (SPIFFS.exists(filename)) {
                     SPIFFS.remove(filename);
                     // Serial.printf("✅ Tree file removed: %s\n", filename);
@@ -403,6 +403,7 @@ namespace mcu {
             sampleChunks.clear();
             allLabels.clear();
         }
+        
         // Iterator class (returns Rf_sample by value for read-only querying)
         class iterator {
         private:
@@ -500,11 +501,7 @@ namespace mcu {
                 sampleChunks[location.first],
                 location.second * (bitsPerSample / 2),
                 (location.second + 1) * (bitsPerSample / 2)
-            );
-
-            
-            
-            
+            );    
         }
 
         // Helper method to store Rf_sample in chunked packed storage
@@ -1487,7 +1484,8 @@ namespace mcu {
         EXIST_DATA_PARAMS       = 0x02,          // data_params file exists
         EXIST_CATEGORIZER       = 0x04,         // categorizer file exists
         ABLE_TO_INFERENCE       = 0x08,        // able to run inference (all tree files exist)
-        ABLE_TO_TRAINING        = 0x10        // able to re_train
+        ABLE_TO_TRAINING        = 0x10,        // able to re_train
+        UNIFIED_MODEL_FORMAT    = 0x20         // model uses unified format (model_name_forest.bin)
     } Rf_base_flags;
 
     // Base file management class for Random Forest project status
@@ -1496,31 +1494,31 @@ namespace mcu {
     private:
         uint8_t flags; // flags indicating the status of member files
         mcu::b_vector<bool> buffer; //buffer for logging inference results (with internal 16 slots on stack - fast access)
-        String base_name;
+        String model_name;
     public:
-        Rf_base() : flags(static_cast<Rf_base_flags>(0)), base_name("") {}
-        Rf_base(const char* bn) : flags(static_cast<Rf_base_flags>(0)), base_name(bn) {
+        Rf_base() : flags(static_cast<Rf_base_flags>(0)), model_name("") {}
+        Rf_base(const char* bn) : flags(static_cast<Rf_base_flags>(0)), model_name(bn) {
             init(bn);
         }
 
-        void init(const char* base_name){
-            if (!base_name || strlen(base_name) == 0) {
+        void init(const char* model_name){
+            if (!model_name || strlen(model_name) == 0) {
                 Serial.println("❌ Base name is empty.");
                 return;
             } else {
-                this->base_name = String(base_name);
+                this->model_name = String(model_name);
                 
-                // BaseFile will now always have the structure "/base_name_nml.bin"
-                String baseFile_bin = "/" + this->base_name + "_nml.bin";
+                // BaseFile will now always have the structure "/model_name_nml.bin"
+                String baseFile_bin = "/" + this->model_name + "_nml.bin";
                 
                 // Check if binary base file exists
                 if(SPIFFS.exists(baseFile_bin.c_str())) {
                     // setup flags to indicate base file exists
                     flags = static_cast<Rf_base_flags>(EXIST_BASE_DATA);
                     
-                    // generate filenames for data_params and categorizer based on base_name
-                    String dataParamsFile = "/" + this->base_name + "_dp.csv"; // data_params file
-                    String categorizerFile = "/" + this->base_name + "_ctg.csv"; // categorizer file
+                    // generate filenames for data_params and categorizer based on model_name
+                    String dataParamsFile = "/" + this->model_name + "_dp.csv"; // data_params file
+                    String categorizerFile = "/" + this->model_name + "_ctg.csv"; // categorizer file
 
                     //  check categorizer file
                     if(SPIFFS.exists(categorizerFile.c_str())) {
@@ -1540,23 +1538,40 @@ namespace mcu {
                     }
 
                     // Check for tree files to set ABLE_TO_INFERENCE flag
-                    // We need to check if tree files exist (tree_0.bin, tree_1.bin, etc.)
-                    bool all_trees_exist = true;
+                    // Support both individual trees and unified model format
+                    String unifiedModelFile = String("/") + model_name + "_forest.bin";
+                    bool all_trees_exist = false;
                     uint8_t tree_count = 0;
                     
-                    // Check for tree files starting from tree_0.bin
-                    for(uint8_t i = 0; i < 100; i++) { // Max 100 trees check
-                        String treeFile = String("/") + base_name + "tree_" + String(i) + ".bin";
-                        if (SPIFFS.exists(treeFile.c_str())) {
-                            tree_count++;
-                        } else {
-                            break; // Stop when we find a missing tree file
+                    // First check for unified model format
+                    if (SPIFFS.exists(unifiedModelFile.c_str())) {
+                        flags |= static_cast<Rf_base_flags>(UNIFIED_MODEL_FORMAT);
+                        all_trees_exist = true;
+                        Serial.printf("✅ Found unified model file: %s\n", unifiedModelFile.c_str());
+                    } else {
+                        // Check for individual tree files starting from tree_0.bin
+                        for(uint8_t i = 0; i < 100; i++) { // Max 100 trees check
+                            String treeFile = String("/") + model_name + "_tree_" + String(i) + ".bin";
+                            if (SPIFFS.exists(treeFile.c_str())) {
+                                tree_count++;
+                            } else {
+                                break; // Stop when we find a missing tree file
+                            }
+                        }
+                        
+                        if (tree_count > 0) {
+                            all_trees_exist = true;
+                            Serial.printf("✅ Found %d individual tree files\n", tree_count);
                         }
                     }
                     
-                    if(tree_count > 0 && flags & EXIST_CATEGORIZER) {
+                    if(all_trees_exist && (flags & EXIST_CATEGORIZER)) {
                         flags |= static_cast<Rf_base_flags>(ABLE_TO_INFERENCE);
-                        Serial.printf("✅ Found %d tree files, inference enabled\n", tree_count);
+                        if (flags & UNIFIED_MODEL_FORMAT) {
+                            Serial.println("✅ Inference enabled (unified model format)");
+                        } else {
+                            Serial.printf("✅ Inference enabled (%d individual tree files)\n", tree_count);
+                        }
                     } 
                     
                 } else {
@@ -1569,101 +1584,126 @@ namespace mcu {
         }
 
         // Get base name
-        String get_baseName() const {
-            return base_name;
+        String get_model_name() const {
+            return model_name;
         }
 
-        void set_baseName(const char* bn) {
-            String old_base_name = base_name;
+        void set_model_name(const char* bn) {
+            String old_model_name = model_name;
             if (bn && strlen(bn) > 0) {
-                base_name = String(bn);
+                model_name = String(bn);
                 // find and rename all existing related files
 
                 // base file
-                String old_baseFile = "/" + old_base_name + "_nml.bin";
-                String new_baseFile = "/" + base_name + "_nml.bin";
+                String old_baseFile = "/" + old_model_name + "_nml.bin";
+                String new_baseFile = "/" + model_name + "_nml.bin";
                 cloneFile(old_baseFile, new_baseFile);
                 SPIFFS.remove(old_baseFile.c_str());
 
                 // data_params file
-                String old_dpFile = "/" + old_base_name + "_dp.csv";
-                String new_dpFile = "/" + base_name + "_dp.csv";
+                String old_dpFile = "/" + old_model_name + "_dp.csv";
+                String new_dpFile = "/" + model_name + "_dp.csv";
                 cloneFile(old_dpFile, new_dpFile);
                 SPIFFS.remove(old_dpFile.c_str());
 
                 // categorizer file
-                String old_ctgFile = "/" + old_base_name + "_ctg.csv";
-                String new_ctgFile = "/" + base_name + "_ctg.csv";
+                String old_ctgFile = "/" + old_model_name + "_ctg.csv";
+                String new_ctgFile = "/" + model_name + "_ctg.csv";
                 cloneFile(old_ctgFile, new_ctgFile);
                 SPIFFS.remove(old_ctgFile.c_str());
 
                 // inference log file
-                String old_logFile = "/" + old_base_name + "_infer_log.bin";
-                String new_logFile = "/" + base_name + "_infer_log.bin";
+                String old_logFile = "/" + old_model_name + "_infer_log.bin";
+                String new_logFile = "/" + model_name + "_infer_log.bin";
                 cloneFile(old_logFile, new_logFile);
                 SPIFFS.remove(old_logFile.c_str());
 
                 // node predictor file
-                String old_nodePredFile = "/" + old_base_name + "_node_pred.bin";
-                String new_nodePredFile = "/" + base_name + "_node_pred.bin";
+                String old_nodePredFile = "/" + old_model_name + "_node_pred.bin";
+                String new_nodePredFile = "/" + model_name + "_node_pred.bin";
                 cloneFile(old_nodePredFile, new_nodePredFile);
                 SPIFFS.remove(old_nodePredFile.c_str());
 
                 // config file
-                String old_configFile = "/" + old_base_name + "_config.json";
-                String new_configFile = "/" + base_name + "_config.json";
+                String old_configFile = "/" + old_model_name + "_config.json";
+                String new_configFile = "/" + model_name + "_config.json";
                 cloneFile(old_configFile, new_configFile);
                 SPIFFS.remove(old_configFile.c_str());
 
-                // tree files
-                for(uint8_t i = 0; i < 50; i++) { // Max 50 trees check
-                    String old_treeFile = "/" + old_base_name + "tree_" + String(i) + ".bin";
-                    String new_treeFile = "/" + base_name + "tree_" + String(i) + ".bin";
-                    if (SPIFFS.exists(old_treeFile.c_str())) {
-                        cloneFile(old_treeFile, new_treeFile);
-                        SPIFFS.remove(old_treeFile.c_str());
-                    }else{
-                        break; // Stop when we find a missing tree file
+                // tree files - handle both individual and unified formats
+                String old_unifiedFile = "/" + old_model_name + "_forest.bin";
+                String new_unifiedFile = "/" + model_name + "_forest.bin";
+                
+                if (SPIFFS.exists(old_unifiedFile.c_str())) {
+                    // Handle unified model format
+                    cloneFile(old_unifiedFile, new_unifiedFile);
+                    SPIFFS.remove(old_unifiedFile.c_str());
+                } else {
+                    // Handle individual tree files
+                    for(uint8_t i = 0; i < 50; i++) { // Max 50 trees check
+                        String old_treeFile = "/" + old_model_name + "_tree_" + String(i) + ".bin";
+                        String new_treeFile = "/" + model_name + "_tree_" + String(i) + ".bin";
+                        if (SPIFFS.exists(old_treeFile.c_str())) {
+                            cloneFile(old_treeFile, new_treeFile);
+                            SPIFFS.remove(old_treeFile.c_str());
+                        }else{
+                            break; // Stop when we find a missing tree file
+                        }
                     }
                 }
                 // Re-initialize flags based on new base name
-                init(base_name.c_str());  
+                init(model_name.c_str());  
             }
         }
 
         // for Rf_data: baseData 
         String get_baseFile() const {
-            return "/" + base_name + "_nml.bin";
+            return "/" + model_name + "_nml.bin";
         }
 
         // for Rf_config 
         String get_dpFile() const {
-            return "/" + base_name + "_dp.csv";
+            return "/" + model_name + "_dp.csv";
         }
 
         // for Rf_categorizer
         String get_ctgFile() const {
-            return "/" + base_name + "_ctg.csv";
+            return "/" + model_name + "_ctg.csv";
         }
 
         // for Rf_base 
         String get_inferenceLogFile() const {
-            return "/" + base_name + "_infer_log.bin";
+            return "/" + model_name + "_infer_log.bin";
         }
 
         // for Rf_config
         String get_configFile() const {
-            return "/" + base_name + "_config.json";
+            return "/" + model_name + "_config.json";
         }
 
         // for Rf_node_predictor
         String get_nodePredictFile() const {
-            return "/" + base_name + "_node_pred.bin";
+            return "/" + model_name + "_node_pred.bin";
+        }
+
+        // for unified model format (all trees in one file)
+        String get_unifiedModelFile() const {
+            return "/" + model_name + "_forest.bin";
+        }
+
+        // for individual tree files (tree index required)
+        String get_treeFile(uint8_t tree_index) const {
+            return "/" + model_name + "_tree_" + String(tree_index) + ".bin";
         }
 
         // Check if base file is in CSV format (always false now as we only use binary)
         bool baseFile_is_csv() const {
             return false; // Always binary format now
+        }
+
+        // Check if model uses unified format (model_name_forest.bin)
+        bool is_unified_model() const {
+            return (flags & UNIFIED_MODEL_FORMAT) != 0;
         }
 
         bool baseFile_exists() const {
@@ -1686,6 +1726,27 @@ namespace mcu {
         // fast check for able to inference 
         bool able_to_inference(uint8_t num_trees) const {
             return (flags & ABLE_TO_INFERENCE) != 0;
+        }
+
+        // overloaded method for unified models (no tree count needed)
+        bool able_to_inference() const {
+            return (flags & ABLE_TO_INFERENCE) != 0;
+        }
+
+        // Get information about the model format and files
+        void print_model_info() const {
+            Serial.printf("📋 Model: %s\n", model_name.c_str());
+            Serial.printf("   Base data: %s\n", baseFile_exists() ? "✅" : "❌");
+            Serial.printf("   Data params: %s\n", dataParams_exists() ? "✅" : "❌");
+            Serial.printf("   Categorizer: %s\n", categorizer_exists() ? "✅" : "❌");
+            Serial.printf("   Training ready: %s\n", able_to_training() ? "✅" : "❌");
+            Serial.printf("   Inference ready: %s\n", able_to_inference() ? "✅" : "❌");
+            
+            if (is_unified_model()) {
+                Serial.printf("   Model file: %s\n", get_unifiedModelFile().c_str());
+            } else if (able_to_inference()) {
+                Serial.println("   Individual tree files found");
+            }
         }
 
     private:
@@ -1850,7 +1911,7 @@ namespace mcu {
                 total_inferences++;
                 if(buffer[i]) {
                     correct_inferences++;
-                }
+                } 
             }
             file.close();
             return mcu::make_pair(total_inferences, correct_inferences);
@@ -1919,7 +1980,7 @@ namespace mcu {
             for (int i = 0; i < 3; i++) {
                 coefficients[i] = 0.0f;
             }
-            // get logfile path from filename : "/base_name_node_pred.bin" -> "/base_name_node_log.csv"
+            // get logfile path from filename : "/model_name_node_pred.bin" -> "/model_name_node_log.csv"
             node_predictor_log = "";
             if (filename.length() > 0) {
                 const int suf_len = 14; // "_node_pred.bin"
@@ -1944,7 +2005,7 @@ namespace mcu {
             for (int i = 0; i < 3; i++) {
                 coefficients[i] = 0.0f;
             }
-            // get logfile path from filename : "/base_name_node_pred.bin" -> "/base_name_node_log.csv"
+            // get logfile path from filename : "/model_name_node_pred.bin" -> "/model_name_node_log.csv"
             node_predictor_log = "";
             if (filename.length() > 0) {
                 const int suf_len = 14; // "_node_pred.bin"
@@ -2404,6 +2465,16 @@ namespace mcu {
             if (!SPIFFS.exists(node_predictor_log)) return false;
             File file = SPIFFS.open(node_predictor_log, FILE_READ);
             bool result = file && file.size() > 0;
+            // only retrain if log file has more 4 samples (excluding header)
+            if (result) {
+                size_t line_count = 0;
+                while (file.available()) {
+                    String line = file.readStringUntil('\n');
+                    line.trim();
+                    if (line.length() > 0) line_count++;
+                }
+                result = line_count > 4; // more than header + 3 samples
+            }
             if (file) file.close();
             return result;
         }

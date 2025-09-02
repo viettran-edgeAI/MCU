@@ -1167,38 +1167,45 @@ namespace mcu {
             }
         }
     };
-/*
+   /*
     ------------------------------------------------------------------------------------------------------------------
     ---------------------------------------------------- RF_CONFIG ---------------------------------------------------
     ------------------------------------------------------------------------------------------------------------------
     */
+
+    typedef enum Rf_training_score : uint8_t {
+        OOB_SCORE = 0x00,   // default 
+        VALID_SCORE = 0x01,
+        K_FOLD_SCORE = 0x02
+    } Rf_training_score;
+
     // Configuration class for Random Forest parameters
     class Rf_config {
     public:
-        // Core training parameters
+        // Core model configuration
         uint8_t num_trees;
+        uint32_t random_seed;
         uint8_t min_split;
         uint8_t max_depth;
         bool use_boostrap;
         bool use_gini;
-        bool use_validation;
-        bool crossValidation;
         uint8_t k_fold;
         float boostrap_ratio; // Ratio of bootstrap samples to original size
         float unity_threshold;
         float impurity_threshold;
-        float combine_ratio;
         float train_ratio;
+        float test_ratio;
         float valid_ratio;
+        Rf_training_score training_score;
         uint8_t train_flag;
         float result_score;
         bool keep_trees_in_memory; // Performance flag to avoid releasing trees during evaluation
         uint32_t estimatedRAM;
 
+        // Dataset parameters (set after loading data)
         uint16_t num_samples;
         uint16_t num_features;
         uint8_t num_labels;
-
         mcu::b_vector<uint8_t, mcu::SMALL> min_split_range;
         mcu::b_vector<uint8_t, mcu::SMALL> max_depth_range;  
         
@@ -1208,19 +1215,19 @@ namespace mcu {
         Rf_config() : isLoaded(false) {
             // Set default values
             num_trees = 20;
+            random_seed = 37;
             min_split = 2;
             max_depth = 13;
             use_boostrap = true;
             boostrap_ratio = 0.632f; // Default bootstrap ratio
             use_gini = false;
-            use_validation = false;
-            crossValidation = false;
             k_fold = 4;
             unity_threshold = 0.125;
             impurity_threshold = 0.1;
-            combine_ratio = 0.386;
-            train_ratio = 0.75;
-            valid_ratio = 0.0;
+            train_ratio = 0.7;
+            test_ratio = 0.15;
+            valid_ratio = 0.15;
+            training_score = OOB_SCORE;
             train_flag = 0x01; // ACCURACY
             result_score = 0.0;
             keep_trees_in_memory = true; // Default to keeping trees for better performance
@@ -1286,22 +1293,22 @@ namespace mcu {
 
                 // Write JSON format preserving timestamp and author
                 file.println("{");
-                file.printf("  \"num_trees\": %d,\n", num_trees);
-                file.printf("  \"min_split\": %d,\n", min_split);
-                file.printf("  \"max_depth\": %d,\n", max_depth);
-                file.printf("  \"use_boostrap\": %s,\n", use_boostrap ? "true" : "false");
-                file.printf("  \"boostrap_ratio\": %.3f,\n", boostrap_ratio);
-                file.printf("  \"use_gini\": %s,\n", use_gini ? "true" : "false");
-                file.printf("  \"use_validation\": %s,\n", use_validation ? "true" : "false");
-                file.printf("  \"crossValidation\": %s,\n", crossValidation ? "true" : "false");
+                file.printf("  \"numTrees\": %d,\n", num_trees);
+                file.printf("  \"randomSeed\": %d,\n", random_seed);
+                file.printf("  \"train_ratio\": %.1f,\n", train_ratio);
+                file.printf("  \"test_ratio\": %.2f,\n", test_ratio);
+                file.printf("  \"valid_ratio\": %.2f,\n", valid_ratio);
+                file.printf("  \"minSplit\": %d,\n", min_split);
+                file.printf("  \"maxDepth\": %d,\n", max_depth);
+                file.printf("  \"useBootstrap\": %s,\n", use_boostrap ? "true" : "false");
+                file.printf("  \"boostrapRatio\": %.3f,\n", boostrap_ratio);
+                file.printf("  \"useGini\": %s,\n", use_gini ? "true" : "false");
+                file.printf("  \"trainingScore\": \"%s\",\n", getTrainingScoreString(training_score).c_str());
                 file.printf("  \"k_fold\": %d,\n", k_fold);
-                file.printf("  \"unity_threshold\": %.3f,\n", unity_threshold);
-                file.printf("  \"impurity_threshold\": %.1f,\n", impurity_threshold);
-                file.printf("  \"combine_ratio\": %.3f,\n", combine_ratio);
-                file.printf("  \"train_ratio\": %.2f,\n", train_ratio);
-                file.printf("  \"valid_ratio\": %.1f,\n", valid_ratio);
-                file.printf("  \"train_flag\": \"%s\",\n", getFlagString(train_flag).c_str());
-                file.printf("  \"result_score\": %.1f,\n", result_score);
+                file.printf("  \"unityThreshold\": %.3f,\n", unity_threshold);
+                file.printf("  \"impurityThreshold\": %.1f,\n", impurity_threshold);
+                file.printf("  \"trainFlag\": \"%s\",\n", getFlagString(train_flag).c_str());
+                file.printf("  \"resultScore\": %.6f,\n", result_score);
                 file.printf("  \"Estimated RAM (bytes)\": %d,\n", estimatedRAM);
                 
                 // Preserve existing timestamp and author
@@ -1368,21 +1375,21 @@ namespace mcu {
     private:
         // Simple JSON parser for configuration
         void parseJSONConfig(const String& jsonStr) {
-            // Use the actual keys from esp32_config.json
+            // Use the actual keys from digit_data_config.json
             num_trees = extractIntValue(jsonStr, "numTrees");              // ✅ Fixed
+            random_seed = extractIntValue(jsonStr, "randomSeed");          // ✅ New parameter
             min_split = extractIntValue(jsonStr, "minSplit");              // ✅ Fixed  
             max_depth = extractIntValue(jsonStr, "maxDepth");              // ✅ Fixed
             use_boostrap = extractBoolValue(jsonStr, "useBootstrap");      // ✅ Fixed
             boostrap_ratio = extractFloatValue(jsonStr, "boostrapRatio");  // ✅ Fixed
             use_gini = extractBoolValue(jsonStr, "useGini");               // ✅ Fixed
-            use_validation = extractBoolValue(jsonStr, "useValidation");   // ✅ Fixed
-            crossValidation = extractBoolValue(jsonStr, "crossValidation"); // ✅ Already correct
             k_fold = extractIntValue(jsonStr, "k_fold");                   // ✅ Already correct
             unity_threshold = extractFloatValue(jsonStr, "unityThreshold"); // ✅ Fixed
             impurity_threshold = extractFloatValue(jsonStr, "impurityThreshold"); // ✅ Fixed
-            combine_ratio = extractFloatValue(jsonStr, "combineRatio");     // ✅ Fixed
-            train_ratio = extractFloatValue(jsonStr, "trainRatio");         // ✅ Fixed
-            valid_ratio = extractFloatValue(jsonStr, "validRatio");         // ✅ Fixed
+            train_ratio = extractFloatValue(jsonStr, "train_ratio");       // ✅ Fixed
+            test_ratio = extractFloatValue(jsonStr, "test_ratio");         // ✅ New parameter
+            valid_ratio = extractFloatValue(jsonStr, "valid_ratio");       // ✅ Fixed
+            training_score = parseTrainingScore(extractStringValue(jsonStr, "trainingScore")); // ✅ New parameter
             train_flag = parseFlagValue(extractStringValue(jsonStr, "trainFlag")); // ✅ Fixed
             result_score = extractFloatValue(jsonStr, "resultScore");       // ✅ Fixed
             estimatedRAM = extractIntValue(jsonStr, "Estimated RAM (bytes)"); // ✅ Already correct
@@ -1407,6 +1414,24 @@ namespace mcu {
                 case 0x08: return "F1_SCORE";
                 case 0x00: return "EARLY_STOP";
                 default: return "ACCURACY";
+            }
+        }
+
+        // Convert string to Rf_training_score enum
+        Rf_training_score parseTrainingScore(const String& scoreStr) {
+            if (scoreStr == "oob_score") return OOB_SCORE;
+            if (scoreStr == "valid_score") return VALID_SCORE;
+            if (scoreStr == "k_fold_score") return K_FOLD_SCORE;
+            return VALID_SCORE; // Default to VALID_SCORE
+        }
+
+        // Convert Rf_training_score enum to string
+        String getTrainingScoreString(Rf_training_score score) {
+            switch(score) {
+                case OOB_SCORE: return "oob_score";
+                case VALID_SCORE: return "valid_score";
+                case K_FOLD_SCORE: return "k_fold_score";
+                default: return "valid_score";
             }
         }
 
@@ -1469,6 +1494,10 @@ namespace mcu {
             if (secondQuoteIndex == -1) return "";
             
             return json.substring(firstQuoteIndex + 1, secondQuoteIndex);
+        }
+        public:
+        bool use_validation() const {
+            return valid_ratio > 0.0f;
         }
     };
 
@@ -3104,6 +3133,10 @@ namespace mcu {
         }
 
         Rf_random(uint64_t seed, bool use_provided_seed) {
+            init(seed, use_provided_seed);
+        }
+
+        void init(uint64_t seed, bool use_provided_seed) {
             if (use_provided_seed) {
                 base_seed = seed;
             } else if (has_global()) {
@@ -3171,5 +3204,207 @@ namespace mcu {
             return h;
         }
     };
+    
+    /*
+    ------------------------------------------------------------------------------------------------------------------------------
+    ------------------------------------------------ CONFUSION MATRIX ------------------------------------------------------------
+    ------------------------------------------------------------------------------------------------------------------------------
+    */
+
+    class Rf_matrix_score{
+    public:
+        // Confusion matrix components
+        b_vector<uint16_t, SMALL, 4> tp;
+        b_vector<uint16_t, SMALL, 4> fp;
+        b_vector<uint16_t, SMALL, 4> fn;
+
+        uint16_t total_predict = 0;
+        uint16_t correct_predict = 0;
+        uint8_t num_labels;
+        uint8_t training_flag;
+
+        // Constructor
+        Rf_matrix_score(uint8_t num_labels, uint8_t training_flag) 
+            : num_labels(num_labels), training_flag(training_flag) {
+            // Ensure vectors have logical length == num_labels and are zeroed
+            tp.clear(); fp.clear(); fn.clear();
+            tp.reserve(num_labels); fp.reserve(num_labels); fn.reserve(num_labels);
+            for (uint8_t i = 0; i < num_labels; ++i) { tp.push_back(0); fp.push_back(0); fn.push_back(0); }
+            total_predict = 0;
+            correct_predict = 0;
+        }
+        void init(uint8_t num_labels, uint8_t training_flag) {
+        this->num_labels = num_labels;
+        this->training_flag = training_flag;
+        tp.clear(); fp.clear(); fn.clear();
+        tp.reserve(num_labels); fp.reserve(num_labels); fn.reserve(num_labels);
+        for (uint8_t i = 0; i < num_labels; ++i) { tp.push_back(0); fp.push_back(0); fn.push_back(0); }
+        total_predict = 0;
+        correct_predict = 0;
+        }
+
+        // Reset all counters
+        void reset() {
+            total_predict = 0;
+            correct_predict = 0;
+            // Reset existing buffers safely; ensure length matches num_labels
+            if (tp.size() != num_labels) {
+                tp.clear(); tp.reserve(num_labels); for (uint8_t i = 0; i < num_labels; ++i) tp.push_back(0);
+            } else { tp.fill(0); }
+            if (fp.size() != num_labels) {
+                fp.clear(); fp.reserve(num_labels); for (uint8_t i = 0; i < num_labels; ++i) fp.push_back(0);
+            } else { fp.fill(0); }
+            if (fn.size() != num_labels) {
+                fn.clear(); fn.reserve(num_labels); for (uint8_t i = 0; i < num_labels; ++i) fn.push_back(0);
+            } else { fn.fill(0); }
+        }
+
+        // Update confusion matrix with a prediction
+        void update_prediction(uint8_t actual_label, uint8_t predicted_label) {
+            if(actual_label >= num_labels || predicted_label >= num_labels) return;
+            
+            total_predict++;
+            if(predicted_label == actual_label) {
+                correct_predict++;
+                tp[actual_label]++;
+            } else {
+                fn[actual_label]++;
+                fp[predicted_label]++;
+            }
+        }
+
+        // Get precision for all labels
+        b_vector<pair<uint8_t, float>> get_precisions() {
+            b_vector<pair<uint8_t, float>> precisions;
+            precisions.reserve(num_labels);
+            for(uint8_t label = 0; label < num_labels; label++) {
+                float prec = (tp[label] + fp[label] == 0) ? 0.0f : 
+                            static_cast<float>(tp[label]) / (tp[label] + fp[label]);
+                precisions.push_back(make_pair(label, prec));
+            }
+            return precisions;
+        }
+
+        // Get recall for all labels
+        b_vector<pair<uint8_t, float>> get_recalls() {
+            b_vector<pair<uint8_t, float>> recalls;
+            recalls.reserve(num_labels);
+            for(uint8_t label = 0; label < num_labels; label++) {
+                float rec = (tp[label] + fn[label] == 0) ? 0.0f : 
+                        static_cast<float>(tp[label]) / (tp[label] + fn[label]);
+                recalls.push_back(make_pair(label, rec));
+            }
+            return recalls;
+        }
+
+        // Get F1 scores for all labels
+        b_vector<pair<uint8_t, float>> get_f1_scores() {
+            b_vector<pair<uint8_t, float>> f1s;
+            f1s.reserve(num_labels);
+            for(uint8_t label = 0; label < num_labels; label++) {
+                float prec = (tp[label] + fp[label] == 0) ? 0.0f : 
+                            static_cast<float>(tp[label]) / (tp[label] + fp[label]);
+                float rec = (tp[label] + fn[label] == 0) ? 0.0f : 
+                        static_cast<float>(tp[label]) / (tp[label] + fn[label]);
+                float f1 = (prec + rec == 0.0f) ? 0.0f : 2.0f * prec * rec / (prec + rec);
+                f1s.push_back(make_pair(label, f1));
+            }
+            return f1s;
+        }
+
+        // Get accuracy for all labels (overall accuracy for multi-class)
+        b_vector<pair<uint8_t, float>> get_accuracies() {
+            b_vector<pair<uint8_t, float>> accuracies;
+            accuracies.reserve(num_labels);
+            float overall_accuracy = (total_predict == 0) ? 0.0f : 
+                                    static_cast<float>(correct_predict) / total_predict;
+            for(uint8_t label = 0; label < num_labels; label++) {
+                accuracies.push_back(make_pair(label, overall_accuracy));
+            }
+            return accuracies;
+        }
+
+        // Calculate combined score based on training flags
+        float calculate_score(const char* score_type = "Combined") {
+            if(total_predict == 0) {
+                Serial.printf("❌ No valid %s predictions found!\n", score_type);
+                return 0.0f;
+            }
+
+            float combined_result = 0.0f;
+            uint8_t numFlags = 0;
+
+            // Calculate accuracy
+            if(training_flag & 0x01) { // ACCURACY flag
+                float accuracy = static_cast<float>(correct_predict) / total_predict;
+                Serial.printf("%s Accuracy: %.3f (%d/%d)\n", score_type, accuracy, correct_predict, total_predict);
+                combined_result += accuracy;
+                numFlags++;
+            }
+
+            // Calculate precision
+            if(training_flag & 0x02) { // PRECISION flag
+                float total_precision = 0.0f;
+                uint8_t valid_labels = 0;
+                
+                for(uint8_t label = 0; label < num_labels; label++) {
+                    if(tp[label] + fp[label] > 0) {
+                        total_precision += static_cast<float>(tp[label]) / (tp[label] + fp[label]);
+                        valid_labels++;
+                    }
+                }
+                
+                float precision = valid_labels > 0 ? total_precision / valid_labels : 0.0f;
+                Serial.printf("%s Precision: %.3f\n", score_type, precision);
+                combined_result += precision;
+                numFlags++;
+            }
+
+            // Calculate recall
+            if(training_flag & 0x04) { // RECALL flag
+                float total_recall = 0.0f;
+                uint8_t valid_labels = 0;
+                
+                for(uint8_t label = 0; label < num_labels; label++) {
+                    if(tp[label] + fn[label] > 0) {
+                        total_recall += static_cast<float>(tp[label]) / (tp[label] + fn[label]);
+                        valid_labels++;
+                    }
+                }
+                
+                float recall = valid_labels > 0 ? total_recall / valid_labels : 0.0f;
+                Serial.printf("%s Recall: %.3f\n", score_type, recall);
+                combined_result += recall;
+                numFlags++;
+            }
+
+            // Calculate F1-Score
+            if(training_flag & 0x08) { // F1_SCORE flag
+                float total_f1 = 0.0f;
+                uint8_t valid_labels = 0;
+                
+                for(uint8_t label = 0; label < num_labels; label++) {
+                    if(tp[label] + fp[label] > 0 && tp[label] + fn[label] > 0) {
+                        float precision = static_cast<float>(tp[label]) / (tp[label] + fp[label]);
+                        float recall = static_cast<float>(tp[label]) / (tp[label] + fn[label]);
+                        if(precision + recall > 0) {
+                            float f1 = 2.0f * precision * recall / (precision + recall);
+                            total_f1 += f1;
+                            valid_labels++;
+                        }
+                    }
+                }
+                
+                float f1_score = valid_labels > 0 ? total_f1 / valid_labels : 0.0f;
+                Serial.printf("%s F1-Score: %.3f\n", score_type, f1_score);
+                combined_result += f1_score;
+                numFlags++;
+            }
+
+            // Return combined score
+            return numFlags > 0 ? combined_result / numFlags : 0.0f;
+        }
+    };
+
 
 } // namespace mcu

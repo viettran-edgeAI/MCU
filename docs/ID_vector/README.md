@@ -4,7 +4,9 @@
 
 ### Overview 
 
-ID_vector - member of mcu library space is a vector class specially designed to store IDs (positive integers) with optimization in both aspects: memory and speed surpassing conventional containers (vector, unordered_set..)
+ID_vector - member of mcu library space is a vector class specially designed to store IDs (positive integers) with optimization in both aspects: memory and speed surpassing conventional containers (vector, unordered_set..). 
+
+**Latest Enhancement (2025)**: Now includes powerful bulk operations, range manipulation, and vector arithmetic capabilities for advanced data processing workflows.
 
 ### Core Mechanism
 
@@ -88,7 +90,7 @@ We conducted extensive benchmarks comparing `ID_vector` against `std::unordered_
 
 #### Small Sparse Dataset (1000 elements, max_id=10000)
 
-| Operation | ID_vector<1> | unordered_set | std::vector | Speedup vs US | Speedup vs Vector |
+| Operation | ID_vector | unordered_set | std::vector | Speedup vs US | Speedup vs Vector |
 |-----------|-------------|---------------|-------------|---------------|-------------------|
 | **Insertion** | 1,553 ns | 54,433 ns | 68,770 ns | 35.1x | 44.3x |
 | **Lookup** | 751 ns | 8,596 ns | 45,927 ns | 11.4x | 61.2x |
@@ -98,7 +100,7 @@ We conducted extensive benchmarks comparing `ID_vector` against `std::unordered_
 
 #### Dense Dataset (1000 consecutive elements)
 
-| Operation | ID_vector<1> | unordered_set | std::vector | Speedup vs US | Speedup vs Vector |
+| Operation | ID_vector | unordered_set | std::vector | Speedup vs US | Speedup vs Vector |
 |-----------|-------------|---------------|-------------|---------------|-------------------|
 | **Insertion** | 1,193 ns | 25,709 ns | 8,476 ns | 21.5x | 7.1x |
 | **Lookup** | 731 ns | 3,286 ns | 30,618 ns | 4.5x | 41.9x |
@@ -108,7 +110,7 @@ We conducted extensive benchmarks comparing `ID_vector` against `std::unordered_
 
 #### Large Dataset with Duplicates (BPV=2)
 
-| Operation | ID_vector<2> | unordered_set | std::vector | Speedup vs US | Speedup vs Vector |
+| Operation | ID_vector | unordered_set | std::vector | Speedup vs US | Speedup vs Vector |
 |-----------|-------------|---------------|-------------|---------------|-------------------|
 | **Insertion** | 22,663 ns | 195,650 ns | 849,441 ns | 8.6x | 37.5x |
 | **Lookup** | 10,029 ns | 45,837 ns | 510,779 ns | 4.6x | 50.9x |
@@ -118,7 +120,7 @@ We conducted extensive benchmarks comparing `ID_vector` against `std::unordered_
 
 #### Very Large Sparse (5000 elements, max_id=1,000,000)
 
-| Operation | ID_vector<1> | unordered_set | std::vector | Speedup vs US | Speedup vs Vector |
+| Operation | ID_vector | unordered_set | std::vector | Speedup vs US | Speedup vs Vector |
 |-----------|-------------|---------------|-------------|---------------|-------------------|
 | **Insertion** | 32,261 ns | 228,984 ns | 730,946 ns | 7.1x | 22.7x |
 | **Lookup** | 10,179 ns | 55,074 ns | 263,380 ns | 5.4x | 25.9x |
@@ -622,7 +624,7 @@ vec1 -= vec2;                           // vec1 now contains: (empty)
 ### Exception Handling Example
 
 ```cpp
-ID_vector<uint16_t, 1> vec(1000, 2000);
+ID_vector<uint16_t> vec(1000, 2000);
 
 try {
     vec.push_back(500);      // Throws: below min_id
@@ -644,6 +646,196 @@ size_t estimated_memory_bytes() const {
            sizeof(*this);
 }
 ```
+
+## Part 4: Enhanced Features (New)
+
+The ID_vector has been significantly enhanced with powerful new features that provide advanced bulk operations, range manipulation, and vector arithmetic capabilities.
+
+### Range Operations
+
+#### Fill Operation
+Fills the vector with all possible values in the current range. For `BitsPerValue > 1`, each ID is filled with the maximum possible count.
+
+```cpp
+ID_vector<uint8_t> vec(10, 15);  // Range 10-15
+vec.fill();                         // Contains: 10, 11, 12, 13, 14, 15
+
+ID_vector<uint8_t, 2> vec2(5, 7);   // BPV=2 (max count = 3)
+vec2.fill();                        // Contains: 5,5,5, 6,6,6, 7,7,7
+```
+
+**Key Properties:**
+- Fills with all IDs in current `[min_id, max_id]` range
+- For `BitsPerValue > 1`: fills with `MAX_COUNT = (2^BitsPerValue - 1)` instances
+- Clears existing data before filling
+- Safe for any valid range
+
+#### Range Erasure
+Removes all instances of IDs within a specified range **without changing the vector's allocated range**.
+
+```cpp
+ID_vector<uint8_t> vec(1, 20);   // Allocated range: 1-20
+vec.insert_range(5, 15);            // Contains: 5,6,7,8,9,10,11,12,13,14,15
+vec.erase_range(8, 12);             // Contains: 5,6,7,13,14,15
+
+// Vector still has range 1-20, but only contains: 5,6,7,13,14,15
+assert(vec.get_minID() == 1);       // Range unchanged
+assert(vec.get_maxID() == 20);      // Range unchanged
+```
+
+**Key Properties:**
+- **Range Preservation**: Never changes `min_id` or `max_id` of the vector
+- **Safe Overlap**: Only affects IDs within both the specified range AND current vector range
+- **Invalid Range Handling**: Silently ignores invalid ranges (start > end)
+- **Performance**: O(range_size) operation
+
+#### Range Insertion  
+Adds all IDs within a specified range **with automatic range expansion**.
+
+```cpp
+ID_vector<uint8_t> vec(10, 15);  // Initial range: 10-15
+vec.insert_range(5, 8);             // Expands range to accommodate 5-8
+vec.insert_range(18, 20);           // Further expands range to include 18-20
+
+// Vector now contains: 5,6,7,8,10,11,12,13,14,15,18,19,20
+assert(vec.get_minID() <= 5);       // Range expanded downward
+assert(vec.get_maxID() >= 20);      // Range expanded upward
+```
+
+**Key Properties:**
+- **Automatic Expansion**: Extends `min_id`/`max_id` as needed to accommodate new range
+- **One Instance Per ID**: Adds exactly one instance of each ID in the range
+- **Invalid Range Handling**: Silently ignores invalid ranges (start > end)
+- **Memory Reallocation**: May trigger memory reallocation for range expansion
+
+### Vector Arithmetic Operations
+
+#### Vector Addition (`+`, `+=`)
+Adds **one instance** of each unique ID from the second vector to the first vector.
+
+```cpp
+ID_vector<uint8_t, 2> vec1(1, 5);
+vec1.push_back(2); vec1.push_back(2); vec1.push_back(4);  // vec1: [2,2,4]
+
+ID_vector<uint8_t, 2> vec2(3, 7);  
+vec2.push_back(2); vec2.push_back(6);                     // vec2: [2,6]
+
+// Addition creates new vector
+auto result = vec1 + vec2;  // result: [2,2,2,4,6]  (one more instance of 2, plus 6)
+
+// In-place addition
+vec1 += vec2;               // vec1 now: [2,2,2,4,6]
+```
+
+**Key Properties:**
+- **Range Expansion**: Result encompasses the union of both vector ranges
+- **Instance Addition**: Adds exactly **one** instance of each unique ID from second vector
+- **Type Safety**: Static assertion ensures both vectors have same `BitsPerValue`
+- **Empty Vector Handling**: Gracefully handles empty vectors
+
+#### Vector Subtraction (`-`, `-=`)
+Removes **all instances** of IDs that exist in the second vector.
+
+```cpp
+ID_vector<uint8_t, 2> vec1(1, 8);
+vec1.push_back(2); vec1.push_back(2); vec1.push_back(3); 
+vec1.push_back(5); vec1.push_back(7);                     // vec1: [2,2,3,5,7]
+
+ID_vector<uint8_t, 2> vec2(2, 6);
+vec2.push_back(2); vec2.push_back(5);                     // vec2: [2,5]
+
+// Subtraction creates new vector  
+auto result = vec1 - vec2;  // result: [3,7]  (all instances of 2 and 5 removed)
+
+// In-place subtraction
+vec1 -= vec2;               // vec1 now: [3,7]
+```
+
+**Key Properties:**
+- **Complete Removal**: Removes **all instances** of matching IDs (not just one)
+- **Range Preservation**: Result maintains the original vector's range
+- **Non-matching IDs**: Preserves all instances of IDs not present in second vector
+- **Type Safety**: Static assertion ensures both vectors have same `BitsPerValue`
+
+### Compile-Time Safety
+
+Enhanced operations include compile-time type checking to prevent mixing incompatible vectors:
+
+```cpp
+ID_vector<uint8_t> vec_1bit;
+ID_vector<uint8_t, 2> vec_2bit;
+
+// ✅ This compiles fine
+auto result1 = vec_1bit + vec_1bit;   // Same BitsPerValue
+
+// ❌ This causes COMPILATION ERROR
+// auto result2 = vec_1bit + vec_2bit;   // Different BitsPerValue
+// Static assertion failure: "Cannot perform arithmetic operations on ID_vectors with different BitsPerValue"
+```
+
+### Usage Examples
+
+#### Pattern: Data Processing Pipeline
+```cpp
+// Step 1: Initialize with expected range
+ID_vector<uint16_t> active_sensors(1000, 2000);
+active_sensors.fill();                           // Start with all sensors
+
+// Step 2: Remove failed sensor ranges  
+active_sensors.erase_range(1200, 1250);        // Remove known failure range
+active_sensors.erase_range(1800, 1820);        // Remove another failure range
+
+// Step 3: Add newly discovered sensors
+active_sensors.insert_range(500, 600);         // Expands range to include 500-600
+active_sensors.insert_range(2100, 2150);       // Expands range to include 2100-2150
+
+// Step 4: Combine with another sensor network
+ID_vector<uint16_t> backup_sensors(2200, 2300);
+backup_sensors.fill();
+active_sensors += backup_sensors;               // Add backup sensors
+```
+
+#### Pattern: Set Operations with Counting
+```cpp
+ID_vector<uint8_t, 3> frequency_count(1, 100);  // Track frequency (up to 7 instances)
+
+// Multiple data sources
+ID_vector<uint8_t, 3> source1(10, 50);
+source1.insert_range(15, 25);
+source1 += source1;  // Double the frequency
+
+ID_vector<uint8_t, 3> source2(20, 60); 
+source2.insert_range(30, 40);
+
+// Combine frequencies
+frequency_count = source1 + source2;  // Each unique ID appears once more
+```
+
+#### Pattern: Memory-Efficient Filtering
+```cpp
+// Large dataset with sparse active elements
+ID_vector<uint32_t> large_dataset(1, 1000000);
+large_dataset.insert_range(50000, 51000);     // 1K active elements
+large_dataset.insert_range(100000, 101000);   // Another 1K active
+
+// Filter out problematic ranges
+large_dataset.erase_range(50200, 50300);      // Remove problematic range
+large_dataset.erase_range(100500, 100600);    // Range preserved, elements removed
+
+// Memory usage: ~125KB instead of ~4MB for traditional vector
+```
+
+### Performance Characteristics
+
+| Operation | Time Complexity | Space Complexity | Notes |
+|-----------|----------------|------------------|-------|
+| `fill()` | O(range × BitsPerValue) | O(1) | Fills all positions |
+| `erase_range(start, end)` | O(end - start) | O(1) | Range preservation |
+| `insert_range(start, end)` | O(end - start + realloc) | O(new_range) | May expand |
+| `vec1 + vec2` | O(range1 + range2) | O(union_range) | Creates new vector |
+| `vec1 += vec2` | O(range2) | O(expanded_range) | In-place, may expand |
+| `vec1 - vec2` | O(range1) | O(range1) | Preserves original range |
+| `vec1 -= vec2` | O(range2) | O(1) | In-place subtraction |
 
 ### Best Practices Summary
 
@@ -679,5 +871,5 @@ size_t estimated_memory_bytes() const {
 5. **Leverage MCU Ecosystem**:
    ```cpp
    mcu::vector<uint16_t> input_data = get_sensor_ids();
-   ID_vector<uint16_t, 1> efficient_storage(input_data);  // Convert for efficiency
+   ID_vector<uint16_t> efficient_storage(input_data);  // Convert for efficiency
    ```

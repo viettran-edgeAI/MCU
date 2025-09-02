@@ -1290,6 +1290,233 @@ public:
         }
     }
 
+    // Helper function for enhanced features tests
+    template<typename T, uint8_t BPV>
+    void print_vector_for_test(const ID_vector<T, BPV>& vec, const std::string& name) {
+        std::cout << "  " << name << " [size=" << vec.size() << ", range=" 
+                  << (int)vec.get_minID() << "-" << (int)vec.get_maxID() << "]: ";
+        for (auto id : vec) {
+            std::cout << (int)id << " ";
+        }
+        std::cout << std::endl;
+    }
+
+    // Helper function to verify vector contents match expected
+    template<typename T, uint8_t BPV>
+    bool verify_contents_match(const ID_vector<T, BPV>& vec, const std::vector<int>& expected) {
+        if (vec.size() != expected.size()) return false;
+        
+        std::vector<int> actual;
+        for (auto id : vec) {
+            actual.push_back((int)id);
+        }
+        
+        return actual == expected;
+    }
+
+    // Test fill() functionality
+    void test_fill_functionality() {
+        std::cout << "\n=== Test: Fill Functionality ===\n";
+        
+        // Test with BitsPerValue = 1 (binary)
+        ID_vector<uint8_t, 1> vec1(5, 8);
+        assert_test(vec1.empty(), "Empty vector before fill");
+        
+        vec1.fill();
+        assert_test(vec1.size() == 4, "Fill creates correct number of elements (BPV=1)");
+        assert_test(verify_contents_match(vec1, {5, 6, 7, 8}), "Fill creates all IDs in range (BPV=1)");
+        
+        // Test with BitsPerValue = 2 (can store up to 3 instances each)
+        ID_vector<uint8_t, 2> vec2(3, 5);
+        vec2.fill();
+        assert_test(vec2.size() == 9, "Fill creates correct number of elements (BPV=2)"); // 3 IDs * 3 instances each
+        assert_test(verify_contents_match(vec2, {3, 3, 3, 4, 4, 4, 5, 5, 5}), "Fill creates max instances for each ID (BPV=2)");
+        
+        // Test empty fill (invalid range handling)
+        ID_vector<uint8_t, 1> vec3;
+        vec3.fill(); // Should handle gracefully
+        assert_test(vec3.size() > 0, "Fill works on default constructed vector");
+    }
+
+    // Test erase_range() functionality  
+    void test_erase_range_functionality() {
+        std::cout << "\n=== Test: Erase Range Functionality ===\n";
+        
+        ID_vector<uint8_t, 1> vec(1, 10);
+        // Add some elements
+        for (int i = 2; i <= 8; i += 2) {
+            vec.push_back(i);
+        }
+        assert_test(verify_contents_match(vec, {2, 4, 6, 8}), "Initial elements added correctly");
+        
+        // Test erase_range that partially overlaps
+        uint8_t old_min = vec.get_minID();
+        uint8_t old_max = vec.get_maxID();
+        
+        vec.erase_range(3, 6);
+        assert_test(vec.get_minID() == old_min, "erase_range preserves min_id");
+        assert_test(vec.get_maxID() == old_max, "erase_range preserves max_id");
+        assert_test(verify_contents_match(vec, {2, 8}), "erase_range removes correct elements");
+        
+        // Test erase_range beyond current range
+        vec.erase_range(15, 20); // Should do nothing
+        assert_test(verify_contents_match(vec, {2, 8}), "erase_range beyond range does nothing");
+        
+        // Test invalid range
+        size_t size_before = vec.size();
+        vec.erase_range(10, 5); // Invalid range (start > end)
+        assert_test(vec.size() == size_before, "erase_range with invalid parameters does nothing");
+    }
+
+    // Test insert_range() functionality
+    void test_insert_range_functionality() {
+        std::cout << "\n=== Test: Insert Range Functionality ===\n";
+        
+        ID_vector<uint8_t, 1> vec(5, 7);
+        vec.push_back(6);
+        assert_test(vec.size() == 1, "Initial vector has 1 element");
+        
+        // Test insert_range that expands the range downward
+        vec.insert_range(2, 4);
+        assert_test(vec.get_minID() <= 2, "insert_range expands min_id when needed");
+        assert_test(vec.get_maxID() >= 7, "insert_range preserves max_id");
+        assert_test(vec.contains(2) && vec.contains(3) && vec.contains(4) && vec.contains(6), 
+                   "insert_range adds all elements in range");
+        
+        // Test insert_range that expands the range upward
+        vec.insert_range(9, 11);
+        assert_test(vec.get_maxID() >= 11, "insert_range expands max_id when needed");
+        assert_test(vec.contains(9) && vec.contains(10) && vec.contains(11), 
+                   "insert_range adds elements beyond current range");
+        
+        // Test invalid range
+        size_t size_before = vec.size();
+        vec.insert_range(15, 10); // Invalid range (start > end)
+        assert_test(vec.size() == size_before, "insert_range with invalid parameters does nothing");
+    }
+
+    // Test vector addition operations
+    void test_vector_addition() {
+        std::cout << "\n=== Test: Vector Addition Operations ===\n";
+        
+        ID_vector<uint8_t, 2> vec1(1, 5);
+        vec1.push_back(2);
+        vec1.push_back(2); // Add 2 twice
+        vec1.push_back(4);
+        assert_test(vec1.count(2) == 2, "vec1 has 2 instances of ID 2");
+        
+        ID_vector<uint8_t, 2> vec2(3, 7);
+        vec2.push_back(2); // Already in vec1
+        vec2.push_back(3);
+        vec2.push_back(6);
+        assert_test(vec2.count(2) == 1, "vec2 has 1 instance of ID 2");
+        
+        // Test addition operator
+        auto result = vec1 + vec2;
+        assert_test(result.get_minID() == 1, "Addition result has correct min_id");
+        assert_test(result.get_maxID() == 7, "Addition result has correct max_id");
+        assert_test(result.count(2) == 3, "Addition adds one instance: 2 + 1 = 3");
+        assert_test(result.count(4) == 1, "Addition preserves existing elements");
+        assert_test(result.count(3) == 1, "Addition adds new elements");
+        assert_test(result.count(6) == 1, "Addition adds elements from second vector");
+        
+        // Test addition assignment
+        ID_vector<uint8_t, 2> vec3 = vec1;
+        vec3 += vec2;
+        assert_test(vec3.count(2) >= 3, "Addition assignment works correctly");
+        assert_test(vec3.contains(3) && vec3.contains(6), "Addition assignment adds new elements");
+    }
+
+    // Test vector subtraction operations
+    void test_vector_subtraction() {
+        std::cout << "\n=== Test: Vector Subtraction Operations ===\n";
+        
+        ID_vector<uint8_t, 2> vec1(1, 8);
+        vec1.push_back(2);
+        vec1.push_back(2); // Add 2 twice
+        vec1.push_back(3);
+        vec1.push_back(5);
+        vec1.push_back(7);
+        assert_test(vec1.count(2) == 2, "vec1 has 2 instances of ID 2");
+        
+        ID_vector<uint8_t, 2> vec2(2, 6);
+        vec2.push_back(2); // Should remove ALL instances of 2 from vec1
+        vec2.push_back(5); // Should remove 5 from vec1
+        vec2.push_back(6); // Not in vec1, so no effect
+        
+        // Test subtraction operator
+        auto result = vec1 - vec2;
+        assert_test(result.count(2) == 0, "Subtraction removes ALL instances of matching IDs");
+        assert_test(result.count(3) == 1, "Subtraction keeps non-matching IDs");
+        assert_test(result.count(5) == 0, "Subtraction removes matching IDs");
+        assert_test(result.count(7) == 1, "Subtraction keeps non-matching IDs");
+        assert_test(verify_contents_match(result, {3, 7}), "Subtraction result is correct");
+        
+        // Test subtraction assignment
+        ID_vector<uint8_t, 2> vec3 = vec1;
+        vec3 -= vec2;
+        assert_test(verify_contents_match(vec3, {3, 7}), "Subtraction assignment works correctly");
+    }
+
+    // Test static assertions and compatibility
+    void test_enhanced_static_assertions() {
+        std::cout << "\n=== Test: Enhanced Static Assertions ===\n";
+        
+        // These should compile fine (same BitsPerValue)
+        ID_vector<uint8_t, 2> vec1;
+        ID_vector<uint8_t, 2> vec2;
+        auto result1 = vec1 + vec2;  // Should compile
+        vec1 += vec2;                // Should compile
+        auto result2 = vec1 - vec2;  // Should compile
+        vec1 -= vec2;                // Should compile
+        
+        assert_test(true, "Static assertions allow same BitsPerValue operations");
+        
+        // Note: Different BitsPerValue would cause compilation errors due to static_assert
+        // This is tested at compile time, not runtime
+    }
+
+    // Test edge cases for enhanced features
+    void test_enhanced_edge_cases() {
+        std::cout << "\n=== Test: Enhanced Features Edge Cases ===\n";
+        
+        // Test with empty vectors
+        ID_vector<uint8_t, 1> empty1;
+        ID_vector<uint8_t, 1> empty2;
+        auto result_empty = empty1 + empty2;
+        assert_test(result_empty.empty(), "Empty vector addition works");
+        
+        auto result_sub = empty1 - empty2;
+        assert_test(result_sub.empty(), "Empty vector subtraction works");
+        
+        // Test range preservation principles
+        ID_vector<uint8_t, 1> vec(5, 15);
+        vec.push_back(7);
+        vec.push_back(10);
+        vec.push_back(13);
+        
+        uint8_t original_min = vec.get_minID();
+        uint8_t original_max = vec.get_maxID();
+        
+        // Test that erase_range doesn't change the vector's range
+        vec.erase_range(6, 12);
+        assert_test(vec.get_minID() == original_min, "erase_range preserves vector range (min)");
+        assert_test(vec.get_maxID() == original_max, "erase_range preserves vector range (max)");
+        
+        // Test that insert_range can expand the range
+        vec.insert_range(1, 3);
+        assert_test(vec.get_minID() <= 1, "insert_range allows range expansion (min)");
+        assert_test(vec.get_maxID() >= original_max, "insert_range preserves or expands range (max)");
+        
+        // Test that vector addition allows range expansion
+        ID_vector<uint8_t, 1> vec2(20, 25);
+        vec2.push_back(22);
+        
+        auto combined = vec + vec2;
+        assert_test(combined.get_minID() <= vec.get_minID(), "Vector addition expands range appropriately (min)");
+        assert_test(combined.get_maxID() >= vec2.get_maxID(), "Vector addition expands range appropriately (max)");
+    }
+
     void run_all_tests() {
         std::cout << "🚀 Starting Comprehensive ID_vector Test Suite" << std::endl;
         std::cout << std::string(60, '=') << std::endl;
@@ -1311,7 +1538,16 @@ public:
         test_size_overflow_prevention();
         test_range_getters();
         test_auto_grow_functionality();
-        test_clear_fit_safety();  // Add our new test
+        test_clear_fit_safety();
+        
+        // Enhanced features tests
+        test_fill_functionality();
+        test_erase_range_functionality();
+        test_insert_range_functionality();
+        test_vector_addition();
+        test_vector_subtraction();
+        test_enhanced_static_assertions();
+        test_enhanced_edge_cases();
         
         print_results();
     }

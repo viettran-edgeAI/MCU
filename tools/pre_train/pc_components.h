@@ -598,7 +598,7 @@ public:
             }
         }
 
-        // Store split_ratio from JSON for validation against training_score
+        // Extract and apply split_ratio from JSON
         json_train_ratio = 0.0f;
         json_test_ratio = 0.0f; 
         json_valid_ratio = 0.0f;
@@ -624,6 +624,7 @@ public:
                     train_value.erase(0, train_value.find_first_not_of(" \t\r\n"));
                     train_value.erase(train_value.find_last_not_of(" \t\r\n") + 1);
                     json_train_ratio = std::stof(train_value);
+                    train_ratio = json_train_ratio; // Apply to actual config
                 }
                 
                 // Extract test_ratio
@@ -636,6 +637,7 @@ public:
                     test_value.erase(0, test_value.find_first_not_of(" \t\r\n"));
                     test_value.erase(test_value.find_last_not_of(" \t\r\n") + 1);
                     json_test_ratio = std::stof(test_value);
+                    test_ratio = json_test_ratio; // Apply to actual config
                 }
                 
                 // Extract valid_ratio
@@ -648,7 +650,11 @@ public:
                     valid_value.erase(0, valid_value.find_first_not_of(" \t\r\n"));
                     valid_value.erase(valid_value.find_last_not_of(" \t\r\n") + 1);
                     json_valid_ratio = std::stof(valid_value);
+                    valid_ratio = json_valid_ratio; // Apply to actual config
                 }
+                
+                std::cout << "📊 Split ratios loaded from JSON: train=" << train_ratio 
+                          << ", test=" << test_ratio << ", valid=" << valid_ratio << std::endl;
             }
         }
 
@@ -860,11 +866,13 @@ public:
         // Automatic ratio configuration based on dataset size
         float samples_per_label = (float)numSamples / labelCounts.size();
         if (samples_per_label > 150) {
-            // Large dataset: use 0.7, 0.15, 0.15
-            train_ratio = 0.7f;
-            test_ratio = 0.15f;
-            valid_ratio = 0.15f;
-            std::cout << "📏 Large dataset (samples/label: " << samples_per_label << " > 50). Using ratios: 0.7/0.15/0.15\n";
+            if(training_score == "valid_score") {
+                // Large dataset: use 0.7, 0.15, 0.15
+                train_ratio = 0.7f;
+                test_ratio = 0.15f;
+                valid_ratio = 0.15f;
+                std::cout << "📏 Large dataset (samples/label: " << samples_per_label << " > 50). Using ratios: 0.7/0.15/0.15\n";
+            }
         } else {
             // Small dataset: use 0.6, 0.2, 0.2
             train_ratio = 0.6f;
@@ -880,29 +888,32 @@ public:
             // Check for invalid cases
             if (training_score == "valid_score" && json_valid_ratio == 0.0f) {
                 std::cout << "⚠️ Invalid configuration: valid_score selected but valid_ratio = 0 in JSON\n";
-                std::cout << "🔧 Keeping training_score as 'valid_score' and adjusting ratios to include validation\n";
-                // Keep training_score as valid_score, but use automatic ratios (which include validation)
-                // The automatic ratios already set above will be used
-                mismatch_detected = false; // Don't use JSON ratios in this case
+                if(samples_per_label <= 150){
+                    train_ratio = 0.6f;
+                    test_ratio = 0.2f;
+                    valid_ratio = 0.2f;
+                    std::cout << "🔧 Adjusting to small dataset ratios: train=0.6, test=0.2, valid=0.2";
+                }else{
+                    train_ratio = 0.7f;
+                    test_ratio = 0.15f;
+                    valid_ratio = 0.15f;
+                    std::cout << "🔧 Adjusting to large dataset ratios: train=0.7, test=0.15, valid=0.15";
+                }
             }
             else if (training_score != "valid_score" && json_valid_ratio > 0.0f) {
                 std::cout << "⚠️ Invalid configuration: " << training_score << " selected but valid_ratio > 0 in JSON\n";
-                mismatch_detected = true;
-            }
-            
-            // If there's a mismatch (only for case 2), use JSON ratios as override
-            if (mismatch_detected) {
-                train_ratio = json_train_ratio;
-                test_ratio = json_test_ratio;
-                valid_ratio = json_valid_ratio;
-                std::cout << "🔧 Using JSON split_ratio as override due to mismatch: train=" << train_ratio 
-                         << ", test=" << test_ratio << ", valid=" << valid_ratio << "\n";
-                         
-                // Adjust training_score to match the ratios
-                if (json_valid_ratio > 0.0f && training_score != "valid_score") {
-                    training_score = "valid_score";
-                    std::cout << "🔧 Adjusted training_score to 'valid_score' to match JSON valid_ratio > 0\n";
+                if(samples_per_label <= 150){
+                    train_ratio = 0.75f;
+                    test_ratio = 0.25f;
+                    valid_ratio = 0.0f;
+                    std::cout << "🔧 Adjusting to small dataset ratios: train=0.75, test=0.25, valid=0.0";
+                }else{
+                    train_ratio = 0.8f;
+                    test_ratio = 0.2f;
+                    valid_ratio = 0.0f;
+                    std::cout << "🔧 Adjusting to large dataset ratios: train=0.8, test=0.2, valid=0.0";
                 }
+                    
             }
         }
 

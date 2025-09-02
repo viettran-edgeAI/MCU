@@ -3671,21 +3671,6 @@ namespace mcu {
             return result;
         }
 
-        ID_vector operator-(const ID_vector& other) const { // Difference (this - other)
-            ID_vector result(min_id_, max_id_);
-            
-            for (index_type id = min_id_; id <= max_id_; ++id) {
-                count_type count1 = count(id);
-                count_type count2 = (id >= other.min_id_ && id <= other.max_id_) ? other.count(id) : 0;
-                count_type diff_count = (count1 > count2) ? (count1 - count2) : 0;
-                
-                for (count_type i = 0; i < diff_count; ++i) {
-                    result.push_back(id);
-                }
-            }
-            return result;
-        }
-
         // Compound assignment operators
         ID_vector& operator|=(const ID_vector& other) { // Union assignment
             *this = *this | other;
@@ -3697,8 +3682,143 @@ namespace mcu {
             return *this;
         }
 
-        ID_vector& operator-=(const ID_vector& other) { // Difference assignment
-            *this = *this - other;
+        // Fill vector with all values in the current range [min_id_, max_id_]
+        // For BitsPerValue > 1, fills with maximum count (MAX_COUNT) for each ID
+        void fill() {
+            if (max_id_ < min_id_) return; // Invalid range
+            
+            clear(); // Start fresh
+            
+            for (index_type id = min_id_; id <= max_id_; ++id) {
+                // Fill with maximum possible count for each ID
+                for (count_type i = 0; i < MAX_COUNT; ++i) {
+                    push_back(id);
+                }
+            }
+        }
+
+        // Erase all instances of IDs in range [start, end] (inclusive)
+        // Does NOT change the vector's min_id_/max_id_ range
+        void erase_range(index_type start, index_type end) {
+            if (start > end) return; // Invalid range
+            
+            // Only process IDs within our current range
+            index_type actual_start = (start > min_id_) ? start : min_id_;
+            index_type actual_end = (end < max_id_) ? end : max_id_;
+            
+            if (actual_start > actual_end) return; // No overlap
+            
+            for (index_type id = actual_start; id <= actual_end; ++id) {
+                erase_all(id); // Remove all instances of this ID
+            }
+        }
+
+        // Insert all IDs in range [start, end] (inclusive), one instance each
+        // DOES allow expansion of the vector's min_id_/max_id_ range
+        void insert_range(index_type start, index_type end) {
+            if (start > end) return; // Invalid range
+            
+            for (index_type id = start; id <= end; ++id) {
+                push_back(id); // This will auto-expand range if needed
+            }
+        }
+
+        // Addition operator: adds one instance of each ID from other vector
+        // Static assertion ensures compatible BitsPerValue
+        template<uint8_t OtherBitsPerValue>
+        ID_vector operator+(const ID_vector<T, OtherBitsPerValue>& other) const {
+            static_assert(BitsPerValue == OtherBitsPerValue, 
+                         "Cannot perform arithmetic operations on ID_vectors with different BitsPerValue");
+            
+            // Create result with expanded range to accommodate both vectors
+            index_type new_min = (min_id_ < other.get_minID()) ? min_id_ : other.get_minID();
+            index_type new_max = (max_id_ > other.get_maxID()) ? max_id_ : other.get_maxID();
+            
+            // Handle empty vectors
+            if (size_ == 0 && other.size() == 0) {
+                return ID_vector();
+            } else if (size_ == 0) {
+                new_min = other.get_minID();
+                new_max = other.get_maxID();
+            } else if (other.size() == 0) {
+                new_min = min_id_;
+                new_max = max_id_;
+            }
+            
+            ID_vector result(new_min, new_max);
+            
+            // Copy this vector's elements
+            for (index_type id = min_id_; id <= max_id_; ++id) {
+                count_type my_count = count(id);
+                for (count_type i = 0; i < my_count; ++i) {
+                    result.push_back(id);
+                }
+            }
+            
+            // Add one instance of each ID from other vector
+            for (index_type id = other.get_minID(); id <= other.get_maxID(); ++id) {
+                if (other.count(id) > 0) {
+                    result.push_back(id); // Add one instance
+                }
+            }
+            
+            return result;
+        }
+
+        // Subtraction operator: removes all instances of IDs present in other vector
+        // Static assertion ensures compatible BitsPerValue
+        template<uint8_t OtherBitsPerValue>
+        ID_vector operator-(const ID_vector<T, OtherBitsPerValue>& other) const {
+            static_assert(BitsPerValue == OtherBitsPerValue, 
+                         "Cannot perform arithmetic operations on ID_vectors with different BitsPerValue");
+            
+            ID_vector result(min_id_, max_id_);
+            
+            for (index_type id = min_id_; id <= max_id_; ++id) {
+                count_type my_count = count(id);
+                if (my_count > 0) {
+                    // If other vector contains this ID, remove all instances
+                    bool other_has_id = (id >= other.get_minID() && id <= other.get_maxID() && other.count(id) > 0);
+                    if (!other_has_id) {
+                        // Keep all instances if other doesn't have this ID
+                        for (count_type i = 0; i < my_count; ++i) {
+                            result.push_back(id);
+                        }
+                    }
+                    // If other has this ID, don't add any instances (remove all)
+                }
+            }
+            
+            return result;
+        }
+
+        // Addition assignment operator: adds one instance of each ID from other vector
+        template<uint8_t OtherBitsPerValue>
+        ID_vector& operator+=(const ID_vector<T, OtherBitsPerValue>& other) {
+            static_assert(BitsPerValue == OtherBitsPerValue, 
+                         "Cannot perform arithmetic operations on ID_vectors with different BitsPerValue");
+            
+            // Add one instance of each ID from other vector
+            for (index_type id = other.get_minID(); id <= other.get_maxID(); ++id) {
+                if (other.count(id) > 0) {
+                    push_back(id); // Add one instance (auto-expands range if needed)
+                }
+            }
+            return *this;
+        }
+
+        // Subtraction assignment operator: removes all instances of IDs present in other vector
+        template<uint8_t OtherBitsPerValue>
+        ID_vector& operator-=(const ID_vector<T, OtherBitsPerValue>& other) {
+            static_assert(BitsPerValue == OtherBitsPerValue, 
+                         "Cannot perform arithmetic operations on ID_vectors with different BitsPerValue");
+            
+            // Remove all instances of IDs present in other vector
+            for (index_type id = other.get_minID(); id <= other.get_maxID(); ++id) {
+                if (other.count(id) > 0) {
+                    erase_all(id); // Remove all instances of this ID
+                }
+            }
             return *this;
         }
 

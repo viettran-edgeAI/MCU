@@ -3696,6 +3696,18 @@ namespace mcu {
                 }
             }
         }
+        // remove all instances of specific ID (if exists)
+        bool erase_all(index_type id){
+            if(id < min_id_ || id > max_id_) return false;
+            index_type index = id_to_index(id);
+            count_type current_count = id_array.get(index);
+            if(current_count > 0){
+                id_array.set(index, 0);
+                size_ -= current_count; // subtract all instances
+                return true;
+            }
+            return false;
+        }
 
         // Erase all instances of IDs in range [start, end] (inclusive)
         // Does NOT change the vector's min_id_/max_id_ range
@@ -3987,7 +3999,7 @@ namespace mcu {
         }
 
         // action-IN : for keyMappingIN - updated to use generic key type R
-        [[nodiscard]] inline pair_kmi keyMappingIN(const R& key) noexcept {
+        [[nodiscard]] inline pair_kmi keyMappingIN(const R& key) const noexcept {
             size_t tranform_key = preprocess_hash_input(key);
             uint8_t range;
             if constexpr (std::is_integral<R>::value){

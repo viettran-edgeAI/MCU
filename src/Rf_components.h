@@ -369,6 +369,7 @@ namespace mcu {
         uint16_t samplesEachChunk;                     // Maximum samples per chunk
         size_t size_;  
         String filename = "";
+
     public:
         bool isLoaded;      
 
@@ -380,6 +381,7 @@ namespace mcu {
             updateSamplesEachChunk();
         }
 
+        // standard init 
         void init(const String& fname, uint16_t numFeatures) {
             filename = fname;
             bitsPerSample = numFeatures * 2;
@@ -392,6 +394,42 @@ namespace mcu {
             allLabels.clear();
         }
 
+        // init without numFeatures - read header file to get numFeatures and size_
+        void init(const String& fname) {
+            filename = fname;
+            isLoaded = false;
+            sampleChunks.clear();
+            allLabels.clear();
+            
+            // read header to get size_ and bitsPerSample
+            File file = SPIFFS.open(filename.c_str(), FILE_READ);
+            if (!file) {
+                Serial.println("❌ Failed to open binary file for reading.");
+                if(SPIFFS.exists(filename.c_str())) {
+                    SPIFFS.remove(filename.c_str());
+                }
+                return;
+            }
+   
+            // Read binary header
+            uint32_t numSamples;
+            uint16_t numFeatures;
+            
+            if(file.read((uint8_t*)&numSamples, sizeof(numSamples)) != sizeof(numSamples) ||
+            file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
+                Serial.println("❌ Failed to read binary header.");
+                file.close();
+                return;
+            }
+            size_ = numSamples;
+            bitsPerSample = numFeatures * 2;
+            updateSamplesEachChunk();
+            file.close();
+            Serial.printf("ℹ️ Rf_data initialized: %s with %d features (%d bits/sample, %d samples/chunk, %d samples total)\n", 
+                          filename.c_str(), numFeatures, bitsPerSample, samplesEachChunk, size_);
+        }
+
+        // for temporary Rf_data (without saving to SPIFFS)
         void init(uint16_t numFeatures) {   
             filename = "";
             bitsPerSample = numFeatures * 2;
@@ -451,12 +489,11 @@ namespace mcu {
             return getSample(index);
         }
 
-    private:
         // Validate that the Rf_data has been properly initialized
         bool isProperlyInitialized() const {
             return bitsPerSample > 0 && samplesEachChunk > 0;
         }
-
+    private:
         // Calculate maximum samples per chunk based on bitsPerSample
         void updateSamplesEachChunk() {
             if (bitsPerSample > 0) {
@@ -686,6 +723,10 @@ namespace mcu {
         }
 
     public:
+        int total_chunks() const {
+            return sampleChunks.size();
+        }
+
         size_t size() const {
             return size_;
         }
@@ -735,8 +776,11 @@ namespace mcu {
             releaseData(false); // Save to binary and clear memory
         }
 
-        // Save data with sequential sample IDs (vector indices)
-        // save to binary format : label (1 byte) | features (packed : 4 values per byte)
+        /**
+         * @brief Save data to SPIFFS in binary format and clear from RAM.
+         * @param reuse If true, keeps data in RAM after saving; if false, clears data from RAM.
+         * @note: after first time rf_data created, it must be releaseData(false) to save data
+         */
         void releaseData(bool reuse = true) {
             if(!isLoaded) return;
             
@@ -1148,6 +1192,23 @@ namespace mcu {
             return true;
         }
 
+        /**
+         *@brief: copy assignment (but not copy filename to avoid SPIFFS over-writing)
+         *@note : Rf_data will be put into release state. loadData() to reload into RAM if needed.
+        */
+        Rf_data& operator=(const Rf_data& other) {
+            purgeData(); // Clear existing data safely
+            if (this != &other) {
+                cloneFile(other.filename, filename);
+                bitsPerSample = other.bitsPerSample;
+                samplesEachChunk = other.samplesEachChunk;
+                size_ = other.size_;
+                // Deep copy of labels
+                allLabels = other.allLabels; // b_vector has its own copy semantics
+            }
+            return *this;   
+        }
+
         // FIXED: Safe data purging
         void purgeData() {
             // Clear in-memory structures first
@@ -1421,7 +1482,7 @@ namespace mcu {
         Rf_training_score parseTrainingScore(const String& scoreStr) {
             if (scoreStr == "oob_score") return OOB_SCORE;
             if (scoreStr == "valid_score") return VALID_SCORE;
-            if (scoreStr == "k_fold_score") return K_FOLD_SCORE;
+            if (scoreStr == "k-fold_score") return K_FOLD_SCORE;
             return VALID_SCORE; // Default to VALID_SCORE
         }
 
@@ -3204,7 +3265,7 @@ namespace mcu {
             return h;
         }
     };
-    
+
     /*
     ------------------------------------------------------------------------------------------------------------------------------
     ------------------------------------------------ CONFUSION MATRIX ------------------------------------------------------------
@@ -3233,14 +3294,15 @@ namespace mcu {
             total_predict = 0;
             correct_predict = 0;
         }
+        
         void init(uint8_t num_labels, uint8_t training_flag) {
-        this->num_labels = num_labels;
-        this->training_flag = training_flag;
-        tp.clear(); fp.clear(); fn.clear();
-        tp.reserve(num_labels); fp.reserve(num_labels); fn.reserve(num_labels);
-        for (uint8_t i = 0; i < num_labels; ++i) { tp.push_back(0); fp.push_back(0); fn.push_back(0); }
-        total_predict = 0;
-        correct_predict = 0;
+            this->num_labels = num_labels;
+            this->training_flag = training_flag;
+            tp.clear(); fp.clear(); fn.clear();
+            tp.reserve(num_labels); fp.reserve(num_labels); fn.reserve(num_labels);
+            for (uint8_t i = 0; i < num_labels; ++i) { tp.push_back(0); fp.push_back(0); fn.push_back(0); }
+            total_predict = 0;
+            correct_predict = 0;
         }
 
         // Reset all counters

@@ -1,6 +1,17 @@
 #include "Rf_components.h"
 #define SUPPORT_LABEL_MAPPING
 
+#define DEV_STAGE  // development stage - for testing and debugging
+
+#ifdef DEV_STAGE
+#define ENABLE_TEST_DATA 1
+#else
+#define ENABLE_TEST_DATA 0
+#endif
+
+#define RF_DEBUG_LEVEL 6 // 0: no debug, 1: error, 2: warning, 3: info, 4: debug, 5: verbose, 6: trace
+
+
 using namespace mcu;
 
 typedef enum Rf_training_flags : uint8_t{
@@ -17,7 +28,9 @@ public:
 
     Rf_data base_data;
     Rf_data train_data;
+    #if ENABLE_TEST_DATA
     Rf_data test_data;
+    #endif
     Rf_data validation_data; // validation data, used for evaluating the model
 
     Rf_base base;
@@ -32,12 +45,8 @@ private:
     b_vector<ID_vector<uint16_t,2>, SMALL> dataList; // each ID_vector stores sample IDs of a sub_dataset, reference to index of allSamples vector in train_data
     b_vector<NodeToBuild> queue_nodes; // Queue for breadth-first tree building
 
-    bool optimal_mode = false;  
+    unordered_map<uint8_t, uint8_t> predictClass;   // for predicting class of a sample
     bool is_loaded = false;
-
-    // Random Number Generator (internal only)
-
-
 
 public:
     RandomForest(){};
@@ -60,13 +69,7 @@ public:
 
         // init base data (make a clone of base_data to avoid modifying original)
         cloneFile(base.get_baseFile().c_str(), base_data_file);
-        base_data.init(base_data_file, config.num_features);
-
-        // data separation
-        dataList.reserve(config.num_trees);
-        memory_tracker.log("forest init");
-        splitData();
-        ClonesData();
+        base_data.init(base_data_file);
     }
     
     // Enhanced destructor
@@ -90,17 +93,39 @@ public:
         config.releaseConfig();     // save best config after retraining    
     }
 
+    void build_model(){
+        // initialize data
+        dataList.reserve(config.num_trees);
+        train_data.init("/train_data.bin", config.num_features);
+        test_data.init("/test_data.bin", config.num_features);
+        if(config.use_validation()){
+            validation_data.init("/valid_data.bin", config.num_features);
+        }
+        memory_tracker.log("forest init");
+
+        // data splitting
+        vector<pair<float, Rf_data*>> dest;
+        dest.push_back(make_pair(config.train_ratio, &train_data));
+        dest.push_back(make_pair(config.test_ratio, &test_data));
+        if(config.use_validation()){
+            dest.push_back(make_pair(config.valid_ratio, &validation_data));
+        }
+        splitData(base_data, dest);
+        ClonesData();
+        MakeForest();
+    }
+
     void MakeForest(){
         // Clear any existing forest first
         clearForest();
-    // We're building a fresh forest; ensure load state reflects that
-    is_loaded = false;
+        // We're building a fresh forest; ensure load state reflects that
+        is_loaded = false;
         Serial.println("START MAKING FOREST...");
 
         // pre_allocate nessessary resources
         root.reserve(config.num_trees);
         queue_nodes.clear();
-        queue_nodes.fit();
+        // queue_nodes.fit();
         uint16_t estimatedNodes = node_predictor.estimate(config.min_split, config.max_depth) * 100 / node_predictor.accuracy;
         queue_nodes.reserve(min(120, estimatedNodes * node_predictor.peak_percent / 100)); // Conservative estimate
         node_data n_data(config.min_split, config.max_depth,0);
@@ -133,57 +158,44 @@ public:
     }
   private:
     // ----------------------------------------------------------------------------------
-    // Split data into training and testing sets. create them from base_data in SPIFFS to avoid peak RAM usage
-    void splitData() {
+    // Split data into training and testing sets. Dest data must be init() before called by this function
+    void splitData(Rf_data& source, vector<pair<float, Rf_data*>>& dest) {
         Serial.println("<-- split data -->");
-        
-        size_t maxID = config.num_samples;  // total number of samples
-        uint16_t trainSize = static_cast<uint16_t>(maxID * config.train_ratio);
-        uint16_t testSize = static_cast<uint16_t>(maxID * config.test_ratio);
-        uint16_t validationSize = maxID - trainSize - testSize;
-        
-
-        // create train_data 
-        sampleID_set train_sampleIDs(maxID);
-        while (train_sampleIDs.size() < trainSize) {
-            uint16_t sampleId = static_cast<uint16_t>(random_generator.bounded(static_cast<uint32_t>(maxID)));
-            train_sampleIDs.push_back(sampleId); 
-        }
-        train_data.init("/train_data.bin", config.num_features);
-        train_data.loadData(base_data, train_sampleIDs); 
-
-
-        train_data.releaseData(false); // Write to binary SPIFFS, clear RAM
-        Serial.println("Train data loaded and released.");
-        
-        // create test_data
-        sampleID_set test_sampleIDs(maxID);
-        while(test_sampleIDs.size() < testSize) {
-            uint16_t i = static_cast<uint16_t>(random_generator.bounded(static_cast<uint32_t>(maxID)));
-            if (!train_sampleIDs.contains(i)) {
-                test_sampleIDs.push_back(i);
+        if(dest.empty() || source.size() == 0) {
+            Serial.println("Error: No data to split or destination is empty.");
+            return;
+        } 
+        float total_ratio = 0.0f;
+        for(auto& d : dest) {
+            if(d.first <= 0.0f || d.first > 1.0f) {
+                Serial.printf("Error: Invalid ratio %.2f. Must be in (0.0, 1.0].\n", d.first);
+                return;
+            }
+            total_ratio += d.first;
+            if(total_ratio > 1.0f) {
+                Serial.println("Error: Total split ratios exceed 1.0.");
+                return;
             }
         }
-        test_data.init("/test_data.bin", config.num_features);
-        test_data.loadData(base_data, test_sampleIDs); // Load only test samples
-        test_data.releaseData(false); // Write to binary SPIFFS, clear RAM
-        Serial.println("Test data loaded and released.");
 
-        // create validation_data
-        if(config.use_validation()){
-            sampleID_set validation_sampleIDs(maxID);
-            while(validation_sampleIDs.size() < validationSize) {
-                uint16_t i = static_cast<uint16_t>(random_generator.bounded(static_cast<uint32_t>(maxID)));
-                if (!train_sampleIDs.contains(i) && !test_sampleIDs.contains(i)) {
-                    validation_sampleIDs.push_back(i);
+        size_t maxID = source.size();
+        sampleID_set used(maxID);       // Track used sample IDs to avoid overlap
+        sampleID_set sink_IDs(maxID);   // sample IDs for each dest Rf_data
+
+        for(uint8_t i=0; i< dest.size(); i++){
+            sink_IDs.clear();
+            uint16_t sink_require = static_cast<uint16_t>(static_cast<float>(maxID) * dest[i].first);
+            while(sink_IDs.size() < sink_require) {
+                uint16_t sampleId = static_cast<uint16_t>(random_generator.bounded(static_cast<uint32_t>(maxID)));
+                if (!used.contains(sampleId)) {
+                    sink_IDs.push_back(sampleId);
+                    used.push_back(sampleId);
                 }
             }
-            validation_data.init("/validation_data.bin", config.num_features);
-            validation_data.loadData(base_data, validation_sampleIDs); // Load only validation samples
-            validation_data.releaseData(false); // Write to binary SPIFFS, clear RAM
-            Serial.println("Validation data loaded and released.");
+            dest[i].second->loadData(source, sink_IDs);
+            dest[i].second->releaseData(false); // Write to binary SPIFFS, clear RAM
+            memory_tracker.log("after splitting data");
         }
-        memory_tracker.log("split data");
     }
 
     // ---------------------------------------------------------------------------------
@@ -243,24 +255,18 @@ public:
                         treeDataset.push_back(arr[t]);
                     }
                 }
-
-                // Check for duplicate dataset across trees
                 uint64_t h = random_generator.hashIDVector(treeDataset);
                 if (seen_hashes.find(h) == seen_hashes.end()) {
                     seen_hashes.insert(h);
                     break; // unique, accept
                 }
-                // Otherwise, bump nonce and try a different deterministic variation
                 nonce++;
                 if (nonce > 8) {
-                    // Fallback tweak: rotate a few indices deterministically
-                    // Since ID_vector is a bit array, we need to modify the underlying data carefully
                     auto temp_vec = treeDataset;  // Copy current state
                     treeDataset.clear();
                     
                     // Re-add samples with slight modifications
                     for (uint16_t k = 0; k < min(5, (int)temp_vec.size()); ++k) {
-                        // Get a sample ID and modify it slightly
                         uint16_t original_id = k < temp_vec.size() ? k : 0; // Simplified access
                         uint16_t modified_id = static_cast<uint16_t>((original_id + k + i) % numSample);
                         treeDataset.push_back(modified_id);
@@ -725,23 +731,21 @@ public:
         memory_tracker.log("tree creation",false);
     }
 
-    uint8_t predClassSample(Rf_sample& s){
+    template<typename T>
+    uint8_t predClassSample(const T& sample_or_features){
         int16_t totalPredict = 0;
-        unordered_map<uint8_t, uint8_t> predictClass;
-        // Serial.println("here 1.6");
+        predictClass.clear();
         
         // Use streaming prediction 
         for(auto& tree : root){
-            uint8_t predict = tree.predictSample(s); 
+            uint8_t predict = tree.predictSample(sample_or_features); 
             if(predict < config.num_labels){
                 predictClass[predict]++;
                 totalPredict++;
             }
         }
-        // Serial.println("here 1.7");
-        
-        if(predictClass.size() == 0 || totalPredict == 0) {
-            return 255;
+        if(predictClass.empty() || totalPredict == 0) {
+            return 255; // Unknown class
         }
         
         // Find most predicted class
@@ -754,15 +758,14 @@ public:
                 mostPredict = predict.first;
             }
         }
-        // Serial.println("here 1.8"); 
+        
         // Check certainty threshold
         float certainty = static_cast<float>(max) / totalPredict;
         if(certainty < config.unity_threshold) {
-            return 255;
+            return 255; // Unknown class if certainty is too low
         }
         return mostPredict;
     }
-    
     // Helper function: evaluate the entire forest using OOB (Out-of-Bag) score
     // Iterates over all samples in training data and evaluates using trees that didn't see each sample
     float get_oob_score(){
@@ -947,17 +950,80 @@ public:
         return valid_scorer.calculate_score("Validation");
     }
 
+    // Performs k-fold cross validation on train_data
+    // train_data -> base_data, fold_train_data ~ train_data, fold_valid_data ~ validation_data
+    float get_cross_validation_score(){
+        Serial.println("Get k-fold cross validation score... ");
+
+        if(config.k_fold < 2 || config.k_fold > 10){
+            Serial.println("❌ Invalid k_fold value! Must be between 2 and 10.");
+            return 0.0f;
+        }
+
+        uint16_t totalSamples = base_data.size();
+        if(totalSamples < config.k_fold * config.num_labels * 2){
+            Serial.println("❌ Not enough samples for k-fold cross validation!");
+            return 0.0f;
+        }
+        Rf_matrix_score scorer(config.num_labels, static_cast<uint8_t>(config.train_flag));
+
+        uint16_t foldSize = totalSamples / config.k_fold;
+        float k_fold_score = 0.0f;
+        // Perform k-fold cross validation
+        for(uint8_t fold = 0; fold < config.k_fold; fold++){
+            scorer.reset();
+            // Create sample ID sets for current fold
+            sampleID_set fold_valid_sampleIDs(fold * foldSize, fold * foldSize + foldSize);
+            sampleID_set fold_train_sampleIDs(totalSamples-1);
+            fold_valid_sampleIDs.fill();
+            fold_train_sampleIDs.fill();
+
+            fold_train_sampleIDs -= fold_valid_sampleIDs;
+            // create train_data and valid data for current fold 
+            validation_data.loadData(base_data, fold_valid_sampleIDs);
+            validation_data.releaseData(false);
+            train_data.loadData(base_data, fold_train_sampleIDs);
+            train_data.releaseData(false); 
+            
+            ClonesData();
+            MakeForest();
+        
+            validation_data.loadData();
+            loadForest();
+            // Process all samples
+            for(uint16_t i = 0; i < validation_data.size(); i++){
+                const Rf_sample& sample = validation_data[i];
+                uint8_t actual = sample.label;
+                uint8_t pred = predClassSample(static_cast<Rf_sample&>(sample));
+            
+                if(actual < config.num_labels && pred < config.num_labels) {
+                    scorer.update_prediction(actual, pred);
+                }
+            }
+            
+            validation_data.releaseData();
+            releaseForest();
+            
+            return scorer.calculate_score("K-fold score");
+        }
+        k_fold_score /= config.k_fold;
+        Serial.printf("✅ K-fold cross validation completed.\n");
+
+        // Calculate and return k-fold score
+        return k_fold_score;
+    }
+
+
     // Helper function: evaluate the entire forest using combined OOB and validation scores
     float get_training_evaluation_index(){
         if(config.training_score == Rf_training_score::OOB_SCORE){
             return get_oob_score();
-        } else if(config.training_score == Rf_training_score::VALID_SCORE){
-            return get_valid_score();
-        } else if(config.training_score == Rf_training_score::K_FOLD_SCORE){
-            return get_oob_score();  // k_fold score not implemented yet
         }
-    // Default fallback
-    return get_valid_score();
+        if(config.training_score == Rf_training_score::VALID_SCORE){
+            return get_valid_score();
+        } 
+        // Default fallback
+        return get_oob_score();
     }
 
     public:
@@ -968,31 +1034,54 @@ public:
         int total_combinations = config.min_split_range.size() * config.max_depth_range.size();
         Serial.printf("Total combinations: %d\n", total_combinations);
 
-        float initial_score = get_training_evaluation_index();
-
-        float best_score = initial_score;
-        Serial.printf("Initial score: %.3f\n", initial_score);
-
         int loop_count = 0;
         int best_min_split = config.min_split;
         int best_max_depth = config.max_depth;
+
+        float best_score = get_training_evaluation_index();
+        Serial.printf("training score : %s\n", 
+                      (config.training_score == Rf_training_score::OOB_SCORE) ? "OOB" : 
+                      (config.training_score == Rf_training_score::VALID_SCORE) ? "VALID" : 
+                      (config.training_score == Rf_training_score::K_FOLD_SCORE) ? "K-FOLD" : "UNKNOWN");
+
+        if(config.training_score == Rf_training_score::K_FOLD_SCORE){
+            // convert train_data to base_data
+            base_data = train_data; 
+            // init validation_data if not yet
+            if(validation_data.isProperlyInitialized() == false){
+                validation_data.init("/valid_data.bin", config.num_features);
+            }
+        }
 
         for(auto min_split : config.min_split_range){
             for(auto max_depth : config.max_depth_range){
                 config.min_split = min_split;
                 config.max_depth = max_depth;
-
-                MakeForest(); // Rebuild forest with new parameters
-                float score = get_training_evaluation_index();
+                float score;
+                if(config.training_score == Rf_training_score::K_FOLD_SCORE){
+                    // convert train_data to base_data
+                    score = get_cross_validation_score();
+                }else{
+                    MakeForest();
+                    score = get_training_evaluation_index();
+                }
                 Serial.printf("Score with min_split=%d, max_depth=%d: %.3f\n", 
                               min_split, max_depth, score);
                 if(score > best_score){
                     best_score = score;
                     best_min_split = min_split;
                     best_max_depth = max_depth;
+                    config.result_score = best_score;
                     //save best forest
                     Serial.printf("New best score: %.3f with min_split=%d, max_depth=%d\n", 
                                   best_score, min_split, max_depth);
+                    if(config.training_score != Rf_training_score::K_FOLD_SCORE){
+                        // rebuild model with full train_data 
+                        train_data = base_data;     // restore train_data
+                        ClonesData();
+                        MakeForest();
+                    }
+                        
                     // Save the best forest to SPIFFS
                     releaseForest(); // Release current trees from RAM
                 }
@@ -1004,6 +1093,36 @@ public:
         config.max_depth = best_max_depth;
         Serial.printf("Best parameters: min_split=%d, max_depth=%d with score=%.3f\n", 
                       best_min_split, best_max_depth, best_score);
+    }
+
+    // overwrite training_flag
+    void set_training_flag(Rf_training_flags flag) {
+        config.train_flag = flag;
+    }
+
+    //  combined training_flag with user input
+    void add_training_flag(Rf_training_flags flag) {
+        config.train_flag |= flag;
+    }
+
+    // set training_score
+    void set_training_score(Rf_training_score score) {
+        config.training_score = score;
+        if(score == Rf_training_score::VALID_SCORE) {
+            if(config.num_samples / config.num_labels > 150){
+                config.train_ratio = 0.7f;
+                config.test_ratio = 0.15f;
+                config.valid_ratio = 0.15f;
+            }else{
+                config.train_ratio = 0.6f;
+                config.test_ratio = 0.2f;
+                config.valid_ratio = 0.2f;
+            }
+        } 
+    }
+
+    void set_ramdom_seed(uint32_t seed) {
+        random_generator.seed(seed);
     }
     
     void loadForest(){
@@ -1541,11 +1660,12 @@ void setup() {
     // const char* filename = "/walker_fall.bin";    // medium dataset : use_Gini = false | boostrap = true; 92% - sklearn : 85%  (5,3)
     const char* filename = "digit_data"; // hard dataset : use_Gini = true/false | boostrap = true; 89/92% - sklearn : 90% (6,5);
     RandomForest forest = RandomForest(filename); // reproducible by default (can omit random_seed)
+    // forest.set_training_score(Rf_training_score::K_FOLD_SCORE);
 
     // printout size of forest object in stack
     Serial.printf("RandomForest object size: %d bytes\n", sizeof(forest));
 
-    forest.MakeForest();
+    forest.build_model();
 
     forest.training();
 

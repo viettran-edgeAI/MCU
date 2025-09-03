@@ -1692,6 +1692,12 @@ namespace mcu {
             
             quickSort(0, size_ - 1);
         }
+
+        size_t memory_usage() const noexcept {
+            size_t buffer_bytes = sizeof(buffer);
+            size_t heap_bytes = using_heap ? static_cast<size_t>(capacity_) * sizeof(T) : 0;
+            return sizeof(*this) + (using_heap ? heap_bytes : buffer_bytes);
+        }
         
     private:
 
@@ -1856,7 +1862,7 @@ namespace mcu {
 
         // Accessors
         vector_index_type size() const noexcept { return size_; }
-        vector_index_type cap() const noexcept { return capacity_; }
+        vector_index_type capacity() const noexcept { return capacity_; }
 
         // Operator[] with improved bounds checking
         T& operator[](vector_index_type index) noexcept {
@@ -2368,7 +2374,7 @@ namespace mcu {
 
         // Accessors
         vector_index_type size() const noexcept { return size_; }
-        vector_index_type cap() const noexcept { return capacity_; }
+        vector_index_type capacity() const noexcept { return capacity_; }
 
         // Operator[] returns default T() on out-of-range
         T& operator[](vector_index_type index) noexcept {
@@ -2386,6 +2392,11 @@ namespace mcu {
         T* end()   noexcept { return array + size_; }
         const T* begin() const noexcept { return array; }
         const T* end()   const noexcept { return array + size_; }
+
+        size_t memory_usage() const noexcept {
+            size_t heap_bytes = static_cast<size_t>(capacity_) * sizeof(T);
+            return sizeof(*this) + heap_bytes;
+        }
     };
     
     /*
@@ -3904,9 +3915,16 @@ namespace mcu {
             throw std::out_of_range("ID_vector::maxID() internal error");
         }
 
-        size_t cap() const {
+        size_t capacity() const {
             index_type range = (size_t)max_id_  -  (size_t)min_id_ + 1;
             return range;
+        }
+
+        size_t memory_usage() const {
+            index_type range = (size_t)max_id_  -  (size_t)min_id_ + 1;
+            size_t total_bits = range * BitsPerValue;
+            size_t bytes = bits_to_bytes(total_bits);
+            return sizeof(ID_vector) + bytes;
         }
 
         // takeout normalized vector of IDs (ascending order, no repetitions)

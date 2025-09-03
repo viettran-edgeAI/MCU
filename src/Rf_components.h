@@ -4,6 +4,21 @@
 #include "SPIFFS.h"
 #include "esp_system.h"
 
+#ifdef DEV_STAGE
+    #define ENABLE_TEST_DATA 1
+#else
+    #define ENABLE_TEST_DATA 0
+#endif
+
+#ifndef RF_DEBUG
+    #define RF_DEBUG_LEVEL 0
+#else
+    #ifndef RF_DEBUG_LEVEL
+        #define RF_DEBUG_LEVEL 2 // default debug level
+    #endif
+#endif
+
+
 class RandomForest;
 // Forward declaration for callback 
 namespace mcu {
@@ -120,8 +135,8 @@ namespace mcu {
             return nodes.size();
         }
 
-        size_t get_memory_usage() const {
-            return nodes.size() * 4;
+        size_t memory_usage() const {
+            return nodes.size() * 4 + sizeof(*this);
         }
 
         // Count leaf nodes in the tree
@@ -1227,6 +1242,16 @@ namespace mcu {
                 Serial.printf("🗑️ Deleted file %s\n", filename.c_str());
             }
         }
+
+        size_t memory_usage() const {
+            size_t total = sizeof(Rf_data);
+            total += allLabels.capacity() * sizeof(uint8_t);
+            for (const auto& chunk : sampleChunks) {
+                total += sizeof(mcu::packed_vector<2, mcu::LARGE>);
+                total += chunk.capacity() * sizeof(uint8_t); // each element is 2 bits, but stored in bytes
+            }
+            return total;
+        }
     };
    /*
     ------------------------------------------------------------------------------------------------------------------
@@ -1559,6 +1584,13 @@ namespace mcu {
         public:
         bool use_validation() const {
             return valid_ratio > 0.0f;
+        }
+
+        size_t memory_usage() const {
+            size_t total = sizeof(Rf_config);
+            total += min_split_range.capacity() * sizeof(uint8_t);
+            total += max_depth_range.capacity() * sizeof(uint8_t);
+            return total;
         }
     };
 
@@ -2005,6 +2037,13 @@ namespace mcu {
             }
             file.close();
             return mcu::make_pair(total_inferences, correct_inferences);
+        }
+
+        size_t memory_usage() const {
+            size_t total = sizeof(Rf_base);
+            total += buffer.capacity() * sizeof(bool);
+            total += model_name.length() * sizeof(char);
+            return total;
         }
     };
 
@@ -2568,6 +2607,14 @@ namespace mcu {
             if (file) file.close();
             return result;
         }
+
+        size_t memory_usage() const {
+            size_t total = sizeof(Rf_node_predictor);
+            total += buffer.capacity() * sizeof(node_data);
+            total += filename.length() * sizeof(char) + 12;
+            total += node_predictor_log.length() * sizeof(char) + 12;
+            return total;
+        }
     };
 
     /*
@@ -2643,6 +2690,11 @@ namespace mcu {
                     logFile.close();
                 }
             }
+        }
+
+        size_t memory_usage() const {
+            size_t total = sizeof(Rf_memory_logger);
+            return total;
         }
     };
 
@@ -3000,7 +3052,7 @@ namespace mcu {
                 isLoaded = true;
                 
                 Serial.println("✅ CTG2 loaded successfully!");
-                Serial.println("   Memory usage: " + String(memoryUsage()) + " bytes");
+                Serial.println("   Memory usage: " + String(memory_usage()) + " bytes");
                 
                 // Clean up file if not reusing
                 if (!re_use) {
@@ -3074,7 +3126,7 @@ namespace mcu {
             Serial.println("Groups per feature: " + String(groupsPerFeature));
             Serial.println("Labels: " + String(numLabels));
             Serial.println("Scale factor: " + String(scaleFactor));
-            Serial.println("Memory usage: " + String(memoryUsage()) + " bytes");
+            Serial.println("Memory usage: " + String(memory_usage()) + " bytes");
             
             #if SUPPORT_LABEL_MAPPING
             if (isLoaded && labelMapping.size() > 0) {
@@ -3092,7 +3144,7 @@ namespace mcu {
             Serial.println("=================================");
         }
         
-        size_t memoryUsage() const {
+        size_t memory_usage() const {
             size_t usage = 0;
             
             // Basic members
@@ -3263,6 +3315,10 @@ namespace mcu {
             h ^= static_cast<uint64_t>((ids.size() >> 8) & 0xFF);
             h *= FNV_PRIME;
             return h;
+        }
+        size_t memory_usage() const {
+            size_t total = sizeof(Rf_random);
+            return total;
         }
     };
 
@@ -3465,6 +3521,15 @@ namespace mcu {
 
             // Return combined score
             return numFlags > 0 ? combined_result / numFlags : 0.0f;
+        }
+
+        size_t memory_usage() const {
+            size_t usage = 0;
+            usage += sizeof(total_predict) + sizeof(correct_predict) + sizeof(num_labels) + sizeof(training_flag);
+            usage += tp.size() * sizeof(uint16_t);
+            usage += fp.size() * sizeof(uint16_t);
+            usage += fn.size() * sizeof(uint16_t);
+            return usage;
         }
     };
 

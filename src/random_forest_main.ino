@@ -1,16 +1,8 @@
+#define DEV_STAGE  // development stage - enable test_data 
+#define RF_DEBUG_LEVEL 6 
+
 #include "Rf_components.h"
 #define SUPPORT_LABEL_MAPPING
-
-#define DEV_STAGE  // development stage - for testing and debugging
-
-#ifdef DEV_STAGE
-#define ENABLE_TEST_DATA 1
-#else
-#define ENABLE_TEST_DATA 0
-#endif
-
-#define RF_DEBUG_LEVEL 6 // 0: no debug, 1: error, 2: warning, 3: info, 4: debug, 5: verbose, 6: trace
-
 
 using namespace mcu;
 
@@ -28,9 +20,9 @@ public:
 
     Rf_data base_data;
     Rf_data train_data;
-    #if ENABLE_TEST_DATA
+#if ENABLE_TEST_DATA
     Rf_data test_data;
-    #endif
+#endif
     Rf_data validation_data; // validation data, used for evaluating the model
 
     Rf_base base;
@@ -79,9 +71,7 @@ public:
         // clear all trees
         for(auto& tree : root){
             tree.purgeTree(this->model_name);   // completely remove tree - for development stage 
-            // tree.releaseTree();               // save tree to SPIFFS - for production stage
         }
-          
         // clear all Rf_data
         train_data.purgeData();
         test_data.purgeData();
@@ -141,9 +131,7 @@ public:
             queue_nodes.clear(); // Clear queue for each tree
 
             buildTree(tree, dataList[i]);
-
             n_data.total_nodes += tree.countNodes();
-            
             tree.isLoaded = true; 
             tree.releaseTree(this->model_name); // Save tree to SPIFFS
             root.push_back(tree);
@@ -1076,14 +1064,9 @@ public:
                     Serial.printf("New best score: %.3f with min_split=%d, max_depth=%d\n", 
                                   best_score, min_split, max_depth);
                     if(config.training_score != Rf_training_score::K_FOLD_SCORE){
-                        // rebuild model with full train_data 
-                        train_data = base_data;     // restore train_data
-                        ClonesData();
-                        MakeForest();
+                        // Save the best forest to SPIFFS
+                        releaseForest(); // Release current trees from RAM
                     }
-                        
-                    // Save the best forest to SPIFFS
-                    releaseForest(); // Release current trees from RAM
                 }
                 if(loop_count++ > 2) return;
             }
@@ -1091,6 +1074,13 @@ public:
         // Set config to best found parameters
         config.min_split = best_min_split;
         config.max_depth = best_max_depth;
+        if(config.training_score == Rf_training_score::K_FOLD_SCORE){
+            // rebuild model with full train_data 
+            train_data = base_data;     // restore train_data
+            ClonesData();
+            MakeForest();
+            releaseForest();
+        }
         Serial.printf("Best parameters: min_split=%d, max_depth=%d with score=%.3f\n", 
                       best_min_split, best_max_depth, best_score);
     }
@@ -1319,8 +1309,8 @@ public:
         is_loaded = true;
         unsigned long end = millis();
         String formatUsed = SPIFFS.exists(base.get_unifiedModelFile().c_str()) ? "unified" : "individual";
-        Serial.printf("✅ Forest loaded (%s format): %d/%d trees (%d nodes) in %lu ms (RAM: %d bytes)\n", 
-                     formatUsed.c_str(), loadedTrees, root.size(), totalNodes, end - start, ESP.getFreeHeap());
+        Serial.printf("✅ Forest loaded (%s format): %d/%d trees (%d nodes) in %lu ms \n", 
+                     formatUsed.c_str(), loadedTrees, root.size(), totalNodes, end - start);
     }
 
     // releaseForest: Release all trees from RAM into SPIFFS (optimized single-file approach)
@@ -1428,7 +1418,6 @@ public:
                 savedCount++;
             }
         }
-        
         file.close();
         
         // Verify file was written correctly
@@ -1453,8 +1442,8 @@ public:
         memory_tracker.log("after release forest");
         
         unsigned long end = millis();
-        Serial.printf("✅ Released %d trees to unified format (%d bytes) in %lu ms (RAM: %d bytes)\n", 
-                     clearedCount, totalBytes, end - fileStart, ESP.getFreeHeap());
+        Serial.printf("✅ Released %d trees to unified format (%d bytes) in %lu ms \n", 
+                     clearedCount, totalBytes, end - fileStart);
     }
 
   public:
@@ -1628,6 +1617,7 @@ public:
         
         return scorer.calculate_score("Accuracy");
     } 
+    
     void visual_result(Rf_data& testSet) {
         loadForest(); // Ensure all trees are loaded before prediction
         testSet.loadData(); // Load test set data if not already loaded

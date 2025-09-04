@@ -8,9 +8,9 @@
 #include <cassert>
 #include <utility>   
 
-    // -----------------------------------------------------------------------------------------
-    // ---------------------------------- ChainedUnorderedSet class -----------------------------------
-    // -----------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------
+// ---------------------------------- ChainedUnorderedSet class -----------------------------------
+// -----------------------------------------------------------------------------------------
 template <typename T>
 class ChainedUnorderedSet : public slot_handler, hash_kernel{
 public:
@@ -122,6 +122,7 @@ public:
         for(uint8_t i=0; i<INIT_CAP; i++){
             if(i < 3) activate_set(i);  // Activate first 3 maps, but it empty 
         }
+        // activate_set(0); // Activate first set 
     }
     
     // Constructor with capacity
@@ -324,8 +325,15 @@ const_iterator cend() const { return end(); }
     /* @ detail :
         - if range does not have a corresponding activated map, automatically assign it a reserve map in cap_ (prefer reserve type 2).
         - if both are exhausted -> return a map outside the range of cap_ -> remap (this is done by wrapper functions)
-     */
+    */
 public:
+    /**
+     * @brief Inserts a key into the ChainedUnorderedSet.
+     * @param key The key to insert.
+     * @return true if the key was successfully inserted, false otherwise.
+     * @note This function handles the insertion logic, including checking for existing keys,
+     *       managing the internal mapping of keys to sets, and resizing if necessary.
+     */
     bool insert(T key) {
         pair_kmi keyPair = keyMappingIN(key); // Get setID and innerKey
         int16_t setID = keyPair.first; // Get setID from pair
@@ -380,6 +388,14 @@ public:
             return false; // No suitable map found and no capacity to extend
         }
     }
+
+    /**
+     * @brief Removes a key from the ChainedUnorderedSet.
+     * @param key The key to remove.
+     * @return true if the key was successfully removed, false if not found.
+     * @note If removing the key results in an empty set, the set will be marked as deleted
+     *       and the range mapping will be updated accordingly.
+     */
     bool erase(const T& key) {
         pair_kmi keyPair = keyMappingIN(key); // Get setID and innerKey
         int16_t setID = keyPair.first; // Get setID from pair
@@ -400,13 +416,15 @@ public:
         return erased; // Return success status
     }
 
-    // Finds an element with the specified key
-    // Returns iterator to element if found, end() otherwise
+    /**
+     * @brief Finds a key in the ChainedUnorderedSet.
+     * @param key The key to find.
+     * @return Iterator pointing to the found element, or end() if not found.
+     * @note Uses the keyMappingIN function to determine which inner set to search.
+     */
     iterator find(const T& key) {
         pair_kmi keyPair = keyMappingIN(key); 
         int16_t setID = keyPair.first; // Get setID from pair
-        uint8_t range = keyPair.second; // Get range from pair
-
 
         if (setID < 0) {
             return end(); // Key not found
@@ -419,15 +437,14 @@ public:
         return end(); // Key not found
     }
 
-
-    // actually set new fullness for each inner map in the chain and re-insert all elements
-    // total number of elements remains the same 
-    /*
-     Note : - Reducing fullness will result in reducing the maximum range of key.
-            - e.g: if fullness = 0.5, the maximum key is 32767 (32767 = 0.5 * 65535)
-            - with MCU, it recommends to set_fullness before inserting elements
-    */
-       // Set fullness factor (similar to ChainedUnorderedMap)
+    /**
+     * @brief Sets the fullness factor for all inner sets.
+     * @param fullness The new fullness factor (0.1-1.0 or 10-100).
+     * @return A pair containing success status and maximum key value after change.
+     * @note Reducing fullness may reduce the maximum range of keys that can be stored.
+     *       This operation rebuilds the entire set structure and should be done before
+     *       inserting elements for best performance.
+     */
     pair<bool, uint16_t> set_fullness(float fullness) {
         // Ensure fullness is within the valid range [0.1, 1.0] or [10, 100] (% format)
         if(fullness < 0.1f) fullness = 0.1f;
@@ -542,14 +559,21 @@ public:
         return pair<bool,uint16_t>(true, new_max_key);
     }
 
+    /**
+     * @brief Gets the current fullness factor.
+     * @return The current fullness factor as a float between 0.0 and 1.0.
+     */
     float get_fullness() const noexcept {
         return static_cast<float>(fullness_) / 100.0f;
     }
-    /*
-    Note: For chains, the reserve() function will not actually prepare the actual number of elements required,
-          since it cannot accurately estimate the number of maps that need to be prepared. 
-          ( It is impossible to predict how many elements each map will contain.)
-    */
+
+    /**
+     * @brief Reserves space for at least the specified number of elements.
+     * @param newCap The number of elements to reserve space for.
+     * @return true if reservation was successful, false otherwise.
+     * @note Due to the chained structure, this is only an approximation as it
+     *       cannot predict how elements will distribute across inner sets.
+     */
     bool reserve(uint16_t newCap) {
         if (newCap < size() || newCap > set_ability()) return false;
     
@@ -567,11 +591,11 @@ public:
     
         return true;
     }
-    uint16_t max_key() const noexcept {
-        return set_ability() - 1;
-    }
 
-    // check if map is full 
+    /**
+     * @brief Checks if the set is full.
+     * @return true if all inner sets are full, false otherwise.
+     */
     bool is_full() {
         for (uint8_t i = 0; i < cap_; i++) {
             if(chain[i] != nullptr){
@@ -581,17 +605,27 @@ public:
         return true;
     }
 
-    // maximum numver of elements the chain can contain now 
+    /**
+     * @brief Gets the current capacity of the set.
+     * @return The maximum number of elements that can be stored without resizing.
+     */
     [[nodiscard]] uint16_t capacity() const noexcept{                
         return cap_ * cset_ability;
     }
 
-    // maximum theoretical capacity of the chain
+    /**
+     * @brief Gets the maximum theoretical capacity of the set.
+     * @return The maximum number of elements the set can hold with current fullness.
+     */
     uint16_t set_ability() const noexcept {
         return cset_ability * MAX_CAP;
     }
 
-    // Compare two chains by size and element values
+    /**
+     * @brief Compares this set with another for equality.
+     * @param other The set to compare with.
+     * @return true if both sets have the same elements, false otherwise.
+     */
     bool operator==(const ChainedUnorderedSet& other) const noexcept {
         if (size() != other.size()) return false;
         for (auto it = begin(); it != end(); ++it) {
@@ -601,19 +635,25 @@ public:
         }
         return true;
     }
+
+    /**
+     * @brief Reports the total memory usage of this set.
+     * @return Size in bytes of memory used by this set.
+     * @note Includes memory used by inner sets, flags, and overhead.
+     */
     size_t memory_usage() const noexcept {
         size_t total = 0;
         // count sub-maps
         for (uint8_t i = 0; i < cap_; ++i){
-          if(set_in_use(i)){
+        if(set_in_use(i)){
             total += chain[i]->memory_usage();
-          }else{
+        }else{
             if(chain[i]){
                 total+=14;
             }else{
                 total+=4;
             }
-          }
+        }
         }
 
         total += (cap_*2 + 7)/8;    // flags
@@ -621,13 +661,20 @@ public:
         return total;
     }
 
+    /**
+     * @brief Compares this set with another for inequality.
+     * @param other The set to compare with.
+     * @return true if sets differ, false if they are equal.
+     */
     bool operator!=(const ChainedUnorderedSet& other) const noexcept {
         return !(*this == other);
     }
-    // Optimizes memory usage by removing type 2 reserve maps and calling fit() on remaining maps
-    // Keep the Used maps and drag them next to each other
-    // Returns number of bytes freed (approximate)
-        // Optimize memory usage
+
+    /**
+     * @brief Optimizes memory usage of the set.
+     * @return Number of bytes freed by the optimization.
+     * @note Removes unused sets, compacts the chain, and minimizes memory allocation.
+     */
     size_t fit() {
         if (chain == nullptr) return 0;
     
@@ -677,9 +724,9 @@ public:
 
 
         // Optional: reduce array size if utilization is low
-        if (activeSets < cap_ / 3 && cap_ > INIT_CAP) {
-            uint16_t newCap = std::max(static_cast<uint16_t>(INIT_CAP), 
-                                     static_cast<uint16_t>(activeSets * 2));
+        if (activeSets < cap_ / 3 && cap_ > SET_INIT_CAP) {
+            uint16_t newCap = std::max(static_cast<uint16_t>(SET_INIT_CAP), 
+                                    static_cast<uint16_t>(activeSets * 2));
     
             unordered_set_s** newChain = new unordered_set_s*[newCap];
             memset(newChain, 0, newCap * sizeof(unordered_set_s*));
@@ -710,7 +757,10 @@ public:
         return bytesFreed;
     }
 
-    // current number of elements in chain
+    /**
+     * @brief Gets the total number of elements in the set.
+     * @return The number of elements across all inner sets.
+     */
     size_t size() const noexcept {                        
         size_t total = 0;
         for(uint8_t i = 0; i < cap_; i++) {
@@ -718,7 +768,11 @@ public:
         }
         return total;
     }
-    // Clear all data and free per‐map memory
+
+    /**
+     * @brief Removes all elements from the set.
+     * @note Deletes all inner sets and resets all state.
+     */
     void clear() noexcept {
         // 1) delete all sub‐maps
         for (uint8_t i = 0; i < cap_; i++) {
@@ -733,6 +787,11 @@ public:
         rangeMap.clear();   
         rangeMap.fit();
     }
+
+    /**
+     * @brief Checks if the set is empty.
+     * @return true if the set contains no elements, false otherwise.
+     */
     bool empty() const {
         for (uint8_t i = 0; i < cap_; i++) {
             if(set_in_use(i)) {
@@ -741,6 +800,7 @@ public:
         }
         return true;
     }
+
     // swap helper for copy-and-swap
     friend void swap(ChainedUnorderedSet& a, ChainedUnorderedSet& b) noexcept {
         using std::swap;

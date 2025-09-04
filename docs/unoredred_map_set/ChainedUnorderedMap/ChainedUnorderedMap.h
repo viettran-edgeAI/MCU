@@ -201,10 +201,10 @@
         }
         // Copy Constructor
         ChainedUnorderedMap(const ChainedUnorderedMap& o) noexcept : slot_handler(o),
+            rangeMap(o.rangeMap),
             fullness_(o.fullness_),
             cmap_ability(o.cmap_ability),
-            chain_size(o.chain_size),
-            rangeMap(o.rangeMap)
+            chain_size(o.chain_size)
         {
             this->cap_ = o.cap_; // assign base member if needed
             chain = new unordered_map_s*[this->cap_];
@@ -217,10 +217,10 @@
 
         // Move Constructor
         ChainedUnorderedMap(ChainedUnorderedMap&& o) noexcept : slot_handler(std::move(o)),   // steal cap_ & flags
+            rangeMap(std::move(o.rangeMap)),    
             fullness_(std::exchange(o.fullness_,   92)),
             cmap_ability(std::exchange(o.cmap_ability, static_cast<uint8_t>(255*92/100))),
-            chain_size(std::exchange(o.chain_size,  0)),
-            rangeMap(std::move(o.rangeMap)){
+            chain_size(std::exchange(o.chain_size,  0)){
                 chain = std::exchange(o.chain, nullptr);
         }
         // Copy‐assignment

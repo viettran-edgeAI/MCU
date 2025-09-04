@@ -4893,7 +4893,7 @@ namespace mcu {
     // -----------------------------------------------------------------------------------------
     template <typename T>
     class ChainedUnorderedSet : public slot_handler, hash_kernel{
-    public:
+    private:
         using unordered_set_s = unordered_set<T>;
         using pair_kmi = pair<int16_t, uint8_t>; // setID , range 
 
@@ -5604,8 +5604,8 @@ namespace mcu {
 
 
             // Optional: reduce array size if utilization is low
-            if (activeSets < cap_ / 3 && cap_ > SET_INIT_CAP) {
-                uint16_t newCap = std::max(static_cast<uint16_t>(SET_INIT_CAP), 
+            if (activeSets < cap_ / 3 && cap_ > INIT_CAP) {
+                uint16_t newCap = std::max(static_cast<uint16_t>(INIT_CAP), 
                                         static_cast<uint16_t>(activeSets * 2));
         
                 unordered_set_s** newChain = new unordered_set_s*[newCap];

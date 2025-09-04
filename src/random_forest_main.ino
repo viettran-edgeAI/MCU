@@ -39,6 +39,7 @@ private:
 
     unordered_map<uint8_t, uint8_t> predictClass;   // for predicting class of a sample
     bool is_loaded = false;
+    bool optimal_mode = true;
 
 public:
     RandomForest(){};
@@ -105,6 +106,11 @@ public:
         MakeForest();
     }
 
+    void set_optimal_mode(bool optimal){
+        this->optimal_mode = optimal;
+    }
+
+private:
     void MakeForest(){
         // Clear any existing forest first
         clearForest();
@@ -144,7 +150,6 @@ public:
 
         Serial.printf("Total nodes: %d, Average nodes per tree: %d\n", n_data.total_nodes * config.num_trees, n_data.total_nodes);
     }
-  private:
     // ----------------------------------------------------------------------------------
     // Split data into training and testing sets. Dest data must be init() before called by this function
     void splitData(Rf_data& source, vector<pair<float, Rf_data*>>& dest) {
@@ -180,7 +185,7 @@ public:
                     used.push_back(sampleId);
                 }
             }
-            dest[i].second->loadData(source, sink_IDs);
+            dest[i].second->loadData(source, sink_IDs, optimal_mode);
             dest[i].second->releaseData(false); // Write to binary SPIFFS, clear RAM
             memory_tracker.log("after splitting data");
         }
@@ -481,7 +486,7 @@ public:
             labelCounts.fill(0);
         }
         
-        // New: analyze a slice [begin,end) over a shared indices array
+        // analyze a slice [begin,end) over a shared indices array
         void analyzeSamplesRange(const b_vector<uint16_t, MEDIUM, 8>& indices, uint16_t begin, uint16_t end,
                                  uint8_t numLabels, const Rf_data& data) {
             totalSamples = (begin < end) ? (end - begin) : 0;
@@ -766,18 +771,13 @@ public:
         }
 
         // Determine chunk size for memory-efficient processing
-        uint16_t buffer_chunk = (train_data.size() + 3 ) / 4;
-        if(buffer_chunk < 130) buffer_chunk = 130;
-        if(buffer_chunk > train_data.size()) buffer_chunk = train_data.size();
+        uint16_t buffer_chunk = train_data.samplesPerChunk();
 
         // Pre-allocate evaluation resources
         Rf_data train_samples_buffer;
-        sampleID_set sampleIDs_bag;
         b_vector<uint8_t, SMALL> activeTrees;
         unordered_map<uint8_t, uint8_t> oobPredictClass;
 
-        train_samples_buffer.init(config.num_features); // Temporary init without file
-        train_samples_buffer.reserve(buffer_chunk);
         activeTrees.reserve(config.num_trees);
         oobPredictClass.reserve(config.num_labels);
 
@@ -789,19 +789,9 @@ public:
         memory_tracker.log("get OOB score");
 
         // Process training samples in chunks for OOB evaluation
-        for(uint16_t start_pos = 0; start_pos < train_data.size(); start_pos += buffer_chunk){
-            uint16_t end_pos = start_pos + buffer_chunk;
-            if(end_pos > train_data.size()) end_pos = train_data.size();
-
-            // Create chunk of sample IDs
-            sampleIDs_bag.clear();
-            sampleIDs_bag.set_ID_range(start_pos, end_pos);
-            for(uint16_t i = start_pos; i < end_pos; i++){
-                sampleIDs_bag.push_back(i);
-            }
-
+        for(size_t chunk_index = 0; chunk_index < train_data.total_chunks(); chunk_index++){
             // Load samples for this chunk
-            train_samples_buffer.loadData(train_data, sampleIDs_bag);
+            train_samples_buffer.loadChunk(train_data, chunk_index, optimal_mode);
             if(train_samples_buffer.size() == 0){
                 Serial.println("❌ Failed to load training samples chunk!");
                 continue;
@@ -810,7 +800,7 @@ public:
             // Process each sample in the chunk
             for(uint16_t idx = 0; idx < train_samples_buffer.size(); idx++){
                 const Rf_sample& sampleData = train_samples_buffer[idx];
-                uint16_t sampleID = start_pos + idx; // Calculate actual sample ID
+                uint16_t sampleID = chunk_index * buffer_chunk + idx;
                 uint8_t actualLabel = sampleData.label;
 
                 // Find trees that didn't use this sample (OOB trees)
@@ -968,9 +958,9 @@ public:
 
             fold_train_sampleIDs -= fold_valid_sampleIDs;
             // create train_data and valid data for current fold 
-            validation_data.loadData(base_data, fold_valid_sampleIDs);
+            validation_data.loadData(base_data, fold_valid_sampleIDs, optimal_mode);
             validation_data.releaseData(false);
-            train_data.loadData(base_data, fold_train_sampleIDs);
+            train_data.loadData(base_data, fold_train_sampleIDs, optimal_mode);
             train_data.releaseData(false); 
             
             ClonesData();
@@ -982,7 +972,7 @@ public:
             for(uint16_t i = 0; i < validation_data.size(); i++){
                 const Rf_sample& sample = validation_data[i];
                 uint8_t actual = sample.label;
-                uint8_t pred = predClassSample(static_cast<Rf_sample&>(sample));
+                uint8_t pred = predClassSample(const_cast<Rf_sample&>(sample));
             
                 if(actual < config.num_labels && pred < config.num_labels) {
                     scorer.update_prediction(actual, pred);
@@ -1486,7 +1476,7 @@ public:
 
 
     // overload: predict for new sample - enhanced with SPIFFS loading
-    uint8_t predict(packed_vector<2, SMALL>& features) {
+    uint8_t predict(packed_vector<2>& features) {
         Rf_sample sample;
         sample.features = features;
         return predClassSample(sample);
@@ -1650,7 +1640,7 @@ void setup() {
     // const char* filename = "/walker_fall.bin";    // medium dataset : use_Gini = false | boostrap = true; 92% - sklearn : 85%  (5,3)
     const char* filename = "digit_data"; // hard dataset : use_Gini = true/false | boostrap = true; 89/92% - sklearn : 90% (6,5);
     RandomForest forest = RandomForest(filename); // reproducible by default (can omit random_seed)
-    // forest.set_training_score(Rf_training_score::K_FOLD_SCORE);
+    forest.set_training_score(Rf_training_score::OOB_SCORE);
 
     // printout size of forest object in stack
     Serial.printf("RandomForest object size: %d bytes\n", sizeof(forest));

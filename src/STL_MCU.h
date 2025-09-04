@@ -4888,18 +4888,12 @@ namespace mcu {
 
 
 
-
-
-
-
-
     // -----------------------------------------------------------------------------------------
     // ---------------------------------- ChainedUnorderedSet class -----------------------------------
     // -----------------------------------------------------------------------------------------
     template <typename T>
     class ChainedUnorderedSet : public slot_handler, hash_kernel{
-    private:
-        using index_type = typename index_type<T>::type;
+    public:
         using unordered_set_s = unordered_set<T>;
         using pair_kmi = pair<int16_t, uint8_t>; // setID , range 
 
@@ -4909,8 +4903,6 @@ namespace mcu {
         uint8_t chain_size = 0; // number of sets in the chain
         uint8_t fullness_ = 92; // maximum map fill level (in %)
         uint8_t cset_ability = 234; // Maximum capacity of each set (234 = 92% of 255)
-
-        static constexpr uint8_t SET_INIT_CAP = 4;
 
         // maximum capacity of each member set in the chain
         inline void recalculate_cset_ability() noexcept {
@@ -4932,6 +4924,7 @@ namespace mcu {
                 return;
             }
         }
+
         inline pair_kmi keyMappingIN(const T& key) noexcept {
             size_t tranform_key = preprocess_hash_input(key);
             uint8_t range;
@@ -5003,13 +4996,13 @@ namespace mcu {
         // default constructor
         ChainedUnorderedSet() : slot_handler() { 
             // Initialize with INIT_CAP maps
-            remap(SET_INIT_CAP);  // Use remap to initialize resources
+            remap(INIT_CAP);  // Use remap to initialize resources
 
-            // // First, make 3 maps available, 7 reserve type 1 maps
-            // for(uint8_t i=0; i<INIT_CAP; i++){
-            //     if(i < 3) activate_set(i);  // Activate first 3 maps, but it empty 
-            // }
-            activate_set(0); // Activate first set 
+            // First, make 3 maps available, 7 reserve type 1 maps
+            for(uint8_t i=0; i<INIT_CAP; i++){
+                if(i < 3) activate_set(i);  // Activate first 3 maps, but it empty 
+            }
+            // activate_set(0); // Activate first set 
         }
         
         // Constructor with capacity
@@ -5079,6 +5072,7 @@ namespace mcu {
             }
             return *this;
         }
+
     // ---------------------------------------------------------------------------------------------------
     // -------------------------------------- iterator class ---------------------------------------------
     // ---------------------------------------------------------------------------------------------------

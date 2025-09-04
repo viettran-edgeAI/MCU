@@ -2669,7 +2669,13 @@ namespace mcu {
     --------------------------------------------- RF_MEMORY_LOGGER ---------------------------------------------------
     ------------------------------------------------------------------------------------------------------------------
     */
-    class Rf_memory_logger {
+
+    typedef struct time_anchor{
+        long unsigned anchor_time;
+        size_t index;
+    };
+
+    class Rf_logger {
     public:
         uint32_t freeHeap;
         uint32_t largestBlock;
@@ -2679,28 +2685,60 @@ namespace mcu {
         uint32_t lowest_rom; 
         uint32_t freeDisk;
         float log_time;
+        mcu::b_vector<time_anchor> time_anchors;
 
-        Rf_memory_logger() : freeHeap(0), largestBlock(0), starting_time(0), fragmentation(0), log_time(0.0f) {
-            lowest_ram = UINT32_MAX;
-            lowest_rom = UINT32_MAX;
-            // clear SPIFFS log file if it exists
-            if(SPIFFS.exists(memory_log_file)){
-                SPIFFS.remove(memory_log_file); 
-            }
-            // write header to log file
-            File logFile = SPIFFS.open(memory_log_file, FILE_WRITE);
-            if (logFile) {
-                logFile.println("Time(s),FreeHeap,Largest_Block,FreeDisk");
-                logFile.close();
-            } 
+        String memory_log_file;
+        String time_log_file;
+
+        Rf_logger() : freeHeap(0), largestBlock(0), starting_time(0), fragmentation(0), log_time(0.0f) {
+        }
+
+        Rf_logger(const String& model_name, bool keep_old_file = false) : freeHeap(0), largestBlock(0), starting_time(0), fragmentation(0), log_time(0.0f) {
+            init(model_name);
         }
         
-        void init() {
+        void init(const String& model_name, bool keep_old_file = false){
+            time_anchors.clear();
             starting_time = millis();
-            log("init tracker", false, true); // Initial log without printing
+            drop_anchor(); // initial anchor at index 0
+
+            lowest_ram = UINT32_MAX;
+            lowest_rom = UINT32_MAX;
+
+            //generate log file name based on model name
+            memory_log_file = "/" + model_name + "_memory_log.csv";
+            time_log_file = "/" + model_name + "_time_log.csv";
+
+            if(!keep_old_file){
+                if(SPIFFS.exists(time_log_file.c_str())){
+                    SPIFFS.remove(time_log_file.c_str()); 
+                }
+                // write header to time log file
+                File logFile = SPIFFS.open(time_log_file.c_str(), FILE_WRITE);
+                if (logFile) {
+                    logFile.println("Event,\t\tTime(s)");
+                    logFile.close();
+                }
+            }
+            t_log("init tracker", 0, 0, false); // Initial log without printing
+
+            if(!keep_old_file){                
+                // clear SPIFFS log file if it exists
+                if(SPIFFS.exists(memory_log_file.c_str())){
+                    SPIFFS.remove(memory_log_file.c_str()); 
+                }
+                // write header to log file
+                File logFile = SPIFFS.open(memory_log_file.c_str(), FILE_WRITE);
+                if (logFile) {
+                    logFile.println("Time(s),FreeHeap,Largest_Block,FreeDisk");
+                    logFile.close();
+                } 
+            }
+            m_log("init tracker", false, true); // Initial log without printing
+
         }
 
-        void log(const char* msg = "", bool print = true, bool log = true){
+        void m_log(const char* msg = "", bool print = true, bool log = true){
             freeHeap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
             freeDisk = SPIFFS.totalBytes() - SPIFFS.usedBytes();
 
@@ -2725,12 +2763,12 @@ namespace mcu {
             // Log to file with timestamp
             if(log) {        
                 log_time = (millis() - starting_time)/1000.0f; 
-                File logFile = SPIFFS.open(memory_log_file, FILE_APPEND);
+                File logFile = SPIFFS.open(memory_log_file.c_str(), FILE_APPEND);
                 if (logFile) {
-                    logFile.printf("%.2f, %u, %u, %u",
+                    logFile.printf("%.2f,\t%u,\t%u,\t%u",
                                     log_time, freeHeap, largestBlock, freeDisk);
                     if(msg && strlen(msg) > 0){
-                        logFile.printf("\t, %s\n", msg);
+                        logFile.printf(",\t%s\n", msg);
                     } else {
                         logFile.println();
                     }
@@ -2739,9 +2777,55 @@ namespace mcu {
             }
         }
 
+        size_t drop_anchor(){
+            time_anchor anchor;
+            anchor.anchor_time = millis();
+            anchor.index = time_anchors.size();
+            time_anchors.push_back(anchor);
+            return anchor.index;
+        }
+
+        size_t current_anchor() const {
+            return time_anchors.size() > 0 ? time_anchors.back().index : 0;
+        }
+
         size_t memory_usage() const {
-            size_t total = sizeof(Rf_memory_logger);
+            size_t total = sizeof(Rf_logger);
             return total;
+        }
+
+        void t_log(const char* msg, size_t begin_anchor_index, size_t end_anchor_idex , bool print = true){
+            if(time_anchors.size() == 0) return; // no anchors set
+            if(begin_anchor_index >= time_anchors.size() || end_anchor_idex >= time_anchors.size()) return; // invalid index
+            if(end_anchor_idex <= begin_anchor_index) {
+                std::swap(begin_anchor_index, end_anchor_idex);
+            }
+
+            long unsigned begin_time = time_anchors[begin_anchor_index].anchor_time;
+            long unsigned end_time = time_anchors[end_anchor_idex].anchor_time;
+            float elapsed = (end_time - begin_time)/1000.0f; // in seconds
+            if(print){
+                if(msg && strlen(msg) > 0){
+                    Serial.print("⏱️  ");
+                    Serial.print(msg);
+                    Serial.print(": ");
+                } else {
+                    Serial.print("⏱️  Elapsed: ");
+                }
+            }
+            // Log to file with timestamp
+            if(time_log_file.length() > 0) {        
+                File logFile = SPIFFS.open(time_log_file.c_str(), FILE_APPEND);
+                if (logFile) {
+                    if(msg && strlen(msg) > 0){
+                        logFile.printf("%s,\t%.2f\n", msg, elapsed);
+                    } else {
+                        logFile.printf("Elapsed,\t%.2f\n", elapsed);
+                    }
+                    logFile.close();
+                }
+            }
+            time_anchors[end_anchor_idex].anchor_time = millis(); // reset end anchor to current time
         }
     };
 

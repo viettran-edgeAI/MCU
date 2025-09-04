@@ -27,10 +27,10 @@ public:
 
     Rf_base base;
     Rf_config config;
+    Rf_logger logger;
     Rf_random random_generator;
     Rf_categorizer categorizer; 
-    Rf_memory_logger memory_tracker;
-    Rf_node_predictor  node_predictor; // Node predictor number of nodes required for a tree based on min_split and max_depth
+    Rf_node_predictor node_predictor; // Node predictor number of nodes required for a tree based on min_split and max_depth
 
 private:
     vector<Rf_tree, SMALL> root;                     // b_vector storing root nodes of trees (now manages SPIFFS filenames)
@@ -47,7 +47,7 @@ public:
         this->model_name = String(model_name);
 
         // initial components
-        memory_tracker.init();
+        logger.init(model_name);
         base.init(model_name); // Initialize base with the provided base name
         config.init(base.get_configFile());
         categorizer.init(base.get_ctgFile());
@@ -92,7 +92,7 @@ public:
         if(config.use_validation()){
             validation_data.init("/valid_data.bin", config.num_features);
         }
-        memory_tracker.log("forest init");
+        logger.m_log("forest init");
 
         // data splitting
         vector<pair<float, Rf_data*>> dest;
@@ -101,9 +101,16 @@ public:
         if(config.use_validation()){
             dest.push_back(make_pair(config.valid_ratio, &validation_data));
         }
+        size_t a1 = logger.drop_anchor();
         splitData(base_data, dest);
+        size_t a2 = logger.drop_anchor();
+        logger.t_log("split time", a1, a2);
         ClonesData();
+        size_t a3 = logger.drop_anchor();
+        logger.t_log("clones time", a2, a3);
         MakeForest();
+        size_t a4 = logger.drop_anchor();
+        logger.t_log("make forest time", a3, a4);
     }
 
     void set_optimal_mode(bool optimal){
@@ -129,7 +136,7 @@ private:
         Serial.print("building sub_tree: ");
         
         train_data.loadData();
-        memory_tracker.log("after loading train data");
+        logger.m_log("after loading train data");
         for(uint8_t i = 0; i < config.num_trees; i++){
             Serial.printf("%d, ", i);
             Rf_tree tree(i);
@@ -187,7 +194,7 @@ private:
             }
             dest[i].second->loadData(source, sink_IDs, optimal_mode);
             dest[i].second->releaseData(false); // Write to binary SPIFFS, clear RAM
-            memory_tracker.log("after splitting data");
+            logger.m_log("after splitting data");
         }
     }
 
@@ -280,7 +287,7 @@ private:
         }
         
         Serial.println();
-        memory_tracker.log("after clones data");  
+        logger.m_log("after clones data");  
     }  
     
     // ------------------------------------------------------------------------------
@@ -441,7 +448,7 @@ private:
         for(uint8_t i = min_maxDepth; i <= max_maxDepth; i = i+2) {
             config.max_depth_range.push_back(i);
         }
-        memory_tracker.log("first scan");
+        logger.m_log("first scan");
 
         if(config.min_split_range.empty()) config.min_split_range.push_back(config.min_split); // Ensure at least one value
         if(config.max_depth_range.empty()) config.max_depth_range.push_back(config.max_depth); // Ensure at least one value
@@ -721,7 +728,7 @@ private:
         }
         
         tree.nodes.fit();
-        memory_tracker.log("tree creation",false);
+        logger.m_log("tree creation",false);
     }
 
     template<typename T>
@@ -786,7 +793,7 @@ private:
 
         // Load forest into memory for evaluation
         loadForest();
-        memory_tracker.log("get OOB score");
+        logger.m_log("get OOB score");
 
         // Process training samples in chunks for OOB evaluation
         for(size_t chunk_index = 0; chunk_index < train_data.total_chunks(); chunk_index++){
@@ -879,7 +886,7 @@ private:
 
         // Load forest into memory for evaluation
         loadForest();
-        memory_tracker.log("get validation score");
+        logger.m_log("get validation score");
 
         // Validation evaluation
         Serial.println("Evaluating on validation set...");
@@ -1309,7 +1316,7 @@ private:
             Serial.println("✅ Forest is not loaded in memory, nothing to release.");
             return;
         }
-        memory_tracker.log("before release forest");
+        logger.m_log("before release forest");
         
         // Count loaded trees
         uint8_t loadedCount = 0;
@@ -1429,7 +1436,7 @@ private:
         }
         
         is_loaded = false;
-        memory_tracker.log("after release forest");
+        logger.m_log("after release forest");
         
         unsigned long end = millis();
         Serial.printf("✅ Released %d trees to unified format (%d bytes) in %lu ms \n", 
@@ -1650,8 +1657,8 @@ void setup() {
     forest.training();
 
     auto result = forest.predict(forest.test_data);
-    Serial.printf("\nlowest RAM: %d\n", forest.memory_tracker.lowest_ram);
-    Serial.printf("lowest ROM: %d\n", forest.memory_tracker.lowest_rom);
+    Serial.printf("\nlowest RAM: %d\n", forest.logger.lowest_ram);
+    Serial.printf("lowest ROM: %d\n", forest.logger.lowest_rom);
 
     // Calculate Precision
     Serial.println("Precision in test set:");

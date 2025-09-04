@@ -18,6 +18,10 @@
     #endif
 #endif
 
+static constexpr uint16_t MAX_LABELS = 256; // maximum number of unique labels supported
+static constexpr uint16_t MAX_NUM_FEATURES = 1024; // maximum number of features
+
+using sampleID_set = mcu::ID_vector<uint16_t>;      // set of unique sample IDs
 
 class RandomForest;
 // Forward declaration for callback 
@@ -28,18 +32,16 @@ namespace mcu {
     ------------------------------------------------------------------------------------------------------------------
     */
     struct Rf_sample{
-        mcu::packed_vector<2, mcu::SMALL> features;           // set containing the values ​​of the features corresponding to that sample , 2 bit per value.
+        mcu::packed_vector<2> features;           // set containing the values ​​of the features corresponding to that sample , 2 bit per value.
         uint8_t label;                     // label of the sample 
 
         Rf_sample() : features(), label(0) {}
         Rf_sample(uint8_t label, const mcu::packed_vector<2, mcu::LARGE>& source, size_t start, size_t end){
             this->label = label;
-            features = packed_vector<2, SMALL>(source, start, end);
+            features = packed_vector<2>(source, start, end);
         }
     };
 
-    using sampleID_set = mcu::ID_vector<uint16_t>;      // set of unique sample IDs
-    using sample_set = mcu::b_vector<Rf_sample>; // set of samples
     /*
     ------------------------------------------------------------------------------------------------------------------
     ---------------------------------------------------- RF_TREE -----------------------------------------------------
@@ -48,13 +50,14 @@ namespace mcu {
     struct Tree_node{
         uint32_t packed_data; 
         
-        // Bit layout optimize for breadth-first tree building:
-        // Bits 0-9:    featureID (10 bits) - 0 to 1023 features
-        // Bits 10-17:  label (8 bits) - 0 to 255 classes  
-        // Bits 18-19:  threshold (2 bits) - 0 to 3
-        // Bit 20:      is_leaf (1 bit) - 0 or 1
-        // Bits 21-31:  left child index (11 bits) - 0 to 2047 nodes -> max 8kB RAM per tree 
-        // Note: right child index = left child index + 1 
+        /** Bit layout optimize for breadth-first tree building:
+            * Bits 0-9  :  featureID        (10 bits)     -> 0 - 1023 features
+            * Bits 10-17:  label            (8 bits)      -> 0 - 255 classes  
+            * Bits 18-19:  threshold        (2 bits)      -> 0 | 1 | 2 | 3
+            * Bit 20    :  is_leaf          (1 bit)       -> 0/1 
+            * Bits 21-31:  left child index (11 bits)     -> 0 - 2047 nodes (max 8kB RAM per tree) 
+        @note: right child index = left child index + 1 
+        */
 
         // Constructor
         Tree_node() : packed_data(0) {}
@@ -104,8 +107,6 @@ namespace mcu {
         void setLeftChildIndex(uint16_t index) {
             packed_data = (packed_data & 0x001FFFFF) | ((uint32_t)(index & 0x7FF) << 21);  // Bits 21-31
         }
-        
-        // Note: setRightChildIndex is not needed since right = left + 1
     };
 
     struct NodeToBuild {
@@ -118,7 +119,6 @@ namespace mcu {
         NodeToBuild(uint16_t idx, uint16_t b, uint16_t e, uint8_t d) 
             : nodeIndex(idx), begin(b), end(e), depth(d) {}
     };
-
 
     class Rf_tree {
     public:
@@ -375,7 +375,7 @@ namespace mcu {
     */
     class Rf_data {
     private:
-        static constexpr size_t MAX_CHUNKS_SIZE = 8192; // max length of each packed array in bytes
+        static constexpr size_t MAX_CHUNKS_SIZE = 8192; // max bytes per chunk (8kB)
 
         // Chunked packed storage - eliminates both heap overhead per sample and large contiguous allocations
         mcu::vector<mcu::packed_vector<2, mcu::LARGE>> sampleChunks;  // Multiple chunks of packed features
@@ -739,7 +739,14 @@ namespace mcu {
 
     public:
         int total_chunks() const {
-            return sampleChunks.size();
+            return size_/samplesEachChunk + (size_ % samplesEachChunk != 0 ? 1 : 0);
+        }
+        uint16_t total_features() const {
+            return bitsPerSample / 2;
+        }
+
+        uint16_t samplesPerChunk() const {
+            return samplesEachChunk;
         }
 
         size_t size() const {
@@ -859,7 +866,7 @@ namespace mcu {
             isLoaded = false;
         }
 
-        // Load data using sequential indices (no sample IDs stored)
+        // Load data using sequential indices 
         void loadData(bool re_use = true) {
             if(isLoaded || filename.length() < 1) return;
             
@@ -1007,8 +1014,14 @@ namespace mcu {
             // Serial.printf("✅ Data loaded fast: %s (using %d chunks)\n", filename.c_str(), sampleChunks.size());
         }
 
-        // overloaded loadData method to load samples from source SPIFFS file
-        void loadData(const Rf_data& source, const sampleID_set& sample_IDs) {
+        /**
+         * @brief Load specific samples from another Rf_data source by sample IDs.
+         * @param source The source Rf_data to load samples from.
+         * @param sample_IDs A sorted set of sample IDs to load from the source.
+         * @param save_ram If true, release source data(if loaded) during process to avoid both datasets in RAM.
+         * @note: The state of the source data will be automatically restored, no need to reload.
+         */
+        void loadData(Rf_data& source, const sampleID_set& sample_IDs, bool save_ram = true) {
             if (source.filename.length() == 0) {
                 Serial.println("❌ Source Rf_data has no filename specified for SPIFFS loading.");
                 return;
@@ -1023,6 +1036,10 @@ namespace mcu {
             if (!file) {
                 Serial.printf("❌ Failed to open source file: %s\n", source.filename.c_str());
                 return;
+            }
+            bool pre_loaded = source.isLoaded;
+            if(pre_loaded && save_ram) {
+                source.releaseData();
             }
 
             // Read binary header
@@ -1110,11 +1127,41 @@ namespace mcu {
             }
             isLoaded = true;
             file.close();
-            
+            if(pre_loaded && save_ram) {
+                source.loadData(); // reload source if it was pre-loaded
+            }
             Serial.printf("✅ Loaded %d samples from SPIFFS file: %s (using %d chunks)\n", 
                         addedSamples, source.filename.c_str(), sampleChunks.size());
         }
         
+        /**
+         * @brief Load a specific chunk of samples from another Rf_data source.
+         * @param source The source Rf_data to load samples from.
+         * @param chunkIndex The index of the chunk to load (0-based).
+         * @param save_ram If true, release source data(if loaded) during process to avoid both datasets in RAM.
+         * @note: this function will call loadData(source, chunkIDs) internally.
+         */
+        void loadChunk(Rf_data& source, size_t chunkIndex, bool save_ram = true) {
+            if(chunkIndex >= source.total_chunks()) {
+                Serial.printf("❌ Chunk index %d out of bounds (total chunks=%d)\n", chunkIndex, source.total_chunks());
+                return; 
+            }
+            bool pre_loaded = source.isLoaded;
+
+            uint16_t startSample = chunkIndex * source.samplesEachChunk;
+            uint16_t endSample = startSample + source.samplesEachChunk;
+            if(endSample > source.size()) {
+                endSample = source.size();
+            }
+            if(startSample >= endSample) {
+                Serial.printf("❌ Invalid chunk range: start %d, end %d\n", startSample, endSample);
+                return;
+            }
+            sampleID_set chunkIDs(startSample, endSample - 1);
+            chunkIDs.fill();
+            loadData(source, chunkIDs, save_ram);   
+        }
+
         // add new sample to the end of the dataset
         bool add_new_sample(const Rf_sample& sample) {
             // If data is loaded, add to in-memory chunked packed storage
@@ -3089,13 +3136,13 @@ namespace mcu {
             Serial.println("🧹 Categorizer data released from memory");
         }
         // Categorize an entire sample
-        mcu::packed_vector<2, SMALL> categorizeSample(const mcu::b_vector<float>& sample) const {
+        mcu::packed_vector<2> categorizeSample(const mcu::b_vector<float>& sample) const {
             if(sample.size() != numFeatures) {
                 Serial.println("❌ Sample size mismatch. Expected " + String(numFeatures) + 
                              " features, got " + String(sample.size()));
-                return mcu::packed_vector<2, SMALL>();
+                return mcu::packed_vector<2>();
             }
-            mcu::packed_vector<2, SMALL> result;
+            mcu::packed_vector<2> result;
             
             if (!isLoaded) {
                 Serial.println("❌ Categorizer not loaded");

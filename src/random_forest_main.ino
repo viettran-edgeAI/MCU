@@ -2,7 +2,6 @@
 #define RF_DEBUG_LEVEL 2
 
 #include "Rf_components.h"
-#define SUPPORT_LABEL_MAPPING
 
 using namespace mcu;
 
@@ -25,9 +24,11 @@ public:
 private:
     Rf_tree_container forest_container; // Tree container managing all trees and forest state
     b_vector<ID_vector<uint16_t,2>, SMALL> dataList; // each ID_vector stores sample IDs of a sub_dataset, reference to index of allSamples vector in train_data
-
     unordered_map<uint8_t, uint8_t> predictClass;   // for predicting class of a sample
-    bool optimal_mode = true;
+
+    Rf_pending_data pending_data; // pending data waiting for true labels from feedback action 
+
+    bool clean_yet = false; 
 
 public:
     RandomForest(){};
@@ -56,16 +57,21 @@ public:
     
     // Enhanced destructor
     ~RandomForest(){
-        Serial.println("🧹 Cleaning files... ");
+        clean_forest();
+    }
 
-        // clear all Rf_data
-        base_data.purgeData();
-        train_data.purgeData();
-        test_data.purgeData();
-        validation_data.purgeData();
-
-        // re_train node predictor after each training session
-        node_predictor.re_train(); 
+    void clean_forest(){
+        if(!clean_yet){
+            Serial.println("🧹 Cleaning files... ");
+            // clear all Rf_data
+            base_data.purgeData();
+            train_data.purgeData();
+            test_data.purgeData();
+            validation_data.purgeData();
+            // re_train node predictor after each training session
+            node_predictor.re_train(); 
+            clean_yet = true;
+        }
     }
 
     void build_model(){
@@ -85,41 +91,37 @@ public:
         if(config.use_validation()){
             dest.push_back(make_pair(config.valid_ratio, &validation_data));
         }
+        logger.m_log("before split data");
         size_t a1 = logger.drop_anchor();
         splitData(base_data, dest);
         size_t a2 = logger.drop_anchor();
-        logger.t_log("split time", a1, a2);
+        logger.t_log("split time", a1, a2, "s");
         ClonesData();
         size_t a3 = logger.drop_anchor();
-        logger.t_log("clones time", a2, a3);
+        logger.t_log("clones time", a2, a3, "s");
         MakeForest();
         size_t a4 = logger.drop_anchor();
-        logger.t_log("make forest time", a3, a4);
-    }
-
-    void set_optimal_mode(bool optimal){
-        this->optimal_mode = optimal;
+        logger.t_log("make forest", a3, a4, "s");
     }
 
 private:
     void MakeForest(){
         // Clear any existing forest first
         forest_container.clearForest();
-        Serial.println("START MAKING FOREST...");
+        logger.m_log("START MAKING FOREST...");
 
         // Get queue_nodes reference from container
         auto& queue_nodes = forest_container.getQueueNodes();
         
         // pre_allocate necessary resources
         queue_nodes.clear();
-        // queue_nodes.fit();
         uint16_t estimated_nodes = node_predictor.estimate(config.min_split, config.max_depth) * 100 / node_predictor.accuracy;
         uint16_t peak_nodes = min(120, estimated_nodes * node_predictor.peak_percent / 100);
         queue_nodes.reserve(peak_nodes); // Conservative estimate
         node_data n_data(config.min_split, config.max_depth,0);
 
-        Serial.print("building sub_tree: ");
-        
+        logger.m_log("after reserving queue nodes");
+
         train_data.loadData();
         logger.m_log("after loading train data");
         for(uint8_t i = 0; i < config.num_trees; i++){
@@ -179,7 +181,7 @@ private:
             }
             dest[i].second->loadData(source, sink_IDs, optimal_mode);
             dest[i].second->releaseData(false); // Write to binary SPIFFS, clear RAM
-            logger.m_log("after splitting data");
+            if(i==dest.size()-1) logger.m_log("split data");
         }
     }
 
@@ -880,7 +882,7 @@ private:
                         forest_container.releaseForest(); // Release current trees from RAM
                     }
                 }
-                if(loop_count++ > 2) return;
+                // if(loop_count++ > 2) return;
             }
         }
         // Set config to best found parameters
@@ -895,6 +897,7 @@ private:
         }
         Serial.printf("Best parameters: min_split=%d, max_depth=%d with score=%.3f\n", 
                       best_min_split, best_max_depth, best_score);
+        clean_forest();
     }
 
     // overwrite training_flag
@@ -923,6 +926,11 @@ private:
         } 
     }
 
+    bool enable_extend_base_data(bool enable){
+        config.extend_base_data = enable;
+        return config.extend_base_data;
+    }
+
     void set_ramdom_seed(uint32_t seed) {
         random_generator.seed(seed);
     }
@@ -936,7 +944,10 @@ private:
         forest_container.releaseForest();
     }
 
-public:
+    void set_model_name(const String& name) {
+        base.set_modelName(name);
+    }
+    
     // Public API: predict() takes raw float data and returns actual label (String)
     template<typename T>
     struct is_supported_vector : std::false_type {};
@@ -956,8 +967,7 @@ public:
     template<typename T>
     String predict(const T& features) {
         // Static assert to ensure T is the right type
-        static_assert(is_supported_vector<T>::value, 
-            "Unsupported feature vector type. Use mcu::vector<float>, mcu::vector<int>, mcu::b_vector<float>, or mcu::b_vector<int>.");
+        static_assert(is_supported_vector<T>::value, "Unsupported type. Use mcu::vector or mcu::b_vector.");
         return predict(features.data(), features.size());
     }
 
@@ -969,14 +979,152 @@ public:
             return "ERROR";
         }
 
-        auto categorized_features = categorizer.categorizeFeatures(features, length);
-        Serial.println();
-        uint8_t internal_label = predClassSample(categorized_features);
-        return categorizer.getOriginalLabel(internal_label);
+        packed_vector<2> c_features = categorizer.categorizeFeatures(features, length);
+        uint8_t i_label = predClassSample(c_features);
+        if(config.enable_retrain){
+            // Add sample to pending data for potential retraining
+            Rf_sample sample;
+            sample.features = c_features;
+            sample.label = i_label; // Store predicted label
+            pending_data.add_pending_sample(sample, base.get_baseFile().c_str(), &config, base.get_inferenceLogFile().c_str());
+        }
+        return categorizer.getOriginalLabel(i_label);
+    }
+
+    public:
+    // Get practical inference score based on logged predictions and actual labels
+    float get_practical_inference_score(uint8_t flag) {
+        String logFile = base.get_inferenceLogFile();
+        if(!SPIFFS.exists(logFile.c_str())) {
+            Serial.println("❌ Inference log file does not exist");
+            return 0.0f;
+        }
+        
+        File file = SPIFFS.open(logFile.c_str(), FILE_READ);
+        if(!file) {
+            Serial.println("❌ Failed to open inference log file");
+            return 0.0f;
+        }
+        
+        // Read header
+        uint32_t magic;
+        uint8_t num_labels;
+        if(file.read((uint8_t*)&magic, 4) != 4 || 
+           file.read((uint8_t*)&num_labels, 1) != 1 ||
+           magic != 0x494E4652) { // "INFR" magic
+            Serial.println("❌ Invalid inference log file header");
+            file.close();
+            return 0.0f;
+        }
+        
+        // Read prediction counts for each label
+        b_vector<uint16_t, SMALL> prediction_counts(num_labels);
+        for(int i = 0; i < num_labels; i++) {
+            if(file.read((uint8_t*)&prediction_counts[i], 2) != 2) {
+                Serial.println("❌ Failed to read prediction counts");
+                file.close();
+                return 0.0f;
+            }
+        }
+        
+        // Initialize matrix score calculator
+        Rf_matrix_score scorer(num_labels, flag);
+        
+        // Read and process packed prediction data
+        uint8_t packed_byte;
+        uint8_t bit_position = 0;
+        uint8_t current_label = 0;
+        uint16_t label_prediction_index = 0;
+        
+        while(file.available() > 0 && file.read(&packed_byte, 1) == 1) {
+            // Process each bit in the packed byte
+            for(int bit = 0; bit < 8 && current_label < num_labels; bit++) {
+                if(label_prediction_index >= prediction_counts[current_label]) {
+                    // Move to next label
+                    current_label++;
+                    label_prediction_index = 0;
+                    if(current_label >= num_labels) break;
+                }
+                
+                // Extract prediction result (correct/incorrect)
+                bool is_correct = (packed_byte & (1 << bit)) != 0;
+                
+                // For practical scoring, we need to simulate actual vs predicted
+                // Since we only have correctness, we assume predicted_label = actual_label when correct
+                // and predicted_label = (actual_label + 1) % num_labels when incorrect
+                uint8_t actual_label = current_label;
+                uint8_t predicted_label = is_correct ? actual_label : ((actual_label + 1) % num_labels);
+                
+                scorer.update_prediction(actual_label, predicted_label);
+                label_prediction_index++;
+            }
+        }
+        
+        file.close();
+        
+        // Calculate and return score based on training flags
+        return scorer.calculate_score("Practical");
+    }
+
+    //overload version without flag: uses model training_flag 
+    float get_practical_inference_score() {
+        return get_practical_inference_score(static_cast<uint8_t>(config.train_flag));
+    }
+
+    // get number of inference saved in log
+    size_t get_logged_inference_count() const {
+        String logFile = base.get_inferenceLogFile();
+        if(!SPIFFS.exists(logFile.c_str())) {
+            return 0;
+        }   
+        File file = SPIFFS.open(logFile.c_str(), FILE_READ);
+        if(!file) {
+            return 0;
+        }
+        size_t file_size = file.size();
+        file.close();
+        if(file_size < 5 + config.num_labels * 2) {
+            return 0; // Invalid file size
+        }
+        size_t data_size = file_size - (5 + config.num_labels * 2);
+        return data_size * 8; // Each byte contains 8 predictions
+    } 
+
+    void add_actual_label(const String& label){
+        uint8_t i_label = categorizer.getNormalizedLabel(label);
+        if(i_label < config.num_labels){
+            pending_data.add_actual_label(i_label);
+        } else {
+            if constexpr(RF_DEBUG_LEVEL > 1)
+            Serial.printf("❌ Unknown label: %s\n", label.c_str());
+        }
+    }
+    // overload for another type of label input : const char*, char*, const char[N], int, float
+    template<typename T>
+    void add_actual_label(const T& label) {
+        using U = std::decay_t<T>;
+        static_assert(
+            std::is_same_v<U, const char*> ||
+            std::is_same_v<U, char*> ||
+            (std::is_array_v<U> && std::is_same_v<std::remove_extent_t<U>, const char>) ||
+            std::is_same_v<U, int> ||
+            std::is_same_v<U, float>,
+            "add_actual_label: T must be one of: String, const char*, int, or float"
+        );
+        add_actual_label(String(label));
+    }
+
+    // Manually flush pending data to base dataset and inference log
+    void flush_pending_data() {
+        pending_data.flush_pending_data(base.get_baseFile().c_str(), config, base.get_inferenceLogFile().c_str());
+    }
+    
+    void set_feedback_timeout(long unsigned timeout){
+        pending_data.set_max_wait_time(timeout);
     }
 
     // methods for development stage - detailed metrics
-#ifdef DEV_STAGE
+    #ifdef DEV_STAGE
     // New combined prediction metrics function
     b_vector<b_vector<pair<uint8_t, float>>> predict(Rf_data& data) {
         bool pre_load_data = true;
@@ -999,7 +1147,7 @@ public:
             if(actual < config.num_labels && pred < config.num_labels) {
                 scorer.update_prediction(actual, pred);
             }
-            base.log_inference(actual == pred);
+            // base.log_inference(actual == pred);
         }
         
         // Build result vectors using matrix scorer
@@ -1110,19 +1258,19 @@ public:
         return scorer.calculate_score("Accuracy");
     } 
     
-    void visual_result(Rf_data& testSet) {
+    void visual_result() {
         forest_container.loadForest(); // Ensure all trees are loaded before prediction
-        testSet.loadData(); // Load test set data if not already loaded
+        test_data.loadData(); // Load test set data if not already loaded
         Serial.println("SampleID, Predicted, Actual");
-        for (uint16_t i = 0; i < testSet.size(); i++) {
-            const Rf_sample& sample = testSet[i];
+        for (uint16_t i = 0; i < test_data.size(); i++) {
+            const Rf_sample& sample = test_data[i];
             uint8_t pred = predClassSample(sample.features);
             Serial.printf("%d, %d, %d\n", i, pred, sample.label);
         }
-        testSet.releaseData(true); // Release test set data after use
+        test_data.releaseData(true); // Release test set data after use
         forest_container.releaseForest(); // Release all trees after prediction
     }
-#endif
+    #endif
 
 };
 
@@ -1138,7 +1286,7 @@ void setup() {
     }
     manageSPIFFSFiles();
     delay(1000);
-    long unsigned start_forest = millis();
+    long unsigned start_forest = GET_CURRENT_TIME_IN_MILLISECONDS;
     // const char* filename = "/walker_fall.bin";    // medium dataset : use_Gini = false | boostrap = true; 92% - sklearn : 85%  (5,3)
     const char* filename = "digit_data"; // hard dataset : use_Gini = true/false | boostrap = true; 89/92% - sklearn : 90% (6,5);
     RandomForest forest = RandomForest(filename); // reproducible by default (can omit random_seed)
@@ -1228,7 +1376,7 @@ void setup() {
     // forest.visual_result(forest.test_data); // Optional visualization
 
 
-    long unsigned end_forest = millis();
+    long unsigned end_forest = GET_CURRENT_TIME_IN_MILLISECONDS;
     Serial.printf("\nTotal time: %lu ms\n", end_forest - start_forest);
 }
 

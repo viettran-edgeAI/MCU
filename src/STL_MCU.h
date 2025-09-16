@@ -106,8 +106,8 @@ namespace mcu {
         }
         template<typename U, typename R> friend class ChainedUnorderedMap;
         template<typename U> friend class ChainedUnorderedSet;
-    // protected:
-    public:
+        
+    protected:
         int16_t getValue(V key) noexcept {
             uint8_t index     = hashFunction(cap_, key, best_hashers_16[cap_ - 1]);
             uint8_t attempts= 0;
@@ -1837,7 +1837,15 @@ namespace mcu {
         T* data() noexcept { return data_ptr(); }
         const T* data() const noexcept { return data_ptr(); }
 
-        // Internal resize: allocate newCapacity, copy old data, free old (only for heap storage)
+        /**
+         * Resizes the container so that it contains n elements.
+
+        - If n is smaller than the current container size, the content is reduced to its first n elements, removing those beyond (and destroying them).
+
+        - If n is greater than the current container size, the content is expanded by inserting at the end as many elements as needed to reach a size of n. If val is specified, the new elements are initialized as copies of val, otherwise, they are value-initialized.
+
+        - If n is also greater than the current container capacity, an automatic reallocation of the allocated storage space takes place.
+         */
         void resize(vector_index_type newCapacity) noexcept {
             if (!using_heap || newCapacity == capacity_) return;
             if (newCapacity == 0) newCapacity = 1;
@@ -1847,6 +1855,22 @@ namespace mcu {
             delete[] heap_array;
             heap_array = newArray;
             capacity_ = newCapacity;
+            if (size_ > capacity_) size_ = capacity_;
+        }
+
+        // overload version
+        void resize(vector_index_type newSize, const T& value) noexcept {
+            if (!using_heap || newSize == capacity_) return;
+            if (newSize == 0) newSize = 1;
+            T* newArray = new T[newSize];
+            vector_index_type toCopy = (size_ < newSize ? size_ : newSize);
+            customCopy(heap_array, newArray, toCopy);
+            for (vector_index_type i = toCopy; i < newSize; ++i) {
+                newArray[i] = value;
+            }
+            delete[] heap_array;
+            heap_array = newArray;
+            capacity_ = newSize;
             if (size_ > capacity_) size_ = capacity_;
         }
 
@@ -2356,7 +2380,15 @@ namespace mcu {
         T* data() noexcept { return array; }
         const T* data() const noexcept { return array; }
 
-        // Internal resize: allocate newCapacity, copy old data, free old
+        /**
+         * Resizes the container so that it contains n elements.
+
+        - If n is smaller than the current container size, the content is reduced to its first n elements, removing those beyond (and destroying them).
+
+        - If n is greater than the current container size, the content is expanded by inserting at the end as many elements as needed to reach a size of n. If val is specified, the new elements are initialized as copies of val, otherwise, they are value-initialized.
+
+        - If n is also greater than the current container capacity, an automatic reallocation of the allocated storage space takes place.
+         */
         void resize(vector_index_type newCapacity) noexcept {
             if (newCapacity == capacity_) return;
             if (newCapacity == 0) newCapacity = 1;
@@ -2368,6 +2400,22 @@ namespace mcu {
             capacity_ = newCapacity;
             if (size_ > capacity_) size_ = capacity_;
         }
+        // overload version
+        void resize(vector_index_type newSize, const T& value) noexcept {
+            if (newSize == capacity_) return;
+            if (newSize == 0) newSize = 1;
+            T* newArray = new T[newSize];
+            vector_index_type toCopy = (size_ < newSize ? size_ : newSize);
+            customCopy(array, newArray, toCopy);
+            for (vector_index_type i = toCopy; i < newSize; ++i) {
+                newArray[i] = value;
+            }
+            delete[] array;
+            array = newArray;
+            capacity_ = newSize;
+            if (size_ > capacity_) size_ = capacity_;   
+        }
+
         void extend(vector_index_type newCapacity) noexcept {
             if (newCapacity > capacity_) resize(newCapacity);
         }
@@ -2919,8 +2967,16 @@ namespace mcu {
             if (get_size() == 0) throw std::out_of_range("packed_vector::front");
             return packed_data.get_unsafe(0);
         }
+
+        // return pointer to raw data (for advanced use cases)
+        const uint8_t* data() const {
+            return packed_data.raw_data();
+        }
+        uint8_t* data() {
+            return packed_data.raw_data();
+        }
         
-        // Resize like std::vector
+        // Resize 
         void resize(vector_index_type newSize, uint8_t value = 0) {
             vector_index_type current_capacity = get_capacity();
             vector_index_type current_size = get_size();

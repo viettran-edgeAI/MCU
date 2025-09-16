@@ -4,6 +4,11 @@
 #include "SPIFFS.h"
 #include "esp_system.h"
 
+
+#define GET_CURRENT_TIME_IN_MICROSECONDS() esp_timer_get_time() // current time in microseconds
+#define GET_CURRENT_TIME_IN_MILLISECONDS millis()// current time in milliseconds
+#define GET_CURRENT_TIME() millis()
+
 #ifdef DEV_STAGE
     #define ENABLE_TEST_DATA 1
 #else
@@ -11,7 +16,7 @@
 #endif
 
 #ifndef RF_DEBUG_LEVEL
-    #define RF_DEBUG_LEVEL 0
+    #define RF_DEBUG_LEVEL 1
 #else
     #if RF_DEBUG_LEVEL > 5
         #undef RF_DEBUG_LEVEL
@@ -22,18 +27,37 @@
 /*
  NOTE : RF_DEBUG_LEVEL
     0 : silent mode - no messages
-    1 : 
-    2 : new: error + warning messages at forest level
-    3 : new : messages and simple errors at components level
-    4 : new:  detailed debug at components level
+    1 : forest messages (start, end, major events) 
+    2 : logger messages (errors, warnings, memory usage, timing)
+    3 : messages at components level
+    4 : 
     5 : extremely detailed debug (not recommended for normal use)
 */
 
-static constexpr uint16_t MAX_LABELS        = 255;       // maximum number of unique labels supported 
-static constexpr uint16_t MAX_NUM_FEATURES  = 1024;     // maximum number of features
-static constexpr uint16_t MAX_NODES         = 2047;    // Maximum nodes per tree 
+static constexpr uint16_t MAX_LABELS             = 255;         // maximum number of unique labels supported 
+static constexpr uint16_t MAX_NUM_FEATURES       = 1024;       // maximum number of features
+static constexpr uint16_t MAX_NUM_SAMPLES        = 65535;     // maximum number of samples in a dataset
+static constexpr uint16_t MAX_NODES              = 2047;     // Maximum nodes per tree 
+static constexpr size_t   MAX_DATASET_SIZE       = 150000;  // Max dataset file size - 150kB
+constexpr static size_t   MAX_INFER_LOGFILE_SIZE = 2048;   // Max log file size in bytes 
 
 using sampleID_set = mcu::ID_vector<uint16_t>;       // set of unique sample IDs
+
+
+/*
+ NOTE : Random file components (for each model)
+    1. model_name_nml.bin       : base data (dataset)
+    2. model_name_config.json   : model configuration file 
+    3. model_name_ctg.bin       : categorizer (feature quantizer and label mapping)
+    4. model_name_dp.csv        : information about dataset (num_features, num_labels...)
+    5. model_name_forest.bin    : model file (all trees) in unified format
+    6. model_name_tree_*.bin    : model files (tree files) in individual format. (Given from pc/used during training, optional)
+    7. model_name_node_pred.bin : node predictor file 
+    8. model_name_node_log.csv  : node splitting log file during training (for retraining node predictor)
+    9. model_name_infer_log.bin : inference log file (predictions, actual labels, metrics over time)
+    10. model_name_time_log.csv     : time log file (detailed timing of forest events)
+    11. model_name_memory_log.csv   : memory log file (detailed memory usage of forest events)
+*/
 
 class RandomForest;
 // Forward declaration for callback 
@@ -48,8 +72,8 @@ namespace mcu {
     // struct Tree_node;           // single tree node
     // ...
 
-    class Rf_tree;              // single decision tree
     class Rf_data;              // dataset object
+    class Rf_tree;              // decision tree
     class Rf_config;            // forest configuration & dataset parameters
     class Rf_base;              // Manage and monitor the status of forest components and resources
     class Rf_node_predictor;    // Helper class: predict and pre-allocate resources needed during tree building
@@ -78,7 +102,6 @@ namespace mcu {
             features = packed_vector<2>(source, start, end);
         }
     };
-
 
     class Rf_data {
     private:
@@ -1466,12 +1489,17 @@ namespace mcu {
         bool keep_trees_in_memory; // Performance flag to avoid releasing trees during evaluation
         uint32_t estimatedRAM;
 
+        bool extend_base_data;
+        bool enable_retrain;
+
         // Dataset parameters (set after loading data)
         uint16_t num_samples;
         uint16_t num_features;
         uint8_t num_labels;
         mcu::pair<uint8_t, uint8_t> min_split_range;
         mcu::pair<uint8_t, uint8_t> max_depth_range;  
+
+        b_vector<uint16_t> samples_per_label; // index = label, value = count
         
         String filename;
         bool isLoaded;
@@ -1506,12 +1534,17 @@ namespace mcu {
             result_score = 0.0;
             keep_trees_in_memory = true; // Default to keeping trees for better performance
             estimatedRAM = 0;
+            
+            // Set defaults for new properties (not in initial config file)
+            extend_base_data = true;
+            enable_retrain = true;
+            
             filename = "";
         }
 
         ~Rf_config() {
             releaseConfig();
-            saveDpFile();
+            releaseDpFile();
         }
 
         void init(const String& fn){
@@ -1544,9 +1577,21 @@ namespace mcu {
                 Serial.printf("✅ Config loaded: %s\n", filename.c_str());
                 Serial.printf("   Trees: %d, max_depth: %d, min_split: %d\n", num_trees, max_depth, min_split);
                 Serial.printf("   Estimated RAM: %d bytes\n", estimatedRAM);
+                Serial.printf("   extend_base_data: %s, enable_retrain: %s\n", 
+                            extend_base_data ? "true" : "false",
+                            enable_retrain ? "true" : "false");
             }
 
             loadDpFile(); // Load dataset parameters
+            
+            // Validate configuration after loading
+            if constexpr(RF_DEBUG_LEVEL > 2) {
+                if (validateSamplesPerLabel()) {
+                    Serial.println("✅ samples_per_label data is consistent");
+                } else {
+                    Serial.println("⚠️ Warning: samples_per_label data inconsistency detected");
+                }
+            }
         }
 
         // read dataset parameters from /dataset_dp.csv and write to config
@@ -1611,6 +1656,15 @@ namespace mcu {
             num_features = numFeatures;
             num_samples = numSamples;
             num_labels = numLabels;
+            
+            // Initialize samples_per_label vector with the parsed label counts
+            samples_per_label.clear();
+            samples_per_label.resize(numLabels, 0);
+            for (uint8_t i = 0; i < numLabels; i++) {
+                if (labelCounts.find(i) != labelCounts.end()) {
+                    samples_per_label[i] = labelCounts[i];
+                }
+            }
 
             // Dataset summary output
             Serial.printf("📊 Dataset Summary (from params file):\n");
@@ -1621,8 +1675,9 @@ namespace mcu {
             Serial.println("  Label distribution:");
             float lowest_distribution = 100.0f;
             for (uint8_t i = 0; i < numLabels; i++) {
-                if (labelCounts[i] > 0) {
-                    float percent = (float)labelCounts[i] / numSamples * 100.0f;
+                if (samples_per_label[i] > 0) {
+                    float percent = (float)samples_per_label[i] / numSamples * 100.0f;
+                    Serial.printf("    Label %u: %u samples (%.1f%%)\n", i, samples_per_label[i], percent);
                     if (percent < lowest_distribution) {
                         lowest_distribution = percent;
                     }
@@ -1671,7 +1726,7 @@ namespace mcu {
         }
 
         // write back to dataset_params file
-        void saveDpFile() {
+        void releaseDpFile() {
             String path = getDpFilename();
             if (path.length() < 1) return;
             File file = SPIFFS.open(path.c_str(), "w");
@@ -1695,11 +1750,9 @@ namespace mcu {
             file.printf("num_samples,%u\n", num_samples);
             file.printf("num_labels,%u\n", num_labels);
             
-            // Note: Individual label counts (samples_label_X) are not stored in Rf_config
-            // These would need to be calculated from the actual dataset if needed
-            // For now, we'll write placeholder zeros if num_labels is known
-            for (uint8_t i = 0; i < num_labels && i < 32; i++) {
-                file.printf("samples_label_%u,0\n", i);
+            // Write actual label counts from samples_per_label vector
+            for (uint8_t i = 0; i < num_labels && i < samples_per_label.size(); i++) {
+                file.printf("samples_label_%u,%u\n", i, samples_per_label[i]);
             }
             
             file.close();
@@ -1753,6 +1806,10 @@ namespace mcu {
             file.printf("  \"resultScore\": %.6f,\n", result_score);
             file.printf("  \"Estimated RAM (bytes)\": %d,\n", estimatedRAM);
             
+            // Add new properties to config file
+            file.printf("  \"extendBaseData\": %s,\n", extend_base_data ? "true" : "false");
+            file.printf("  \"enableRetrain\": %s,\n", enable_retrain ? "true" : "false");
+            
             // Preserve existing timestamp and author
             if (existingTimestamp.length() > 0) {
                 file.printf("  \"timestamp\": \"%s\",\n", existingTimestamp.c_str());
@@ -1788,7 +1845,7 @@ namespace mcu {
             readFile.close();
             
             // Get current timestamp
-            String currentTime = String(millis()); // Simple timestamp, can be improved
+            String currentTime = String(GET_CURRENT_TIME_IN_MILLISECONDS); // Simple timestamp, can be improved
             
             // Find and replace timestamp
             int timestampStart = jsonContent.indexOf("\"timestamp\":");
@@ -1836,6 +1893,26 @@ namespace mcu {
             train_flag = parseFlagValue(extractStringValue(jsonStr, "trainFlag")); // ✅ Fixed
             result_score = extractFloatValue(jsonStr, "resultScore");       // ✅ Fixed
             estimatedRAM = extractIntValue(jsonStr, "Estimated RAM (bytes)"); // ✅ Already correct
+            
+            // Handle new properties that might not be in initial config files
+            // Check if they exist in JSON, if not, keep default values (true)
+            String extendBaseDataStr = extractStringValue(jsonStr, "extendBaseData");
+            if (extendBaseDataStr.length() > 0) {
+                extend_base_data = extractBoolValue(jsonStr, "extendBaseData");
+            }
+            // If not found in JSON, extend_base_data keeps its default value (true)
+            
+            String enableRetrainStr = extractStringValue(jsonStr, "enableRetrain");
+            if (enableRetrainStr.length() > 0) {
+                enable_retrain = extractBoolValue(jsonStr, "enableRetrain");
+            }
+            // If not found in JSON, enable_retrain keeps its default value (true)
+            
+            if constexpr(RF_DEBUG_LEVEL > 2) {
+                Serial.printf("   extend_base_data: %s, enable_retrain: %s\n", 
+                            extend_base_data ? "true" : "false",
+                            enable_retrain ? "true" : "false");
+            }
         }
 
         // Convert flag string to uint8_t
@@ -1946,11 +2023,25 @@ namespace mcu {
         size_t memory_usage() const {
             size_t total = sizeof(Rf_config);
             total += 4;    // min_split and max_depth ranges (2 pairs of uint8_t)
+            total += samples_per_label.size() * sizeof(uint16_t); // samples_per_label vector
             return total;
         }
+        
+        // Method to validate that samples_per_label data is consistent
+        bool validateSamplesPerLabel() const {
+            if (samples_per_label.size() != num_labels) {
+                return false;
+            }
+            
+            uint32_t totalSamples = 0;
+            for (uint16_t count : samples_per_label) {
+                totalSamples += count;
+            }
+            
+            return totalSamples == num_samples;
+        }
     };
-
-
+    
     /*
     ------------------------------------------------------------------------------------------------------------------
     -------------------------------------------------- RF_BASE -------------------------------------------------------
@@ -1968,10 +2059,8 @@ namespace mcu {
 
     // Base file management class for Random Forest project status
     class Rf_base {
-        constexpr static size_t MAX_INFER_LOGFILE_SIZE = 1048; // Max log file size in bytes - about 8000 inferences (1 bits per inference)
     private:
         uint8_t flags; // flags indicating the status of member files
-        mcu::packed_vector<1> buffer; //buffer for logging inference results (with internal 16 slots on stack - fast access)
         String model_name;
     public:
         Rf_base() : flags(static_cast<Rf_base_flags>(0)), model_name("") {}
@@ -2240,183 +2329,8 @@ namespace mcu {
             }
         }
 
-    private:
-        // Helper method to trim log file by removing oldest bytes
-        void trim_log_file(const String& logFile, size_t bytes_to_remove) {
-            if(!SPIFFS.exists(logFile.c_str())) {
-                return;
-            }
-            
-            File originalFile = SPIFFS.open(logFile.c_str(), FILE_READ);
-            if(!originalFile) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
-                Serial.printf("❌ Failed to open log file for trimming: %s\n", logFile.c_str());
-                return;
-            }
-            
-            size_t original_size = originalFile.size();
-            if(original_size <= bytes_to_remove) {
-                // If file is smaller than or equal to bytes to remove, just delete it
-                originalFile.close();
-                SPIFFS.remove(logFile.c_str());
-                Serial.printf("🗑️ Removed entire log file (%zu bytes <= %zu bytes to remove)\n", 
-                            original_size, bytes_to_remove);
-                return;
-            }
-            
-            // Create temporary file for trimmed data
-            String tempFile = logFile + ".tmp";
-            File trimmedFile = SPIFFS.open(tempFile.c_str(), FILE_WRITE);
-            if(!trimmedFile) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
-                Serial.printf("❌ Failed to create temporary file: %s\n", tempFile.c_str());
-                originalFile.close();
-                return;
-            }
-            
-            // Skip the first bytes_to_remove bytes (oldest data)
-            originalFile.seek(bytes_to_remove);
-            
-            // Copy remaining data to temporary file
-            uint8_t buffer_chunk[64]; // Use small buffer for ESP32 memory constraints
-            size_t bytes_copied = 0;
-            while(originalFile.available()) {
-                size_t bytes_to_read = min(sizeof(buffer_chunk), (size_t)originalFile.available());
-                size_t bytes_read = originalFile.read(buffer_chunk, bytes_to_read);
-                if(bytes_read > 0) {
-                    trimmedFile.write(buffer_chunk, bytes_read);
-                    bytes_copied += bytes_read;
-                } else {
-                    break;
-                }
-            }
-            
-            originalFile.close();
-            trimmedFile.close();
-            
-            // Replace original file with trimmed file
-            SPIFFS.remove(logFile.c_str());
-            if(SPIFFS.rename(tempFile.c_str(), logFile.c_str())) {
-                if constexpr(RF_DEBUG_LEVEL > 2)
-                Serial.printf("✂️ Trimmed log file: removed %zu bytes, kept %zu bytes\n", 
-                            bytes_to_remove, bytes_copied);
-            } else {
-                if constexpr(RF_DEBUG_LEVEL > 2)
-                Serial.printf("❌ Failed to rename trimmed file from %s to %s\n", 
-                            tempFile.c_str(), logFile.c_str());
-                SPIFFS.remove(tempFile.c_str()); // Clean up temp file
-            }
-        }
-
-    public:
-        void log_inference(bool result){
-            if(buffer.size() < 16){     // just log when buffer is full(16 results), avoid file write too often
-                buffer.push_back(result);       
-            } else {
-                // Buffer full, write to file and clear buffer
-                String logFile = get_inferenceLogFile();
-                
-                // Check if log file needs size management
-                bool need_trim = false;
-                if(SPIFFS.exists(logFile.c_str())) {
-                    File checkFile = SPIFFS.open(logFile.c_str(), FILE_READ);
-                    if(checkFile) {
-                        size_t current_size = checkFile.size();
-                        checkFile.close();
-                        
-                        if(current_size >= MAX_INFER_LOGFILE_SIZE) {
-                            need_trim = true;
-                            Serial.printf("📏 Log file size (%zu bytes) exceeds limit (%zu bytes), trimming oldest 128 results\n", 
-                                        current_size, MAX_INFER_LOGFILE_SIZE);
-                        }
-                    }
-                }
-                
-                // If file needs trimming, remove oldest 128 inference results (16 bytes)
-                if(need_trim) {
-                    trim_log_file(logFile, 16); // Remove 16 bytes (128 bits = 128 inference results)
-                }
-                
-                File file = SPIFFS.open(logFile.c_str(), FILE_APPEND);
-                if (!file) {
-                    // If file doesn't exist, create it
-                    file = SPIFFS.open(logFile.c_str(), FILE_WRITE);
-                    if (!file) {
-                        if constexpr(RF_DEBUG_LEVEL > 2)
-                        Serial.printf("❌ Failed to create inference log file: %s\n", logFile.c_str());
-                        return;
-                    }
-                }
-
-                // Pack 16 boolean values into 2 bytes (8 bits per byte)
-                uint8_t packed_bytes[2] = {0, 0};
-                for(uint8_t i = 0; i < 16; i++) {
-                    if(buffer[i]) {
-                        uint8_t byte_index = i / 8;      // Which byte (0 or 1)
-                        uint8_t bit_index = i % 8;       // Which bit in that byte
-                        packed_bytes[byte_index] |= (1 << bit_index);
-                    }
-                }
-                
-                // Write packed data to file
-                file.write(packed_bytes, 2);
-                file.close();
-                
-                // Clear buffer and add current result
-                buffer.clear();
-                buffer.push_back(result);
-                
-                if constexpr(RF_DEBUG_LEVEL > 2)
-                Serial.printf("📝 Logged 16 inference results to %s\n", logFile.c_str());
-            }
-        }
-
-        // Get inference statistics: total inferences and correct inferences
-        mcu::pair<size_t, size_t> get_inference_stats() const {
-            size_t total_inferences = 0;
-            size_t correct_inferences = 0;
-            
-            String logFile = get_inferenceLogFile();
-            if(!SPIFFS.exists(logFile.c_str())) {
-                return mcu::make_pair(total_inferences, correct_inferences);
-            }
-            
-            File file = SPIFFS.open(logFile.c_str(), FILE_READ);
-            if(!file) {
-                return mcu::make_pair(total_inferences, correct_inferences);
-            }
-            
-            uint8_t packed_bytes[2];
-            while(file.available() >= 2) {
-                if(file.read(packed_bytes, 2) == 2) {
-                    // Unpack and count
-                    for(uint8_t i = 0; i < 16; i++) {
-                        uint8_t byte_index = i / 8;
-                        uint8_t bit_index = i % 8;
-                        bool result = (packed_bytes[byte_index] & (1 << bit_index)) != 0;
-                        
-                        total_inferences++;
-                        if(result) {
-                            correct_inferences++;
-                        }
-                    }
-                }
-            }
-            
-            // Add current buffer results
-            for(uint8_t i = 0; i < buffer.size(); i++) {
-                total_inferences++;
-                if(buffer[i]) {
-                    correct_inferences++;
-                } 
-            }
-            file.close();
-            return mcu::make_pair(total_inferences, correct_inferences);
-        }
-
         size_t memory_usage() const {
             size_t total = sizeof(Rf_base);
-            total += buffer.capacity() * sizeof(bool);
             total += model_name.length() * sizeof(char);
             return total;
         }
@@ -3030,14 +2944,14 @@ namespace mcu {
 
     typedef struct time_anchor{
         long unsigned anchor_time;
-        size_t index;
+        uint16_t index;
     };
 
     class Rf_logger {
     public:
         uint32_t freeHeap;
         uint32_t largestBlock;
-        uint32_t starting_time;
+        long unsigned starting_time;
         uint8_t fragmentation;
         uint32_t lowest_ram;
         uint32_t lowest_rom; 
@@ -3057,7 +2971,7 @@ namespace mcu {
         
         void init(const String& model_name, bool keep_old_file = false){
             time_anchors.clear();
-            starting_time = millis();
+            starting_time = GET_CURRENT_TIME_IN_MILLISECONDS;
             drop_anchor(); // initial anchor at index 0
 
             lowest_ram = UINT32_MAX;
@@ -3074,11 +2988,11 @@ namespace mcu {
                 // write header to time log file
                 File logFile = SPIFFS.open(time_log_file.c_str(), FILE_WRITE);
                 if (logFile) {
-                    logFile.println("Event,\t\tTime(s)");
+                    logFile.println("Event,\t\tTime(ms),duration,Unit");
                     logFile.close();
                 }
             }
-            t_log("init tracker", 0, 0, false); // Initial log without printing
+            t_log("init tracker"); // Initial log without printing
 
             if(!keep_old_file){                
                 // clear SPIFFS log file if it exists
@@ -3093,7 +3007,6 @@ namespace mcu {
                 } 
             }
             m_log("init tracker", false, true); // Initial log without printing
-
         }
 
         void m_log(const char* msg = "", bool print = true, bool log = true){
@@ -3113,16 +3026,16 @@ namespace mcu {
                 if constexpr(RF_DEBUG_LEVEL > 1) {
                     Serial.print("--> RAM LEFT (heap): ");
                     Serial.println(freeHeap);
-                    Serial.print("Largest Free Block: ");
-                    Serial.println(largestBlock);
-                    Serial.printf("Fragmentation: %d", fragmentation);
-                    Serial.println("%");
+                    // Serial.print("Largest Free Block: ");
+                    // Serial.println(largestBlock);
+                    // Serial.printf("Fragmentation: %d", fragmentation);
+                    // Serial.println("%");
                 }
             }
 
             // Log to file with timestamp
             if(log) {        
-                log_time = (millis() - starting_time)/1000.0f; 
+                log_time = (GET_CURRENT_TIME_IN_MILLISECONDS - starting_time)/1000.0f; 
                 File logFile = SPIFFS.open(memory_log_file.c_str(), FILE_APPEND);
                 if (logFile) {
                     logFile.printf("%.2f,\t%u,\t%u,\t%u",
@@ -3137,15 +3050,15 @@ namespace mcu {
             }
         }
 
-        size_t drop_anchor(){
+        uint16_t drop_anchor(){
             time_anchor anchor;
-            anchor.anchor_time = millis();
+            anchor.anchor_time = GET_CURRENT_TIME_IN_MILLISECONDS;
             anchor.index = time_anchors.size();
             time_anchors.push_back(anchor);
             return anchor.index;
         }
 
-        size_t current_anchor() const {
+        uint16_t current_anchor() const {
             return time_anchors.size() > 0 ? time_anchors.back().index : 0;
         }
 
@@ -3154,7 +3067,12 @@ namespace mcu {
             return total;
         }
 
-        void t_log(const char* msg, size_t begin_anchor_index, size_t end_anchor_idex , bool print = true){
+        // for durtion measurement between two anchors
+        void t_log(const char* msg, size_t begin_anchor_index, size_t end_anchor_idex, const char* unit = "ms" , bool print = true){
+            float ratio = 1;  // default to ms 
+            if(strcmp(unit, "s") == 0 || strcmp(unit, "second") == 0) ratio = 1000.0f;
+            else if(strcmp(unit, "us") == 0 || strcmp(unit, "microsecond") == 0) ratio = 0.001f;
+
             if(time_anchors.size() == 0) return; // no anchors set
             if(begin_anchor_index >= time_anchors.size() || end_anchor_idex >= time_anchors.size()) return; // invalid index
             if(end_anchor_idex <= begin_anchor_index) {
@@ -3163,7 +3081,7 @@ namespace mcu {
 
             long unsigned begin_time = time_anchors[begin_anchor_index].anchor_time;
             long unsigned end_time = time_anchors[end_anchor_idex].anchor_time;
-            float elapsed = (end_time - begin_time)/1000.0f; // in seconds
+            float elapsed = (end_time - begin_time)/ratio;
             if(print){
                 if constexpr(RF_DEBUG_LEVEL > 1) {         
                     if(msg && strlen(msg) > 0){
@@ -3171,10 +3089,10 @@ namespace mcu {
                         Serial.print(msg);
                         Serial.print(": ");
                     } else {
-                        Serial.print("⏱️  Elapsed: ");
+                        Serial.print("⏱️  unknown event: ");
                     }
-                    Serial.print(elapsed, 2);
-                    Serial.println(" seconds");
+                    Serial.print(elapsed);
+                    Serial.println(unit);
                 }
             }
             // Log to file with timestamp
@@ -3182,14 +3100,71 @@ namespace mcu {
                 File logFile = SPIFFS.open(time_log_file.c_str(), FILE_APPEND);
                 if (logFile) {
                     if(msg && strlen(msg) > 0){
-                        logFile.printf("%s,\t%.2f\n", msg, elapsed);
+                        logFile.printf("%s,\t%.1f,\t%.2f,\t%s\n", msg, begin_time/1000.0f, elapsed, unit);     // time always in s
                     } else {
-                        logFile.printf("Elapsed,\t%.2f\n", elapsed);
+                        if(ratio > 1.1f)
+                            logFile.printf("unknown event,\t%.1f,\t%.2f,\t%s\n", begin_time/1000.0f, elapsed, unit); 
+                        else 
+                            logFile.printf("unknown event,\t%.1f,\t%lu,\t%s\n", begin_time/1000.0f, (long unsigned)elapsed, unit);
                     }
                     logFile.close();
                 }
             }
-            time_anchors[end_anchor_idex].anchor_time = millis(); // reset end anchor to current time
+            time_anchors[end_anchor_idex].anchor_time = GET_CURRENT_TIME_IN_MILLISECONDS; // reset end anchor to current time
+        }
+    
+        /**
+         * @brief for duration measurement from an anchor to now
+         * @param msg name of the event
+         * @param begin_anchor_index index of the begin anchor
+         * @param unit time unit, "ms" (default), "s", "us" 
+         * @param print whether to print to Serial, will be disabled if RF_DEBUG_LEVEL <= 1
+         * @note : this action will create a new anchor at the current time
+         */
+        void t_log(const char* msg, size_t begin_anchor_index, const char* unit = "ms" , bool print = true){
+            time_anchor end_anchor;
+            end_anchor.anchor_time = GET_CURRENT_TIME_IN_MILLISECONDS;
+            end_anchor.index = time_anchors.size();
+            time_anchors.push_back(end_anchor);
+            t_log(msg, begin_anchor_index, end_anchor.index, unit, print);
+        }
+
+        /**
+         * @brief log time from starting point to now
+         * @param msg name of the event
+         * @param print whether to print to Serial, will be disabled if RF_DEBUG_LEVEL <= 1
+         * @note : this action will NOT create a new anchor
+         */
+        void t_log(const char* msg, bool print = true){
+            long unsigned current_time = GET_CURRENT_TIME_IN_MILLISECONDS - starting_time;
+            if(print){
+                if constexpr(RF_DEBUG_LEVEL > 1) {         
+                    if(msg && strlen(msg) > 0){
+                        Serial.print("⏱️  ");
+                        Serial.print(msg);
+                        Serial.print(": ");
+                    } else {
+                        Serial.print("⏱️  unknown event: ");
+                    }
+                    Serial.print(current_time);       // timeline always in ms
+                    Serial.println("ms");
+                }
+            }
+            // Log to file with timestamp
+            if(time_log_file.length() > 0) {        
+                File logFile = SPIFFS.open(time_log_file.c_str(), FILE_APPEND);
+                if (logFile) {
+                    if(msg && strlen(msg) > 0){
+                        logFile.printf("%s,\t%.1f,\t_,\tms\n", msg, current_time/1000.0f); // time always in s
+                    } else {
+                        logFile.printf("unknown event,\t%.1f,\t_,\tms\n", current_time/1000.0f); // time always in s
+                    }
+                    logFile.close();
+                }else{
+                    if constexpr(RF_DEBUG_LEVEL > 3)
+                    Serial.printf("❌ Failed to open time log file: %s\n", time_log_file.c_str());
+                }
+            }
         }
     };
 
@@ -3589,6 +3564,30 @@ namespace mcu {
             return result;
         }
 
+        // overload for vector input
+        template<typename T>
+        struct is_supported_vector : std::false_type {};
+
+        template<mcu::index_size_flag flag>
+        struct is_supported_vector<mcu::vector<float, flag>> :std::true_type{};
+        template<mcu::index_size_flag flag>
+        struct is_supported_vector<mcu::vector<int, flag>> :std::true_type{};
+
+        template<mcu::index_size_flag flag, size_t sboSize>
+        struct is_supported_vector<mcu::b_vector<float, flag, sboSize>> :std::true_type{};
+        template<mcu::index_size_flag flag, size_t sboSize>
+        struct is_supported_vector<mcu::b_vector<int, flag, sboSize>> :std::true_type{};
+
+        template<tyename T>
+        mcu::packed_vector<2> categorizeFeatures(const T& features) const {
+            static_assert(is_supported_vector<T>::value, "Unsupported vector type for categorizeFeatures");
+            if (features.size() != numFeatures) {
+                Serial.printf("❌ Feature count mismatch: expected %d, got %d\n", numFeatures, features.size());
+                return mcu::packed_vector<2>();
+            }
+            return categorizeFeatures(features.data(), features.size());
+        }
+
         // Debug methods
         void printInfo() const {
             Serial.println("=== Rf_categorizer Categorizer Info ===");
@@ -3636,12 +3635,24 @@ namespace mcu {
             return usage;
         }
 
-        String inline getOriginalLabel(uint8_t normalizedLabel) const {
+        String getOriginalLabel(uint8_t normalizedLabel) const {
             if (normalizedLabel < labelMapping.size()) {
                 return labelMapping[normalizedLabel];
             }
             // return error if out of bounds
             return "ERROR";
+        }
+        // mapping from original label to normalized label 
+        uint8_t getNormalizedLabel(const String& originalLabel) const {
+            if (originalLabel == "ERROR" || originalLabel.length() == 0) return 255;
+            if (labelMapping.size() == 0) return 255;
+            for (uint8_t i = 0; i < labelMapping.size(); i++) {
+                if (labelMapping[i] == originalLabel) {
+                    return i;
+                }
+            }
+            // return error if not found
+            return 255;
         }
     };
 
@@ -4178,7 +4189,7 @@ namespace mcu {
                     return;
                 }
                 
-                unsigned long start = millis();
+                unsigned long start = GET_CURRENT_TIME_IN_MILLISECONDS;
                 
                 // Try to load from unified forest file first (using base method for consistency)
                 String unifiedFilename = base_ptr ? base_ptr->get_unifiedModelFile() : "";
@@ -4348,7 +4359,7 @@ namespace mcu {
                 }
                 
                 is_loaded = true;
-                unsigned long end = millis();
+                unsigned long end = GET_CURRENT_TIME_IN_MILLISECONDS;
                 String formatUsed = (base_ptr && SPIFFS.exists(base_ptr->get_unifiedModelFile().c_str())) ? "unified" : "individual";
                 Serial.printf("✅ Forest loaded (%s format): %d/%d trees (%d nodes) in %lu ms \n", 
                             formatUsed.c_str(), loadedTrees, trees.size(), totalNodes, end - start);
@@ -4396,7 +4407,7 @@ namespace mcu {
                     return;
                 }
                 
-                unsigned long fileStart = millis();
+                unsigned long fileStart = GET_CURRENT_TIME_IN_MILLISECONDS;
                 File file = SPIFFS.open(unifiedFilename.c_str(), FILE_WRITE);
                 if (!file) {
                     Serial.printf("❌ Failed to create unified forest file: %s\n", unifiedFilename.c_str());
@@ -4419,7 +4430,7 @@ namespace mcu {
                     return;
                 }
                 
-                unsigned long writeStart = millis();
+                unsigned long writeStart = GET_CURRENT_TIME_IN_MILLISECONDS;
                 size_t totalBytes = 0;
                 
                 // Write all trees in sequence with error checking
@@ -4486,10 +4497,417 @@ namespace mcu {
                 is_loaded = false;
                 if(logger_ptr) logger_ptr->m_log("after release forest");
                 
-                unsigned long end = millis();
+                unsigned long end = GET_CURRENT_TIME_IN_MILLISECONDS;
                 Serial.printf("✅ Released %d trees to unified format (%d bytes) in %lu ms \n", 
                             clearedCount, totalBytes, end - fileStart);
             }
     };
+
+    /*
+    ------------------------------------------------------------------------------------------------------------------------------
+    ------------------------------------------------ RF_PENDING_DATA ------------------------------------------------------------
+    ------------------------------------------------------------------------------------------------------------------------------
+    */
+
+    class Rf_pending_data{
+        b_vector<Rf_sample> buffer; // buffer for pending samples
+        b_vector<uint8_t> actual_labels; // true labels of the samples, default 255 (unknown/error label)
+
+        uint16_t max_pending_samples; // max number of pending samples in buffer
+
+        // interval between 2 inferences. If after this interval the actual label is not provided, the currently labeled waiting sample will be skipped.
+        long unsigned max_wait_time; // max wait time for true label in ms 
+        long unsigned last_time_received_actual_label;   
+        bool first_label_received = false; // flag to indicate if the first actual label has been received 
+
+        public:
+        Rf_pending_data() {
+            buffer.clear();
+            actual_labels.clear();
+            max_pending_samples = 100; // default max pending samples
+            // max_wait_time disabled by default (very large value)
+            max_wait_time = 2147483647; // ~24 days
+        }
+
+        // add pending sample to buffer, including the label predicted by the model
+        void add_pending_sample(const Rf_sample& sample, const char* base_data_file = nullptr, Rf_config* config_ptr = nullptr, const char* infer_log_file = nullptr){
+            buffer.push_back(sample);
+            if(buffer.size() > max_pending_samples){
+                // Auto-flush if parameters are provided
+                if(base_data_file && config_ptr && infer_log_file) {
+                    flush_pending_data(base_data_file, *config_ptr, infer_log_file);
+                } else {
+                    // Otherwise just clear buffers to prevent memory overflow
+                    buffer.clear();
+                    actual_labels.clear();
+                }
+            }
+        }
+
+        void add_actual_label(uint8_t true_label){
+            uint16_t ignore_index = (GET_CURRENT_TIME_IN_MILLISECONDS - last_time_received_actual_label) / max_wait_time;
+            if(!first_label_received){
+                ignore_index = 0;
+                first_label_received = true;
+            }
+            while(ignore_index-- > 0) actual_labels.push_back(255); // push error label for ignored samples
+
+            // all pending samples have been labeled, ignore this label
+            if(actual_labels.size() >= buffer.size()) return;
+
+            actual_labels.push_back(true_label);
+            last_time_received_actual_label = GET_CURRENT_TIME_IN_MILLISECONDS;
+        }
+
+        void set_max_pending_samples(uint16_t max_samples){
+            max_pending_samples = max_samples;
+        }
+
+        void set_max_wait_time(long unsigned wait_time_ms){
+            max_wait_time = wait_time_ms;
+        }
+
+        // write valid samples (with 0 < actual_label < 255) to base_data file
+        void write_to_base_data(const char* base_data_file, Rf_config& config){
+            if(buffer.empty()) return;
+            
+            // Count valid samples first
+            uint16_t valid_samples_count = 0;
+            for(uint16_t i = 0; i < buffer.size() && i < actual_labels.size(); i++) {
+                if(actual_labels[i] < 255) { // Valid actual label provided
+                    valid_samples_count++;
+                }
+            }
+            
+            if(valid_samples_count == 0) {
+                return; // No valid samples to add
+            }
+            
+            if(!SPIFFS.exists(base_data_file)) {
+                Serial.printf("❌ Base data file does not exist: %s\n", base_data_file);
+                return;
+            }
+            
+            // Read existing file header
+            File file = SPIFFS.open(base_data_file, FILE_READ);
+            if(!file) {
+                Serial.printf("❌ Failed to open base data file for reading: %s\n", base_data_file);
+                return;
+            }
+            
+            uint32_t existing_num_samples;
+            uint16_t existing_num_features;
+            
+            if(file.read((uint8_t*)&existing_num_samples, sizeof(existing_num_samples)) != sizeof(existing_num_samples) ||
+            file.read((uint8_t*)&existing_num_features, sizeof(existing_num_features)) != sizeof(existing_num_features)) {
+                Serial.println("❌ Failed to read existing file header");
+                file.close();
+                return;
+            }
+            
+            if(existing_num_features != config.num_features) {
+                Serial.printf("❌ Feature count mismatch: expected %d, file has %d\n", config.num_features, existing_num_features);
+                file.close();
+                return;
+            }
+            
+            // Calculate sizes
+            const uint16_t packed_feature_bytes = (existing_num_features + 3) / 4; // 4 values per byte
+            const size_t record_size = sizeof(uint8_t) + packed_feature_bytes; // label + packed features
+            
+            if(config.extend_base_data) {
+                // Check limits before extending
+                uint32_t new_sample_count = existing_num_samples + valid_samples_count;
+                size_t header_size = 6; // 4 bytes for num_samples + 2 bytes for num_features
+                size_t new_file_size = header_size + (new_sample_count * record_size);
+                
+                if(new_sample_count > MAX_NUM_SAMPLES) {
+                    Serial.printf("⚠️ Warning: Reached maximum of num samples, disabling extension (%u vs %u)\n", 
+                                new_sample_count, MAX_NUM_SAMPLES);
+                    file.close();
+                    config.extend_base_data = false;
+                    return;
+                }
+                
+                if(new_file_size > MAX_DATASET_SIZE) {
+                    Serial.printf("⚠️ Warning: Reached maximum dataset size, disabling extension (%u vs %u bytes)\n", 
+                                new_file_size, MAX_DATASET_SIZE);
+                    file.close();
+                    config.extend_base_data = false;
+                    return;
+                }
+                
+                // Simple case: append new samples to the end
+                file.close();
+                
+                // Reopen in append mode
+                file = SPIFFS.open(base_data_file, FILE_APPEND);
+                if(!file) {
+                    Serial.printf("❌ Failed to open base data file for appending: %s\n", base_data_file);
+                    return;
+                }
+                
+                // Write new valid samples
+                for(uint16_t i = 0; i < buffer.size() && i < actual_labels.size(); i++) {
+                    if(actual_labels[i] < 255) {
+                        // Write label
+                        uint8_t label = actual_labels[i];
+                        file.write(&label, sizeof(label));
+                        
+                        // Pack and write features (4 values per byte)
+                        uint8_t packed_buffer[packed_feature_bytes];
+                        for(uint16_t j = 0; j < packed_feature_bytes; j++) {
+                            packed_buffer[j] = 0;
+                        }
+                        
+                        for(size_t j = 0; j < buffer[i].features.size() && j < existing_num_features; j++) {
+                            uint16_t byte_index = j / 4;
+                            uint8_t bit_offset = (j % 4) * 2;
+                            uint8_t feature_value = buffer[i].features[j] & 0x03;
+                            packed_buffer[byte_index] |= (feature_value << bit_offset);
+                        }
+                        
+                        file.write(packed_buffer, packed_feature_bytes);
+
+                        config.samples_per_label[label]++; // Update sample count per label
+                    }
+                }
+                
+                file.close();
+                
+                // Update header with new sample count
+                file = SPIFFS.open(base_data_file, FILE_WRITE);
+                if(file) {
+                    uint32_t new_num_samples = existing_num_samples + valid_samples_count;
+                    file.write((uint8_t*)&new_num_samples, sizeof(new_num_samples));
+                    file.write((uint8_t*)&existing_num_features, sizeof(existing_num_features));
+                    file.close();
+                    config.num_samples = new_num_samples;
+                }
+                
+            } else {
+                // Replace mode: remove old samples from beginning, add new ones at end
+                if(valid_samples_count > existing_num_samples) {
+                    Serial.println("❌ Cannot remove more samples than exist in dataset");
+                    file.close();
+                    return;
+                }
+                
+                // Read all existing data (skip the first N samples)
+                file.seek(6 + (valid_samples_count * record_size)); // Skip header + N records
+                
+                uint32_t remaining_samples = existing_num_samples - valid_samples_count;
+                size_t remaining_data_size = remaining_samples * record_size;
+                
+                uint8_t* temp_buffer = (uint8_t*)malloc(remaining_data_size);
+                if(!temp_buffer) {
+                    Serial.println("❌ Not enough memory for replace operation");
+                    file.close();
+                    return;
+                }
+                
+                size_t bytes_read = file.read(temp_buffer, remaining_data_size);
+                file.close();
+                
+                if(bytes_read != remaining_data_size) {
+                    Serial.println("❌ Failed to read existing data");
+                    free(temp_buffer);
+                    return;
+                }
+                
+                // Rewrite entire file
+                file = SPIFFS.open(base_data_file, FILE_WRITE);
+                if(!file) {
+                    Serial.printf("❌ Failed to open base data file for writing: %s\n", base_data_file);
+                    free(temp_buffer);
+                    return;
+                }
+                
+                // Write header (same number of samples)
+                uint32_t final_num_samples = existing_num_samples;
+                file.write((uint8_t*)&final_num_samples, sizeof(final_num_samples));
+                file.write((uint8_t*)&existing_num_features, sizeof(existing_num_features));
+                
+                // Write remaining old data
+                file.write(temp_buffer, remaining_data_size);
+                free(temp_buffer);
+                
+                // Write new valid samples
+                for(uint16_t i = 0; i < buffer.size() && i < actual_labels.size(); i++) {
+                    if(actual_labels[i] < 255) {
+                        // Write label
+                        uint8_t label = actual_labels[i];
+                        file.write(&label, sizeof(label));
+                        
+                        // Pack and write features
+                        uint8_t packed_buffer[packed_feature_bytes];
+                        for(uint16_t j = 0; j < packed_feature_bytes; j++) {
+                            packed_buffer[j] = 0;
+                        }
+                        
+                        for(size_t j = 0; j < buffer[i].features.size() && j < existing_num_features; j++) {
+                            uint16_t byte_index = j / 4;
+                            uint8_t bit_offset = (j % 4) * 2;
+                            uint8_t feature_value = buffer[i].features[j] & 0x03;
+                            packed_buffer[byte_index] |= (feature_value << bit_offset);
+                        }
+                        
+                        file.write(packed_buffer, packed_feature_bytes);
+                    }
+                }
+                
+                file.close();
+            }
+        }
+
+        // Write prediction which given actual label (0 < actual_label < 255) to the inference log file
+        void write_to_infer_log(const char* infer_log_file, int num_labels){
+            if(buffer.empty()) return;
+            
+            // Check if file exists to determine if header needs to be written
+            bool file_exists = SPIFFS.exists(infer_log_file);
+            File file = SPIFFS.open(infer_log_file, file_exists ? FILE_APPEND : FILE_WRITE);
+            
+            if(!file) {
+                Serial.printf("❌ Failed to open inference log file: %s\n", infer_log_file);
+                return;
+            }
+            
+            // Write header if new file
+            if(!file_exists) {
+                // Magic number (4 bytes) + num_labels (1 byte) + reserved space for prediction counts per label
+                uint32_t magic = 0x494E4652; // "INFR" in hex
+                file.write((uint8_t*)&magic, 4);
+                file.write((uint8_t*)&num_labels, 1);
+                
+                // Write initial prediction counts (2 bytes per label - total predictions for each label)
+                for(int i = 0; i < num_labels; i++) {
+                    uint16_t count = 0;
+                    file.write((uint8_t*)&count, 2);
+                }
+            }
+            
+            // Collect prediction results for valid samples
+            b_vector<uint8_t, SMALL> prediction_bits;
+            b_vector<uint8_t, SMALL> label_counts_increment(num_labels, 0);
+            
+            for(uint16_t i = 0; i < buffer.size() && i < actual_labels.size(); i++) {
+                if(actual_labels[i] < 255 && actual_labels[i] < num_labels) {
+                    uint8_t predicted_label = buffer[i].label;
+                    uint8_t actual_label = actual_labels[i];
+                    
+                    // Prediction is correct if predicted == actual
+                    bool is_correct = (predicted_label == actual_label);
+                    prediction_bits.push_back(is_correct ? 1 : 0);
+                    label_counts_increment[actual_label]++;
+                }
+            }
+            
+            if(!prediction_bits.empty()) {
+                // Pack prediction bits into bytes (8 predictions per byte)
+                b_vector<uint8_t, SMALL> packed_predictions;
+                for(size_t i = 0; i < prediction_bits.size(); i += 8) {
+                    uint8_t packed_byte = 0;
+                    for(int bit = 0; bit < 8 && (i + bit) < prediction_bits.size(); bit++) {
+                        if(prediction_bits[i + bit]) {
+                            packed_byte |= (1 << bit);
+                        }
+                    }
+                    packed_predictions.push_back(packed_byte);
+                }
+                
+                // Write packed prediction data
+                file.write(packed_predictions.data(), packed_predictions.size());
+                
+                // Update prediction counts in header
+                file.seek(5); // Skip magic (4) + num_labels (1)
+                for(int i = 0; i < num_labels; i++) {
+                    uint16_t current_count;
+                    file.read((uint8_t*)&current_count, 2);
+                    file.seek(file.position() - 2); // Go back to overwrite
+                    current_count += label_counts_increment[i];
+                    file.write((uint8_t*)&current_count, 2);
+                }
+            }
+            
+            file.close();
+            
+            // Trim file if it exceeds max size
+            trim_log_file(infer_log_file);
+        }
+
+        // trim log file if it exceeds max size (MAX_INFER_LOGFILE_SIZE)
+        void trim_log_file(const char* infer_log_file) {
+            if(!SPIFFS.exists(infer_log_file)) return;
+            
+            File file = SPIFFS.open(infer_log_file, FILE_READ);
+            if(!file) return;
+            
+            size_t file_size = file.size();
+            file.close();
+            
+            if(file_size <= MAX_INFER_LOGFILE_SIZE) return;
+            
+            // File is too large, trim from the beginning (keep most recent data)
+            file = SPIFFS.open(infer_log_file, FILE_READ);
+            if(!file) return;
+            
+            // Calculate how much data to keep (keep last MAX_INFER_LOGFILE_SIZE/2 bytes to have room for growth)
+            size_t keep_size = MAX_INFER_LOGFILE_SIZE / 2;
+            size_t skip_size = file_size - keep_size;
+            
+            // Read header first to preserve it
+            uint32_t magic;
+            uint8_t num_labels;
+            file.read((uint8_t*)&magic, 4);
+            file.read((uint8_t*)&num_labels, 1);
+            
+            // Read prediction counts
+            b_vector<uint16_t, SMALL> prediction_counts(num_labels);
+            for(int i = 0; i < num_labels; i++) {
+                file.read((uint8_t*)&prediction_counts[i], 2);
+            }
+            
+            size_t header_size = 5 + (num_labels * 2); // magic + num_labels + counts
+            
+            // Skip to the position we want to keep from
+            file.seek(skip_size);
+            
+            // Read remaining data
+            size_t remaining_data_size = file_size - skip_size;
+            b_vector<uint8_t, MEDIUM> remaining_data(remaining_data_size);
+            file.read(remaining_data.data(), remaining_data_size);
+            file.close();
+            
+            // Rewrite file with header and trimmed data
+            file = SPIFFS.open(infer_log_file, FILE_WRITE);
+            if(!file) return;
+            
+            // Write header
+            file.write((uint8_t*)&magic, 4);
+            file.write((uint8_t*)&num_labels, 1);
+            for(int i = 0; i < num_labels; i++) {
+                file.write((uint8_t*)&prediction_counts[i], 2);
+            }
+            
+            // Write remaining data
+            file.write(remaining_data.data(), remaining_data.size());
+            file.close();
+        }
+
+        // Public method to flush pending data when buffer is full or on demand
+        void flush_pending_data(const char* base_data_file, Rf_config& config, const char* infer_log_file) {
+            if(buffer.empty()) return;
+            
+            write_to_base_data(base_data_file, config);
+            write_to_infer_log(infer_log_file, config.num_labels);
+            
+            // Clear buffers after processing
+            buffer.clear();
+            actual_labels.clear();
+        }
+
+    }
+
 
 } // namespace mcu

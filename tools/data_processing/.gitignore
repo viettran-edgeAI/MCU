@@ -3,9 +3,6 @@
 # Build artifacts
 processing_data
 
-# Generated output files
-data/result/
-plots/
 
 # Python environment and cache
 venv_*/

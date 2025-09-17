@@ -992,7 +992,7 @@ struct ESP32_Sample {
 };
 
 // Load CSV data for binary conversion
-mcu::vector<ESP32_Sample> loadCSVForBinary(const std::string& csvFilename, uint8_t expectedFeatures) {
+mcu::vector<ESP32_Sample> loadCSVForBinary(const std::string& csvFilename, uint16_t expectedFeatures) {
     std::cout << "🔄 Loading CSV data for binary conversion: " << csvFilename << std::endl;
     
     std::ifstream file(csvFilename);
@@ -1173,7 +1173,7 @@ void convertCSVToBinary(const std::string& inputCSV, const std::string& outputBi
     std::cout << "   Valid range: 0-" << static_cast<int>(getMaxFeatureValue()) << std::endl;
     
     // Load CSV data
-    auto samples = loadCSVForBinary(inputCSV, static_cast<uint8_t>(numFeatures));
+    auto samples = loadCSVForBinary(inputCSV, numFeatures);
     
     if (samples.empty()) {
         throw std::runtime_error("No valid samples found in CSV file");

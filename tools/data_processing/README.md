@@ -16,10 +16,10 @@ Complete pipeline for STL_MCU Random Forest: converts CSV data to ESP32-ready fo
 
 ```mermaid
 flowchart LR
-  A[Raw CSV<br/>(labels + features)] --> B[Normalization & Quantization<br/>(2-bit; 0..3)]
-  B --> C[Outputs in data/result/<br/>• *_nml.csv (quantized)<br/>• *_ctg.csv (categorizer)<br/>• *_dp.csv (params)<br/>• *_nml.bin (binary)]
-  C --> D[Optional Visualization<br/>(PCA 3D views)]
-  C --> E[Transfer to ESP32<br/>(serial unified/individual/manual)]
+  A["Raw CSV<br/>labels + features"] --> B["Normalization & Quantization<br/>2-bit: 0..3"]
+  B --> C["Outputs in data/result/<br/>• *_nml.csv quantized<br/>• *_ctg.csv categorizer<br/>• *_dp.csv params<br/>• *_nml.bin binary"]
+  C --> D["Optional Visualization<br/>PCA 3D views"]
+  C --> E["Transfer to ESP32<br/>serial unified/individual/manual"]
 ```
 ```
 📊 Raw Dataset (CSV)

@@ -18,10 +18,11 @@ using u8 = uint8_t;
 // Function declarations
 int truncate_csv(const char *in_path);
 
-// Quantization coefficient for feature values. 1->8 bits per feature value.
 static constexpr uint8_t quantization_coefficient = 2; // Coefficient for quantization (bits per feature value)
+
+static const int MAX_LABELS = 256; // Maximum number of unique labels supporte 
 static const int MAX_NUM_FEATURES = 1023; // Maximum number of features supported
-static const int MAX_LABELS = 256; // Maximum number of unique labels supporte (5 bits per label - fixed)
+static const int MAX_NUM_SAMPLES = 65535; // Maximum number of samples supported
 
 // Helper functions to calculate derived values from quantization coefficient
 static constexpr uint16_t getGroupsPerFeature() {
@@ -775,8 +776,11 @@ struct DatasetInfo {
     int numSamples;
     mcu::vector<mcu::pair<std::string, uint8_t>> labelMapping; // original -> normalized
     bool needsTruncation;
+    bool needsHorizontalTruncation;
+    bool needsVerticalTruncation;
     
-    DatasetInfo() : numFeatures(0), numSamples(0), needsTruncation(false) {}
+    DatasetInfo() : numFeatures(0), numSamples(0), needsTruncation(false), 
+                   needsHorizontalTruncation(false), needsVerticalTruncation(false) {}
 };
 
 // Scan dataset to get info and create label mapping
@@ -798,7 +802,7 @@ DatasetInfo scanDataset(const char* inputFilePath) {
     }
     
     info.numFeatures = n_cols - 1; // Exclude label column
-    info.needsTruncation = (info.numFeatures > MAX_NUM_FEATURES);
+    info.needsHorizontalTruncation = (info.numFeatures > MAX_NUM_FEATURES);
     
     // Collect unique labels
     mcu::vector<std::string> uniqueLabels;
@@ -829,6 +833,8 @@ DatasetInfo scanDataset(const char* inputFilePath) {
     
     fin.close();
     info.numSamples = lineCount;
+    info.needsVerticalTruncation = (info.numSamples > MAX_NUM_SAMPLES);
+    info.needsTruncation = info.needsHorizontalTruncation || info.needsVerticalTruncation;
     uniqueLabels.sort(); // Sort labels for consistent mapping
     
     // Create label mapping: original label -> normalized index (0, 1, 2, ...)
@@ -846,9 +852,14 @@ DatasetInfo scanDataset(const char* inputFilePath) {
         std::cout << "     \"" << mapping.first << "\" -> " << static_cast<int>(mapping.second) << "\n";
     }
     
-    if (info.needsTruncation) {
+    if (info.needsHorizontalTruncation) {
         std::cout << "  ⚠️  Feature count (" << info.numFeatures << ") exceeds MAX_NUM_FEATURES (" 
-                  << MAX_NUM_FEATURES << "). Truncation needed.\n";
+                  << MAX_NUM_FEATURES << "). Horizontal truncation needed.\n";
+    }
+    
+    if (info.needsVerticalTruncation) {
+        std::cout << "  ⚠️  Sample count (" << info.numSamples << ") exceeds MAX_NUM_SAMPLES (" 
+                  << MAX_NUM_SAMPLES << "). Vertical truncation needed.\n";
     }
     
     return info;
@@ -864,7 +875,7 @@ uint8_t getNormalizedLabel(const std::string& originalLabel, const mcu::vector<m
     return 0; // Default if not found (shouldn't happen after scanning)
 }
 
-// CSV truncation function to limit number of features
+// CSV truncation function to limit number of features (horizontal) and samples (vertical)
 int truncate_csv(const char *in_path) {
     // Determine output directory and filename
     std::string input_path(in_path);
@@ -885,29 +896,83 @@ int truncate_csv(const char *in_path) {
     std::string out_path_str = result_dir + "/" + base_name + "_truncated.csv";
     const char* out_path = out_path_str.c_str();
 
-    FILE *in  = fopen(in_path, "r");
-    if (!in)  return -errno;
-    FILE *out = fopen(out_path, "w");
-    if (!out) { fclose(in); return -errno; }
-
-    int c, col = 0;
-    while ((c = fgetc(in)) != EOF) {
-        if (c == ',') {
-            if (++col < MAX_NUM_FEATURES)
-                fputc(',', out);
-        }
-        else if (c == '\n') {
-            fputc('\n', out);
-            col = 0;
-        }
-        else {
-            if (col < MAX_NUM_FEATURES)
-                fputc(c, out);
-        }
+    // First, read the file line by line to apply both horizontal and vertical truncation
+    std::ifstream fin(in_path);
+    if (!fin) return -errno;
+    std::ofstream fout(out_path);
+    if (!fout) { 
+        fin.close(); 
+        return -errno; 
     }
 
-    fclose(in);
-    fclose(out);
+    std::string line;
+    int row_count = 0;
+    bool needsHorizontalTruncation = false;
+    bool needsVerticalTruncation = false;
+    
+    // Check if we need any truncation by reading the first line to get column count
+    if (std::getline(fin, line)) {
+        auto firstLineCols = split(line);
+        int n_cols = (int)firstLineCols.size();
+        
+        needsHorizontalTruncation = (n_cols > MAX_NUM_FEATURES + 1); // +1 for label column
+        
+        // Reset file to beginning for actual processing
+        fin.clear();
+        fin.seekg(0, std::ios::beg);
+        
+        std::cout << "🔧 Truncation Analysis:\n";
+        std::cout << "   Original features: " << (n_cols - 1) << " (max allowed: " << MAX_NUM_FEATURES << ")\n";
+        std::cout << "   Horizontal truncation needed: " << (needsHorizontalTruncation ? "YES" : "NO") << "\n";
+    }
+
+    // Process the file with both horizontal and vertical truncation
+    while (std::getline(fin, line) && row_count < MAX_NUM_SAMPLES) {
+        if (line.empty()) continue;
+        
+        if (needsHorizontalTruncation) {
+            // Apply horizontal truncation (limit features)
+            auto cols = split(line);
+            if (!cols.empty()) {
+                // Write label (first column)
+                fout << cols[0];
+                
+                // Write features up to MAX_NUM_FEATURES
+                int features_written = 0;
+                for (size_t i = 1; i < cols.size() && features_written < MAX_NUM_FEATURES; ++i) {
+                    fout << "," << cols[i];
+                    features_written++;
+                }
+                fout << "\n";
+            }
+        } else {
+            // No horizontal truncation needed, write the line as-is
+            fout << line << "\n";
+        }
+        
+        row_count++;
+    }
+    
+    // Check if vertical truncation was needed
+    std::string remaining_line;
+    if (std::getline(fin, remaining_line)) {
+        needsVerticalTruncation = true;
+    }
+    
+    fin.close();
+    fout.close();
+    
+    std::cout << "   Original samples: " << (needsVerticalTruncation ? ">" + std::to_string(MAX_NUM_SAMPLES) : std::to_string(row_count));
+    std::cout << " (max allowed: " << MAX_NUM_SAMPLES << ")\n";
+    std::cout << "   Vertical truncation needed: " << (needsVerticalTruncation ? "YES" : "NO") << "\n";
+    std::cout << "   Final samples written: " << row_count << "\n";
+    
+    if (needsHorizontalTruncation || needsVerticalTruncation) {
+        std::cout << "✅ Truncated dataset saved: " << out_path << "\n";
+    } else {
+        std::cout << "ℹ️  No truncation needed, but truncated copy created: " << out_path << "\n";
+    }
+    
     return 0;
 }
 
@@ -1276,19 +1341,25 @@ int main(int argc, char* argv[]) {
                       << (skipHeader ? "yes (header will be skipped)" : "no (all lines will be processed)") << "\n";
         }
 
-        // Step 2: Handle feature truncation if needed
+        // Step 2: Handle dataset truncation if needed
         if (datasetInfo.needsTruncation) {
-            std::cout << "\n=== Feature Truncation ===\n";
-            std::cout << "Truncating from " << datasetInfo.numFeatures << " to " << MAX_NUM_FEATURES << " features...\n";
+            std::cout << "\n=== Dataset Truncation ===\n";
+            
+            if (datasetInfo.needsHorizontalTruncation) {
+                std::cout << "🔧 Horizontal truncation: " << datasetInfo.numFeatures << " → " << MAX_NUM_FEATURES << " features\n";
+            }
+            
+            if (datasetInfo.needsVerticalTruncation) {
+                std::cout << "🔧 Vertical truncation: " << datasetInfo.numSamples << " → " << MAX_NUM_SAMPLES << " samples\n";
+            }
 
-            int result = truncate_csv(inputFile.c_str()); // +1 for label column
+            int result = truncate_csv(inputFile.c_str());
             if (result != 0) {
                 throw std::runtime_error("Failed to truncate CSV file");
             }
 
             // Update working file to the truncated version
             workingFile = truncatedFile.c_str();
-            std::cout << "✅ Truncated dataset saved as: " << workingFile << "\n";
         }
 
         // Step 3: Categorize features with the (possibly truncated) dataset

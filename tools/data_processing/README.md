@@ -6,35 +6,9 @@ Complete pipeline for STL_MCU Random Forest: converts CSV data to ESP32-ready fo
 
 ## 🎯 What you get
 
-- Automatic CSV processing (handles headers intelligently)
-- 2-bit quantization (values 0-3) optimized for ESP32
-- Binary export ready for microcontroller memory
-- Optional visualization
-- Simple transfer to ESP32
-
-## 📛 Model Name Concept
-
-**Important:** The system uses your CSV filename (without .csv extension) as the `model_name` throughout the entire pipeline.
-
-**Example:**
-- Input: `digit_data.csv` → Model name: `digit_data`
-- Input: `walker_fall.csv` → Model name: `walker_fall`
-
-**All generated files use this model_name:**
-- `{model_name}_nml.csv` - Quantized dataset
-- `{model_name}_nml.bin` - ESP32 binary format  
-- `{model_name}_ctg.csv` - Categorizer rules
-- `{model_name}_dp.csv` - Dataset parameters
-
-**For transfer and identification:**
-- Transfer command: `python3 unified_transfer.py {model_name} /dev/ttyUSB0`
-- ESP32 identifies data by this model_name
-- All references in documentation use this naming convention
-
-**On the ESP32 side:**
-- `model_name` is used to load and manage datasets, initialize model, file components, etc.
-
-💡 **Remember:** Choose meaningful CSV filenames as they become your model identifiers!
+- 2-bit dataset quantization 
+- Visualization effects of quantization
+- transfer to ESP32
 
 ## 🧭 Pipeline at a glance
 
@@ -68,6 +42,30 @@ flowchart LR
    ├── Individual files
    └── Manual (Serial Monitor)
 ```
+
+## 📛 Model Name Concept
+
+**Important:** The system uses your CSV filename (without .csv extension) as the `model_name` throughout the entire pipeline.
+
+**Example:**
+- Input: `digit_data.csv` → Model name: `digit_data`
+- Input: `walker_fall.csv` → Model name: `walker_fall`
+
+**All generated files use this model_name:**
+- `{model_name}_nml.csv` - Quantized dataset
+- `{model_name}_nml.bin` - ESP32 binary format  
+- `{model_name}_ctg.csv` - Categorizer rules
+- `{model_name}_dp.csv` - Dataset parameters
+
+**For transfer and identification:**
+- Transfer command: `python3 unified_transfer.py {model_name} /dev/ttyUSB0`
+- ESP32 identifies data by this model_name
+- All references in documentation use this naming convention
+
+**On the ESP32 side:**
+- `model_name` is used to load and manage datasets, initialize model, file components, etc.
+
+💡 **Remember:** Choose meaningful CSV filenames as they become your model identifiers!
 
 ## 📋 Requirements
 

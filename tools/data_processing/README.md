@@ -17,22 +17,23 @@ flowchart LR
   A["Raw CSV<br/>model_name.csv"] --> B["Quantization<br/>2-bit"]
   B --> C["Generated Files<br/>• model_name_nml.bin <br/>• model_name_nml.csv <br/>• momdel_name_dp.csv <br/>• model_name_ctg.csv"]
   B --> D["Visualization<br/>PCA 3D views"]
-  C --> E["Transfer to ESP32<br/> (unified/individual/manual)"]
+  C --> E["Transfer to ESP32<br/> (unified /individual /manual)"]
 ```
 ```
 📊 Raw Dataset (CSV)
     ↓
-� Smart Header Handling
+� Internal pre-processing
     ├── Headers detected → Skip first line
-    └── No headers → Process all lines
+    ├── No headers → Process all lines
+    └── exceeds limits → truncate  
     ↓
-�🔄 Quantization Process (2-bit: 0..3)
+�🔄 Quantization Process (features categorizing, labels mapping)
     ↓
 📁 Generated Files:
-   ├── *_nml.csv (quantized data only)
-   ├── *_ctg.csv (categorizer rules) 
-   ├── *_dp.csv (dataset params)
-   └── *_nml.bin (ESP32 binary)
+   ├── model_name_nml.bin 
+   ├── model_name_nml.csv 
+   ├── model_name_dp.csv  
+   └── model_name_ctg.csv 
     ↓
 📈 Visualization (Optional)
    └── PCA 3D plots
@@ -52,10 +53,20 @@ flowchart LR
 - Input: `walker_fall.csv` → Model name: `walker_fall`
 
 **All generated files use this model_name:**
-- `{model_name}_nml.csv` - Quantized dataset
-- `{model_name}_nml.bin` - ESP32 binary format  
-- `{model_name}_ctg.csv` - Categorizer rules
-- `{model_name}_dp.csv` - Dataset parameters
+- `{model_name}_nml.bin` - Standard format for transfer to ESP32
+- `{model_name}_nml.csv` - Used for pre_train tool or manual transfer
+- `{model_name}_dp.csv` - File containing general parameters of the dataset
+- `{model_name}_ctg.csv` - File containing categorizer
+
+**Technical Details:**
+For details on how quantization and categorizer work, please refer to:
+`/home/viettran/Arduino/libraries/STL_MCU/docs/Rf_components/Rf_categorizer_Technical_Overview.md`
+
+⚠️ **Dataset Limits:**
+- **Max Labels**: 255 unique classes
+- **Max Features**: 1024 features per sample
+- **Max Samples**: 60,000 samples per dataset
+- Datasets exceeding these limits will be automatically truncated or will fail processing
 
 **For transfer and identification:**
 - Transfer command: `python3 unified_transfer.py {model_name} /dev/ttyUSB0`
@@ -236,58 +247,26 @@ The script compiles this automatically if needed.
 
 ## 🧪 Processing details
 
-### Smart Header Handling
-- **Automatic Detection**: System analyzes your CSV to determine if it has headers
-- **No Configuration Needed**: Just run the tool and it handles headers correctly
-- **Manual Override**: Use `--header yes/no` if you need to force specific behavior
+### How Quantization and Categorizer Work
 
-### Quantization (quantization_coefficient = 2)
-- Outlier handling: Z-score ±3σ clipping
-- Continuous features → 4 quantile-based bins
-- Discrete detection for integer-like features
-- Encode features into 2-bit categories {0,1,2,3}
-- Label normalization: map strings → numeric indices
+For comprehensive technical details on the quantization process and categorizer implementation, please refer to:
 
-Derived properties:
-- Groups per feature: 2^2 = 4
-- Features per byte: 8/2 = 4
-- Max features supported: 1023
+**📖 [Rf_categorizer Technical Overview](../../../docs/Rf_components/Rf_categorizer_Technical_Overview.md)**
 
-### Outputs (in `data/result/`)
-- `<name>_nml.csv` – normalized CSV (quantized data only, no headers)
-- `<name>_ctg.csv` – CTG2 categorizer rules
-- `<name>_dp.csv` – dataset parameters/metadata
-- `<name>_nml.bin` – ESP32 binary dataset
-- `plots/` – visuals if `-v` or Makefile visualize
-- `<name>_nml.bin` – ESP32 binary dataset
-- `plots/` – visuals if `-v` or Makefile visualize
+This document covers:
+- Detailed quantization algorithms (2-bit categorical encoding)
+- Categorizer architecture and optimization
+- Feature binning strategies (quantile-based, discrete detection)
+- Label normalization processes
+- Memory optimization techniques for ESP32
 
-### Binary file format (ESP32)
+### Quick Overview
 
-Header (6 bytes):
-- numSamples: 4 bytes, uint32_t, LE
-- numFeatures: 2 bytes, uint16_t, LE
+- **Input**: Continuous feature values and string/numeric labels
+- **Process**: 2-bit quantization (4 categories: 0,1,2,3) with outlier handling
+- **Output**: Categorical dataset optimized for ESP32 Random Forest
+- **Compression**: Overall compression ratio can reach ~28x, depending on the data and number of features
 
-Each sample:
-- sampleID: 2 bytes, uint16_t, LE
-- label: 1 byte, uint8_t
-- features: packed, 2 bits/feature (4 features per byte)
-
-Validation performed:
-- Ensures features are ∈ [0..3]
-- Consistent size vs. expected structure
-- Read-back check and summary logging
-
-## 👀 Visualization
-
-PCA-based inspection comparing class separability and variance retention post-quantization.
-- Multi-angle images (standard, top-front, side)
-- Downsampling for large datasets
-- Top-5 class limiting for highly multi-class sets
-
-Generate by either:
-- `./quantize_dataset.sh -p data/your.csv -v`
-- or `make visualize NAME=<dataset_base_name>` (expects processed files)
 
 ## 🔌 Transfer to ESP32
 
@@ -411,13 +390,13 @@ tools/data_processing/
 │   ├── iris_data.csv
 │   ├── digit_data.csv
 │   ├── walker_fall.csv
-│   └── result/
-│       ├── <name>_nml.csv        # Quantized CSV (0..3)
-│       ├── <name>_nml.bin        # ESP32 binary dataset
-│       ├── <name>_ctg.csv        # Categorizer rules (CTG2)
-│       └── <name>_dp.csv         # Dataset params/metadata
-├── plots/                         # Visualization outputs
-└── data_transfer/
+│   └── result/                     # Generated files
+│       ├── <name>_nml.csv      
+│       ├── <name>_nml.bin        
+│       ├── <name>_ctg.csv       
+│       └── <name>_dp.csv         
+├── plots/                          # Visualization outputs
+└── data_transfer/                  # Transfer tools
     ├── pc_side/
     │   ├── unified_transfer.py
     │   ├── transfer_categorizer.py
@@ -434,12 +413,6 @@ tools/data_processing/
 ```
 
 ## 🧪 Tips, limits, and troubleshooting
-
-Performance & limits:
-- >10K samples may take several minutes
-- ~1GB RAM suggested for >1M samples
-- Max features: 1023 (extra truncated)
-- Disable `-v` to speed up large runs
 
 Common issues:
 - Missing compiler: install build-essential on Debian/Ubuntu

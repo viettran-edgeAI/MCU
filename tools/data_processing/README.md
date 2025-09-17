@@ -107,7 +107,7 @@ Generated files will be in `data/result/` directory, ready for ESP32 transfer.
 
 ### Basic Script
 
-`./quantize_dataset.sh -p <csv_file> [--visualize]`
+`./quantize_dataset.sh -p <csv_path> [--visualize]`
 
 ### Available Options
 - `-p, --path <file>`: input CSV (required)
@@ -251,7 +251,7 @@ The script compiles this automatically if needed.
 
 For comprehensive technical details on the quantization process and categorizer implementation, please refer to:
 
-**📖 [Rf_categorizer Technical Overview](../../../docs/Rf_components/Rf_categorizer_Technical_Overview.md)**
+**📖 [Rf_categorizer Technical Overview](../../docs/Rf_components/Rf_categorizer_Technical_Overview.md)**
 
 This document covers:
 - Detailed quantization algorithms (2-bit categorical encoding)

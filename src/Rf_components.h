@@ -45,13 +45,13 @@ using sampleID_set = mcu::ID_vector<uint16_t>;       // set of unique sample IDs
 
 
 /*
- NOTE : Random file components (for each model)
+ NOTE : Random file components (with each model)
     1. model_name_nml.bin       : base data (dataset)
     2. model_name_config.json   : model configuration file 
     3. model_name_ctg.bin       : categorizer (feature quantizer and label mapping)
     4. model_name_dp.csv        : information about dataset (num_features, num_labels...)
     5. model_name_forest.bin    : model file (all trees) in unified format
-    6. model_name_tree_*.bin    : model files (tree files) in individual format. (Given from pc/used during training, optional)
+    6. model_name_tree_*.bin    : model files (tree files) in individual format. (Given from pc/used during training)
     7. model_name_node_pred.bin : node predictor file 
     8. model_name_node_log.csv  : node splitting log file during training (for retraining node predictor)
     9. model_name_infer_log.bin : inference log file (predictions, actual labels, metrics over time)
@@ -1750,12 +1750,14 @@ namespace mcu {
             file.printf("num_samples,%u\n", num_samples);
             file.printf("num_labels,%u\n", num_labels);
             
+            Serial.printf("num labels: %u\n", num_labels);
+            Serial.printf("samples_per_label size: %u\n", samples_per_label.size());
             // Write actual label counts from samples_per_label vector
-            for (uint8_t i = 0; i < num_labels && i < samples_per_label.size(); i++) {
+            for (uint8_t i = 0; i < samples_per_label.size(); i++) {
                 file.printf("samples_label_%u,%u\n", i, samples_per_label[i]);
             }
             
-            file.close();
+            file.close();   
             
             if constexpr(RF_DEBUG_LEVEL > 2)
                 Serial.println("✅ Dataset parameters saved successfully.");
@@ -2174,70 +2176,86 @@ namespace mcu {
                 model_name = String(bn);
                 // find and rename all existing related files
 
+                String old_file, new_file;
+
                 // base file
-                String old_baseFile = "/" + old_model_name + "_nml.bin";
-                String new_baseFile = "/" + model_name + "_nml.bin";
-                cloneFile(old_baseFile, new_baseFile);
-                SPIFFS.remove(old_baseFile.c_str());
+                old_file = "/" + old_model_name + "_nml.bin";
+                new_file = "/" + model_name + "_nml.bin";
+                cloneFile(old_file, new_file);
+                SPIFFS.remove(old_file.c_str());
 
                 // data_params file
-                String old_dpFile = "/" + old_model_name + "_dp.csv";
-                String new_dpFile = "/" + model_name + "_dp.csv";
-                cloneFile(old_dpFile, new_dpFile);
-                SPIFFS.remove(old_dpFile.c_str());
+                old_file = "/" + old_model_name + "_dp.csv";
+                new_file = "/" + model_name + "_dp.csv";
+                cloneFile(old_file, new_file);
+                SPIFFS.remove(old_file.c_str());
 
                 // categorizer file
-                String old_ctgFile = "/" + old_model_name + "_ctg.csv";
-                String new_ctgFile = "/" + model_name + "_ctg.csv";
-                cloneFile(old_ctgFile, new_ctgFile);
-                SPIFFS.remove(old_ctgFile.c_str());
+                old_file = "/" + old_model_name + "_ctg.csv";
+                new_file = "/" + model_name + "_ctg.csv";
+                cloneFile(old_file, new_file);
+                SPIFFS.remove(old_file.c_str());
 
                 // inference log file
-                String old_logFile = "/" + old_model_name + "_infer_log.bin";
-                String new_logFile = "/" + model_name + "_infer_log.bin";
-                cloneFile(old_logFile, new_logFile);
-                SPIFFS.remove(old_logFile.c_str());
+                old_file = "/" + old_model_name + "_infer_log.bin";
+                new_file = "/" + model_name + "_infer_log.bin";
+                cloneFile(old_file, new_file);
+                SPIFFS.remove(old_file.c_str());
 
                 // node predictor file
-                String old_nodePredFile = "/" + old_model_name + "_node_pred.bin";
-                String new_nodePredFile = "/" + model_name + "_node_pred.bin";
-                cloneFile(old_nodePredFile, new_nodePredFile);
-                SPIFFS.remove(old_nodePredFile.c_str());
+                old_file = "/" + old_model_name + "_node_pred.bin";
+                new_file = "/" + model_name + "_node_pred.bin";
+                cloneFile(old_file, new_file);
+                SPIFFS.remove(old_file.c_str());
 
                 // config file
-                String old_configFile = "/" + old_model_name + "_config.json";
-                String new_configFile = "/" + model_name + "_config.json";
-                cloneFile(old_configFile, new_configFile);
-                SPIFFS.remove(old_configFile.c_str());
+                old_file = "/" + old_model_name + "_config.json";
+                new_file = "/" + model_name + "_config.json";
+                cloneFile(old_file, new_file);
+                SPIFFS.remove(old_file.c_str());
 
                 // tree files - handle both individual and unified formats
-                String old_unifiedFile = "/" + old_model_name + "_forest.bin";
-                String new_unifiedFile = "/" + model_name + "_forest.bin";
+                old_file = "/" + old_model_name + "_forest.bin";
+                new_file = "/" + model_name + "_forest.bin";
                 
-                if (SPIFFS.exists(old_unifiedFile.c_str())) {
+                if (SPIFFS.exists(old_file.c_str())) {
                     // Handle unified model format
-                    cloneFile(old_unifiedFile, new_unifiedFile);
-                    SPIFFS.remove(old_unifiedFile.c_str());
+                    cloneFile(old_file, new_file);
+                    SPIFFS.remove(old_file.c_str());
                 } else {
                     // Handle individual tree files
                     for(uint8_t i = 0; i < 50; i++) { // Max 50 trees check
-                        String old_treeFile = "/" + old_model_name + "_tree_" + String(i) + ".bin";
-                        String new_treeFile = "/" + model_name + "_tree_" + String(i) + ".bin";
-                        if (SPIFFS.exists(old_treeFile.c_str())) {
-                            cloneFile(old_treeFile, new_treeFile);
-                            SPIFFS.remove(old_treeFile.c_str());
+                        old_file = "/" + old_model_name + "_tree_" + String(i) + ".bin";
+                        new_file = "/" + model_name + "_tree_" + String(i) + ".bin";
+                        if (SPIFFS.exists(old_file.c_str())) {
+                            cloneFile(old_file, new_file);
+                            SPIFFS.remove(old_file.c_str());
                         }else{
                             break; // Stop when we find a missing tree file
                         }
                     }
                 }
+
+                // log files - optional, not critical
+                // model_name_memory_log.csv 
+                old_file = "/" + old_model_name + "_memory_log.csv";
+                new_file = "/" + model_name + "_memory_log.csv";
+                cloneFile(old_file, new_file);
+                SPIFFS.remove(old_file.c_str());
+
+                // model_name_time_log.csv
+                old_file = "/" + old_model_name + "_time_log.csv";
+                new_file = "/" + model_name + "_time_log.csv";
+                cloneFile(old_file, new_file);
+                SPIFFS.remove(old_file.c_str());
+
                 // Re-initialize flags based on new base name
                 init(model_name.c_str());  
             }
         }
 
         // for Rf_data: baseData 
-        String get_baseFile() const {
+        String get_base_data() const {
             return "/" + model_name + "_nml.bin";
         }
 
@@ -3193,6 +3211,22 @@ namespace mcu {
         uint8_t getOffset() const { return packed & 0xFF; }
     };
 
+    // Template trait to check supported vector types for Rf_categorizer
+    template<typename T>
+    struct is_supported_vector : std::false_type {};
+
+    template<>
+    struct is_supported_vector<mcu::vector<float>> : std::true_type {};
+
+    template<>
+    struct is_supported_vector<mcu::vector<int>> : std::true_type {};
+
+    template<size_t sboSize>
+    struct is_supported_vector<mcu::b_vector<float, sboSize>> : std::true_type {};
+
+    template<size_t sboSize>
+    struct is_supported_vector<mcu::b_vector<int, sboSize>> : std::true_type {};
+
     class Rf_categorizer {
     private:
         uint16_t numFeatures = 0;
@@ -3209,11 +3243,11 @@ namespace mcu {
         mcu::vector<uint16_t> sharedPatterns;             // Concatenated pattern edges
         mcu::vector<uint16_t> allUniqueEdges;             // Concatenated unique edges
         mcu::vector<uint8_t> allDiscreteValues;           // Concatenated discrete values
-        mcu::b_vector<String, mcu::SMALL> labelMapping; // Optional label reverse mapping
+        mcu::b_vector<String, 4> labelMapping; // Optional label reverse mapping
         
         // Helper function to split CSV line
-        mcu::b_vector<String, mcu::SMALL> split(const String& line, char delimiter = ',') {
-            mcu::b_vector<String, mcu::SMALL> result;
+        mcu::b_vector<String, 4> split(const String& line, char delimiter = ',') {
+            mcu::b_vector<String, 4> result;
             int start = 0;
             int end = line.indexOf(delimiter);
             
@@ -3566,19 +3600,6 @@ namespace mcu {
 
         // overload for vector input
         template<typename T>
-        struct is_supported_vector : std::false_type {};
-
-        template<mcu::index_size_flag flag>
-        struct is_supported_vector<mcu::vector<float, flag>> :std::true_type{};
-        template<mcu::index_size_flag flag>
-        struct is_supported_vector<mcu::vector<int, flag>> :std::true_type{};
-
-        template<mcu::index_size_flag flag, size_t sboSize>
-        struct is_supported_vector<mcu::b_vector<float, flag, sboSize>> :std::true_type{};
-        template<mcu::index_size_flag flag, size_t sboSize>
-        struct is_supported_vector<mcu::b_vector<int, flag, sboSize>> :std::true_type{};
-
-        template<tyename T>
         mcu::packed_vector<2> categorizeFeatures(const T& features) const {
             static_assert(is_supported_vector<T>::value, "Unsupported vector type for categorizeFeatures");
             if (features.size() != numFeatures) {
@@ -3804,16 +3825,16 @@ namespace mcu {
 
     /*
     ------------------------------------------------------------------------------------------------------------------------------
-    ------------------------------------------------ CONFUSION MATRIX ------------------------------------------------------------
+    ------------------------------------------ CONFUSION MATRIX CACULATOR --------------------------------------------------------
     ------------------------------------------------------------------------------------------------------------------------------
     */
 
     class Rf_matrix_score{
     public:
         // Confusion matrix components
-        b_vector<uint16_t, SMALL, 4> tp;
-        b_vector<uint16_t, SMALL, 4> fp;
-        b_vector<uint16_t, SMALL, 4> fn;
+        b_vector<uint16_t, 4> tp;
+        b_vector<uint16_t, 4> fp;
+        b_vector<uint16_t, 4> fn;
 
         uint16_t total_predict = 0;
         uint16_t correct_predict = 0;
@@ -4022,7 +4043,7 @@ namespace mcu {
     class Rf_tree_container{
         private:
             String model_name;
-            vector<Rf_tree, SMALL> trees;        // b_vector storing root nodes of trees (now manages SPIFFS filenames)
+            vector<Rf_tree> trees;        // b_vector storing root nodes of trees (now manages SPIFFS filenames)
             b_vector<uint16_t> tree_depths;     // store depth of each tree
             b_vector<uint16_t> tree_nodes;     // store number of nodes of each tree
             b_vector<uint16_t> tree_leaves;   // store number of leaves of each tree
@@ -4788,8 +4809,8 @@ namespace mcu {
             }
             
             // Collect prediction results for valid samples
-            b_vector<uint8_t, SMALL> prediction_bits;
-            b_vector<uint8_t, SMALL> label_counts_increment(num_labels, 0);
+            b_vector<uint8_t> prediction_bits;
+            b_vector<uint8_t> label_counts_increment(num_labels, 0);
             
             for(uint16_t i = 0; i < buffer.size() && i < actual_labels.size(); i++) {
                 if(actual_labels[i] < 255 && actual_labels[i] < num_labels) {
@@ -4805,7 +4826,7 @@ namespace mcu {
             
             if(!prediction_bits.empty()) {
                 // Pack prediction bits into bytes (8 predictions per byte)
-                b_vector<uint8_t, SMALL> packed_predictions;
+                b_vector<uint8_t> packed_predictions;
                 for(size_t i = 0; i < prediction_bits.size(); i += 8) {
                     uint8_t packed_byte = 0;
                     for(int bit = 0; bit < 8 && (i + bit) < prediction_bits.size(); bit++) {
@@ -4863,7 +4884,7 @@ namespace mcu {
             file.read((uint8_t*)&num_labels, 1);
             
             // Read prediction counts
-            b_vector<uint16_t, SMALL> prediction_counts(num_labels);
+            b_vector<uint16_t> prediction_counts(num_labels);
             for(int i = 0; i < num_labels; i++) {
                 file.read((uint8_t*)&prediction_counts[i], 2);
             }
@@ -4875,7 +4896,7 @@ namespace mcu {
             
             // Read remaining data
             size_t remaining_data_size = file_size - skip_size;
-            b_vector<uint8_t, MEDIUM> remaining_data(remaining_data_size);
+            b_vector<uint8_t> remaining_data(remaining_data_size);
             file.read(remaining_data.data(), remaining_data_size);
             file.close();
             
@@ -4907,7 +4928,7 @@ namespace mcu {
             actual_labels.clear();
         }
 
-    }
+    };
 
 
 } // namespace mcu

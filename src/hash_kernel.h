@@ -3,6 +3,9 @@
 #include <cstring>
 #include <type_traits>
 
+#ifdef ARDUINO
+#include <Arduino.h>
+#endif
 
 static constexpr uint8_t MAX_CAP = 255;
 static constexpr uint8_t INIT_CAP = 10;

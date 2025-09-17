@@ -23,11 +23,10 @@ public:
 
 private:
     Rf_tree_container forest_container; // Tree container managing all trees and forest state
-    b_vector<ID_vector<uint16_t,2>, SMALL> dataList; // each ID_vector stores sample IDs of a sub_dataset, reference to index of allSamples vector in train_data
+    b_vector<ID_vector<uint16_t,2>> dataList; // each ID_vector stores sample IDs of a sub_dataset, reference to index of allSamples vector in train_data
     unordered_map<uint8_t, uint8_t> predictClass;   // for predicting class of a sample
 
     Rf_pending_data pending_data; // pending data waiting for true labels from feedback action 
-
     bool clean_yet = false; 
 
 public:
@@ -50,8 +49,8 @@ public:
         forest_container.init(this->model_name, config.num_trees, config.num_labels, base, logger);
 
         // init base data (make a clone of base_data to avoid modifying original)
-        cloneFile(base.get_baseFile().c_str(), base_data_file);
-        base_data.init(base_data_file);
+        cloneFile(base.get_base_data().c_str(), temp_base_data);
+        base_data.init(temp_base_data);
         predictClass.reserve(config.num_labels);
     }
     
@@ -179,7 +178,7 @@ private:
                     used.push_back(sampleId);
                 }
             }
-            dest[i].second->loadData(source, sink_IDs, optimal_mode);
+            dest[i].second->loadData(source, sink_IDs, true);
             dest[i].second->releaseData(false); // Write to binary SPIFFS, clear RAM
             if(i==dest.size()-1) logger.m_log("split data");
         }
@@ -285,7 +284,7 @@ private:
 
     struct NodeStats {
         unordered_set<uint8_t> labels;
-        b_vector<uint16_t, SMALL> labelCounts; 
+        b_vector<uint16_t> labelCounts; 
         uint8_t majorityLabel;
         uint16_t totalSamples;
         
@@ -295,7 +294,7 @@ private:
         }
         
         // analyze a slice [begin,end) over a shared indices array
-        void analyzeSamplesRange(const b_vector<uint16_t, MEDIUM, 8>& indices, uint16_t begin, uint16_t end,
+        void analyzeSamplesRange(const b_vector<uint16_t, 8>& indices, uint16_t begin, uint16_t end,
                                  uint8_t numLabels, const Rf_data& data) {
             totalSamples = (begin < end) ? (end - begin) : 0;
             uint16_t maxCount = 0;
@@ -317,7 +316,7 @@ private:
     };
 
     // New: Range-based variant operating on a shared indices array
-    SplitInfo findBestSplitRange(const b_vector<uint16_t, MEDIUM, 8>& indices, uint16_t begin, uint16_t end,
+    SplitInfo findBestSplitRange(const b_vector<uint16_t, 8>& indices, uint16_t begin, uint16_t end,
                                  const unordered_set<uint16_t>& selectedFeatures, bool use_Gini, uint8_t numLabels) {
         SplitInfo bestSplit;
         uint32_t totalSamples = (begin < end) ? (end - begin) : 0;
@@ -425,7 +424,7 @@ private:
         tree.nodes.push_back(rootNode);
 
         // Build a single contiguous index array for this tree
-        b_vector<uint16_t, MEDIUM, 8> indices;
+        b_vector<uint16_t, 8> indices;
         indices.reserve(sampleIDs.size());
         for (const auto& sid : sampleIDs) indices.push_back(sid);
         
@@ -592,7 +591,7 @@ private:
 
         // Pre-allocate evaluation resources
         Rf_data train_samples_buffer;
-        b_vector<uint8_t, SMALL> activeTrees;
+        b_vector<uint8_t, 16> activeTrees;
         unordered_map<uint8_t, uint8_t> oobPredictClass;
 
         activeTrees.reserve(config.num_trees);
@@ -608,7 +607,7 @@ private:
         // Process training samples in chunks for OOB evaluation
         for(size_t chunk_index = 0; chunk_index < train_data.total_chunks(); chunk_index++){
             // Load samples for this chunk
-            train_samples_buffer.loadChunk(train_data, chunk_index, optimal_mode);
+            train_samples_buffer.loadChunk(train_data, chunk_index, true);
             if(train_samples_buffer.size() == 0){
                 Serial.println("❌ Failed to load training samples chunk!");
                 continue;
@@ -775,9 +774,9 @@ private:
 
             fold_train_sampleIDs -= fold_valid_sampleIDs;
             // create train_data and valid data for current fold 
-            validation_data.loadData(base_data, fold_valid_sampleIDs, optimal_mode);
+            validation_data.loadData(base_data, fold_valid_sampleIDs, true);
             validation_data.releaseData(false);
-            train_data.loadData(base_data, fold_train_sampleIDs, optimal_mode);
+            train_data.loadData(base_data, fold_train_sampleIDs, true);
             train_data.releaseData(false); 
             
             ClonesData();
@@ -945,29 +944,14 @@ private:
     }
 
     void set_model_name(const String& name) {
-        base.set_modelName(name);
+        base.set_model_name(name.c_str());
     }
-    
+
     // Public API: predict() takes raw float data and returns actual label (String)
-    template<typename T>
-    struct is_supported_vector : std::false_type {};
-
-    template<index_size_flag SizeFlag>
-    struct is_supported_vector<vector<float, SizeFlag>> : std::true_type {};
-
-    template<index_size_flag SizeFlag>
-    struct is_supported_vector<vector<int, SizeFlag>> : std::true_type {};
-
-    template<index_size_flag SizeFlag, size_t sboSize>
-    struct is_supported_vector<b_vector<float, SizeFlag, sboSize>> : std::true_type {};
-
-    template<index_size_flag SizeFlag, size_t sboSize>
-    struct is_supported_vector<b_vector<int, SizeFlag, sboSize>> : std::true_type {};
-
     template<typename T>
     String predict(const T& features) {
         // Static assert to ensure T is the right type
-        static_assert(is_supported_vector<T>::value, "Unsupported type. Use mcu::vector or mcu::b_vector.");
+        static_assert(mcu::is_supported_vector<T>::value, "Unsupported type. Use mcu::vector or mcu::b_vector.");
         return predict(features.data(), features.size());
     }
 
@@ -986,7 +970,7 @@ private:
             Rf_sample sample;
             sample.features = c_features;
             sample.label = i_label; // Store predicted label
-            pending_data.add_pending_sample(sample, base.get_baseFile().c_str(), &config, base.get_inferenceLogFile().c_str());
+            pending_data.add_pending_sample(sample, base.get_base_data().c_str(), &config, base.get_inferenceLogFile().c_str());
         }
         return categorizer.getOriginalLabel(i_label);
     }
@@ -1018,7 +1002,7 @@ private:
         }
         
         // Read prediction counts for each label
-        b_vector<uint16_t, SMALL> prediction_counts(num_labels);
+        b_vector<uint16_t> prediction_counts(num_labels);
         for(int i = 0; i < num_labels; i++) {
             if(file.read((uint8_t*)&prediction_counts[i], 2) != 2) {
                 Serial.println("❌ Failed to read prediction counts");
@@ -1116,7 +1100,7 @@ private:
 
     // Manually flush pending data to base dataset and inference log
     void flush_pending_data() {
-        pending_data.flush_pending_data(base.get_baseFile().c_str(), config, base.get_inferenceLogFile().c_str());
+        pending_data.flush_pending_data(base.get_base_data().c_str(), config, base.get_inferenceLogFile().c_str());
     }
     
     void set_feedback_timeout(long unsigned timeout){
@@ -1161,7 +1145,9 @@ private:
         forest_container.releaseForest();
         return result;
     }
-
+    b_vector<b_vector<pair<uint8_t, float>>> result_on_test_set() {
+        return predict(test_data);
+    }
     float precision(Rf_data& data) {
         // Create a temporary scorer to calculate precision
         Rf_matrix_score scorer(config.num_labels, 0x02); // PRECISION flag only
@@ -1299,7 +1285,7 @@ void setup() {
 
     // forest.training();
 
-    auto result = forest.predict(forest.test_data);
+    auto result = forest.result_on_test_set();
     Serial.printf("\nlowest RAM: %d\n", forest.logger.lowest_ram);
     Serial.printf("lowest ROM: %d\n", forest.logger.lowest_rom);
 
@@ -1357,15 +1343,13 @@ void setup() {
 
     Serial.printf("\n📊 FINAL SUMMARY:\n");
     Serial.printf("Dataset: %s\n", filename);
-    Serial.printf("Trees: %d, Max Depth: %d, Min Split: %d\n", forest.config.num_trees, forest.config.max_depth, forest.config.min_split);
-    Serial.printf("Labels in dataset: %d\n", forest.config.num_labels);
     Serial.printf("Average Precision: %.3f\n", avgPrecision);
     Serial.printf("Average Recall: %.3f\n", avgRecall);
     Serial.printf("Average F1-Score: %.3f\n", avgF1);
     Serial.printf("Average Accuracy: %.3f\n", avgAccuracy);
 
     // // check actual prediction time 
-    b_vector<float, SMALL> sample = MAKE_FLOAT_LIST(0,0.000454539,0,0,0,0.510392,0.145854,0,0.115446,0,0.00516406,0.0914579,0.565657,0.523204,0.315898,0.0548166,0,0.310198,0.0193819,0,0,0.0634356,0.45749,0.00122793,0.493418,0.314128,0.150056,0.106594,0.321845,0.0745179,0.282953,0.353358,0,0.254502,0.502515,0.000288011,0,0,0.0756328,0.00226037,0.382164,0.261311,0.300058,0.261635,0.313706,0,0.0501838,0.450812,0.0947562,0.000373078,0.00211045,0.0744771,0.462151,0.715595,0.269004,0.0449925,0,0,0.00212813,0.000589888,0.420681,0.0574298,0.0717421,0,0.313605,0.339293,0.0629904,0.0675315,0.0618258,0.069364,0.41181,0.223367,0.0892957,0.0317173,0.0412844,0.000333441,0.733433,0.035459,0.000471556,0.00492559,0.103231,0.255209,0.411744,0.154244,0.0670255,0,0.0747003,0.271415,0.740801,0.0413177,0.000545948,0.00293495,0.31086,0.000711829,0.000690576,0.00328563,0.0109791,0,0.00179087,0.05755,0.281221,0.0908081,0.139806,0.0358642,0.0303179,0.0455232,0.000940401,0.000496404,0.933685,0.0312803,0.108249,0.0307203,0.0946534,0.0618412,0.0974416,0.0649112,0.677713,0.00266646,0.0009506,0.0560812,0.492166,0.0329419,0.0117499,0.0216917,0.379698,0.0638361,0.344801,0.00247299,0.568132,0.00436328,0.00107975,0.0635284,0.379419,0.000722445,0.000700875,0.0521259,0.635661,0.068638,0.299062,0.0238965,0.00382694,0.00504611,0.163862,0.0285841);
+    b_vector<float> sample = MAKE_FLOAT_LIST(0,0.000454539,0,0,0,0.510392,0.145854,0,0.115446,0,0.00516406,0.0914579,0.565657,0.523204,0.315898,0.0548166,0,0.310198,0.0193819,0,0,0.0634356,0.45749,0.00122793,0.493418,0.314128,0.150056,0.106594,0.321845,0.0745179,0.282953,0.353358,0,0.254502,0.502515,0.000288011,0,0,0.0756328,0.00226037,0.382164,0.261311,0.300058,0.261635,0.313706,0,0.0501838,0.450812,0.0947562,0.000373078,0.00211045,0.0744771,0.462151,0.715595,0.269004,0.0449925,0,0,0.00212813,0.000589888,0.420681,0.0574298,0.0717421,0,0.313605,0.339293,0.0629904,0.0675315,0.0618258,0.069364,0.41181,0.223367,0.0892957,0.0317173,0.0412844,0.000333441,0.733433,0.035459,0.000471556,0.00492559,0.103231,0.255209,0.411744,0.154244,0.0670255,0,0.0747003,0.271415,0.740801,0.0413177,0.000545948,0.00293495,0.31086,0.000711829,0.000690576,0.00328563,0.0109791,0,0.00179087,0.05755,0.281221,0.0908081,0.139806,0.0358642,0.0303179,0.0455232,0.000940401,0.000496404,0.933685,0.0312803,0.108249,0.0307203,0.0946534,0.0618412,0.0974416,0.0649112,0.677713,0.00266646,0.0009506,0.0560812,0.492166,0.0329419,0.0117499,0.0216917,0.379698,0.0638361,0.344801,0.00247299,0.568132,0.00436328,0.00107975,0.0635284,0.379419,0.000722445,0.000700875,0.0521259,0.635661,0.068638,0.299062,0.0238965,0.00382694,0.00504611,0.163862,0.0285841);
     forest.loadForest();
     long unsigned start = micros();
     String pred = forest.predict(sample);

@@ -4,8 +4,9 @@
 #include <SPIFFS.h>
 #include <FS.h>
 
-#define base_data_file           "/base_data.bin"
-#define memory_log_file          "/rf_memory_log.csv"
+#define temp_base_data           "/base_data.bin"
+// #define memory_log_file         "/rf_memory_log.csv"
+// #define time_log_file           "/rf_time_log.csv"
 // #define rf_ctg_file             "/rf_categorizer.bin"
 // #define inference_log           "/rf_inference_log.bin"
 // #define rf_config_file          "/rf_esp32_config.json"

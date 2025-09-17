@@ -212,16 +212,31 @@ void handleFileInfo() {
     Serial.readBytes((uint8_t*)&receivedFileSize, sizeof(receivedFileSize));
     bytesWritten = 0;
 
+    // Close any currently open file
     if (currentFile) {
         currentFile.close();
+        currentFile = File(); // Reset file handle
     }
     
-    // Delete existing file if it exists
+    // Force removal of existing file - try multiple times if needed
     if (SPIFFS.exists(receivedFileName)) {
-        SPIFFS.remove(receivedFileName);
+        bool removed = SPIFFS.remove(receivedFileName);
+        if (!removed) {
+            // Try again after a small delay
+            delay(10);
+            SPIFFS.remove(receivedFileName);
+        }
+        // Verify the file is actually gone
+        if (SPIFFS.exists(receivedFileName)) {
+            Serial.print(RESP_ERROR);
+            Serial.flush();
+            currentState = State::ERROR_STATE;
+            return;
+        }
     }
     
-    currentFile = SPIFFS.open(receivedFileName, FILE_WRITE);
+    // Create new file
+    currentFile = SPIFFS.open(receivedFileName, FILE_WRITE, true); // Force create
     if (!currentFile) {
         currentState = State::ERROR_STATE;
         Serial.print(RESP_ERROR);

@@ -45,8 +45,8 @@ public:
     node_predictor pre;
 
 private:
-    vector<Rf_tree, SMALL> root;                     // b_vector storing root nodes of trees (now manages SPIFFS filenames)
-    b_vector<ID_vector<uint16_t,2>, SMALL> dataList; // list of training data sample IDs for each tree
+    vector<Rf_tree> root;                     // b_vector storing root nodes of trees (now manages SPIFFS filenames)
+    b_vector<ID_vector<uint16_t,2>> dataList; // list of training data sample IDs for each tree
     Rf_random rng;
 
     std::string node_log_path;
@@ -313,7 +313,7 @@ public:
 
     struct NodeStats {
         unordered_set<uint8_t> labels;
-        b_vector<uint16_t, SMALL> labelCounts; 
+        b_vector<uint16_t> labelCounts; 
         uint8_t majorityLabel;
         uint16_t totalSamples;
         
@@ -323,7 +323,7 @@ public:
         }
         
         // New: analyze a slice [begin,end) over a shared indices array
-        void analyzeSamplesRange(const b_vector<uint16_t, MEDIUM, 8>& indices, uint16_t begin, uint16_t end,
+        void analyzeSamplesRange(const b_vector<uint16_t, 8>& indices, uint16_t begin, uint16_t end,
                                  uint8_t numLabels, const Rf_data& data) {
             totalSamples = (begin < end) ? (end - begin) : 0;
             uint16_t maxCount = 0;
@@ -345,7 +345,7 @@ public:
     };
 
     // New: Range-based variant operating on a shared indices array
-    SplitInfo findBestSplitRange(const b_vector<uint16_t, MEDIUM, 8>& indices, uint16_t begin, uint16_t end,
+    SplitInfo findBestSplitRange(const b_vector<uint16_t, 8>& indices, uint16_t begin, uint16_t end,
                                  const unordered_set<uint16_t>& selectedFeatures, bool use_Gini, uint8_t numLabels) {
         SplitInfo bestSplit;
         uint32_t totalSamples = (begin < end) ? (end - begin) : 0;
@@ -452,7 +452,7 @@ public:
         queue_nodes.reserve(200); // Reserve space for efficiency
 
         // Build a single contiguous index array for this tree
-        b_vector<uint16_t, MEDIUM, 8> indices;
+        b_vector<uint16_t, 8> indices;
         indices.reserve(sampleIDs.size());
         for (const auto& sid : sampleIDs) indices.push_back(sid);
         
@@ -635,7 +635,7 @@ public:
         for(const auto& sample : train_data.allSamples){                
         
             // Find all trees whose OOB set contains this sampleId
-            b_vector<uint8_t, SMALL> activeTrees;
+            b_vector<uint8_t> activeTrees;
             activeTrees.reserve(config.num_trees);
             
             for(uint8_t i = 0; i < config.num_trees; i++){

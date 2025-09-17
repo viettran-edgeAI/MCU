@@ -12,8 +12,8 @@
         "description": "Number of trees in the random forest. should be < 50"
     },
     "split_ratio":{
-        "train_ratio" : 0.75,
-        "test_ratio" : 0.25,
+        "train_ratio" : 0.8,
+        "test_ratio" : 0.2,
         "valid_ratio" : 0.0,
         "description": "Ratios for splitting the dataset into training, testing, and validation sets."
     },
@@ -33,7 +33,7 @@
         "description": "Threshold for impurity in decision trees."
     },
     "training_score": {
-        "value": "valid_score",
+        "value": "k-fold_score",
         "options": ["oob_score", "valid_score", "k-fold_score"],
         "description": "Method for evaluating model performance during training. oob_score: Out-of-bag validation, valid_score: Validation set, k-fold_score: K-fold cross validation"
     },

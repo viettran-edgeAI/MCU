@@ -1194,27 +1194,43 @@ namespace mcu {
     ------------------------------------------------------------------------------------------------------------------
 */
     // Forward declarations (for b_vector <-> vector conversion mechanism)
-    template<typename T, index_size_flag SizeFlag, size_t sboSize>
+    template<typename T, size_t sboSize>
     class b_vector;
     
-    template<typename T, index_size_flag SizeFlag>
+    template<typename T>
     class vector;
 
     // vector with small buffer optimization (SBO)
-    template<typename T, index_size_flag SizeFlag = index_size_flag::MEDIUM, size_t sboSize = 0>
+    template<typename T, size_t sboSize = 0>
     class b_vector : hash_kernel {
-        // assert if sboSize > max for index type
-        static_assert(sboSize == 0 || sboSize <= (std::is_same<typename vector_index_type<SizeFlag>::type, uint8_t>::value ? 255 :
-                                                  std::is_same<typename vector_index_type<SizeFlag>::type, uint16_t>::value ? 65535 : 2000000000),
-                      "sboSize exceeds maximum for the chosen index type");
     private:
-        using vector_index_type = typename vector_index_type<SizeFlag>::type;
+        using vector_index_type = size_t;
         
-        // Small Buffer Optimization - internal buffer size based on template parameter or index type
-        static constexpr vector_index_type SBO_SIZE = 
-            (sboSize > 0) ? static_cast<vector_index_type>(sboSize) :
-            (std::is_same<vector_index_type, uint8_t>::value) ? 8 :
-            (std::is_same<vector_index_type, uint16_t>::value) ? 16 : 32;
+        // Small Buffer Optimization - auto-adjust SBO size based on sizeof(T)
+        // If sboSize is explicitly provided (non-zero), use it; otherwise auto-calculate
+        static constexpr size_t calculateSboSize() {
+            if constexpr (sboSize != 0) {
+                return sboSize;  // User-specified size
+            } else {
+                // Auto-calculate based on sizeof(T)
+                constexpr size_t type_size = sizeof(T);
+                if constexpr (type_size == 1) {
+                    return 32;  // 32 bytes for 1-byte types (char, uint8_t, etc.)
+                } else if constexpr (type_size == 2) {
+                    return 16;  // 16 elements for 2-byte types (short, uint16_t, etc.)
+                } else if constexpr (type_size == 4) {
+                    return 8;   // 8 elements for 4-byte types (int, float, uint32_t, etc.)
+                } else if constexpr (type_size == 8) {
+                    return 4;   // 4 elements for 8-byte types (double, uint64_t, etc.)
+                } else if constexpr (type_size <= 16) {
+                    return 4;   // 4 elements for types up to 16 bytes
+                } else {
+                    return 2;   // 2 element for very large types
+                }
+            }
+        }
+        
+        static constexpr size_t SBO_SIZE = calculateSboSize();
         
         // Union to save memory - either use internal buffer or heap pointer
         union {
@@ -1226,11 +1242,8 @@ namespace mcu {
         vector_index_type capacity_ = SBO_SIZE;
         bool using_heap = false;  // Track whether we're using heap or buffer
         
-        // based on vector_index_type, set the maximum capacity
-        static constexpr int VECTOR_MAX_CAP = 
-            (std::is_same<vector_index_type, uint8_t>::value) ? 255 :
-            (std::is_same<vector_index_type, uint16_t>::value) ? 65535 :
-            2000000000; // for uint32_t and larger types
+        // based on size_t, set the maximum capacity
+        static constexpr size_t VECTOR_MAX_CAP = SIZE_MAX / 2; // Safe maximum for size_t
 
         // Get pointer to current data (buffer or heap)
         T* data_ptr() noexcept {
@@ -1239,6 +1252,19 @@ namespace mcu {
         
         const T* data_ptr() const noexcept {
             return using_heap ? heap_array : reinterpret_cast<const T*>(buffer);
+        }
+
+        // internal resize without preserving size
+        void i_resize(vector_index_type newCapacity) noexcept {
+            if (!using_heap || newCapacity == capacity_) return;
+            if (newCapacity == 0) newCapacity = 1;
+            T* newArray = new T[newCapacity];
+            vector_index_type toCopy = (size_ < newCapacity ? size_ : newCapacity);
+            customCopy(heap_array, newArray, toCopy);
+            delete[] heap_array;
+            heap_array = newArray;
+            capacity_ = newCapacity;
+            if (size_ > capacity_) size_ = capacity_;
         }
         
         // Switch from buffer to heap storage
@@ -1311,7 +1337,7 @@ namespace mcu {
         }
 
         // Constructor: from min_init_list<T>
-        b_vector(const min_init_list<T>& init) noexcept : size_(init.size()) {
+        b_vector(const mcu::min_init_list<T>& init) noexcept : size_(init.size()) {
             if (init.size() <= SBO_SIZE) {
                 using_heap = false;
                 capacity_ = SBO_SIZE;
@@ -1361,25 +1387,6 @@ namespace mcu {
             other.using_heap = false;
         }
 
-        // Constructor: from regular vector (conversion constructor)
-        template<index_size_flag OtherSizeFlag>
-        b_vector(const vector<T, OtherSizeFlag>& other) noexcept : size_(static_cast<vector_index_type>(other.size())) {
-            if (other.size() <= SBO_SIZE) {
-                using_heap = false;
-                capacity_ = SBO_SIZE;
-                T* buffer_ptr = reinterpret_cast<T*>(buffer);
-                for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
-                    new(buffer_ptr + i) T(i < size_ ? other.data()[i] : T());
-                }
-            } else {
-                using_heap = true;
-                capacity_ = static_cast<vector_index_type>(other.size());
-                heap_array = new T[capacity_];
-                for (vector_index_type i = 0; i < size_; ++i) {
-                    heap_array[i] = other.data()[i];
-                }
-            }
-        }
 
         // Destructor
         ~b_vector() noexcept {
@@ -1492,56 +1499,56 @@ namespace mcu {
             return *this;
         }
 
-        // Assignment operator: from regular vector (conversion assignment)
-        template<index_size_flag OtherSizeFlag>
-        b_vector& operator=(const vector<T, OtherSizeFlag>& other) noexcept {
-            // Clear current data
+        // Implicit conversion operator to vector
+        operator vector<T>() const noexcept {
+            vector<T> result;
+            result.clear();
+            const T* ptr = data_ptr();
+            for (vector_index_type i = 0; i < size_; ++i) {
+                result.push_back(ptr[i]);
+            }
+            return result;
+        }
+
+        // Assignment from vector (enables implicit conversion in assignment)
+        b_vector& operator=(const vector<T>& other) noexcept {
+            // First, correctly destroy the elements in `this`
             if (using_heap) {
                 delete[] heap_array;
             } else {
                 T* p = reinterpret_cast<T*>(buffer);
                 for (vector_index_type i = 0; i < SBO_SIZE; ++i) p[i].~T();
             }
-
-            size_ = static_cast<vector_index_type>(other.size());
-
-            if (other.size() <= SBO_SIZE) {
+            
+            // Determine if we need heap or can use SBO
+            size_ = other.size();
+            if (size_ <= SBO_SIZE) {
                 // Use SBO
                 using_heap = false;
                 capacity_ = SBO_SIZE;
                 T* buffer_ptr = reinterpret_cast<T*>(buffer);
                 for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
-                    new(buffer_ptr + i) T(i < size_ ? other.data()[i] : T());
+                    new(buffer_ptr + i) T(i < size_ ? other[i] : T());
                 }
             } else {
                 // Use heap
                 using_heap = true;
-                capacity_ = static_cast<vector_index_type>(other.size());
+                capacity_ = size_;
                 heap_array = new T[capacity_];
                 for (vector_index_type i = 0; i < size_; ++i) {
-                    heap_array[i] = other.data()[i];
+                    heap_array[i] = other[i];
                 }
             }
-
+            
             return *this;
         }
+
         void fill(const T& value) noexcept {
             T* ptr = data_ptr();
             for (vector_index_type i = 0; i < size_; ++i) {
                 ptr[i] = value;
             }
-        }
-
-        // Implicit conversion operator to regular vector
-        template<index_size_flag TargetSizeFlag = SizeFlag>
-        operator vector<T, TargetSizeFlag>() const noexcept {
-            vector<T, TargetSizeFlag> result;
-            result.clear();
-            result.reserve(static_cast<typename mcu::vector_index_type<TargetSizeFlag>::type>(size_));
-            for (vector_index_type i = 0; i < size_; ++i) {
-                result.push_back(data_ptr()[i]);
-            }
-            return result;
+            size_ = capacity_;
         }
 
         // Reserve at least newCapacity
@@ -1550,7 +1557,7 @@ namespace mcu {
                 if (newCapacity > SBO_SIZE && !using_heap) {
                     switch_to_heap(newCapacity);
                 } else if (using_heap) {
-                    resize(newCapacity);
+                    i_resize(newCapacity);
                 }
             }
         }
@@ -1568,7 +1575,7 @@ namespace mcu {
                 if (doubled > SBO_SIZE && !using_heap) {
                     switch_to_heap(doubled);
                 } else if (using_heap) {
-                    resize(doubled);
+                    i_resize(doubled);
                 }
             }
             data_ptr()[size_++] = value;
@@ -1588,7 +1595,7 @@ namespace mcu {
                 if (doubled > SBO_SIZE && !using_heap) {
                     switch_to_heap(doubled);
                 } else if (using_heap) {
-                    resize(doubled);
+                    i_resize(doubled);
                 }
             }
             T* ptr = data_ptr();
@@ -1611,7 +1618,7 @@ namespace mcu {
                 if (newCapacity > SBO_SIZE && !using_heap) {
                     switch_to_heap(newCapacity);
                 } else if (using_heap) {
-                    resize(newCapacity);
+                    i_resize(newCapacity);
                 }
             }
             T* ptr = data_ptr();
@@ -1643,7 +1650,7 @@ namespace mcu {
 
         // Shrink capacity to fit size
         void fit() noexcept {
-            if (size_ < capacity_) resize(size_);
+            if (size_ < capacity_) i_resize(size_);
         }
 
         T& back() noexcept {
@@ -1846,42 +1853,61 @@ namespace mcu {
 
         - If n is also greater than the current container capacity, an automatic reallocation of the allocated storage space takes place.
          */
-        void resize(vector_index_type newCapacity) noexcept {
-            if (!using_heap || newCapacity == capacity_) return;
-            if (newCapacity == 0) newCapacity = 1;
-            T* newArray = new T[newCapacity];
-            vector_index_type toCopy = (size_ < newCapacity ? size_ : newCapacity);
-            customCopy(heap_array, newArray, toCopy);
-            delete[] heap_array;
-            heap_array = newArray;
-            capacity_ = newCapacity;
-            if (size_ > capacity_) size_ = capacity_;
-        }
-
-        // overload version
-        void resize(vector_index_type newSize, const T& value) noexcept {
-            if (!using_heap || newSize == capacity_) return;
-            if (newSize == 0) newSize = 1;
-            T* newArray = new T[newSize];
-            vector_index_type toCopy = (size_ < newSize ? size_ : newSize);
-            customCopy(heap_array, newArray, toCopy);
-            for (vector_index_type i = toCopy; i < newSize; ++i) {
-                newArray[i] = value;
-            }
-            delete[] heap_array;
-            heap_array = newArray;
-            capacity_ = newSize;
-            if (size_ > capacity_) size_ = capacity_;
-        }
-
-        void extend(vector_index_type newCapacity) noexcept {
-            if (newCapacity > capacity_) {
-                if (newCapacity > SBO_SIZE && !using_heap) {
-                    switch_to_heap(newCapacity);
-                } else if (using_heap) {
-                    resize(newCapacity);
+        void resize(vector_index_type newSize) noexcept {
+            if (newSize < size_) {
+                // Case 1: Shrinking - reduce size, destroy elements beyond new size
+                // For simple types, just update size; for complex types, call destructors
+                if constexpr (!std::is_trivially_destructible_v<T>) {
+                    T* ptr = data_ptr();
+                    for (vector_index_type i = newSize; i < size_; ++i) {
+                        ptr[i].~T();
+                    }
                 }
+                size_ = newSize;
             }
+            else if (newSize > size_) {
+                // Case 2: Growing - expand size, value-initialize new elements
+                if (newSize > capacity_) {
+                    // Need to increase capacity first
+                    reserve(newSize);
+                }
+                
+                T* ptr = data_ptr();
+                // Value-initialize new elements (default constructor)
+                for (vector_index_type i = size_; i < newSize; ++i) {
+                    new(ptr + i) T();
+                }
+                size_ = newSize;
+            }
+            // Case 3: newSize == size_ - do nothing
+        }
+        
+        void resize(vector_index_type newSize, const T& value) noexcept {
+            if (newSize < size_) {
+                // Case 1: Shrinking - reduce size, destroy elements beyond new size
+                if constexpr (!std::is_trivially_destructible_v<T>) {
+                    T* ptr = data_ptr();
+                    for (vector_index_type i = newSize; i < size_; ++i) {
+                        ptr[i].~T();
+                    }
+                }
+                size_ = newSize;
+            }
+            else if (newSize > size_) {
+                // Case 2: Growing - expand size, initialize new elements with provided value
+                if (newSize > capacity_) {
+                    // Need to increase capacity first
+                    reserve(newSize);
+                }
+                
+                T* ptr = data_ptr();
+                // Initialize new elements with the provided value
+                for (vector_index_type i = size_; i < newSize; ++i) {
+                    new(ptr + i) T(value);
+                }
+                size_ = newSize;
+            }
+            // Case 3: newSize == size_ - do nothing
         }
 
         // Accessors
@@ -1972,24 +1998,32 @@ namespace mcu {
     };
 
 
-    template<typename T, index_size_flag SizeFlag = index_size_flag::MEDIUM>
+    template<typename T>
     class vector : hash_kernel{
     private:
-        using vector_index_type = typename vector_index_type<SizeFlag>::type;
         T*      array    = nullptr;
-        vector_index_type size_    = 0;
-        vector_index_type capacity_ = 0;
+        size_t size_    = 0;
+        size_t capacity_ = 0;
         
-        // based on vector_index_type, set the maximum capacity
-        static constexpr int VECTOR_MAX_CAP = 
-            (std::is_same<vector_index_type, uint8_t>::value) ? 255 :
-            (std::is_same<vector_index_type, uint16_t>::value) ? 65535 :
-            2000000000; // for uint32_t and larger types
+        // Maximum capacity for the vector
+        static constexpr size_t VECTOR_MAX_CAP = 2000000000;
 
+        // internal resize without preserving size
+        void i_resize(size_t newCapacity) noexcept {
+            if (newCapacity == capacity_) return;
+            if (newCapacity == 0) newCapacity = 1;
+            T* newArray = new T[newCapacity];
+            size_t toCopy = (size_ < newCapacity ? size_ : newCapacity);
+            customCopy(array, newArray, toCopy);
+            delete[] array;
+            array = newArray;
+            capacity_ = newCapacity;
+            if (size_ > capacity_) size_ = capacity_;
+        }
 
         // Internal helper: copy 'count' elements from src to dst
-        void customCopy(const T* src, T* dst, vector_index_type count) noexcept {
-            for (vector_index_type i = 0; i < count; ++i) {
+        void customCopy(const T* src, T* dst, size_t count) noexcept {
+            for (size_t i = 0; i < count; ++i) {
                 dst[i] = src[i];
             }
         }
@@ -2000,27 +2034,27 @@ namespace mcu {
             : array(new T[1]), size_(0), capacity_(1) {}
 
         // Constructor with initial capacity
-        explicit vector(vector_index_type initialCapacity) noexcept
+        explicit vector(size_t initialCapacity) noexcept
             : array(new T[(initialCapacity == 0) ? 1 : initialCapacity]),
             size_(initialCapacity), // Set size equal to capacity
             capacity_((initialCapacity == 0) ? 1 : initialCapacity) {
             // fix for error : access elements throgh operator[] when vector just initialized
-            for (vector_index_type i = 0; i < size_; ++i) {
+            for (size_t i = 0; i < size_; ++i) {
                 array[i] = T();
             }
         }
 
         // Constructor with initial size and value
-        explicit vector(vector_index_type initialCapacity, const T& value) noexcept
+        explicit vector(size_t initialCapacity, const T& value) noexcept
             : array(new T[(initialCapacity == 0) ? 1 : initialCapacity]),
             size_(initialCapacity), capacity_((initialCapacity == 0) ? 1 : initialCapacity) {
-            for (vector_index_type i = 0; i < size_; ++i) {
+            for (size_t i = 0; i < size_; ++i) {
                 array[i] = value;
             }
         }
 
         // Constructor: from min_init_list<T>
-        vector(const min_init_list<T>& init) noexcept
+        vector(const mcu::min_init_list<T>& init) noexcept
             : array(new T[init.size()]), size_(init.size()), capacity_(init.size()) {
             for (unsigned i = 0; i < init.size(); ++i)
                 array[i] = init.data_[i];
@@ -2039,17 +2073,6 @@ namespace mcu {
             other.array    = nullptr;
             other.size_    = 0;
             other.capacity_ = 0;
-        }
-
-        // Constructor: from b_vector (conversion constructor)
-        template<index_size_flag OtherSizeFlag, size_t sboSize>
-        vector(const b_vector<T, OtherSizeFlag, sboSize>& other) noexcept
-            : array(new T[other.size() == 0 ? 1 : other.size()]),
-            size_(static_cast<vector_index_type>(other.size())),
-            capacity_(other.size() == 0 ? 1 : static_cast<vector_index_type>(other.size())) {
-            for (vector_index_type i = 0; i < size_; ++i) {
-                array[i] = other.data()[i];
-            }
         }
 
         // Destructor
@@ -2084,39 +2107,39 @@ namespace mcu {
             return *this;
         }
 
-        // Assignment operator: from b_vector (conversion assignment)
-        template<index_size_flag OtherSizeFlag, size_t sboSize>
-        vector& operator=(const b_vector<T, OtherSizeFlag, sboSize>& other) noexcept {
-            vector_index_type new_size = static_cast<vector_index_type>(other.size());
-            vector_index_type new_capacity = (new_size == 0) ? 1 : new_size;
-            
-            T* newArray = new T[new_capacity];
-            for (vector_index_type i = 0; i < new_size; ++i) {
-                newArray[i] = other.data()[i];
+        // Implicit conversion operator to b_vector
+        template<size_t sboSize = 32>
+        operator b_vector<T, sboSize>() const noexcept {
+            b_vector<T, sboSize> result;
+            result.clear();
+            for (size_t i = 0; i < size_; ++i) {
+                result.push_back(array[i]);
             }
-            
+            return result;
+        }
+
+        // Assignment from b_vector (enables implicit conversion in assignment)
+        template<size_t sboSize>
+        vector& operator=(const b_vector<T, sboSize>& other) noexcept {
+            // Clear current content
             delete[] array;
-            array = newArray;
-            size_ = new_size;
-            capacity_ = new_capacity;
+            
+            // Allocate new space
+            size_ = other.size();
+            capacity_ = size_ > 0 ? size_ : 1;
+            array = new T[capacity_];
+            
+            // Copy elements
+            for (size_t i = 0; i < size_; ++i) {
+                array[i] = other[i];
+            }
             
             return *this;
         }
 
         // Reserve at least newCapacity
-        void reserve(vector_index_type newCapacity) noexcept {
-            if (newCapacity > capacity_) resize(newCapacity);
-        }
-
-        // Implicit conversion operator to b_vector
-        template<index_size_flag TargetSizeFlag = SizeFlag, size_t sboSize = 0>
-        operator b_vector<T, TargetSizeFlag, sboSize>() const noexcept {
-            b_vector<T, TargetSizeFlag, sboSize> result;
-            result.clear();
-            for (vector_index_type i = 0; i < size_; ++i) {
-                result.push_back(array[i]);
-            }
-            return result;
+        void reserve(size_t newCapacity) noexcept {
+            if (newCapacity > capacity_) i_resize(newCapacity);
         }
 
         // Append element
@@ -2128,13 +2151,13 @@ namespace mcu {
                 else
                     doubled = capacity_ ? capacity_ * 20 : 1;
                 if (doubled > VECTOR_MAX_CAP) doubled = VECTOR_MAX_CAP;
-                resize(doubled);
+                i_resize(doubled);
             }
             array[size_++] = value;
         }
 
         // Insert at position
-        void insert(vector_index_type pos, const T& value) noexcept {
+        void insert(size_t pos, const T& value) noexcept {
             if (pos > size_) return;
             if (size_ == capacity_) {
                 size_t doubled;
@@ -2143,9 +2166,9 @@ namespace mcu {
                 else
                     doubled = capacity_ ? capacity_ * 20 : 1;
                 if (doubled > VECTOR_MAX_CAP) doubled = VECTOR_MAX_CAP;
-                resize(doubled);
+                i_resize(doubled);
             }
-            for (vector_index_type i = size_; i > pos; --i) {
+            for (size_t i = size_; i > pos; --i) {
                 array[i] = array[i - 1];
             }
             array[pos] = value;
@@ -2161,18 +2184,18 @@ namespace mcu {
         */
         template<typename InputIterator>
         void insert(const T* position, InputIterator first, InputIterator last) noexcept {
-            vector_index_type pos = position - array;
-            vector_index_type count = last - first;
+            size_t pos = position - array;
+            size_t count = last - first;
             if (pos > size_) return;
             if (size_ + count > capacity_) {
                 size_t newCapacity = capacity_ ? capacity_ * 2 : 1;
                 if (newCapacity > VECTOR_MAX_CAP) newCapacity = VECTOR_MAX_CAP;
-                resize(newCapacity);
+                i_resize(newCapacity);
             }
-            for (vector_index_type i = size_ + count - 1; i >= pos + count; --i) {
+            for (size_t i = size_ + count - 1; i >= pos + count; --i) {
                 array[i] = array[i - count];
             }
-            for (vector_index_type i = 0; i < count; ++i) {
+            for (size_t i = 0; i < count; ++i) {
                 array[pos + i] = *(first + i);
             }
             size_ += count;
@@ -2210,7 +2233,7 @@ namespace mcu {
         }
 
         // Partition function with comprehensive safety checks
-        vector_index_type partition(vector_index_type low, vector_index_type high) noexcept {
+        size_t partition(size_t low, size_t high) noexcept {
             // Safety: null pointer check
             if (array == nullptr) return low;
             
@@ -2222,10 +2245,10 @@ namespace mcu {
             if (high == 0 && low > 0) return low;
             
             T pivot = array[high];
-            vector_index_type i = low;
+            size_t i = low;
             
             // Safety: bound-checked loop
-            for (vector_index_type j = low; j < high && j < size_; ++j) {
+            for (size_t j = low; j < high && j < size_; ++j) {
                 // Additional bounds check during iteration
                 if (i >= size_) break;
                 
@@ -2254,7 +2277,7 @@ namespace mcu {
         }
         
         // Quicksort with stack overflow protection and safety checks
-        void quickSort(vector_index_type low, vector_index_type high) noexcept {
+        void quickSort(size_t low, size_t high) noexcept {
             // Safety: null pointer check
             if (array == nullptr) return;
             
@@ -2277,7 +2300,7 @@ namespace mcu {
             
             ++recursion_depth;
             
-            vector_index_type pivotIndex = partition(low, high);
+            size_t pivotIndex = partition(low, high);
             
             // Safety: validate pivot index before recursive calls
             if (pivotIndex >= low && pivotIndex <= high && pivotIndex < size_) {
@@ -2295,16 +2318,16 @@ namespace mcu {
         }
         
         // Safe fallback sorting when recursion limit reached
-        void bubbleSortFallback(vector_index_type low, vector_index_type high) noexcept {
+        void bubbleSortFallback(size_t low, size_t high) noexcept {
             // Safety: basic validation
             if (array == nullptr || low >= high || high >= size_) return;
             
             // Safety: prevent infinite loops
-            const vector_index_type max_iterations = (high - low + 1) * (high - low + 1);
-            vector_index_type iteration_count = 0;
+            const size_t max_iterations = (high - low + 1) * (high - low + 1);
+            size_t iteration_count = 0;
             
-            for (vector_index_type i = low; i <= high && i < size_; ++i) {
-                for (vector_index_type j = low; j < high - (i - low) && j < size_; ++j) {
+            for (size_t i = low; i <= high && i < size_; ++i) {
+                for (size_t j = low; j < high - (i - low) && j < size_; ++j) {
                     // Safety: iteration limit check
                     if (++iteration_count > max_iterations) return;
                     
@@ -2324,7 +2347,7 @@ namespace mcu {
 
     public:
         // Erase element at position
-        void erase(vector_index_type pos) noexcept {
+        void erase(size_t pos) noexcept {
             if (pos >= size_) return;
             customCopy(array + pos + 1, array + pos, size_ - pos - 1);
             --size_;
@@ -2339,31 +2362,42 @@ namespace mcu {
             size_ = 0;
         }
 
+        void fill(const T& value) noexcept {
+            for (size_t i = 0; i < size_; ++i) {
+                array[i] = value;
+            }
+            size_ = capacity_;
+        }
+
         // Shrink capacity to fit size
         void fit() noexcept {
-            if (size_ < capacity_) resize(size_);
+            if (size_ < capacity_) i_resize(size_);
         }
         T& back() noexcept {
             if (size_ == 0){
-                return array[0]; // Return default value if empty
+                static T default_value = T();
+                return default_value; // Return default value if empty
             }
             return array[size_ - 1];
         }
         const T& back() const noexcept {
             if (size_ == 0){
-                return array[0]; // Return default value if empty
+                static T default_value = T();
+                return default_value; // Return default value if empty
             }
             return array[size_ - 1];
         }
         T& front() noexcept {
             if (size_ == 0){
-                return array[0]; // Return default value if empty
+                static T default_value = T();
+                return default_value; // Return default value if empty
             }
             return array[0];
         }
         const T& front() const noexcept {
             if (size_ == 0){
-                return array[0]; // Return default value if empty
+                static T default_value = T();
+                return default_value; // Return default value if empty
             }
             return array[0];
         }
@@ -2389,48 +2423,65 @@ namespace mcu {
 
         - If n is also greater than the current container capacity, an automatic reallocation of the allocated storage space takes place.
          */
-        void resize(vector_index_type newCapacity) noexcept {
-            if (newCapacity == capacity_) return;
-            if (newCapacity == 0) newCapacity = 1;
-            T* newArray = new T[newCapacity];
-            vector_index_type toCopy = (size_ < newCapacity ? size_ : newCapacity);
-            customCopy(array, newArray, toCopy);
-            delete[] array;
-            array = newArray;
-            capacity_ = newCapacity;
-            if (size_ > capacity_) size_ = capacity_;
-        }
-        // overload version
-        void resize(vector_index_type newSize, const T& value) noexcept {
-            if (newSize == capacity_) return;
-            if (newSize == 0) newSize = 1;
-            T* newArray = new T[newSize];
-            vector_index_type toCopy = (size_ < newSize ? size_ : newSize);
-            customCopy(array, newArray, toCopy);
-            for (vector_index_type i = toCopy; i < newSize; ++i) {
-                newArray[i] = value;
+        void resize(size_t newSize, const T& value) noexcept {
+            if (newSize > VECTOR_MAX_CAP) {
+                newSize = VECTOR_MAX_CAP;
             }
-            delete[] array;
-            array = newArray;
-            capacity_ = newSize;
-            if (size_ > capacity_) size_ = capacity_;   
+            
+            if (newSize < size_) {
+                // Shrink: reduce size to newSize
+                size_ = newSize;
+            } else if (newSize > size_) {
+                // Expand: need to add elements
+                if (newSize > capacity_) {
+                    // Need to reallocate
+                    i_resize(newSize);
+                }
+                
+                // Fill new elements with the provided value
+                for (size_t i = size_; i < newSize; ++i) {
+                    array[i] = value;
+                }
+                size_ = newSize;
+            }
+            // If newSize == size_, do nothing
         }
-
-        void extend(vector_index_type newCapacity) noexcept {
-            if (newCapacity > capacity_) resize(newCapacity);
+        
+        void resize(size_t newSize) noexcept {
+            if (newSize > VECTOR_MAX_CAP) {
+                newSize = VECTOR_MAX_CAP;
+            }
+            
+            if (newSize < size_) {
+                // Shrink: reduce size to newSize
+                size_ = newSize;
+            } else if (newSize > size_) {
+                // Expand: need to add elements
+                if (newSize > capacity_) {
+                    // Need to reallocate
+                    i_resize(newSize);
+                }
+                
+                // Fill new elements with default-initialized values
+                for (size_t i = size_; i < newSize; ++i) {
+                    array[i] = T();
+                }
+                size_ = newSize;
+            }
+            // If newSize == size_, do nothing
         }
 
         // Accessors
-        vector_index_type size() const noexcept { return size_; }
-        vector_index_type capacity() const noexcept { return capacity_; }
+        size_t size() const noexcept { return size_; }
+        size_t capacity() const noexcept { return capacity_; }
 
         // Operator[] returns default T() on out-of-range
-        T& operator[](vector_index_type index) noexcept {
+        T& operator[](size_t index) noexcept {
             static T default_value = T();
             return (index < size_) ? array[index] : default_value;
         }
     
-        const T& operator[](vector_index_type index) const noexcept {
+        const T& operator[](size_t index) const noexcept {
             static T default_value = T();
             return (index < size_) ? array[index] : default_value;
         }
@@ -2446,7 +2497,6 @@ namespace mcu {
             return sizeof(*this) + heap_bytes;
         }
     };
-    
     /*
     -------------------------------------------------------------------------------------------------------------------
     ------------------------------------------------- PACKED VECTOR ---------------------------------------------------
@@ -2937,6 +2987,8 @@ namespace mcu {
             for (vector_index_type i = 0; i < current_size; ++i) {
                 packed_data.set_unsafe(i, value);
             }
+            // update size equal to capacity
+            set_size(current_size);
         }
         
         uint8_t operator[](vector_index_type index) const {

@@ -431,7 +431,7 @@ struct Rf_config{
 
     b_vector<uint8_t> max_depth_range;      // for training
     b_vector<uint8_t> min_split_range;      // for training 
-    b_vector<bool, SMALL> overwrite{4}; // min_split-> max_depth-> unity_threshold-> training_flag
+    b_vector<bool> overwrite{4}; // min_split-> max_depth-> unity_threshold-> training_flag
 
     Rf_training_flags training_flag;
     std::string data_path;

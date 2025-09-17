@@ -647,8 +647,7 @@ String reception_data(int exact_columns, bool print_file) {
             buffer = "";
             total_rows++;
         }
-
-        delay(10);
+        delay(30);
     }
     file.close();
     if(exact_columns > 0) {

@@ -16,12 +16,12 @@
 using u8 = uint8_t;
 
 // Function declarations
-int truncate_csv(const char *in_path, int n_cols);
+int truncate_csv(const char *in_path);
 
 // Quantization coefficient for feature values. 1->8 bits per feature value.
 static constexpr uint8_t quantization_coefficient = 2; // Coefficient for quantization (bits per feature value)
-static const int MAX_NUM_FEATURES = 234; // Maximum number of features supported
-static const int MAX_LABELS = 31; // Maximum number of unique labels supporte (5 bits per label - fixed)
+static const int MAX_NUM_FEATURES = 1023; // Maximum number of features supported
+static const int MAX_LABELS = 256; // Maximum number of unique labels supporte (5 bits per label - fixed)
 
 // Helper functions to calculate derived values from quantization coefficient
 static constexpr uint16_t getGroupsPerFeature() {
@@ -747,7 +747,7 @@ uint8_t getNormalizedLabel(const std::string& originalLabel, const mcu::vector<m
 }
 
 // CSV truncation function to limit number of features
-int truncate_csv(const char *in_path, int n_cols) {
+int truncate_csv(const char *in_path) {
     // Determine output directory and filename
     std::string input_path(in_path);
     size_t slash = input_path.find_last_of("/\\");
@@ -775,7 +775,7 @@ int truncate_csv(const char *in_path, int n_cols) {
     int c, col = 0;
     while ((c = fgetc(in)) != EOF) {
         if (c == ',') {
-            if (++col < n_cols)
+            if (++col < MAX_NUM_FEATURES)
                 fputc(',', out);
         }
         else if (c == '\n') {
@@ -783,7 +783,7 @@ int truncate_csv(const char *in_path, int n_cols) {
             col = 0;
         }
         else {
-            if (col < n_cols)
+            if (col < MAX_NUM_FEATURES)
                 fputc(c, out);
         }
     }
@@ -1107,7 +1107,7 @@ int main(int argc, char* argv[]) {
             std::cout << "\n=== Feature Truncation ===\n";
             std::cout << "Truncating from " << datasetInfo.numFeatures << " to " << MAX_NUM_FEATURES << " features...\n";
 
-            int result = truncate_csv(inputFile.c_str(), MAX_NUM_FEATURES + 1); // +1 for label column
+            int result = truncate_csv(inputFile.c_str()); // +1 for label column
             if (result != 0) {
                 throw std::runtime_error("Failed to truncate CSV file");
             }

@@ -64,9 +64,9 @@ For details on how quantization and categorizer work, please refer to:
 
 ⚠️ **Dataset Limits:**
 - **Max Labels**: 255 unique classes
-- **Max Features**: 1024 features per sample
-- **Max Samples**: 60,000 samples per dataset
-- Datasets exceeding these limits will be automatically truncated or will fail processing
+- **Max Features**: 1023 features per sample
+- **Max Samples**: 65,535 samples per dataset
+- Datasets exceeding these limits will be automatically truncated (except labels)
 
 **For transfer and identification:**
 - Transfer command: `python3 unified_transfer.py {model_name} /dev/ttyUSB0`

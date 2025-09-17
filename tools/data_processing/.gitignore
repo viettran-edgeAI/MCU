@@ -1,0 +1,29 @@
+# ESP32 Dataset Processing Tool - .gitignore
+
+# Build artifacts
+processing_data
+
+# Generated output files
+data/result/
+plots/
+
+# Python environment and cache
+venv_*/
+__pycache__/
+*.pyc
+*.pyo
+
+# Temporary files
+*.tmp
+.DS_Store
+Thumbs.db
+
+# User datasets (uncomment to ignore)
+# data/*.csv
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

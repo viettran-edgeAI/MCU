@@ -1,206 +1,414 @@
-# Quantization Data Visualizer
+# ESP32 Dataset Processing, Visualization, and Transfer (STL_MCU)
 
-This tool provides comprehensive PCA-based visualization and analysis to assess the effects of data quantization on classification datasets. It creates multi-angle 3D scatter plots comparing original and quantized data distributions with detailed statistical analysis.
+Process CSV datasets → quantize to 2-bit categories → transfer to ESP32.
 
-## Features
+Complete pipeline for STL_MCU Random Forest: converts CSV data to ESP32-ready format with automatic header detection, 2-bit quantization, and binary export.
 
-- **Multi-View PCA Analysis**: 4 different viewing angles for comprehensive visualization
-- **Smart Sampling**: Reduces visual density for large datasets while maintaining class representation
-- **Class Distribution**: Shows how different classes are distributed in principal component space
-- **Quantization Impact Assessment**: Compares data dispersion before and after quantization
-- **Classification Quality Scoring**: Evaluates class separability and provides recommendations
-- **Comprehensive Variance Analysis**: Detailed explanation of principal component significance
-- **Multiple Datasets Support**: Works with iris, cancer, digit, and walker_fall datasets
+## 🎯 What you get
 
-## Key Enhancements
+- Automatic CSV processing (handles headers intelligently)
+- 2-bit quantization (values 0-3) optimized for ESP32
+- Binary export ready for microcontroller memory
+- Optional visualization
+- Simple transfer to ESP32
 
-- **3×3 Grid Layout**: Organized visualization with original data (row 1), quantized data (row 2), and impact assessment (row 3)
-- **Smart Class Limiting**: Automatically shows only top 5 most frequent classes for datasets with >5 classes
-- **Dense Data Sampling**: Automatically samples large datasets (>500 points) for clearer visualization
-- **Three Viewing Angles**: Standard, Top-Front, and Side views for comprehensive perspective
-- **Quantization Impact Assessment**: Visual charts showing variance retention, comparison metrics, and recommendations
-- **Enhanced Metrics Dashboard**: Bottom row includes variance comparison bars, retention percentages, and summary recommendations
+## 🧭 Pipeline at a glance
 
-## Requirements
+```mermaid
+flowchart LR
+  A[Raw CSV<br/>(labels + features)] --> B[Normalization & Quantization<br/>(2-bit; 0..3)]
+  B --> C[Outputs in data/result/<br/>• *_nml.csv (quantized)<br/>• *_ctg.csv (categorizer)<br/>• *_dp.csv (params)<br/>• *_nml.bin (binary)]
+  C --> D[Optional Visualization<br/>(PCA 3D views)]
+  C --> E[Transfer to ESP32<br/>(serial unified/individual/manual)]
+```
+```
+📊 Raw Dataset (CSV)
+    ↓
+� Smart Header Handling
+    ├── Headers detected → Skip first line
+    └── No headers → Process all lines
+    ↓
+�🔄 Quantization Process (2-bit: 0..3)
+    ↓
+📁 Generated Files:
+   ├── *_nml.csv (quantized data only)
+   ├── *_ctg.csv (categorizer rules) 
+   ├── *_dp.csv (dataset params)
+   └── *_nml.bin (ESP32 binary)
+    ↓
+📈 Visualization (Optional)
+   └── PCA 3D plots
+    ↓
+🔌 Transfer to ESP32
+   ├── Unified (recommended)
+   ├── Individual files
+   └── Manual (Serial Monitor)
+```
 
-- Python 3.7+
-- numpy>=1.21.0
-- pandas>=1.3.0
-- matplotlib>=3.4.0
-- scikit-learn>=1.0.0
+## 📋 Requirements
 
-## Installation
+- Linux/macOS/WSL
+- g++ with C++17
+- Python 3.7+ (for visualization/transfer)
+- Python packages: numpy, pandas, matplotlib, scikit-learn (installed via Makefile)
 
-### Quick Setup
+## 🚀 Quick start
+
+### Basic Processing
+
 ```bash
-chmod +x install_and_test.sh
-./install_and_test.sh
+# Process a dataset (automatic header detection)
+./quantize_dataset.sh -p data/iris_data.csv
 ```
 
-### Manual Setup
-```bash
-# Create virtual environment
-python3 -m venv venv_visualizer
-source venv_visualizer/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Create plots directory
-mkdir -p plots
-```
-
-## Usage
+### With Visualization
 
 ```bash
-python quantization_visualizer.py <model_name>
+# Process and generate plots
+./quantize_dataset.sh -p data/iris_data.csv --visualize
 ```
 
-### Examples
+Generated files will be in `data/result/` directory, ready for ESP32 transfer.
+
+## 🔧 Commands and interfaces
+
+### Basic Script
+
+`./quantize_dataset.sh -p <csv_file> [--visualize]`
+
+### Available Options
+- `-p, --path <file>`: input CSV (required)
+- `-he, --header <yes/no>`: Skip header if 'yes', process all lines if 'no' (auto-detect if not specified)
+- `-v, --visualize`: run visualization after processing
+- `-h, --help`: usage
+
+## 📊 Input format
+
+Your CSV should have:
+- Column 1: label (string or numeric)
+- Columns 2..N: features (any numeric data)
+- Headers: optional (automatically handled)
+
+Example:
+```
+Species,SepalLength,SepalWidth,PetalLength,PetalWidth
+setosa,5.1,3.5,1.4,0.2
+versicolor,7.0,3.2,4.7,1.4
+```
+
+## 🔌 Transfer to ESP32
+
 ```bash
-# Visualize iris dataset
-python quantization_visualizer.py iris_data
-
-# Visualize cancer dataset
-python quantization_visualizer.py cancer_data
-
-# Visualize digit dataset
-python quantization_visualizer.py digit_data
-
-# Visualize walker fall detection dataset
-python quantization_visualizer.py walker_fall
+cd data_transfer/pc_side
+python3 unified_transfer.py <dataset_name> /dev/ttyUSB0
 ```
 
-## Data Format
+---
 
-The program expects:
-- **Original data**: `data/<model_name>.csv`
-- **Quantized data**: `data/result/<model_name>_nml.csv`
+## 🔧 Advanced Usage
 
-Both files should:
-- Have class labels in the first column
-- Have feature data in subsequent columns
-- Can have header rows (will be auto-detected and handled)
+### Complete Setup Workflow
 
-## Output
+```bash
+# 1. Navigate to the tool directory
+cd /path/to/STL_MCU/tools/data_processing
 
-The visualizer generates:
+# 2. One-time setup (builds C++, creates Python env, makes folders)
+make setup
 
-1. **Console Output**: 
-   - Dataset information (shape, number of classes)
-   - Comprehensive PCA variance analysis with detailed explanations
-   - Class separation quality assessment
-   - Quantization impact evaluation
-   - Clear recommendations for classification use
+# 3. Check available datasets
+ls data/*.csv
+# You'll see: iris_data.csv, digit_data.csv, cancer_data.csv, walker_fall.csv
 
-2. **3×3 Grid Visualization Layout**:
-   - **Row 1**: Original data from 3 different viewing angles
-   - **Row 2**: Quantized data from matching viewing angles  
-   - **Row 3**: Quantization impact assessment charts
-   - Auto-sampling for datasets with >500 points per visualization
-   - Shows only top 5 most frequent classes for datasets with >5 classes
+# 4. Process with full options
+./quantize_dataset.sh -p data/iris_data.csv --visualize
 
-3. **Quantization Impact Assessment Dashboard**:
-   - **Variance Comparison**: Bar chart comparing PC1-PC3 between original and quantized
-   - **Retention Metrics**: Color-coded retention percentages (green ≥90%, orange ≥80%, red <80%)
-   - **Summary & Recommendation**: Clear guidance with visual indicators
+# 5. Check the generated files
+ls -la data/result/
+# You'll see: iris_data_nml.csv, iris_data_ctg.csv, iris_data_dp.csv, iris_data_nml.bin
 
-## Interpretation
-
-### Explained Variance Percentages
-- **PC1 (Principal Component 1)**: Captures the direction of maximum data variation
-  - High PC1% (>70%): Data varies mainly along one primary direction
-  - Moderate PC1% (30-70%): Data has significant variation in multiple directions
-  - Low PC1% (<30%): Data variation is distributed across many dimensions
-
-### Variance Analysis
-- **Total 3PC Variance**: Percentage of information preserved in 3D visualization
-  - >95%: Excellent 3D representation of the data
-  - 80-95%: Good 3D representation
-  - <80%: 3D view may miss important data structure
-
-### Classification Quality Indicators
-- **Class Separation Score**: Measures how distinguishable classes are in the feature space
-- **Separation Retention**: How well quantization preserves class boundaries
-- **Visual Cluster Analysis**: Well-separated, tight clusters indicate good classification potential
-
-### Quantization Impact Assessment
-- **✓ Recommended**: Quantized version maintains >90% quality metrics
-- **⚠ Acceptable**: Quantized version retains 80-90% of original quality
-- **✗ Not Recommended**: Significant quality loss (>20%) in quantized version
-
-### Multiple View Benefits
-- **Standard View (-150°, 110°)**: General overview of class distribution
-- **Top-Front View (20°, 45°)**: Better view of class overlap and separation
-- **Side View (-90°, 0°)**: Shows data spread along different axes
-
-### Visual Assessment Dashboard
-- **Variance Bars**: Direct comparison of PC1, PC2, PC3 between original and quantized
-- **Retention Traffic Lights**: Green (≥90%), Orange (≥80%), Red (<80%) for quick assessment
-- **Recommendation Panel**: Clear visual guidance with summary metrics
-- **Class Limitation**: Automatically focuses on top 5 classes for complex datasets (10+ classes)
-
-## Supported Datasets
-
-| Dataset | Classes | Description |
-|---------|---------|-------------|
-| iris_data | 3 | Iris flower species classification |
-| cancer_data | 2 | Breast cancer diagnosis (malignant/benign) |
-| digit_data | 10 | Handwritten digit recognition |
-| walker_fall | 2 | Fall detection from sensor data |
-
-## Example Output
-
-```
-Dataset: iris_data
-Original data shape: (150, 4)
-Quantized data shape: (149, 4)
-Number of classes: 3
-
-================================================================================
-PCA ANALYSIS & CLASSIFICATION QUALITY ASSESSMENT
-================================================================================
-EXPLAINED VARIANCE ANALYSIS:
-----------------------------------------
-Explained variance represents the proportion of the dataset's total variation
-captured by each principal component. Higher percentages mean more information
-is preserved in fewer dimensions.
-
-Original Data - Explained Variance:
-  PC1: 69.5% (most important variation direction)
-  PC2: 22.6% (second most important direction)
-  PC3: 5.2% (third most important direction)
-  Total (3 PCs): 97.3% (total info preserved in 3D)
-
-Quantized Data - Explained Variance:
-  PC1: 69.4%
-  PC2: 22.7%
-  PC3: 5.1%
-  Total (3 PCs): 97.3%
-
-Variance Retention after Quantization:
-  PC1: 99.8%
-  PC2: 100.4%
-  PC3: 100.0%
-
-----------------------------------------
-CLASSIFICATION QUALITY ASSESSMENT:
-----------------------------------------
-Class Separation Score (higher = better for classification):
-  Original Data:  1.000
-  Quantized Data: 1.000
-  Separation Retention: 100.0%
-
-----------------------------------------
-RECOMMENDATION FOR CLASSIFICATION:
-----------------------------------------
-✓ QUANTIZED version recommended - minimal quality loss
-
-Plot saved as: plots/iris_data_pca_comparison.png
+# 6. Transfer to ESP32 (close Serial Monitor first!)
+cd data_transfer/pc_side
+python3 unified_transfer.py iris_data /dev/ttyUSB0
 ```
 
-## Troubleshooting
+### Detailed Script Options
 
-**File not found errors**: Ensure the CSV files exist in the expected locations
-**Memory issues**: For large datasets, consider reducing the number of samples
-**Display issues**: Use `export DISPLAY=:0` for headless systems with X11 forwarding
+`quantize_dataset.sh`
+- Options:
+  - `-p, --path <file>`: input CSV (required)
+  - `-he, --header <yes/no>`: Skip header if 'yes', process all lines if 'no' (auto-detect if not specified)
+  - `-v, --visualize`: run visualization after processing
+  - `-h, --help`: usage
+
+Examples:
+- Auto-detect header: `./quantize_dataset.sh -p data/iris_data.csv`
+- Force skip header: `./quantize_dataset.sh -p data/iris_data.csv --header yes`
+- Force process all lines: `./quantize_dataset.sh -p data/iris_data.csv --header no`
+- Auto-detect + visualize: `./quantize_dataset.sh -p data/iris_data.csv -v`
+
+**Header Detection Logic:**
+- Analyzes first two rows to detect header presence
+- Compares numeric content ratio between rows
+- `--header yes`: Skip first line (treat as header)
+- `--header no`: Process all lines (no header present)
+- (no --header): Automatically detect and handle appropriately
+
+### Alternative Build Tools
+
+#### Makefile
+
+- `make setup` – build C++ tool, create venv, and make folders
+- `make unified FILE=data/file.csv [HEADER=yes] [VIZ=yes]` – full workflow
+- `make process FILE=data/file.csv` – process only
+- `make process-viz FILE=data/file.csv` – process + visualize
+- `make visualize NAME=dataset_name` – visualize existing results
+- `make test` / `make test-viz` – quick tests
+- `make status` – project health
+
+#### C++ tool (low-level)
+
+- Binary: `processing_data`
+- Options:
+  - `-p, -path <file>`: input CSV
+  - `-he, -header <yes/no>`: Skip header if 'yes', process all lines if 'no' (auto-detect if not specified)
+  - `-v, -visualize`
+  - `-h, --help`
+
+The script compiles this automatically if needed.
+
+---
+
+## 🧪 Processing details
+
+### Smart Header Handling
+- **Automatic Detection**: System analyzes your CSV to determine if it has headers
+- **No Configuration Needed**: Just run the tool and it handles headers correctly
+- **Manual Override**: Use `--header yes/no` if you need to force specific behavior
+
+### Quantization (quantization_coefficient = 2)
+- Outlier handling: Z-score ±3σ clipping
+- Continuous features → 4 quantile-based bins
+- Discrete detection for integer-like features
+- Encode features into 2-bit categories {0,1,2,3}
+- Label normalization: map strings → numeric indices
+
+Derived properties:
+- Groups per feature: 2^2 = 4
+- Features per byte: 8/2 = 4
+- Max features supported: 1023
+
+### Outputs (in `data/result/`)
+- `<name>_nml.csv` – normalized CSV (quantized data only, no headers)
+- `<name>_ctg.csv` – CTG2 categorizer rules
+- `<name>_dp.csv` – dataset parameters/metadata
+- `<name>_nml.bin` – ESP32 binary dataset
+- `plots/` – visuals if `-v` or Makefile visualize
+- `<name>_nml.bin` – ESP32 binary dataset
+- `plots/` – visuals if `-v` or Makefile visualize
+
+### Binary file format (ESP32)
+
+Header (6 bytes):
+- numSamples: 4 bytes, uint32_t, LE
+- numFeatures: 2 bytes, uint16_t, LE
+
+Each sample:
+- sampleID: 2 bytes, uint16_t, LE
+- label: 1 byte, uint8_t
+- features: packed, 2 bits/feature (4 features per byte)
+
+Validation performed:
+- Ensures features are ∈ [0..3]
+- Consistent size vs. expected structure
+- Read-back check and summary logging
+
+## 👀 Visualization
+
+PCA-based inspection comparing class separability and variance retention post-quantization.
+- Multi-angle images (standard, top-front, side)
+- Downsampling for large datasets
+- Top-5 class limiting for highly multi-class sets
+
+Generate by either:
+- `./quantize_dataset.sh -p data/your.csv -v`
+- or `make visualize NAME=<dataset_base_name>` (expects processed files)
+
+## 🔌 Transfer to ESP32
+
+Close the Arduino Serial Monitor before automatic transfer.
+
+Options:
+
+1) Unified transfer (recommended)
+- From `tools/data_processing/data_transfer/pc_side/`:
+  - `python3 unified_transfer.py <dataset_base_name> <serial_port>`
+  - Looks for files in `tools/data_processing/data/result/`:
+    - `<name>_ctg.csv`, `<name>_dp.csv`, `<name>_nml.bin`
+- ESP32 sketch: `data_transfer/esp32_side/unified_receiver.ino`
+
+2) Individual transfer
+- From `data_transfer/pc_side/`:
+  - `transfer_categorizer.py ../data/result/<name>_ctg.csv <serial>`
+  - `transfer_dataset_params.py ../data/result/<name>_dp.csv <serial>`
+  - `transfer_dataset.py ../data/result/<name>_nml.bin <serial>`
+- ESP32 sketches: use corresponding receivers in `data_transfer/esp32_side/`
+
+3) Manual (Serial Monitor)
+- Use CSV versions and manual copy/paste:
+  - `manual_transfer/csv_dataset_receiver.ino`
+  - `manual_transfer/ctg_receiver.ino`
+  - `manual_transfer/dataset_params_receiver.ino`
+
+Transfer sequence (high level):
+
+```mermaid
+sequenceDiagram
+  participant PC as PC (unified_transfer.py)
+  participant ESP as ESP32 (unified_receiver.ino)
+  PC->>ESP: Start session + basename
+  ESP-->>PC: READY
+  PC->>ESP: File info *_ctg.csv + chunks
+  ESP-->>PC: ACKs per chunk
+  PC->>ESP: File info *_dp.csv + chunks
+  ESP-->>PC: ACKs per chunk
+  PC->>ESP: File info *_nml.bin + chunks
+  ESP-->>PC: ACKs per chunk
+  PC->>ESP: End session
+  ESP-->>PC: OK
+```
+
+ESP32-C3 notes:
+- If transfers fail (USB-CDC), tune in `unified_transfer.py`:
+  - Reduce `CHUNK_SIZE` (e.g., 128/256)
+  - Increase `ACK_TIMEOUT`
+  - Add small inter-chunk delays
+
+## 🧰 Examples
+
+### Process Different Dataset Types
+
+- **Iris dataset (with headers)**:
+  ```bash
+  # Automatically handles headers and skips them
+  ./quantize_dataset.sh -p data/iris_data.csv -v
+  # Output: 150 samples (header skipped)
+  ```
+
+- **Digit dataset (no headers)**:
+  ```bash
+  # Automatically detects no headers, processes all rows
+  ./quantize_dataset.sh -p data/digit_data.csv
+  # Output: All rows processed as data
+  ```
+
+### Override Automatic Behavior
+
+- **Force skip first line**:
+  ```bash
+  ./quantize_dataset.sh -p data/iris_data.csv --header yes
+  # Skips first line regardless of content
+  ```
+
+- **Force process all lines**:
+  ```bash
+  ./quantize_dataset.sh -p data/iris_data.csv --header no
+  # Processes all lines including first row as data
+  # Output: 151 samples (first row processed as data)
+  ```
+
+### Batch Processing
+
+- **With Makefile**:
+  ```bash
+  make unified FILE=data/sensor_data.csv HEADER=yes VIZ=yes
+  ```
+  Check `data/result/` for outputs
+
+### Sample Dataset Formats
+
+**Dataset with headers:**
+```csv
+Species,SepalLength,SepalWidth,PetalLength,PetalWidth
+setosa,5.1,3.5,1.4,0.2
+versicolor,7.0,3.2,4.7,1.4
+```
+→ **Result**: Headers detected and skipped (0% vs 100% numeric)
+
+**Dataset without headers:**
+```csv
+0,5.1,3.5,1.4,0.2
+1,7.0,3.2,4.7,1.4
+2,6.3,3.3,6.0,2.5
+```
+→ **Result**: No headers detected, all rows processed (100% vs 100% numeric)
+
+## 🧱 Folder structure
+
+```
+tools/data_processing/
+├── Makefile
+├── quantize_dataset.sh             # Main script: CSV → quantized outputs
+├── processing_data.cpp             # C++ quantizer + binary exporter
+├── quantization_visualizer.py
+├── requirements.txt
+├── data/
+│   ├── iris_data.csv
+│   ├── digit_data.csv
+│   ├── walker_fall.csv
+│   └── result/
+│       ├── <name>_nml.csv        # Quantized CSV (0..3)
+│       ├── <name>_nml.bin        # ESP32 binary dataset
+│       ├── <name>_ctg.csv        # Categorizer rules (CTG2)
+│       └── <name>_dp.csv         # Dataset params/metadata
+├── plots/                         # Visualization outputs
+└── data_transfer/
+    ├── pc_side/
+    │   ├── unified_transfer.py
+    │   ├── transfer_categorizer.py
+    │   ├── transfer_dataset.py
+    │   └── transfer_dataset_params.py
+    └── esp32_side/
+        ├── unified_receiver.ino
+        ├── binary_dataset_receiver.ino
+        ├── dataset_params_receiver.ino
+        └── manual_transfer/
+            ├── csv_dataset_receiver.ino
+            ├── ctg_receiver.ino
+            └── dataset_params_receiver.ino
+```
+
+## 🧪 Tips, limits, and troubleshooting
+
+Performance & limits:
+- >10K samples may take several minutes
+- ~1GB RAM suggested for >1M samples
+- Max features: 1023 (extra truncated)
+- Disable `-v` to speed up large runs
+
+Common issues:
+- Missing compiler: install build-essential on Debian/Ubuntu
+- Python deps: use `make setup-python` or `make clean-python && make setup-python`
+- Permission: `chmod +x quantize_dataset.sh processing_data`
+- Wrong paths: verify files under `tools/data_processing/data/`
+
+ESP32 compatibility checks (done automatically):
+- Features in [0..3]
+- Binary structure size matches expectations
+- Read-back verification pass
+- Sample count reasonable (<10,000 recommended)
+
+ESP32-C3 transfer hiccups (USB-CDC):
+- Use unified transfer first
+- If still flaky, try CHUNK_SIZE=128, ACK_TIMEOUT=30, and small delays
+- Consider classic UART via USB-Serial (e.g., /dev/ttyUSB0)
+
+## 📘 Notes
+
+- This tool is part of the STL_MCU ecosystem; designed for Random Forest on ESP32
+- Keep datasets tidy; inspect `_ctg.csv` and `_dp.csv` when debugging quantization
+- The binary converter is integrated inside `processing_data.cpp` (no separate build needed)
+
+---
+
+Ready to process and deploy your datasets to ESP32. 🚀

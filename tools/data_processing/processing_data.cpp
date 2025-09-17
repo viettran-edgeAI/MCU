@@ -464,10 +464,97 @@ float clipOutlier(float value, float mean, float stdDev, float minVal, float max
     return value; // No clipping needed
 }
 
+// Helper function to check if a string is likely numeric (including scientific notation)
+bool isLikelyNumeric(const std::string& str) {
+    if (str.empty()) return false;
+    
+    // Trim whitespace
+    std::string trimmed = str;
+    size_t start = trimmed.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) return false;
+    size_t end = trimmed.find_last_not_of(" \t\r\n");
+    trimmed = trimmed.substr(start, end - start + 1);
+    
+    if (trimmed.empty()) return false;
+    
+    try {
+        // Try to parse as float - this handles integers, decimals, and scientific notation
+        std::stof(trimmed);
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+// Function to automatically detect if CSV has header by analyzing first two rows
+bool detectCSVHeader(const char* inputFilePath) {
+    std::ifstream fin(inputFilePath);
+    if (!fin) {
+        throw std::runtime_error(std::string("Cannot open input file for header detection: ") + inputFilePath);
+    }
+    
+    std::string firstLine, secondLine;
+    if (!std::getline(fin, firstLine) || !std::getline(fin, secondLine)) {
+        fin.close();
+        // If we can't read two lines, assume no header
+        return false;
+    }
+    fin.close();
+    
+    if (firstLine.empty() || secondLine.empty()) {
+        return false;
+    }
+    
+    auto firstCols = split(firstLine);
+    auto secondCols = split(secondLine);
+    
+    if (firstCols.size() != secondCols.size() || firstCols.size() < 2) {
+        return false;
+    }
+    
+    // Check if first row looks like headers (non-numeric) and second row looks like data (numeric)
+    int firstRowNumeric = 0;
+    int secondRowNumeric = 0;
+    int totalCols = firstCols.size();
+    
+    // Skip the first column (label) for numeric analysis, focus on feature columns
+    for (int i = 1; i < totalCols; ++i) {
+        if (isLikelyNumeric(firstCols[i])) {
+            firstRowNumeric++;
+        }
+        if (isLikelyNumeric(secondCols[i])) {
+            secondRowNumeric++;
+        }
+    }
+    
+    int featureCols = totalCols - 1; // Exclude label column
+    
+    // Heuristic: if first row has significantly fewer numeric values than second row,
+    // and second row is mostly numeric, then first row is likely a header
+    float firstRowNumericRatio = static_cast<float>(firstRowNumeric) / featureCols;
+    float secondRowNumericRatio = static_cast<float>(secondRowNumeric) / featureCols;
+    
+    // Header detection criteria:
+    // 1. Second row should be mostly numeric (>= 80% of feature columns)
+    // 2. First row should be significantly less numeric than second row
+    bool hasHeader = (secondRowNumericRatio >= 0.8f) && 
+                     (firstRowNumericRatio < 0.5f) && 
+                     (secondRowNumericRatio - firstRowNumericRatio >= 0.3f);
+    
+    std::cout << "🔍 Header Detection Analysis:\n";
+    std::cout << "   First row numeric ratio: " << std::fixed << std::setprecision(2) 
+              << (firstRowNumericRatio * 100) << "%\n";
+    std::cout << "   Second row numeric ratio: " << std::fixed << std::setprecision(2) 
+              << (secondRowNumericRatio * 100) << "%\n";
+    std::cout << "   📊 Result: " << (hasHeader ? "Header detected" : "No header detected") << "\n";
+    
+    return hasHeader;
+}
+
 // Forward declaration
 uint8_t getNormalizedLabel(const std::string& originalLabel, const mcu::vector<mcu::pair<std::string, uint8_t>>& labelMapping);
 
-Rf_categorizer categorizeCSVFeatures(const char* inputFilePath, const char* outputFilePath, int groupsPerFeature, const mcu::vector<mcu::pair<std::string, uint8_t>>& labelMapping){
+Rf_categorizer categorizeCSVFeatures(const char* inputFilePath, const char* outputFilePath, int groupsPerFeature, const mcu::vector<mcu::pair<std::string, uint8_t>>& labelMapping, bool skipHeader = false){
     if (groupsPerFeature < 1) {
         throw std::runtime_error("groupsPerFeature must be >= 1");
     }
@@ -477,10 +564,10 @@ Rf_categorizer categorizeCSVFeatures(const char* inputFilePath, const char* outp
         throw std::runtime_error(std::string("Cannot open input file: ") + inputFilePath);
     }
 
-    // Read header
-    std::string header;
-    std::getline(fin, header);
-    auto cols = split(header);
+    // Read first line to determine structure
+    std::string firstLine;
+    std::getline(fin, firstLine);
+    auto cols = split(firstLine);
     int n_cols = (int)cols.size();
     if (n_cols < 2) {
         fin.close();
@@ -493,6 +580,36 @@ Rf_categorizer categorizeCSVFeatures(const char* inputFilePath, const char* outp
     mcu::vector<FeatureStats> featureStats(n_feats);
     mcu::vector<std::string> labels;
     mcu::vector<mcu::vector<float>> data;
+    
+    // If skipHeader=false, process the first line as data
+    // If skipHeader=true, skip the first line (treat it as header)
+    bool processFirstLine = !skipHeader;
+    
+    if (processFirstLine) {
+        // Process the first line as data
+        if ((int)cols.size() == n_cols) {
+            labels.push_back(cols[0]);
+            mcu::vector<float> feats;
+            feats.reserve(n_feats);
+            
+            for (int j = 1; j < n_cols; ++j) {
+                try {
+                    float val = std::stof(cols[j]);
+                    feats.push_back(val);
+                    
+                    int idx = j - 1;
+                    featureStats[idx].min = std::min(featureStats[idx].min, val);
+                    featureStats[idx].max = std::max(featureStats[idx].max, val);
+                    featureStats[idx].mean += val;
+                } catch (const std::exception& e) {
+                    // Handle conversion error with a default value
+                    feats.push_back(0.0f);
+                }
+            }
+            
+            data.push_back(std::move(feats));
+        }
+    }
     
     std::string line;
     while (std::getline(fin, line)) {
@@ -631,12 +748,13 @@ Rf_categorizer categorizeCSVFeatures(const char* inputFilePath, const char* outp
         encoded[i] = ctg.categorizeSample(data[i]);
     }
     
-    // Write output CSV (no header, normalized labels)
+    // Write output CSV (quantized data without headers)
     std::ofstream fout(outputFilePath);
     if (!fout) {
         throw std::runtime_error(std::string("Cannot open output file: ") + outputFilePath);
     }
     
+    // Write quantized data (no headers needed for quantized output)
     for (int i = 0; i < n_samples; ++i) {
         // Use normalized label from mapping
         uint8_t normalizedLabel = getNormalizedLabel(labels[i], labelMapping);
@@ -1069,11 +1187,54 @@ void convertCSVToBinary(const std::string& inputCSV, const std::string& outputBi
 
 int main(int argc, char* argv[]) {
     try {
-        if (argc < 2) {
-            std::cerr << "Usage: " << argv[0] << " <path_to_dataset_csv>\n";
+        bool skipHeader = false; // Default to not skipping header (process all lines)
+        bool headerSpecified = false; // Track if user explicitly specified header option
+        bool runVisualization = false; // Default to not running visualization
+        std::string inputFile;
+        
+        // Parse command line arguments
+        for (int i = 1; i < argc; i++) {
+            std::string arg = argv[i];
+            if (arg == "-p" || arg == "-path") {
+                if (i + 1 < argc) {
+                    inputFile = argv[++i];
+                } else {
+                    std::cerr << "Error: -p/-path requires a file path\n";
+                    return 1;
+                }
+            } else if (arg == "-he" || arg == "-header") {
+                if (i + 1 < argc) {
+                    std::string headerArg = argv[++i];
+                    skipHeader = (headerArg == "yes" || headerArg == "true" || headerArg == "1");
+                    headerSpecified = true;
+                } else {
+                    skipHeader = true; // Default to skipping header if no value provided
+                    headerSpecified = true;
+                }
+            } else if (arg == "-v" || arg == "-visualize") {
+                runVisualization = true;
+            } else if (arg == "-h" || arg == "--help") {
+                std::cout << "Usage: " << argv[0] << " [options]\n";
+                std::cout << "Options:\n";
+                std::cout << "  -p, -path <file>        Path to input CSV file (required)\n";
+                std::cout << "  -he, -header <yes/no>   Skip header if 'yes', process all lines if 'no' (auto-detect if not specified)\n";
+                std::cout << "  -v, -visualize          Run quantization visualization after processing\n";
+                std::cout << "  -h, --help              Show this help message\n";
+                std::cout << "\nExample:\n";
+                std::cout << "  " << argv[0] << " -p data/mydata.csv -header yes -visualize\n";
+                return 0;
+            } else if (inputFile.empty() && arg.find('-') != 0) {
+                // If no flags and inputFile not set, treat as positional argument (backward compatibility)
+                inputFile = arg;
+            }
+        }
+        
+        if (inputFile.empty()) {
+            std::cerr << "Error: Input file path is required. Use -p <path> or provide as first argument.\n";
+            std::cerr << "Use -h or --help for usage information.\n";
             return 1;
         }
-        std::string inputFile = argv[1];
+        
         const char* workingFile = inputFile.c_str(); // File to work with (may be truncated)
 
         // Generate output file names based on inputFile
@@ -1102,6 +1263,19 @@ int main(int argc, char* argv[]) {
         std::cout << "=== Dataset Analysis ===\n";
         DatasetInfo datasetInfo = scanDataset(inputFile.c_str());
 
+        // Auto-detect header if not explicitly specified by user
+        if (!headerSpecified) {
+            std::cout << "\n=== Automatic Header Detection ===\n";
+            bool hasHeader = detectCSVHeader(inputFile.c_str());
+            skipHeader = hasHeader; // Skip header if detected
+            std::cout << "   🤖 Auto-detected header mode: " 
+                      << (skipHeader ? "yes (header will be skipped)" : "no (all lines will be processed)") << "\n";
+        } else {
+            std::cout << "\n=== User-specified Header Mode ===\n";
+            std::cout << "   👤 User specified header mode: " 
+                      << (skipHeader ? "yes (header will be skipped)" : "no (all lines will be processed)") << "\n";
+        }
+
         // Step 2: Handle feature truncation if needed
         if (datasetInfo.needsTruncation) {
             std::cout << "\n=== Feature Truncation ===\n";
@@ -1119,7 +1293,7 @@ int main(int argc, char* argv[]) {
 
         // Step 3: Categorize features with the (possibly truncated) dataset
         std::cout << "\n=== Feature Categorization ===\n";
-        Rf_categorizer test_ctg = categorizeCSVFeatures(workingFile, normalizedFile.c_str(), getGroupsPerFeature(), datasetInfo.labelMapping);
+        Rf_categorizer test_ctg = categorizeCSVFeatures(workingFile, normalizedFile.c_str(), getGroupsPerFeature(), datasetInfo.labelMapping, skipHeader);
         std::cout << "Categorization completed successfully.\n";
 
         // Save categorizer for ESP32 transfer
@@ -1152,32 +1326,25 @@ int main(int argc, char* argv[]) {
         std::cout << "   ⚙️  Parameters: " << dataParamsFile << "\n";
         std::cout << "\n🚀 Ready for ESP32 transfer!\n";
         
-        // Optional: Auto-run unified transfer
-        std::cout << "\n=== Auto Transfer Option ===\n";
-        std::cout << "Would you like to transfer all files to ESP32 now? (y/n): ";
-        std::string response;
-        std::getline(std::cin, response);
-        
-        if (response == "y" || response == "Y" || response == "yes") {
-            std::cout << "Enter ESP32 serial port (e.g., /dev/ttyUSB0, COM3): ";
-            std::string serialPort;
-            std::getline(std::cin, serialPort);
+        // Step 7: Run quantization visualization if requested
+        if (runVisualization) {
+            std::cout << "\n=== Quantization Visualization ===\n";
+            std::cout << "🔄 Running quantization visualization...\n";
             
-            if (!serialPort.empty()) {
-                std::string transferCommand = "python3 unified_transfer.py " + baseName + " " + serialPort;
-                std::cout << "🚀 Running: " << transferCommand << std::endl;
-                
-                int result = system(transferCommand.c_str());
-                if (result == 0) {
-                    std::cout << "✅ Transfer completed successfully!" << std::endl;
-                } else {
-                    std::cout << "❌ Transfer failed. You can run it manually:" << std::endl;
-                    std::cout << "   " << transferCommand << std::endl;
-                }
+            // Prepare command to run visualization
+            std::string visualizeCommand = "python3 quantization_visualizer.py " + baseName;
+            std::cout << "🚀 Running: " << visualizeCommand << std::endl;
+            
+            int result = system(visualizeCommand.c_str());
+            if (result == 0) {
+                std::cout << "✅ Visualization completed successfully!" << std::endl;
+                std::cout << "📊 Check the plots/ directory for generated visualizations." << std::endl;
+            } else {
+                std::cout << "❌ Visualization failed. You can run it manually:" << std::endl;
+                std::cout << "   " << visualizeCommand << std::endl;
+                std::cout << "💡 Make sure Python dependencies are installed:" << std::endl;
+                std::cout << "   pip install -r requirements.txt" << std::endl;
             }
-        } else {
-            std::cout << "💡 To transfer manually, run:" << std::endl;
-            std::cout << "   python3 unified_transfer.py " << baseName << " <serial_port>" << std::endl;
         }
 
         std::cout << "\n";

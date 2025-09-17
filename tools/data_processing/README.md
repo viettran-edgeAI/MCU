@@ -17,8 +17,8 @@ Complete pipeline for STL_MCU Random Forest: converts CSV data to ESP32-ready fo
 ```mermaid
 flowchart LR
   A["Raw CSV<br/>labels + features"] --> B["Normalization & Quantization<br/>2-bit: 0..3"]
-  B --> C["Outputs in data/result/<br/>• *_nml.csv quantized<br/>• *_ctg.csv categorizer<br/>• *_dp.csv params<br/>• *_nml.bin binary"]
-  C --> D["Optional Visualization<br/>PCA 3D views"]
+  B --> C["Generated Files<br/>• *_nml.csv quantized<br/>• *_ctg.csv categorizer<br/>• *_dp.csv params<br/>• *_nml.bin binary"]
+  B --> D["Optional Visualization<br/>PCA 3D views"]
   C --> E["Transfer to ESP32<br/>serial unified/individual/manual"]
 ```
 ```
@@ -102,6 +102,39 @@ versicolor,7.0,3.2,4.7,1.4
 cd data_transfer/pc_side
 python3 unified_transfer.py <dataset_name> /dev/ttyUSB0
 ```
+
+## 📊 Visualization
+
+The visualization feature reveals how 2-bit quantization affects your dataset's classification performance. When data is compressed from continuous values to just 4 categories (0,1,2,3), some information is inevitably lost. The PCA analysis shows you exactly what happens:
+
+**What you'll see:**
+- **3D PCA plots**: Original data vs quantized data comparison
+- **Class separation**: How well different classes remain distinguishable after quantization
+- **Variance retention**: Information preserved through the quantization process
+
+![PCA Comparison Example](plots/iris_data_pca_comparison.png)
+
+The visualization compares original high-dimensional data vs quantized data in 3D PCA space, helping you understand:
+- **Before Quantization**: Natural class boundaries and feature relationships
+- **After Quantization**: How 2-bit compression affects class separability
+- **Trade-off Assessment**: Whether the compression is suitable for your classification task
+
+**Classification Impact:**
+- **Class Separation**: How well different classes remain distinguishable after quantization
+- **Information Loss**: Which features lose the most discriminative power
+- **Clustering Quality**: Whether similar samples still group together post-quantization
+
+### Generate Visualizations
+
+```bash
+# Include visualization during processing
+./quantize_dataset.sh -p data/your_dataset.csv --visualize
+
+# Or generate plots for existing processed data
+make visualize NAME=your_dataset
+```
+
+Plots are saved to `plots/` directory with descriptive filenames.
 
 ---
 

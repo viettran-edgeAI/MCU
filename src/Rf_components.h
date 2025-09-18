@@ -101,6 +101,7 @@ namespace mcu {
             this->label = label;
             features = packed_vector<2>(source, start, end);
         }
+        Rf_sample(const mcu::packed_vector<2> features, uint8_t label) : features(features), label(label) {}
     };
 
     class Rf_data {
@@ -655,6 +656,10 @@ namespace mcu {
                 return;
             }
 
+            if constexpr(RF_DEBUG_LEVEL > 2) {
+                Serial.printf("📊 Header read: %d samples, %d features\n", numSamples, numFeatures);
+            }
+
             if(numFeatures * 2 != bitsPerSample) {
                 Serial.printf("❌ Feature count mismatch: expected %d features, file has %d\n", 
                             bitsPerSample / 2, numFeatures);
@@ -950,100 +955,6 @@ namespace mcu {
             loadData(source, chunkIDs, save_ram);   
         }
 
-        // add new sample to the end of the dataset
-        bool add_new_sample(const Rf_sample& sample, Rf_config& config) {
-            // If data is loaded, add to in-memory chunked packed storage
-            if (isLoaded) {
-                // Set bitsPerSample if not set yet
-                if (bitsPerSample == 0) {
-                    bitsPerSample = sample.features.size() * 2;
-                    updateSamplesEachChunk();
-                }
-                
-                // Validate feature count
-                if (sample.features.size() * 2 != bitsPerSample) {
-                    Serial.printf("❌ Feature count mismatch: expected %d, got %d\n", 
-                                bitsPerSample / 2, sample.features.size());
-                    return false;
-                }
-                
-                storeSample(sample, size_);
-                size_++;
-                allLabels.fit();
-                for (auto& chunk : sampleChunks) {
-                    chunk.fit();
-                }
-                releaseData(false); // Save to SPIFFS
-                return true;
-            }
-
-            File file;
-            uint16_t numFeatures = sample.features.size();
-            uint16_t packedFeatureBytes = (numFeatures + 3) / 4;
-
-            if (SPIFFS.exists(filename.c_str())) {
-                // File exists, open to read header and then append
-                file = SPIFFS.open(filename.c_str(), "r+");
-                if (!file) {
-                    Serial.printf("❌ Failed to open existing file for update: %s\n", filename.c_str());
-                    return false;
-                }
-
-                // Read current sample count and update it
-                uint32_t currentSamples;
-                file.read((uint8_t*)&currentSamples, sizeof(currentSamples));
-                currentSamples++;
-                
-                // Rewind and write the new sample count
-                file.seek(0);
-                file.write((uint8_t*)&currentSamples, sizeof(currentSamples));
-                file.close();
-
-                // Re-open in append mode to add the new sample
-                file = SPIFFS.open(filename.c_str(), "a");
-
-            } else {
-                // File doesn't exist, create it and write the header
-                file = SPIFFS.open(filename.c_str(), "w");
-                if (!file) {
-                    if constexpr(RF_DEBUG_LEVEL > 3)
-                    Serial.printf("❌ Failed to create new file: %s\n", filename.c_str());
-                    return false;
-                }
-                uint32_t numSamples = 1;
-                file.write((uint8_t*)&numSamples, sizeof(numSamples));
-                file.write((uint8_t*)&numFeatures, sizeof(numFeatures));
-                
-                // Set bitsPerSample for future use
-                bitsPerSample = numFeatures * 2;
-                updateSamplesEachChunk();
-                size_ = 1;
-            }
-
-            if (!file) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
-                Serial.printf("❌ File operation failed for: %s\n", filename.c_str());
-                return false;
-            }
-
-            // Append the new sample data (no sample ID needed)
-            file.write(&sample.label, sizeof(sample.label));
-
-            // Pack and write features
-            uint8_t packedBuffer[packedFeatureBytes];
-            memset(packedBuffer, 0, packedFeatureBytes);
-
-            for (size_t i = 0; i < numFeatures; ++i) {
-                uint16_t byteIndex = i / 4;
-                uint8_t bitOffset = (i % 4) * 2;
-                uint8_t feature_value = sample.features[i] & 0x03;
-                packedBuffer[byteIndex] |= (feature_value << bitOffset);
-            }
-            file.write(packedBuffer, packedFeatureBytes);
-            file.close();
-            return true;
-        }
-
         /**
          *@brief: copy assignment (but not copy filename to avoid SPIFFS over-writing)
          *@note : Rf_data will be put into release state. loadData() to reload into RAM if needed.
@@ -1081,6 +992,239 @@ namespace mcu {
             }
         }
 
+        /**
+         * @brief Add new data directly to file without loading into RAM
+         * @param samples Vector of new samples to add
+         * @param extend If false, keeps file size same (overwrites old data from start); 
+         *               if true, appends new data while respecting size limits
+         * @return : deleted labels
+         * @note Directly writes to SPIFFS file to save RAM. File must exist and be properly initialized.
+         */
+        mcu::b_vector<uint8_t> addNewData(const mcu::b_vector<Rf_sample>& samples, bool extend = true) {
+            mcu::b_vector<uint8_t> deletedLabels;
+            if (filename.length() == 0) {
+                if constexpr(RF_DEBUG_LEVEL > 3)
+                    Serial.println("❌ No filename specified for addNewData operation");
+                return deletedLabels;
+            }
+
+            if (!SPIFFS.exists(filename.c_str())) {
+                if constexpr(RF_DEBUG_LEVEL > 3)
+                    Serial.printf("❌ File does not exist: %s\n", filename.c_str());
+                return deletedLabels;
+            }
+
+            if (samples.size() == 0) {
+                if constexpr(RF_DEBUG_LEVEL > 3)
+                    Serial.println("❌ No samples to add");
+                return deletedLabels;
+            }
+
+            // Read current file header to get existing info
+            File file = SPIFFS.open(filename.c_str(), FILE_READ);
+            if (!file) {
+                if constexpr(RF_DEBUG_LEVEL > 3)
+                    Serial.printf("❌ Failed to open file for reading: %s\n", filename.c_str());
+                return deletedLabels;
+            }
+
+            uint32_t currentNumSamples;
+            uint16_t numFeatures;
+            
+            if (file.read((uint8_t*)&currentNumSamples, sizeof(currentNumSamples)) != sizeof(currentNumSamples) ||
+                file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
+                if constexpr(RF_DEBUG_LEVEL > 3)
+                    Serial.println("❌ Failed to read file header");
+                file.close();
+                return deletedLabels;
+            }
+            file.close();
+
+            // Validate feature count compatibility
+            if (samples.size() > 0 && samples[0].features.size() != numFeatures) {
+                if constexpr(RF_DEBUG_LEVEL > 3)
+                    Serial.printf("❌ Feature count mismatch: file has %d, samples have %d\n", 
+                                numFeatures, samples[0].features.size());
+                return deletedLabels;
+            }
+
+            // Calculate packed bytes needed for features (4 values per byte)
+            uint16_t packedFeatureBytes = (numFeatures + 3) / 4;
+            size_t sampleDataSize = sizeof(uint8_t) + packedFeatureBytes; // label + packed features
+            size_t headerSize = sizeof(uint32_t) + sizeof(uint16_t);
+
+            uint32_t newNumSamples;
+            size_t writePosition;
+            
+            if (extend) {
+                // Append mode: add to existing samples
+                newNumSamples = currentNumSamples + samples.size();
+                
+                // Check limits
+                if (newNumSamples > MAX_NUM_SAMPLES) {
+                    size_t maxAddable = MAX_NUM_SAMPLES - currentNumSamples;
+                    if constexpr(RF_DEBUG_LEVEL > 2)
+                        Serial.printf("⚠️ Limiting samples to %d (max %d, current %d)\n", 
+                                    maxAddable, MAX_NUM_SAMPLES, currentNumSamples);
+                    newNumSamples = MAX_NUM_SAMPLES;
+                }
+                
+                size_t newFileSize = headerSize + (newNumSamples * sampleDataSize);
+                if (newFileSize > MAX_DATASET_SIZE) {
+                    size_t maxSamplesBySize = (MAX_DATASET_SIZE - headerSize) / sampleDataSize;
+                    if constexpr(RF_DEBUG_LEVEL > 2)
+                        Serial.printf("⚠️ Limiting samples by file size to %d (max file size %d bytes)\n", 
+                                    maxSamplesBySize, MAX_DATASET_SIZE);
+                    newNumSamples = maxSamplesBySize;
+                }
+                
+                writePosition = headerSize + (currentNumSamples * sampleDataSize);
+            } else {
+                // Overwrite mode: keep same file size, write from beginning
+                newNumSamples = currentNumSamples; // Keep same sample count - ALWAYS preserve original dataset size
+                writePosition = headerSize; // Write from beginning of data section
+            }
+
+            // Calculate actual number of samples to write
+            uint32_t samplesToWrite = extend ? 
+                (newNumSamples - currentNumSamples) : 
+                min((uint32_t)samples.size(), newNumSamples);
+
+            if constexpr(RF_DEBUG_LEVEL > 2) {
+                Serial.printf("📝 Adding %d samples to %s (extend=%s)\n", 
+                            samplesToWrite, filename.c_str(), extend ? "true" : "false");
+                Serial.printf("📊 Dataset info: current=%d, new_total=%d, samples_to_write=%d\n", 
+                            currentNumSamples, newNumSamples, samplesToWrite);
+            }
+
+            // Open file for writing (r+ mode to update existing file)
+            file = SPIFFS.open(filename.c_str(), "r+");
+            if (!file) {
+                if constexpr(RF_DEBUG_LEVEL > 3)
+                    Serial.printf("❌ Failed to open file for writing: %s\n", filename.c_str());
+                return deletedLabels;
+            }
+
+            // In overwrite mode, read the labels that will be overwritten
+            if (!extend && samplesToWrite > 0) {
+                if constexpr(RF_DEBUG_LEVEL > 2)
+                    Serial.printf("📋 Reading %d labels that will be overwritten...\n", samplesToWrite);
+                
+                // Seek to the start of data section to read existing labels
+                if (!file.seek(headerSize)) {
+                    if constexpr(RF_DEBUG_LEVEL > 3)
+                        Serial.println("❌ Failed to seek to data section for reading labels");
+                    file.close();
+                    return deletedLabels;
+                }
+                
+                // Reserve space for deleted labels
+                deletedLabels.reserve(samplesToWrite);
+                
+                // Read labels that will be overwritten
+                for (uint32_t i = 0; i < samplesToWrite; ++i) {
+                    uint8_t existingLabel;
+                    if (file.read(&existingLabel, sizeof(existingLabel)) != sizeof(existingLabel)) {
+                        if constexpr(RF_DEBUG_LEVEL > 3)
+                            Serial.printf("❌ Failed to read existing label %d\n", i);
+                        break;
+                    }
+                    deletedLabels.push_back(existingLabel);
+                    
+                    // Skip the packed features to get to next label
+                    if (!file.seek(file.position() + packedFeatureBytes)) {
+                        if constexpr(RF_DEBUG_LEVEL > 3)
+                            Serial.printf("❌ Failed to skip features for sample %d\n", i);
+                        break;
+                    }
+                }
+                
+                if constexpr(RF_DEBUG_LEVEL > 2)
+                    Serial.printf("📋 Collected %d labels that will be overwritten\n", deletedLabels.size());
+            }
+
+            // Update header with new sample count
+            file.seek(0);
+            file.write((uint8_t*)&newNumSamples, sizeof(newNumSamples));
+            file.write((uint8_t*)&numFeatures, sizeof(numFeatures));
+
+            // Seek to write position
+            if (!file.seek(writePosition)) {
+                if constexpr(RF_DEBUG_LEVEL > 3)
+                    Serial.printf("❌ Failed to seek to position %d\n", writePosition);
+                file.close();
+                return deletedLabels;
+            }
+
+            // Write samples directly to file
+            uint32_t written = 0;
+            for (uint32_t i = 0; i < samplesToWrite && i < samples.size(); ++i) {
+                const Rf_sample& sample = samples[i];
+                
+                // Validate sample feature count
+                if (sample.features.size() != numFeatures) {
+                    if constexpr(RF_DEBUG_LEVEL > 3)
+                        Serial.printf("❌ Sample %d has %d features, expected %d\n", 
+                                    i, sample.features.size(), numFeatures);
+                    continue;
+                }
+
+                // Write label
+                if (file.write(&sample.label, sizeof(sample.label)) != sizeof(sample.label)) {
+                    if constexpr(RF_DEBUG_LEVEL > 3)
+                        Serial.printf("❌ Failed to write label for sample %d\n", i);
+                    break;
+                }
+
+                // Pack and write features
+                uint8_t packedBuffer[packedFeatureBytes];
+                // Initialize buffer to 0
+                for (uint16_t j = 0; j < packedFeatureBytes; j++) {
+                    packedBuffer[j] = 0;
+                }
+                
+                // Pack 4 feature values into each byte
+                for (size_t j = 0; j < sample.features.size(); ++j) {
+                    uint16_t byteIndex = j / 4;
+                    uint8_t bitOffset = (j % 4) * 2;
+                    uint8_t feature_value = sample.features[j] & 0x03;
+                    packedBuffer[byteIndex] |= (feature_value << bitOffset);
+                }
+                
+                if (file.write(packedBuffer, packedFeatureBytes) != packedFeatureBytes) {
+                    if constexpr(RF_DEBUG_LEVEL > 3)
+                        Serial.printf("❌ Failed to write features for sample %d\n", i);
+                    break;
+                }
+                
+                written++;
+            }
+
+            file.close();
+
+            // Update internal size if data is loaded in memory
+            if (isLoaded) {
+                size_ = newNumSamples;
+                if constexpr(RF_DEBUG_LEVEL > 2)
+                    Serial.println("ℹ️ Updated internal size. Consider reloading data for consistency.");
+            }
+
+            if constexpr(RF_DEBUG_LEVEL > 2) {
+                Serial.printf("✅ Successfully wrote %d samples to %s (total samples now: %d)\n", 
+                            written, filename.c_str(), newNumSamples);
+                if (!extend && deletedLabels.size() > 0) {
+                    Serial.printf("📊 Overwrote %d samples with labels: [", deletedLabels.size());
+                    for (size_t i = 0; i < deletedLabels.size(); ++i) {
+                        Serial.printf("%d", deletedLabels[i]);
+                        if (i < deletedLabels.size() - 1) Serial.print(",");
+                    }
+                    Serial.println("]");
+                }
+            }
+            
+            return deletedLabels;
+        }
+
         size_t memory_usage() const {
             size_t total = sizeof(Rf_data);
             total += allLabels.capacity() * sizeof(uint8_t);
@@ -1091,7 +1235,7 @@ namespace mcu {
             return total;
         }
     };
-    
+
     /*
     ------------------------------------------------------------------------------------------------------------------
     ---------------------------------------------------- RF_TREE -----------------------------------------------------
@@ -4606,12 +4750,12 @@ namespace mcu {
         }
 
         // add pending sample to buffer, including the label predicted by the model
-        void add_pending_sample(const Rf_sample& sample, const char* base_data_file = nullptr, Rf_config* config_ptr = nullptr, const char* infer_log_file = nullptr){
+        void add_pending_sample(const Rf_sample& sample, Rf_data& base_data, Rf_config* config_ptr = nullptr, const char* infer_log_file = nullptr){
             buffer.push_back(sample);
             if(buffer.size() > max_pending_samples){
                 // Auto-flush if parameters are provided
-                if(base_data_file && config_ptr && infer_log_file) {
-                    flush_pending_data(base_data_file, *config_ptr, infer_log_file);
+                if(config_ptr && infer_log_file) {
+                    flush_pending_data(base_data, *config_ptr, infer_log_file);
                 } else {
                     // Otherwise just clear buffers to prevent memory overflow
                     buffer.clear();
@@ -4644,196 +4788,51 @@ namespace mcu {
         }
 
         // write valid samples (with 0 < actual_label < 255) to base_data file
-        void write_to_base_data(const char* base_data_file, Rf_config& config){
-            if(buffer.empty()) return;
-            
-            // Count valid samples first
+        bool write_to_base_data(Rf_data& base_data, Rf_config& config){
+            if(buffer.empty()) {
+                Serial.println("⚠️ No pending samples to write to base data");
+                return false;
+            }
+            // first scan 
             uint16_t valid_samples_count = 0;
+            mcu::b_vector<Rf_sample> valid_samples;
             for(uint16_t i = 0; i < buffer.size() && i < actual_labels.size(); i++) {
                 if(actual_labels[i] < 255) { // Valid actual label provided
                     valid_samples_count++;
+                    Rf_sample sample(buffer[i].features, actual_labels[i]);
+                    valid_samples.push_back(sample);
                 }
             }
             
             if(valid_samples_count == 0) {
-                return; // No valid samples to add
+                return false; // No valid samples to add
             }
-            
-            if(!SPIFFS.exists(base_data_file)) {
-                Serial.printf("❌ Base data file does not exist: %s\n", base_data_file);
-                return;
-            }
-            
-            // Read existing file header
-            File file = SPIFFS.open(base_data_file, FILE_READ);
-            if(!file) {
-                Serial.printf("❌ Failed to open base data file for reading: %s\n", base_data_file);
-                return;
-            }
-            
-            uint32_t existing_num_samples;
-            uint16_t existing_num_features;
-            
-            if(file.read((uint8_t*)&existing_num_samples, sizeof(existing_num_samples)) != sizeof(existing_num_samples) ||
-            file.read((uint8_t*)&existing_num_features, sizeof(existing_num_features)) != sizeof(existing_num_features)) {
-                Serial.println("❌ Failed to read existing file header");
-                file.close();
-                return;
-            }
-            
-            if(existing_num_features != config.num_features) {
-                Serial.printf("❌ Feature count mismatch: expected %d, file has %d\n", config.num_features, existing_num_features);
-                file.close();
-                return;
-            }
-            
-            // Calculate sizes
-            const uint16_t packed_feature_bytes = (existing_num_features + 3) / 4; // 4 values per byte
-            const size_t record_size = sizeof(uint8_t) + packed_feature_bytes; // label + packed features
-            
-            if(config.extend_base_data) {
-                // Check limits before extending
-                uint32_t new_sample_count = existing_num_samples + valid_samples_count;
-                size_t header_size = 6; // 4 bytes for num_samples + 2 bytes for num_features
-                size_t new_file_size = header_size + (new_sample_count * record_size);
-                
-                if(new_sample_count > MAX_NUM_SAMPLES) {
-                    Serial.printf("⚠️ Warning: Reached maximum of num samples, disabling extension (%u vs %u)\n", 
-                                new_sample_count, MAX_NUM_SAMPLES);
-                    file.close();
-                    config.extend_base_data = false;
-                    return;
-                }
-                
-                if(new_file_size > MAX_DATASET_SIZE) {
-                    Serial.printf("⚠️ Warning: Reached maximum dataset size, disabling extension (%u vs %u bytes)\n", 
-                                new_file_size, MAX_DATASET_SIZE);
-                    file.close();
-                    config.extend_base_data = false;
-                    return;
-                }
-                
-                // Simple case: append new samples to the end
-                file.close();
-                
-                // Reopen in append mode
-                file = SPIFFS.open(base_data_file, FILE_APPEND);
-                if(!file) {
-                    Serial.printf("❌ Failed to open base data file for appending: %s\n", base_data_file);
-                    return;
-                }
-                
-                // Write new valid samples
-                for(uint16_t i = 0; i < buffer.size() && i < actual_labels.size(); i++) {
-                    if(actual_labels[i] < 255) {
-                        // Write label
-                        uint8_t label = actual_labels[i];
-                        file.write(&label, sizeof(label));
-                        
-                        // Pack and write features (4 values per byte)
-                        uint8_t packed_buffer[packed_feature_bytes];
-                        for(uint16_t j = 0; j < packed_feature_bytes; j++) {
-                            packed_buffer[j] = 0;
-                        }
-                        
-                        for(size_t j = 0; j < buffer[i].features.size() && j < existing_num_features; j++) {
-                            uint16_t byte_index = j / 4;
-                            uint8_t bit_offset = (j % 4) * 2;
-                            uint8_t feature_value = buffer[i].features[j] & 0x03;
-                            packed_buffer[byte_index] |= (feature_value << bit_offset);
-                        }
-                        
-                        file.write(packed_buffer, packed_feature_bytes);
 
-                        config.samples_per_label[label]++; // Update sample count per label
-                    }
-                }
-                
-                file.close();
-                
-                // Update header with new sample count
-                file = SPIFFS.open(base_data_file, FILE_WRITE);
-                if(file) {
-                    uint32_t new_num_samples = existing_num_samples + valid_samples_count;
-                    file.write((uint8_t*)&new_num_samples, sizeof(new_num_samples));
-                    file.write((uint8_t*)&existing_num_features, sizeof(existing_num_features));
-                    file.close();
-                    config.num_samples = new_num_samples;
-                }
-                
-            } else {
-                // Replace mode: remove old samples from beginning, add new ones at end
-                if(valid_samples_count > existing_num_samples) {
-                    Serial.println("❌ Cannot remove more samples than exist in dataset");
-                    file.close();
-                    return;
-                }
-                
-                // Read all existing data (skip the first N samples)
-                file.seek(6 + (valid_samples_count * record_size)); // Skip header + N records
-                
-                uint32_t remaining_samples = existing_num_samples - valid_samples_count;
-                size_t remaining_data_size = remaining_samples * record_size;
-                
-                uint8_t* temp_buffer = (uint8_t*)malloc(remaining_data_size);
-                if(!temp_buffer) {
-                    Serial.println("❌ Not enough memory for replace operation");
-                    file.close();
-                    return;
-                }
-                
-                size_t bytes_read = file.read(temp_buffer, remaining_data_size);
-                file.close();
-                
-                if(bytes_read != remaining_data_size) {
-                    Serial.println("❌ Failed to read existing data");
-                    free(temp_buffer);
-                    return;
-                }
-                
-                // Rewrite entire file
-                file = SPIFFS.open(base_data_file, FILE_WRITE);
-                if(!file) {
-                    Serial.printf("❌ Failed to open base data file for writing: %s\n", base_data_file);
-                    free(temp_buffer);
-                    return;
-                }
-                
-                // Write header (same number of samples)
-                uint32_t final_num_samples = existing_num_samples;
-                file.write((uint8_t*)&final_num_samples, sizeof(final_num_samples));
-                file.write((uint8_t*)&existing_num_features, sizeof(existing_num_features));
-                
-                // Write remaining old data
-                file.write(temp_buffer, remaining_data_size);
-                free(temp_buffer);
-                
-                // Write new valid samples
-                for(uint16_t i = 0; i < buffer.size() && i < actual_labels.size(); i++) {
-                    if(actual_labels[i] < 255) {
-                        // Write label
-                        uint8_t label = actual_labels[i];
-                        file.write(&label, sizeof(label));
-                        
-                        // Pack and write features
-                        uint8_t packed_buffer[packed_feature_bytes];
-                        for(uint16_t j = 0; j < packed_feature_bytes; j++) {
-                            packed_buffer[j] = 0;
-                        }
-                        
-                        for(size_t j = 0; j < buffer[i].features.size() && j < existing_num_features; j++) {
-                            uint16_t byte_index = j / 4;
-                            uint8_t bit_offset = (j % 4) * 2;
-                            uint8_t feature_value = buffer[i].features[j] & 0x03;
-                            packed_buffer[byte_index] |= (feature_value << bit_offset);
-                        }
-                        
-                        file.write(packed_buffer, packed_feature_bytes);
-                    }
-                }
-                
-                file.close();
+            auto deleted_labels = base_data.addNewData(valid_samples, config.extend_base_data);
+
+            // update config 
+            if(config.extend_base_data) {
+                config.num_samples += valid_samples_count;
+                if(config.num_samples > MAX_NUM_SAMPLES) 
+                    config.num_samples = MAX_NUM_SAMPLES;
             }
+
+            for(uint16_t i = 0; i < buffer.size() && i < actual_labels.size(); i++) {
+                if(actual_labels[i] < 255) { // Valid actual label provided
+                    config.samples_per_label[actual_labels[i]]++;
+                }
+            }
+
+            for(auto& lbl : deleted_labels) {
+                if(lbl < 255 && lbl < config.num_labels && config.samples_per_label[lbl] > 0) {
+                    config.samples_per_label[lbl]--;
+                }
+            }
+
+            if constexpr (RF_DEBUG_LEVEL >= 1) {
+                Serial.printf("✅ Added %d new samples to base data\n", valid_samples_count);
+            }
+            return true;
         }
 
         // Write prediction which given actual label (0 < actual_label < 255) to the inference log file
@@ -4972,10 +4971,10 @@ namespace mcu {
         }
 
         // Public method to flush pending data when buffer is full or on demand
-        void flush_pending_data(const char* base_data_file, Rf_config& config, const char* infer_log_file) {
+        void flush_pending_data(Rf_data& base_data, Rf_config& config, const char* infer_log_file) {
             if(buffer.empty()) return;
             
-            write_to_base_data(base_data_file, config);
+            write_to_base_data(base_data, config);
             write_to_infer_log(infer_log_file, config.num_labels);
             
             // Clear buffers after processing

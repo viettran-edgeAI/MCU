@@ -1,304 +1,245 @@
-/**
- * ESP32 Dataset Receiver Sketch
- * 
- * This sketch receives binary dataset files via Serial communication
- * and saves them to the ESP32 filesystem (SPIFFS/LittleFS).
- * 
- * Protocol:
- * 1. Receives start command with filename and file size
- * 2. Receives data in chunks with acknowledgments
- * 3. Receives end command and finalizes the file
- * 
- * Usage:
- * 1. Upload this sketch to ESP32
- * 2. Close Serial Monitor in Arduino IDE
- * 3. Run: python3 transfer_to_esp32.py <file> <port> <esp32_path>
- * 
- * Compatible with: ESP32, ESP32-S2, ESP32-S3, ESP32-C3
+/*
+ * ESP32 Binary File Receiver
+ * Upload this sketch to ESP32, then use transfer_dataset.py to send files
+ * Saves files to SPIFFS with original filename
  */
 
-#include "FS.h"
 #include "SPIFFS.h"
-// Alternative: Use LittleFS instead of SPIFFS
-// #include "LittleFS.h"
-// #define SPIFFS LittleFS
 
-// Protocol constants (must match Python script)
-const char HEADER_MAGIC[] = "ESP32BIN";
-const uint8_t CMD_START_TRANSFER = 0x01;
-const uint8_t CMD_DATA_CHUNK = 0x02;
-const uint8_t CMD_END_TRANSFER = 0x03;
-const uint8_t CMD_ACK = 0xAA;
-const uint8_t CMD_NACK = 0x55;
-
-const int CHUNK_SIZE = 512;  // Must match Python script
-const int SERIAL_TIMEOUT = 5000;  // 5 seconds
-const int MAX_FILENAME_LENGTH = 64;
-
-// Configuration
-#define DEBUG_TRANSFER false  // Set to false to disable debug output during transfer
-
-// Global variables
-File currentFile;
-String currentFilename;
-uint32_t expectedFileSize = 0;
-uint32_t receivedBytes = 0;
-uint16_t expectedChunk = 0;
-bool transferInProgress = false;
+// Transfer timing and size configuration
+// IMPORTANT: Keep these in sync with the PC sender script (transfer_dataset.py)
+// - BUFFER_CHUNK should match CHUNK_SIZE
+// - BUFFER_DELAY_MS should reflect CHUNK_DELAY (in milliseconds)
+const int BUFFER_CHUNK = 1024;
+const int BUFFER_DELAY_MS = 50;  // 0.05s to match CHUNK_DELAY=0.05
+uint8_t buffer[BUFFER_CHUNK];
 
 void setup() {
   Serial.begin(115200);
   
-  // Wait for serial connection (optional for debugging)
-  delay(1000);
-  
-  // Initialize filesystem
+  // Initialize SPIFFS
   if (!SPIFFS.begin(true)) {
-    Serial.println("❌ SPIFFS initialization failed!");
-    while (1) delay(1000);
+    return;
   }
-  
-  Serial.println("=== ESP32 Dataset Receiver ===");
-  Serial.println("✅ Ready to receive binary files");
-  Serial.println("📁 Filesystem: SPIFFS");
-  
-  // Print filesystem info
-  size_t totalBytes = SPIFFS.totalBytes();
-  size_t usedBytes = SPIFFS.usedBytes();
-  Serial.printf("💾 Storage: %d / %d bytes used (%.1f%%)\n", 
-                usedBytes, totalBytes, (float)usedBytes / totalBytes * 100);
-  
-  Serial.println("🔌 Waiting for transfer commands...");
-  Serial.println();
 }
 
 void loop() {
-  handleSerialCommand();
-  delay(10);  // Small delay to prevent excessive CPU usage
-}
+  // Check for incoming transfer command
+  if (Serial.available()) {
+    String command = Serial.readStringUntil('\n');
+    command.trim();
 
-void sendAck() {
-  Serial.write(CMD_ACK);
-  Serial.flush();
-}
-
-void sendNack() {
-  Serial.write(CMD_NACK);
-  Serial.flush();
-}
-
-bool readExactBytes(uint8_t* buffer, int length, int timeout = SERIAL_TIMEOUT) {
-  unsigned long startTime = millis();
-  int bytesRead = 0;
-  
-  while (bytesRead < length && (millis() - startTime) < timeout) {
-    if (Serial.available()) {
-      buffer[bytesRead] = Serial.read();
-      bytesRead++;
+    if (command == "TRANSFER_START") {
+      // Legacy mode (no CRC/ACK) remains available
+      receiveFile();
+    } else if (command == "TRANSFER_V2") {
+      receiveFileV2();
     }
-    yield();  // Allow other tasks to run
   }
-  
-  return bytesRead == length;
+
+  delay(50);
 }
 
-void handleStartTransfer() {
-  if (DEBUG_TRANSFER) Serial.println("📤 Receiving start command...");
-  
-  // Read filename (64 bytes, null-terminated)
-  uint8_t filenameBuffer[MAX_FILENAME_LENGTH];
-  if (!readExactBytes(filenameBuffer, MAX_FILENAME_LENGTH)) {
-    if (DEBUG_TRANSFER) Serial.println("❌ Failed to read filename");
-    sendNack();
+void receiveFile() {
+  // Receive filename length
+  uint32_t filename_length = 0;
+  if (Serial.readBytes((uint8_t*)&filename_length, 4) != 4) {
     return;
   }
   
-  // Read file size (4 bytes, little-endian)
-  uint8_t sizeBuffer[4];
-  if (!readExactBytes(sizeBuffer, 4)) {
-    if (DEBUG_TRANSFER) Serial.println("❌ Failed to read file size");
-    sendNack();
+  // Receive filename
+  char filename[256];
+  if (Serial.readBytes((uint8_t*)filename, filename_length) != filename_length) {
+    return;
+  }
+  filename[filename_length] = '\0';
+  
+  // Receive file size
+  uint32_t file_size = 0;
+  if (Serial.readBytes((uint8_t*)&file_size, 4) != 4) {
     return;
   }
   
-  // Parse filename and file size
-  currentFilename = String((char*)filenameBuffer);
-  expectedFileSize = sizeBuffer[0] | (sizeBuffer[1] << 8) | (sizeBuffer[2] << 16) | (sizeBuffer[3] << 24);
-  
-  if (DEBUG_TRANSFER) {
-    Serial.printf("📁 Filename: %s\n", currentFilename.c_str());
-    Serial.printf("📊 File size: %d bytes\n", expectedFileSize);
-  }
-  
-  // Validate filename
-  if (currentFilename.length() == 0 || !currentFilename.startsWith("/")) {
-    if (DEBUG_TRANSFER) Serial.println("❌ Invalid filename - must start with '/'");
-    sendNack();
-    return;
-  }
-  
-  // Check available space
-  size_t freeBytes = SPIFFS.totalBytes() - SPIFFS.usedBytes();
-  if (expectedFileSize > freeBytes) {
-    if (DEBUG_TRANSFER) Serial.printf("❌ Insufficient space: need %d bytes, have %d bytes\n", expectedFileSize, freeBytes);
-    sendNack();
-    return;
-  }
-  
-  // Remove existing file if it exists
-  if (SPIFFS.exists(currentFilename)) {
-    if (DEBUG_TRANSFER) Serial.println("🗑️  Removing existing file");
-    SPIFFS.remove(currentFilename);
-  }
+  // Prepare file path (add leading slash for SPIFFS)
+  String filepath = "/" + String(filename);
   
   // Open file for writing
-  currentFile = SPIFFS.open(currentFilename, FILE_WRITE);
-  if (!currentFile) {
-    if (DEBUG_TRANSFER) Serial.println("❌ Failed to create file");
-    sendNack();
+  File file = SPIFFS.open(filepath, FILE_WRITE);
+  if (!file) {
     return;
   }
   
-  // Initialize transfer state
-  receivedBytes = 0;
-  expectedChunk = 0;
-  transferInProgress = true;
+  // Send ready signal
+  Serial.println("READY");
   
-  if (DEBUG_TRANSFER) Serial.println("✅ Ready to receive data");
-  sendAck();
+  // Receive file data
+  uint32_t bytes_received = 0;
+  
+  while (bytes_received < file_size) {
+  uint32_t bytes_to_read = min((uint32_t)BUFFER_CHUNK, file_size - bytes_received);
+    
+    // Wait for data
+    unsigned long start_time = millis();
+    while (Serial.available() < bytes_to_read && (millis() - start_time) < 5000) {
+      delay(1);
+    }
+    
+    if (Serial.available() < bytes_to_read) {
+      file.close();
+      SPIFFS.remove(filepath);
+      return;
+    }
+    
+    // Read data chunk
+  size_t actual_read = Serial.readBytes(buffer, bytes_to_read);
+    
+    // Write to file
+    size_t written = file.write(buffer, actual_read);
+    if (written != actual_read) {
+      file.close();
+      SPIFFS.remove(filepath);
+      return;
+    }
+    
+    bytes_received += actual_read;
+    
+    // Small delay between buffer writes
+  delay(BUFFER_DELAY_MS);
+  }
+  
+  file.close();
+  
+  // Verify file was saved correctly
+  File verify_file = SPIFFS.open(filepath, FILE_READ);
+  if (verify_file && verify_file.size() == file_size) {
+    verify_file.close();
+    Serial.println("TRANSFER_COMPLETE");
+  } else {
+    if (verify_file) verify_file.close();
+    SPIFFS.remove(filepath);
+  }
 }
 
-void handleDataChunk() {
-  if (DEBUG_TRANSFER) Serial.println("📦 Receiving data chunk...");
-  
-  if (!transferInProgress) {
-    if (DEBUG_TRANSFER) Serial.println("❌ No transfer in progress");
-    sendNack();
+// V2: Robust receiver with per-chunk CRC and ACK/NACK
+void receiveFileV2() {
+  // Receive filename length
+  uint32_t filename_length = 0;
+  if (Serial.readBytes((uint8_t*)&filename_length, 4) != 4) {
     return;
   }
-  
-  // Read chunk index (2 bytes, little-endian)
-  uint8_t indexBuffer[2];
-  if (!readExactBytes(indexBuffer, 2)) {
-    if (DEBUG_TRANSFER) Serial.println("❌ Failed to read chunk index");
-    sendNack();
+
+  // Receive filename
+  char filename[256];
+  if (filename_length >= sizeof(filename)) {
     return;
   }
-  
-  // Read chunk size (2 bytes, little-endian)
-  uint8_t sizeBuffer[2];
-  if (!readExactBytes(sizeBuffer, 2)) {
-    if (DEBUG_TRANSFER) Serial.println("❌ Failed to read chunk size");
-    sendNack();
+  if (Serial.readBytes((uint8_t*)filename, filename_length) != filename_length) {
     return;
   }
-  
-  uint16_t chunkIndex = indexBuffer[0] | (indexBuffer[1] << 8);
-  uint16_t chunkSize = sizeBuffer[0] | (sizeBuffer[1] << 8);
-  
-  if (DEBUG_TRANSFER) Serial.printf("📦 Chunk info: index=%d, size=%d, expected=%d\n", chunkIndex, chunkSize, expectedChunk);
-  
-  // Validate chunk
-  if (chunkIndex != expectedChunk) {
-    if (DEBUG_TRANSFER) Serial.printf("❌ Wrong chunk order: expected %d, got %d\n", expectedChunk, chunkIndex);
-    sendNack();
+  filename[filename_length] = '\0';
+
+  // Receive file size, expected file CRC, and chunk size
+  uint32_t file_size = 0;
+  uint32_t file_crc_expected = 0;
+  uint32_t chunk_size = 0;
+  if (Serial.readBytes((uint8_t*)&file_size, 4) != 4) return;
+  if (Serial.readBytes((uint8_t*)&file_crc_expected, 4) != 4) return;
+  if (Serial.readBytes((uint8_t*)&chunk_size, 4) != 4) return;
+
+  // Ensure chunk size doesn't exceed our buffer
+  if (chunk_size > (uint32_t)BUFFER_CHUNK) {
+    // Can't accept; avoid buffer overflow
     return;
   }
-  
-  if (chunkSize > CHUNK_SIZE) {
-    if (DEBUG_TRANSFER) Serial.printf("❌ Chunk too large: %d bytes (max %d)\n", chunkSize, CHUNK_SIZE);
-    sendNack();
+
+  String filepath = "/" + String(filename);
+  File file = SPIFFS.open(filepath, FILE_WRITE);
+  if (!file) {
     return;
   }
-  
-  // Read chunk data
-  uint8_t chunkBuffer[CHUNK_SIZE];
-  if (!readExactBytes(chunkBuffer, chunkSize)) {
-    if (DEBUG_TRANSFER) Serial.printf("❌ Failed to read chunk data (%d bytes)\n", chunkSize);
-    sendNack();
-    return;
+
+  // Send ready for V2
+  Serial.println("READY_V2");
+
+  uint32_t bytes_received = 0;
+  // Simple CRC32 calculation using ESP32's ROM function isn't directly available here.
+  // We'll accumulate CRC manually via a software implementation.
+  uint32_t crc = 0xFFFFFFFF;
+
+  while (bytes_received < file_size) {
+    // Header: offset (4), chunk_len (4), chunk_crc (4)
+    uint32_t offset = 0, clen = 0, ccrc = 0;
+    if (Serial.readBytes((uint8_t*)&offset, 4) != 4) { file.close(); SPIFFS.remove(filepath); return; }
+    if (Serial.readBytes((uint8_t*)&clen, 4) != 4)   { file.close(); SPIFFS.remove(filepath); return; }
+    if (Serial.readBytes((uint8_t*)&ccrc, 4) != 4)   { file.close(); SPIFFS.remove(filepath); return; }
+
+    if (clen > chunk_size || clen == 0) { file.close(); SPIFFS.remove(filepath); return; }
+    // Read chunk payload
+    size_t got = Serial.readBytes(buffer, clen);
+    if (got != clen) { file.close(); SPIFFS.remove(filepath); return; }
+
+    // Compute CRC32 of the received chunk
+    uint32_t calc = 0xFFFFFFFF;
+    for (uint32_t i = 0; i < clen; ++i) {
+      uint8_t b = buffer[i];
+      calc ^= b;
+      for (int j = 0; j < 8; ++j) {
+        uint32_t mask = -(int)(calc & 1);
+        calc = (calc >> 1) ^ (0xEDB88320 & mask);
+      }
+    }
+    calc ^= 0xFFFFFFFF;
+
+    if (calc != ccrc) {
+      Serial.print("NACK ");
+      Serial.println(offset);
+      delay(2);
+      continue; // Sender will retry
+    }
+
+    // CRC matched; write to file at the correct position if needed
+    // For simplicity since we receive in order, append write is okay.
+    size_t written = file.write(buffer, clen);
+    if (written != clen) { file.close(); SPIFFS.remove(filepath); return; }
+
+    // Update running CRC for entire file (same polynomial)
+    for (uint32_t i = 0; i < clen; ++i) {
+      uint8_t b = buffer[i];
+      crc ^= b;
+      for (int j = 0; j < 8; ++j) {
+        uint32_t mask = -(int)(crc & 1);
+        crc = (crc >> 1) ^ (0xEDB88320 & mask);
+      }
+    }
+
+    bytes_received += clen;
+
+    Serial.print("ACK ");
+    Serial.println(offset);
+    delay(BUFFER_DELAY_MS);
   }
-  
-  // Write to file
-  size_t written = currentFile.write(chunkBuffer, chunkSize);
-  if (written != chunkSize) {
-    if (DEBUG_TRANSFER) Serial.printf("❌ Write error: wrote %d of %d bytes\n", written, chunkSize);
-    sendNack();
-    return;
+
+  // Wait for TRANSFER_END line before finalizing
+  {
+    unsigned long start = millis();
+    while (millis() - start < 3000) {
+      if (Serial.available()) {
+        String endcmd = Serial.readStringUntil('\n');
+        endcmd.trim();
+        if (endcmd == "TRANSFER_END") break;
+      }
+      delay(1);
+    }
   }
-  
-  receivedBytes += chunkSize;
-  expectedChunk++;
-  
-  // Progress indicator
-  if (DEBUG_TRANSFER) {
-    float progress = (float)receivedBytes / expectedFileSize * 100.0;
-    Serial.printf("📦 Chunk %d: %d bytes (%.1f%% complete)\n", chunkIndex, chunkSize, progress);
+
+  file.close();
+
+  // Finalize file CRC
+  crc ^= 0xFFFFFFFF;
+  if (crc == file_crc_expected && bytes_received == file_size) {
+    Serial.println("TRANSFER_COMPLETE");
+  } else {
+    SPIFFS.remove(filepath);
   }
-  
-  sendAck();
 }
-
-void handleEndTransfer() {
-  if (DEBUG_TRANSFER) Serial.println("📤 Receiving end command...");
-  
-  if (!transferInProgress) {
-    if (DEBUG_TRANSFER) Serial.println("❌ No transfer in progress");
-    sendNack();
-    return;
-  }
-  
-  // Close file
-  currentFile.close();
-  transferInProgress = false;
-  
-  // Verify file size
-  if (receivedBytes != expectedFileSize) {
-    if (DEBUG_TRANSFER) Serial.printf("❌ Size mismatch: expected %d, received %d\n", expectedFileSize, receivedBytes);
-    SPIFFS.remove(currentFilename);  // Remove incomplete file
-    sendNack();
-    return;
-  }
-  
-  // Verify file exists and has correct size
-  if (!SPIFFS.exists(currentFilename)) {
-    if (DEBUG_TRANSFER) Serial.println("❌ File not found after transfer");
-    sendNack();
-    return;
-  }
-  
-  File verifyFile = SPIFFS.open(currentFilename, FILE_READ);
-  if (!verifyFile) {
-    if (DEBUG_TRANSFER) Serial.println("❌ Cannot open file for verification");
-    sendNack();
-    return;
-  }
-  
-  size_t actualSize = verifyFile.size();
-  verifyFile.close();
-  
-  if (actualSize != expectedFileSize) {
-    if (DEBUG_TRANSFER) Serial.printf("❌ File size verification failed: expected %d, actual %d\n", expectedFileSize, actualSize);
-    SPIFFS.remove(currentFilename);
-    sendNack();
-    return;
-  }
-  
-  // Always show completion message
-  Serial.println("🎉 Transfer completed successfully!");
-  Serial.printf("📁 File saved: %s (%d bytes)\n", currentFilename.c_str(), receivedBytes);
-  
-  // Print updated filesystem info
-  size_t totalBytes = SPIFFS.totalBytes();
-  size_t usedBytes = SPIFFS.usedBytes();
-  Serial.printf("💾 Storage: %d / %d bytes used (%.1f%%)\n", 
-                usedBytes, totalBytes, (float)usedBytes / totalBytes * 100);
-  
-  Serial.println("🔄 Ready for next transfer");
-  Serial.println();
-  
-  sendAck();
-}
-
-
 

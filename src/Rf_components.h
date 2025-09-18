@@ -18,9 +18,9 @@
 #ifndef RF_DEBUG_LEVEL
     #define RF_DEBUG_LEVEL 1
 #else
-    #if RF_DEBUG_LEVEL > 5
+    #if RF_DEBUG_LEVEL > 4
         #undef RF_DEBUG_LEVEL
-        #define RF_DEBUG_LEVEL 5
+        #define RF_DEBUG_LEVEL 4
     #endif
 #endif
 
@@ -30,12 +30,11 @@
     1 : forest messages (start, end, major events) 
     2 : logger messages (errors, warnings, memory usage, timing)
     3 : messages at components level
-    4 : 
-    5 : extremely detailed debug (not recommended for normal use)
+    4 : extremely detailed debug (not recommended for normal use)
 */
 
 static constexpr uint16_t MAX_LABELS             = 255;         // maximum number of unique labels supported 
-static constexpr uint16_t MAX_NUM_FEATURES       = 1024;       // maximum number of features
+static constexpr uint16_t MAX_NUM_FEATURES       = 1023;       // maximum number of features
 static constexpr uint16_t MAX_NUM_SAMPLES        = 65535;     // maximum number of samples in a dataset
 static constexpr uint16_t MAX_NODES              = 2047;     // Maximum nodes per tree 
 static constexpr size_t   MAX_DATASET_SIZE       = 150000;  // Max dataset file size - 150kB
@@ -45,7 +44,7 @@ using sampleID_set = mcu::ID_vector<uint16_t>;       // set of unique sample IDs
 
 
 /*
- NOTE : Random file components (with each model)
+ NOTE : Forest file components (with each model)
     1. model_name_nml.bin       : base data (dataset)
     2. model_name_config.json   : model configuration file 
     3. model_name_ctg.bin       : categorizer (feature quantizer and label mapping)
@@ -82,6 +81,7 @@ namespace mcu {
     class Rf_random;            // random generator (for stability across platforms and runs)
     class Rf_matrix_score;      // confusion matrix and metrics calculator
     class Rf_tree_container;    // manages all trees at forest level
+    class Rf_pending_data;      // manage pending data waiting for true labels from feedback action
 
     // enum Rf_training_flags;      // flags for training process/score calculation (accuracy, precision, recall, f1_score)
     // enum Rf_training_score;      // score types for training process (oob, validation, k-fold)

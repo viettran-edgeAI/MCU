@@ -57,3 +57,10 @@ __pycache__/
 # specific files
 src/main_backup.ino
 src/STL_backup.ino
+
+src/icons.cpp
+src/icons
+
+src/test.cpp
+src/test
+

@@ -389,7 +389,7 @@ mcu::vector<float> computeQuantileBinEdges(mcu::vector<float> values, int numBin
         // Basic linear interpolation
         float fraction = q_idx - idx;
         float edge_val;
-        if (idx + 1 < values.size()) {
+        if (static_cast<size_t>(idx + 1) < values.size()) {
             edge_val = values[idx] + fraction * (values[idx+1] - values[idx]);
         } else {
             edge_val = values.back();
@@ -451,6 +451,10 @@ mcu::vector<float> collectUniqueValues(const mcu::vector<mcu::vector<float>>& da
 }
 // Apply Z-score outlier detection and clipping
 float clipOutlier(float value, float mean, float stdDev, float minVal, float maxVal) {
+    // Suppress unused parameter warnings
+    (void)minVal;
+    (void)maxVal;
+    
     // Only apply if we have enough standard deviation to avoid division by near-zero
     if (stdDev > 1e-6f) {
         float zScore = (value - mean) / stdDev;
@@ -669,7 +673,7 @@ Rf_categorizer categorizeCSVFeatures(const char* inputFilePath, const char* outp
     // Initial check for discrete features to avoid clipping them
     for (int j = 0; j < n_feats; ++j) {
         mcu::vector<float> distinct = collectUniqueValues(data, j, n_samples);
-        if (distinct.size() <= groupsPerFeature) {
+        if (distinct.size() <= static_cast<size_t>(groupsPerFeature)) {
             featureStats[j].isDiscrete = true;
         }
     }
@@ -713,9 +717,9 @@ Rf_categorizer categorizeCSVFeatures(const char* inputFilePath, const char* outp
     for (int j = 0; j < n_feats; ++j) {
         mcu::vector<float> distinct_after_clip = collectUniqueValues(data, j, n_samples);
         
-        if (distinct_after_clip.size() <= groupsPerFeature) {
+        if (distinct_after_clip.size() <= static_cast<size_t>(groupsPerFeature)) {
             // Check if it's a full discrete range (0..groupsPerFeature-1)
-            bool isFullRange = (distinct_after_clip.size() == groupsPerFeature);
+            bool isFullRange = (distinct_after_clip.size() == static_cast<size_t>(groupsPerFeature));
             if (isFullRange) {
                 std::sort(distinct_after_clip.begin(), distinct_after_clip.end());
                 for (size_t k = 0; k < distinct_after_clip.size(); ++k) {
@@ -791,10 +795,19 @@ DatasetInfo scanDataset(const char* inputFilePath) {
         throw std::runtime_error(std::string("Cannot open input file for scanning: ") + inputFilePath);
     }
 
-    // Read header to get number of columns
-    std::string header;
-    std::getline(fin, header);
-    auto cols = split(header);
+    // Detect if CSV has header
+    fin.close(); // Close and reopen for header detection
+    bool hasHeader = detectCSVHeader(inputFilePath);
+    
+    fin.open(inputFilePath);
+    if (!fin) {
+        throw std::runtime_error(std::string("Cannot reopen input file for scanning: ") + inputFilePath);
+    }
+
+    // Read first line to get number of columns
+    std::string firstLine;
+    std::getline(fin, firstLine);
+    auto cols = split(firstLine);
     int n_cols = (int)cols.size();
     if (n_cols < 2) {
         fin.close();
@@ -808,6 +821,16 @@ DatasetInfo scanDataset(const char* inputFilePath) {
     mcu::vector<std::string> uniqueLabels;
     std::string line;
     int lineCount = 0;
+    
+    // If first line is not a header, process it as data
+    if (!hasHeader) {
+        auto cells = split(firstLine);
+        if ((int)cells.size() == n_cols) {
+            lineCount++;
+            std::string label = cells[0].c_str();
+            uniqueLabels.push_back(label);
+        }
+    }
     
     while (std::getline(fin, line)) {
         if (line.empty()) continue;
@@ -844,7 +867,8 @@ DatasetInfo scanDataset(const char* inputFilePath) {
     }
     
     std::cout << "Dataset scan results:\n";
-    std::cout << "  📊 Samples: " << info.numSamples << "\n";
+    std::cout << "  � Header: " << (hasHeader ? "Detected and skipped" : "Not detected") << "\n";
+    std::cout << "  �📊 Samples: " << info.numSamples << "\n";
     std::cout << "  🔢 Features: " << info.numFeatures << "\n";
     std::cout << "  🏷️  Labels: " << uniqueLabels.size() << " unique\n";
     std::cout << "  📝 Label mapping:\n";
@@ -997,7 +1021,7 @@ void generateDatasetParamsCSV(std::string path, const DatasetInfo& datasetInfo, 
             
             try {
                 int labelValue = std::stoi(cells[0]);
-                if (labelValue >= 0 && labelValue < samplesPerLabel.size()) {
+                if (labelValue >= 0 && static_cast<size_t>(labelValue) < samplesPerLabel.size()) {
                     samplesPerLabel[labelValue]++;
                 }
             } catch (...) {
@@ -1083,7 +1107,7 @@ mcu::vector<ESP32_Sample> loadCSVForBinary(const std::string& csvFilename, uint1
         auto fields = split(line);
         
         // Validate field count (label + features)
-        if (fields.size() != expectedFeatures + 1) {
+        if (fields.size() != static_cast<size_t>(expectedFeatures + 1)) {
             errorCount++;
             continue;
         }

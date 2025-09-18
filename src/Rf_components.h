@@ -1749,9 +1749,7 @@ namespace mcu {
             file.printf("num_features,%u\n", num_features);
             file.printf("num_samples,%u\n", num_samples);
             file.printf("num_labels,%u\n", num_labels);
-            
-            Serial.printf("num labels: %u\n", num_labels);
-            Serial.printf("samples_per_label size: %u\n", samples_per_label.size());
+        
             // Write actual label counts from samples_per_label vector
             for (uint8_t i = 0; i < samples_per_label.size(); i++) {
                 file.printf("samples_label_%u,%u\n", i, samples_per_label[i]);
@@ -4195,12 +4193,6 @@ namespace mcu {
                     return;
                 }
                 
-                // Safety check: Ensure forest exists
-                if(trees.empty()) {
-                    Serial.println("❌ No trees in forest to load!");
-                    return;
-                }
-                
                 // Memory safety check
                 size_t freeMemory = ESP.getFreeHeap();
                 size_t minMemoryRequired = 20000; // 20KB minimum threshold
@@ -4212,10 +4204,67 @@ namespace mcu {
                 
                 unsigned long start = GET_CURRENT_TIME_IN_MILLISECONDS;
                 
-                // Try to load from unified forest file first (using base method for consistency)
+                // Use Rf_base methods to determine the loading strategy
+                bool useUnifiedFormat = base_ptr && base_ptr->is_unified_model();
                 String unifiedFilename = base_ptr ? base_ptr->get_unifiedModelFile() : "";
                 
-                if(!unifiedFilename.isEmpty() && SPIFFS.exists(unifiedFilename.c_str())){ 
+                // If trees vector is empty and we have a unified file, populate the trees vector first
+                if(trees.empty() && useUnifiedFormat && SPIFFS.exists(unifiedFilename.c_str())) {
+                    // Read the unified file to get tree count and indices
+                    File file = SPIFFS.open(unifiedFilename.c_str(), FILE_READ);
+                    if(file) {
+                        uint32_t magic;
+                        uint8_t treeCount;
+                        
+                        if(file.read((uint8_t*)&magic, sizeof(magic)) == sizeof(magic) && 
+                           magic == 0x464F5253 && 
+                           file.read((uint8_t*)&treeCount, sizeof(treeCount)) == sizeof(treeCount)) {
+                            
+                            Serial.printf("🔧 Initializing forest structure from unified file (%d trees)\n", treeCount);
+                            
+                            // Reserve space and create empty trees
+                            trees.reserve(treeCount);
+                            tree_depths.reserve(treeCount);
+                            tree_nodes.reserve(treeCount);
+                            tree_leaves.reserve(treeCount);
+                            
+                            // Read tree indices and create corresponding empty trees
+                            for(uint8_t i = 0; i < treeCount; i++) {
+                                uint8_t treeIndex;
+                                uint32_t nodeCount;
+                                
+                                if(file.read((uint8_t*)&treeIndex, sizeof(treeIndex)) == sizeof(treeIndex) &&
+                                   file.read((uint8_t*)&nodeCount, sizeof(nodeCount)) == sizeof(nodeCount)) {
+                                    
+                                    // Create empty tree with the correct index
+                                    Rf_tree tree(treeIndex);
+                                    trees.push_back(std::move(tree));
+                                    
+                                    // Initialize metadata vectors with placeholder values
+                                    tree_depths.push_back(0);
+                                    tree_nodes.push_back(0);
+                                    tree_leaves.push_back(0);
+                                    
+                                    // Skip the node data for now (we'll read it in the main loading logic)
+                                    file.seek(file.position() + nodeCount * sizeof(uint32_t));
+                                } else {
+                                    Serial.printf("❌ Failed to read tree %d metadata from unified file\n", i);
+                                    break;
+                                }
+                            }
+                        }
+                        file.close();
+                    }
+                }
+                
+                // Safety check: Ensure forest exists (either pre-populated or loaded from file)
+                if(trees.empty()) {
+                    Serial.println("❌ No trees in forest to load!");
+                    return;
+                }
+                
+                // Choose loading strategy based on Rf_base detection
+                if(useUnifiedFormat && SPIFFS.exists(unifiedFilename.c_str())){ 
                     // Load from unified file (optimized format)
                     File file = SPIFFS.open(unifiedFilename.c_str(), FILE_READ);
                     if(!file) {
@@ -4277,7 +4326,8 @@ namespace mcu {
                         
                         // Find the corresponding tree in trees vector
                         bool treeFound = false;
-                        for(auto& tree : trees) {
+                        for(size_t treeIdx = 0; treeIdx < trees.size(); treeIdx++) {
+                            auto& tree = trees[treeIdx];
                             if(tree.index == treeIndex) {
                                 // Memory check before loading this tree
                                 size_t requiredMemory = nodeCount * sizeof(Tree_node);
@@ -4307,6 +4357,11 @@ namespace mcu {
                                     tree.nodes.fit();
                                     tree.isLoaded = true;
                                     successfullyLoaded++;
+                                    
+                                    // Update metadata vectors with actual values after loading
+                                    if(treeIdx < tree_depths.size()) tree_depths[treeIdx] = tree.getTreeDepth();
+                                    if(treeIdx < tree_nodes.size()) tree_nodes[treeIdx] = tree.countNodes();
+                                    if(treeIdx < tree_leaves.size()) tree_leaves[treeIdx] = tree.countLeafNodes();
                                 } else {
                                     // Clean up failed tree
                                     tree.nodes.clear();
@@ -4381,7 +4436,7 @@ namespace mcu {
                 
                 is_loaded = true;
                 unsigned long end = GET_CURRENT_TIME_IN_MILLISECONDS;
-                String formatUsed = (base_ptr && SPIFFS.exists(base_ptr->get_unifiedModelFile().c_str())) ? "unified" : "individual";
+                String formatUsed = (base_ptr && base_ptr->is_unified_model()) ? "unified" : "individual";
                 Serial.printf("✅ Forest loaded (%s format): %d/%d trees (%d nodes) in %lu ms \n", 
                             formatUsed.c_str(), loadedTrees, trees.size(), totalNodes, end - start);
             }

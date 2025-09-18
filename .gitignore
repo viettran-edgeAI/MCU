@@ -64,3 +64,8 @@ src/icons
 src/test.cpp
 src/test
 
+src/STL_backup.h
+src/Rf_components_backup.h
+src/*.bin
+src/*.py
+

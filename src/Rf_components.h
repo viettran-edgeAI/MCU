@@ -126,6 +126,9 @@ namespace mcu {
             bitsPerSample = numFeatures * 2;
             updateSamplesEachChunk();
         }
+        Rf_data(const char* fname){
+            init(String(fname));
+        }
 
         // standard init 
         void init(const String& fname, uint16_t numFeatures) {
@@ -1832,22 +1835,22 @@ namespace mcu {
             // Calculate optimal parameters based on dataset size
             int baseline_minsplit_ratio = 100 * (num_samples / 500 + 1); 
             if (baseline_minsplit_ratio > 500) baseline_minsplit_ratio = 500; 
-            uint8_t min_minSplit = max(2, (int)(num_samples / baseline_minsplit_ratio));
+            uint8_t min_minSplit = max(2, (int)(num_samples / baseline_minsplit_ratio) - 2);
             int dynamic_max_split = min(min_minSplit + 6, (int)(log2(num_samples) / 4 + num_features / 25.0f));
-            uint8_t max_minSplit = min(24, dynamic_max_split); // Cap at 24 to prevent overly simple trees.
+            uint8_t max_minSplit = min(24, dynamic_max_split) - 2; // Cap at 24 to prevent overly simple trees.
             if (max_minSplit <= min_minSplit) max_minSplit = min_minSplit + 4; // Ensure a valid range.
 
 
             int base_maxDepth = max((int)log2(num_samples * 2.0f), (int)(log2(num_features) * 2.5f));
-            uint8_t max_maxDepth = max(6, base_maxDepth);
+            uint8_t max_maxDepth = max(6, base_maxDepth) + 8;
             int dynamic_min_depth = max(4, (int)(log2(num_features) + 2));
-            uint8_t min_maxDepth = min((int)max_maxDepth - 2, dynamic_min_depth); // Ensure a valid range.
+            uint8_t min_maxDepth = min((int)max_maxDepth - 2, dynamic_min_depth) + 2; // Ensure a valid range.
             if (min_maxDepth >= max_maxDepth) min_maxDepth = max_maxDepth - 2;
             if (min_maxDepth < 4) min_maxDepth = 4;
 
             if(min_split == 0 || max_depth == 0) {
-                min_split = (min_minSplit + max_minSplit) / 2 - 2;
-                max_depth = (min_maxDepth + max_maxDepth) / 2 + 2;
+                min_split = (min_minSplit + max_minSplit) / 2;
+                max_depth = (min_maxDepth + max_maxDepth) / 2;
                 Serial.println("⚙️ Not found minSplit/maxDepth in .");
                 Serial.printf("Setting minSplit to %u and maxDepth to %u based on dataset size.\n", 
                             min_split, max_depth);
@@ -1862,7 +1865,6 @@ namespace mcu {
 
             min_split_range = make_pair(min_minSplit, max_minSplit);
             max_depth_range = make_pair(min_maxDepth, max_maxDepth);
-
             // at deployment, test_set is not used, merge it to train_set
             if (!ENABLE_TEST_DATA){
                 train_ratio += test_ratio;
@@ -2085,7 +2087,7 @@ namespace mcu {
         Rf_training_score parseTrainingScore(const String& scoreStr) {
             if (scoreStr == "oob_score") return OOB_SCORE;
             if (scoreStr == "valid_score") return VALID_SCORE;
-            if (scoreStr == "k-fold_score") return K_FOLD_SCORE;
+            if (scoreStr == "k_fold_score") return K_FOLD_SCORE;
             return VALID_SCORE; // Default to VALID_SCORE
         }
 
@@ -4588,7 +4590,8 @@ namespace mcu {
             // Release forest from RAM into SPIFFS (optimized single-file approach)
             void releaseForest(){
                 if(!is_loaded) {
-                    Serial.println("✅ Forest is not loaded in memory, nothing to release.");
+                    if constexpr (RF_DEBUG_LEVEL > 2) 
+                        Serial.println("✅ Forest is not loaded in memory, nothing to release.");
                     return;
                 }
                 if(logger_ptr) logger_ptr->m_log("before release forest");

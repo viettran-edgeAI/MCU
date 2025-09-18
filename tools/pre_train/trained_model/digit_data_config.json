@@ -5,7 +5,7 @@
   "test_ratio": 0.2,
   "valid_ratio": 0,
   "minSplit": 2,
-  "maxDepth": 17,
+  "maxDepth": 15,
   "useBootstrap": true,
   "boostrapRatio": 0.632,
   "useGini": false,
@@ -14,8 +14,8 @@
   "unityThreshold": 0.125,
   "impurityThreshold": 0.1,
   "trainFlag": "ACCURACY",
-  "resultScore": 0.963207,
-  "Estimated RAM (bytes)": 43720,
-  "timestamp": "2025-09-03T03:25:30+0700",
+  "resultScore": 0.926228,
+  "Estimated RAM (bytes)": 43708,
+  "timestamp": "2025-09-18T23:36:38+0700",
   "author": "Viettran - tranvaviet@gmail.com"
 }

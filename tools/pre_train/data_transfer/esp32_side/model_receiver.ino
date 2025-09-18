@@ -8,7 +8,10 @@
  * - {model_name}_config.json (model configuration)
  * - {model_name}_node_pred.bin (memory estimation model)
  * - {model_name}_node_log.csv (training history and statistics)
- * - {model_name}_tree_0.bin, {model_name}_tree_1.bin, ... {model_name}_tree_N.bin (decision tree data)
+ * - {model_name}_forest.bin (unified forest file containing all decision trees)
+ * 
+ * The unified forest file replaces individual tree files for more efficient
+ * storage and loading on the ESP32.
  * 
  * The node predictor enables accurate memory usage estimation for 
  * random forest configurations before model creation.
@@ -107,7 +110,7 @@ void listReceivedFiles() {
     
     int fileCount = 0;
     int configFiles = 0;
-    int treeFiles = 0;
+    int forestFiles = 0;
     int predictorFiles = 0;
     int logFiles = 0;
     
@@ -127,9 +130,9 @@ void listReceivedFiles() {
                 Serial.printf("   📊 %s (%u bytes) - Training Log\n", fileName.c_str(), file.size());
                 logFiles++;
                 fileCount++;
-            } else if (fileName.indexOf("tree_") >= 0 && fileName.endsWith(".bin")) {
-                // Count tree files but don't list them individually to save space
-                treeFiles++;
+            } else if (fileName.indexOf("_forest") >= 0 && fileName.endsWith(".bin")) {
+                Serial.printf("   🌳 %s (%u bytes) - Unified Forest\n", fileName.c_str(), file.size());
+                forestFiles++;
                 fileCount++;
             } else if (fileName.endsWith(".bin")) {
                 Serial.printf("   📄 %s (%u bytes)\n", fileName.c_str(), file.size());
@@ -143,20 +146,17 @@ void listReceivedFiles() {
         file = root.openNextFile();
     }
     
-    if (treeFiles > 0) {
-    }
-    
     if (fileCount == 0) {
         Serial.println("   (No model files found)");
     } else {
         Serial.printf("   Total: %d model files", fileCount);
-        if (configFiles > 0 || predictorFiles > 0 || logFiles > 0 || treeFiles > 0) {
-            Serial.printf(" (%d config, %d predictor, %d logs, %d trees)", configFiles, predictorFiles, logFiles, treeFiles);
+        if (configFiles > 0 || predictorFiles > 0 || logFiles > 0 || forestFiles > 0) {
+            Serial.printf(" (%d config, %d predictor, %d logs, %d forests)", configFiles, predictorFiles, logFiles, forestFiles);
         }
         Serial.println();
         
         // Check if we have a complete model
-        if (configFiles > 0 && treeFiles > 0) {
+        if (configFiles > 0 && forestFiles > 0) {
             Serial.println("   ✅ Complete model ready for use!");
             if (predictorFiles > 0) {
                 Serial.println("   🧮 Memory estimation available!");
@@ -167,7 +167,7 @@ void listReceivedFiles() {
                 Serial.println("   📊 Training history available!");
             }
         } else {
-            Serial.println("   ⚠️  Incomplete model (need config + trees)");
+            Serial.println("   ⚠️  Incomplete model (need config + unified forest)");
         }
     }
 }
@@ -354,8 +354,8 @@ void handleFileInfo() {
         fileType = "🧮 Node Predictor";
     } else if (strstr(receivedFileName, "node_log") && strstr(receivedFileName, ".csv")) {
         fileType = "📊 Training Log";
-    } else if (strstr(receivedFileName, "tree_") && strstr(receivedFileName, ".bin")) {
-        fileType = "🌳 Decision Tree";
+    } else if (strstr(receivedFileName, "_forest") && strstr(receivedFileName, ".bin")) {
+        fileType = "🌳 Unified Forest";
     } else if (strstr(receivedFileName, ".csv")) {
         fileType = "📊 CSV Data";
     } else if (strstr(receivedFileName, ".bin")) {

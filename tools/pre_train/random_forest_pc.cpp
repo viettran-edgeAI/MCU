@@ -174,7 +174,7 @@ public:
     }
 
     void generateFilePaths() {
-        node_log_path = model_name + "_node_log.csv";
+        node_log_path = result_folder + model_name + "_node_log.csv";
         node_predictor_path = result_folder + model_name + "_node_pred.bin";
         result_config_path = result_folder + model_name + "_config.json";
     }
@@ -1139,15 +1139,9 @@ public:
         std::cout << "\n✅ Training Complete! Best: min_split=" << (int)best_min_split 
                   << ", max_depth=" << (int)best_max_depth << ", score=" << best_score << "\n";
 
-        // Load the best forest that was saved during training
-        std::cout << "🔨 Loading best forest from saved files...\n";
-        loadForest(final_folder);
-        
         // Update config with best parameters found
         config.min_split = best_min_split;
-        config.max_depth = best_max_depth;
-        
-        // Clean up temporary folder
+        config.max_depth = best_max_depth;        // Clean up temporary folder
         std::cout << "🧹 Cleaning up temporary files...\n";
         #ifdef _WIN32
             system(("rmdir /s /q " + temp_folder).c_str());
@@ -1166,24 +1160,21 @@ private:
             mkdir(dest_path.c_str(), 0755);
         #endif
         
-        // Copy all tree files (now include model_name prefix)
-        for(uint16_t i = 0; i < config.num_trees; i++){
-            std::string src_file = source_path + "/" + model_name + "_tree_" + std::to_string(i) + ".bin";
-            std::string dest_file = dest_path + "/" + model_name + "_tree_" + std::to_string(i) + ".bin";
-            
-            std::ifstream src(src_file, std::ios::binary);
-            if (src.is_open()) {
-                std::ofstream dest(dest_file, std::ios::binary);
-                dest << src.rdbuf();
-                src.close();
-                dest.close();
-            }
+        // Copy unified forest file
+        std::string forest_src = source_path + "/" + model_name + "_forest.bin";
+        std::string forest_dest = dest_path + "/" + model_name + "_forest.bin";
+        
+        std::ifstream src(forest_src, std::ios::binary);
+        if (src.is_open()) {
+            std::ofstream dest(forest_dest, std::ios::binary);
+            dest << src.rdbuf();
+            src.close();
+            dest.close();
         }
         
         // Copy config files if they exist
-        std::string config_json_src = source_path + model_name + "_config.json";
-
-        std::string config_json_dest = dest_path + model_name + "_config.json";
+        std::string config_json_src = source_path + "/" + model_name + "_config.json";
+        std::string config_json_dest = dest_path + "/" + model_name + "_config.json";
         
         std::ifstream json_src(config_json_src, std::ios::binary);
         if (json_src.is_open()) {
@@ -1210,7 +1201,8 @@ public:
         #else
             mkdir(folder_path.c_str(), 0755);
         #endif
-        // Calculate forest statistics BEFORE saving (which purges the trees)
+        
+        // Calculate forest statistics BEFORE saving
         uint32_t totalNodes = 0;
         uint32_t totalLeafNodes = 0;
         uint16_t maxTreeDepth = 0;
@@ -1229,15 +1221,56 @@ public:
         }
         config.RAM_usage = (totalNodes + totalLeafNodes) * 4;
         
-        // Save individual tree files (use model_name prefix)
-        for(uint16_t i = 0; i < config.num_trees; i++){
-            std::string filename = model_name + "_tree_" + std::to_string(i) + ".bin";
-            root[i].filename = filename;
-            root[i].saveTree(folder_path);
-        }
-        
         // Save config in both JSON and CSV formats
         config.saveConfig(result_config_path);
+
+        // Save unified forest file directly from memory (no individual tree files)
+        const uint32_t FOREST_MAGIC = 0x464F5253; // "FORS"
+        std::string unified_path = folder_path + "/" + model_name + "_forest.bin";
+        std::ofstream out(unified_path, std::ios::binary);
+        if (!out.is_open()) {
+            if (!silent) {
+                std::cout << "❌ Failed to create unified forest file: " << unified_path << "\n";
+            }
+            return;
+        }
+
+        // Forest header: magic + tree count (u8)
+        out.write(reinterpret_cast<const char*>(&FOREST_MAGIC), sizeof(FOREST_MAGIC));
+        uint8_t tree_count_written = 0;
+        out.write(reinterpret_cast<const char*>(&tree_count_written), sizeof(tree_count_written));
+
+        uint32_t total_nodes_written = 0;
+        for (uint16_t i = 0; i < config.num_trees; ++i) {
+            if (root[i].nodes.empty()) {
+                continue; // skip empty trees
+            }
+            
+            uint32_t node_count = static_cast<uint32_t>(root[i].nodes.size());
+            
+            // Unified per-tree header: tree index (u8) + node_count (u32)
+            uint8_t tree_index = static_cast<uint8_t>(i);
+            out.write(reinterpret_cast<const char*>(&tree_index), sizeof(tree_index));
+            out.write(reinterpret_cast<const char*>(&node_count), sizeof(node_count));
+            
+            // Write node data directly from memory
+            for (const auto& node : root[i].nodes) {
+                out.write(reinterpret_cast<const char*>(&node.packed_data), sizeof(node.packed_data));
+            }
+
+            ++tree_count_written;
+            total_nodes_written += node_count;
+        }
+
+        // Patch tree_count at byte offset sizeof(FOREST_MAGIC)
+        out.seekp(static_cast<std::streamoff>(sizeof(FOREST_MAGIC)), std::ios::beg);
+        out.write(reinterpret_cast<const char*>(&tree_count_written), sizeof(tree_count_written));
+        out.close();
+
+        if (!silent) {
+            std::cout << "✅ Saved unified forest: " << (int)tree_count_written << "/" << (int)config.num_trees
+                      << " trees (" << total_nodes_written << " nodes) -> " << unified_path << "\n";
+        }
     }
     
     // Load the best trained forest from files (trees only, ignores config file)

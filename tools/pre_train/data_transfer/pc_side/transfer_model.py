@@ -38,7 +38,7 @@ CHUNK_SIZE =  256  # bytes per chunk
 CHUNK_DELAY = 50  # delay between chunks in ms
 
 # Timeout settings
-SERIAL_TIMEOUT = 10  # seconds
+SERIAL_TIMEOUT = 30  # seconds
 ACK_TIMEOUT = 30    # seconds
 
 def get_model_files(model_name):
@@ -48,7 +48,7 @@ def get_model_files(model_name):
     model_dir = os.path.abspath(model_dir)
     
     config_files = []
-    tree_files = []
+    forest_files = []
     predictor_files = []
     log_files = []
     
@@ -56,6 +56,11 @@ def get_model_files(model_name):
     config_file = os.path.join(model_dir, f"{model_name}_config.json")
     if os.path.exists(config_file):
         config_files.append(config_file)
+    
+    # Add unified forest file (replaces individual tree files)
+    forest_file = os.path.join(model_dir, f"{model_name}_forest.bin")
+    if os.path.exists(forest_file):
+        forest_files.append(forest_file)
     
     # Add node predictor model file
     predictor_file = os.path.join(model_dir, f"{model_name}_node_pred.bin")
@@ -67,21 +72,17 @@ def get_model_files(model_name):
         if os.path.exists(alt_predictor_path):
             predictor_files.append(os.path.abspath(alt_predictor_path))
     
-    # Add tree log CSV file (model-specific)
-    tree_log_file = os.path.join(script_dir, '..', '..', f"{model_name}_node_log.csv")
+    # Add tree log CSV file (model-specific, now in trained_model folder)
+    tree_log_file = os.path.join(model_dir, f"{model_name}_node_log.csv")
     if os.path.exists(tree_log_file):
-        log_files.append(os.path.abspath(tree_log_file))
+        log_files.append(tree_log_file)
     
-    # Add all tree binary files (model-specific pattern)
-    tree_pattern = os.path.join(model_dir, f"{model_name}_tree_*.bin")
-    tree_files = sorted(glob.glob(tree_pattern))
-    
-    return config_files, tree_files, predictor_files, log_files
+    return config_files, forest_files, predictor_files, log_files
 
 def get_all_model_files(model_name):
     """Get all model files as a single list (for compatibility)."""
-    config_files, tree_files, predictor_files, log_files = get_model_files(model_name)
-    return config_files + predictor_files + log_files + tree_files
+    config_files, forest_files, predictor_files, log_files = get_model_files(model_name)
+    return config_files + predictor_files + log_files + forest_files
 
 def wait_for_response(ser, expected_response, timeout=ACK_TIMEOUT, verbose=True):
     """Wait for a specific response from the ESP32."""
@@ -253,8 +254,8 @@ def transfer_multiple_files(ser, files, title):
 def check_model_files(model_name):
     """Check for model files and print a report for the given model_name."""
     print("\n🔍 Searching for model files...")
-    config_files, tree_files, predictor_files, log_files = get_model_files(model_name)
-    all_files = config_files + predictor_files + log_files + tree_files
+    config_files, forest_files, predictor_files, log_files = get_model_files(model_name)
+    all_files = config_files + predictor_files + log_files + forest_files
     
     if not all_files:
         print("❌ No model files found!")
@@ -280,10 +281,12 @@ def check_model_files(model_name):
             size = os.path.getsize(file_path)
             print(f"      • {os.path.basename(file_path)} ({size} bytes)")
     
-    if tree_files:
-        print(f"   🌳 Tree files ({len(tree_files)} trees):")
-        tree_total_size = sum(os.path.getsize(f) for f in tree_files)
-        print(f"      • {model_name}_tree_0.bin to {model_name}_tree_{len(tree_files)-1}.bin ({tree_total_size} bytes total)")
+    if forest_files:
+        print("   🌳 Unified Forest files:")
+        forest_total_size = sum(os.path.getsize(f) for f in forest_files)
+        for file_path in forest_files:
+            size = os.path.getsize(file_path)
+            print(f"      • {os.path.basename(file_path)} ({size} bytes) - Contains all decision trees")
     
     total_size = sum(os.path.getsize(f) for f in all_files)
     print(f"📊 Total size: {total_size} bytes ({total_size/1024:.1f} KB)")
@@ -302,8 +305,8 @@ def main():
     if not check_model_files(model_name):
         return 1
     
-    config_files, tree_files, predictor_files, log_files = get_model_files(model_name)
-    total_files = len(config_files) + len(predictor_files) + len(log_files) + len(tree_files)
+    config_files, forest_files, predictor_files, log_files = get_model_files(model_name)
+    total_files = len(config_files) + len(predictor_files) + len(log_files) + len(forest_files)
     
     print(f"\n🔌 Connecting to ESP32 on {serial_port}...")
     try:
@@ -361,10 +364,16 @@ def main():
                     print(f"❌ Failed to transfer {filename}")
                     print("⚠️  Note: ESP32 will not have training history without log file")
         
-        # Transfer tree files with combined progress bar
-        if tree_files:
-            tree_success = transfer_multiple_files(ser, tree_files, "Tree Files Transfer")
-            total_success += tree_success
+        # Transfer unified forest file
+        if forest_files:
+            for file_path in forest_files:
+                filename = os.path.basename(file_path)
+                if transfer_file(ser, file_path):
+                    total_success += 1
+                    print(f"✅ Unified forest file transferred successfully!")
+                else:
+                    print(f"❌ Failed to transfer {filename}")
+                    print("⚠️  Critical: ESP32 cannot function without the forest file")
 
         # End session
         print("\n🏁 Ending transfer session...")

@@ -27,8 +27,8 @@
 using namespace mcu;
 
 struct Rf_sample{
-    packed_vector<2, SMALL> features;           // set containing the values ​​of the features corresponding to that sample , 2 bit per value.
-    uint8_t label;                     // label of the sample 
+    packed_vector<2> features;           // set containing the values ​​of the features corresponding to that sample , 2 bit per value.
+    uint16_t label;                     // label of the sample 
 };
 
 using sampleID_set = ID_vector<uint16_t>; // Sample ID set type
@@ -54,11 +54,11 @@ struct Tree_node{
         return packed_data & 0x3FF;  // Bits 0-9 (10 bits)
     }
     
-    uint8_t getLabel() const {
+    uint16_t getLabel() const {
         return (packed_data >> 10) & 0xFF;  // Bits 10-17 (8 bits)
     }
     
-    uint8_t getThreshold() const {
+    uint16_t getThreshold() const {
         return (packed_data >> 18) & 0x03;  // Bits 18-19 (2 bits)
     }
     
@@ -79,11 +79,11 @@ struct Tree_node{
         packed_data = (packed_data & 0xFFFFFC00) | (featureID & 0x3FF);  // Bits 0-9
     }
     
-    void setLabel(uint8_t label) {
+    void setLabel(uint16_t label) {
         packed_data = (packed_data & 0xFFFC03FF) | ((uint32_t)(label & 0xFF) << 10);  // Bits 10-17
     }
     
-    void setThreshold(uint8_t threshold) {
+    void setThreshold(uint16_t threshold) {
         packed_data = (packed_data & 0xFFF3FFFF) | ((uint32_t)(threshold & 0x03) << 18);  // Bits 18-19
     }
     
@@ -102,10 +102,10 @@ struct NodeToBuild {
     uint16_t nodeIndex;
     uint16_t begin;   // inclusive
     uint16_t end;     // exclusive
-    uint8_t depth;
+    uint16_t depth;
     
     NodeToBuild() : nodeIndex(0), begin(0), end(0), depth(0) {}
-    NodeToBuild(uint16_t idx, uint16_t b, uint16_t e, uint8_t d) 
+    NodeToBuild(uint16_t idx, uint16_t b, uint16_t e, uint16_t d) 
         : nodeIndex(idx), begin(b), end(e), depth(d) {}
 };
 
@@ -226,7 +226,7 @@ class Rf_tree {
         //           << " (" << nodeCount << " nodes)" << std::endl;
     }
 
-    uint8_t predictSample(const Rf_sample& sample) const {
+    uint16_t predictSample(const Rf_sample& sample) const {
         if (nodes.empty()) return 0;
         
         uint16_t currentIndex = 0;  // Start from root
@@ -237,7 +237,7 @@ class Rf_tree {
                 return 0; // Invalid feature access
             }
             
-            uint8_t featureValue = sample.features[nodes[currentIndex].getFeatureID()];
+            uint16_t featureValue = sample.features[nodes[currentIndex].getFeatureID()];
             
             if (featureValue <= nodes[currentIndex].getThreshold()) {
                 // Go to left child
@@ -288,7 +288,7 @@ public:
     Rf_data(const std::string& fname) : filename(fname) {}
 
     // Load data from CSV format (used only once for initial dataset conversion)
-    void loadCSVData(std::string csvFilename, uint8_t numFeatures) {
+    void loadCSVData(std::string csvFilename, uint16_t numFeatures) {
         std::ifstream file(csvFilename);
         if (!file.is_open()) {
             std::cout << "❌ Failed to open CSV file for reading: " << csvFilename << std::endl;
@@ -320,7 +320,7 @@ public:
             s.features.clear();
             s.features.reserve(numFeatures);
 
-            uint8_t fieldIdx = 0;
+            uint16_t fieldIdx = 0;
             std::stringstream ss(line);
             std::string token;
             
@@ -329,7 +329,7 @@ public:
                 token.erase(0, token.find_first_not_of(" \t"));
                 token.erase(token.find_last_not_of(" \t") + 1);
                 
-                uint8_t v = static_cast<uint8_t>(std::stoi(token));
+                uint16_t v = static_cast<uint16_t>(std::stoi(token));
 
                 if (fieldIdx == 0) {
                     s.label = v;
@@ -371,7 +371,7 @@ public:
     }
 };
 
-typedef enum Rf_training_flags : uint8_t{
+typedef enum Rf_training_flags : uint16_t{
     ACCURACY    = 0x01,          // calculate accuracy of the model
     PRECISION   = 0x02,          // calculate precision of the model
     RECALL      = 0x04,            // calculate recall of the model
@@ -379,7 +379,7 @@ typedef enum Rf_training_flags : uint8_t{
 }Rf_training_flags;
 
 // Helper functions to convert between flag enum and string representation
-std::string flagsToString(uint8_t flags) {
+std::string flagsToString(uint16_t flags) {
     std::vector<std::string> flag_names;
     
     if (flags & ACCURACY) flag_names.push_back("ACCURACY");
@@ -396,8 +396,8 @@ std::string flagsToString(uint8_t flags) {
     return result;
 }
 
-uint8_t stringToFlags(const std::string& flag_str) {
-    uint8_t flags = 0;
+uint16_t stringToFlags(const std::string& flag_str) {
+    uint16_t flags = 0;
     
     if (flag_str.find("ACCURACY") != std::string::npos) flags |= ACCURACY;
     if (flag_str.find("PRECISION") != std::string::npos) flags |= PRECISION;
@@ -412,12 +412,12 @@ uint8_t stringToFlags(const std::string& flag_str) {
 
 struct Rf_config{
     // model parameters
-    uint8_t quantization_coefficient = 2;
-    uint8_t num_trees = 20;
-    uint8_t num_features;  
-    uint8_t num_labels;
-    uint8_t k_fold; 
-    uint8_t min_split; 
+    uint16_t quantization_coefficient = 2;
+    uint16_t num_trees = 20;
+    uint16_t num_features;  
+    uint16_t num_labels;
+    uint16_t k_fold; 
+    uint16_t min_split; 
     uint16_t max_depth;
     uint16_t num_samples;  // number of samples in the base data
     uint32_t random_seed = 42; // random seed for Rf_random class
@@ -429,8 +429,8 @@ struct Rf_config{
     float valid_ratio = 0.15f; // ratio of validation data to total data, automatically set
     float boostrap_ratio = 0.632f; // ratio of samples taken from train data to create subdata
 
-    b_vector<uint8_t> max_depth_range;      // for training
-    b_vector<uint8_t> min_split_range;      // for training 
+    b_vector<uint16_t> max_depth_range;      // for training
+    b_vector<uint16_t> min_split_range;      // for training 
     b_vector<bool> overwrite{4}; // min_split-> max_depth-> unity_threshold-> training_flag
 
     Rf_training_flags training_flag;
@@ -486,7 +486,7 @@ public:
                 // Remove whitespace
                 value.erase(0, value.find_first_not_of(" \t\r\n"));
                 value.erase(value.find_last_not_of(" \t\r\n") + 1);
-                num_trees = static_cast<uint8_t>(std::stoi(value));
+                num_trees = static_cast<uint16_t>(std::stoi(value));
             }
         }
         
@@ -501,7 +501,7 @@ public:
                 std::string value = content.substr(pos, end - pos);
                 value.erase(0, value.find_first_not_of(" \t\r\n"));
                 value.erase(value.find_last_not_of(" \t\r\n") + 1);
-                k_fold = static_cast<uint8_t>(std::stoi(value));
+                k_fold = static_cast<uint16_t>(std::stoi(value));
             }
         }
         
@@ -563,7 +563,7 @@ public:
                 std::string value = content.substr(pos, end - pos);
                 value.erase(0, value.find_first_not_of(" \t\r\n"));
                 value.erase(value.find_last_not_of(" \t\r\n") + 1);
-                k_fold = static_cast<uint8_t>(std::stoi(value));
+                k_fold = static_cast<uint16_t>(std::stoi(value));
             }
         }
 
@@ -722,7 +722,7 @@ public:
         if (overwrite[0]) {
             std::string value = extractParameterValue("min_split");
             if (!value.empty()) {
-                min_split = static_cast<uint8_t>(std::stoi(value));
+                min_split = static_cast<uint16_t>(std::stoi(value));
                 std::cout << "⚙️  min_split override enabled: " << (int)min_split << std::endl;
             }
         }
@@ -755,7 +755,7 @@ public:
                 bool isStacked = isParameterStacked("train_flag");
                 if (isStacked) {
                     // Stacked mode: combine with automatic flags (will be determined later)
-                    uint8_t user_flags = stringToFlags(value);
+                    uint16_t user_flags = stringToFlags(value);
                     training_flag = static_cast<Rf_training_flags>(user_flags); // Temporarily store user flags
                     std::cout << "⚙️  train_flag stacked mode enabled: " << flagsToString(user_flags) << " (will be combined with auto-detected flags)\n";
                 } else {
@@ -805,8 +805,8 @@ public:
             return;
         }
 
-        unordered_map<uint8_t, uint16_t> labelCounts;
-        unordered_set<uint8_t> featureValues;
+        unordered_map<uint16_t, uint16_t> labelCounts;
+        unordered_set<uint16_t> featureValues;
 
         uint16_t numSamples = 0;
         uint16_t maxFeatures = 0;
@@ -990,8 +990,8 @@ public:
                 
                 if (isStacked) {
                     // Stacked mode: combine user flags with auto-detected flags
-                    uint8_t user_flags = static_cast<uint8_t>(training_flag); // User flags from init()
-                    uint8_t auto_flags = 0;
+                    uint16_t user_flags = static_cast<uint16_t>(training_flag); // User flags from init()
+                    uint16_t auto_flags = 0;
                     
                     // Determine automatic flags based on dataset
                     if (maxImbalanceRatio > 10.0f) {
@@ -1009,7 +1009,7 @@ public:
                     }
                     
                     // Combine user flags with auto-detected flags
-                    uint8_t combined_flags = user_flags | auto_flags;
+                    uint16_t combined_flags = user_flags | auto_flags;
                     training_flag = static_cast<Rf_training_flags>(combined_flags);
                     std::cout << "🔗 Stacked train_flags: " << flagsToString(combined_flags) 
                               << " (user: " << flagsToString(user_flags) << " + auto: " << flagsToString(auto_flags) << ")\n";
@@ -1058,16 +1058,16 @@ public:
         // Calculate optimal parameters based on dataset size
         int baseline_minsplit_ratio = 100 * (num_samples / 500 + 1); 
         if (baseline_minsplit_ratio > 500) baseline_minsplit_ratio = 500; 
-        uint8_t min_minSplit = std::min(2, (int)(num_samples / baseline_minsplit_ratio));
+        uint16_t min_minSplit = std::min(2, (int)(num_samples / baseline_minsplit_ratio));
         int dynamic_max_split = std::min(min_minSplit + 6, (int)(log2(num_samples) / 4 + num_features / 25.0f));
-        uint8_t max_minSplit = std::min(24, dynamic_max_split); // Cap at 24 to prevent overly simple trees.
+        uint16_t max_minSplit = std::min(24, dynamic_max_split); // Cap at 24 to prevent overly simple trees.
         if (max_minSplit <= min_minSplit) max_minSplit = min_minSplit + 4; // Ensure a valid range.
 
 
         int base_maxDepth = std::max((int)log2(num_samples * 2.0f), (int)(log2(num_features) * 2.5f));
-        uint8_t max_maxDepth = std::max(6, base_maxDepth);
+        uint16_t max_maxDepth = std::max(6, base_maxDepth);
         int dynamic_min_depth = std::max(4, (int)(log2(num_features) + 2));
-        uint8_t min_maxDepth = std::min((int)max_maxDepth - 2, dynamic_min_depth); // Ensure a valid range.
+        uint16_t min_maxDepth = std::min((int)max_maxDepth - 2, dynamic_min_depth); // Ensure a valid range.
         if (min_maxDepth >= max_maxDepth) min_maxDepth = max_maxDepth - 2;
         if (min_maxDepth < 4) min_maxDepth = 4;
 
@@ -1091,11 +1091,11 @@ public:
             std::cout << "🔧 min_split override active: using fixed value " << (int)min_split << "\n";
         } else {
             // min_split automatic - build range with step 2
-            uint8_t min_split_step = 2;
+            uint16_t min_split_step = 2;
             if(overwrite[1] || max_minSplit - min_minSplit < 4) {
                 min_split_step = 1; // If max_depth is overridden, use smaller step for min_split
             }
-            for(uint8_t i = min_minSplit; i <= max_minSplit; i += min_split_step) {
+            for(uint16_t i = min_minSplit; i <= max_minSplit; i += min_split_step) {
                 min_split_range.push_back(i);
             }
         }
@@ -1106,11 +1106,11 @@ public:
             std::cout << "🔧 max_depth override active: using fixed value " << (int)max_depth << "\n";
         } else {
             // max_depth automatic - build range with step 2
-            uint8_t max_depth_step = 2;
+            uint16_t max_depth_step = 2;
             if(overwrite[0]) {
                 max_depth_step = 1; // If min_split is overridden, use smaller step for max_depth
             }
-            for(uint8_t i = min_maxDepth; i <= max_maxDepth; i += max_depth_step) {
+            for(uint16_t i = min_maxDepth; i <= max_maxDepth; i += max_depth_step) {
                 max_depth_range.push_back(i);
             }
         }
@@ -1207,14 +1207,14 @@ private:
 };
 
 struct node_data {
-    uint8_t min_split;
-    uint8_t max_depth;
+    uint16_t min_split;
+    uint16_t max_depth;
     uint16_t total_nodes; // Total nodes in the tree for this configuration
     
     node_data() : min_split(3), max_depth(6), total_nodes(0) {}
-    node_data(uint8_t split, uint16_t depth, uint16_t nodes) 
+    node_data(uint16_t split, uint16_t depth, uint16_t nodes) 
         : min_split(split), max_depth(depth), total_nodes(nodes) {}
-    node_data(uint8_t min_split, uint8_t max_depth){
+    node_data(uint16_t min_split, uint16_t max_depth){
         min_split = min_split;
         max_depth = max_depth;
         total_nodes = 0; // Default to 0, will be calculated later
@@ -1231,8 +1231,8 @@ public:
     b_vector<float> peak_nodes;
 public:
     bool is_trained;
-    uint8_t accuracy; // in percentage
-    uint8_t peak_percent;   // number of nodes at depth with maximum number of nodes / total number of nodes in tree
+    uint16_t accuracy; // in percentage
+    uint16_t peak_percent;   // number of nodes at depth with maximum number of nodes / total number of nodes in tree
     
     
     // Helper methods for regression analysis
@@ -1246,7 +1246,7 @@ public:
         
         // Dynamically analyze the data patterns
         // Collect all unique min_split and max_depth values
-        std::vector<uint8_t> unique_min_splits;
+        std::vector<uint16_t> unique_min_splits;
         std::vector<uint16_t> unique_max_depths;
         
         for (const auto& sample : training_data) {
@@ -1391,7 +1391,7 @@ public:
             
             // Parse min_split
             if (!std::getline(ss, token, ',')) continue;
-            sample.min_split = static_cast<uint8_t>(std::stoi(token));
+            sample.min_split = static_cast<uint16_t>(std::stoi(token));
             
             // Parse max_depth
             if (!std::getline(ss, token, ',')) continue;
@@ -1428,7 +1428,7 @@ public:
             if(peak > 34) percent_count[9]++;
         }
         bool peak_found = false;
-        uint8_t percent_track = 25;  // start from 25% 
+        uint16_t percent_track = 25;  // start from 25% 
         size_t total_peak_nodes = peak_nodes.size(); // Fix: use actual number of trees
         for(auto count : percent_count) {
             float percent = total_peak_nodes > 0 ? (float)count/(float)total_peak_nodes * 100.0f : 0.0f; // Fix: calculate actual percentage
@@ -1475,7 +1475,7 @@ public:
         file.write(reinterpret_cast<const char*>(&peak_percent), sizeof(peak_percent));
         
         // Write number of coefficients
-        uint8_t num_coefficients = 3;
+        uint16_t num_coefficients = 3;
         file.write(reinterpret_cast<const char*>(&num_coefficients), sizeof(num_coefficients));
         
         // Write coefficients
@@ -1512,7 +1512,7 @@ public:
         file.read(reinterpret_cast<char*>(&peak_percent), sizeof(peak_percent));
         
         // Read number of coefficients
-        uint8_t num_coefficients;
+        uint16_t num_coefficients;
         file.read(reinterpret_cast<char*>(&num_coefficients), sizeof(num_coefficients));
         
         if (num_coefficients != 3) {
@@ -1675,7 +1675,7 @@ public:
         }
         return h;
     }
-    static inline uint64_t hashBytes(const uint8_t* data, size_t len) {
+    static inline uint64_t hashBytes(const uint16_t* data, size_t len) {
         uint64_t h = FNV_OFFSET;
         for (size_t i = 0; i < len; ++i) { 
             h ^= data[i]; 

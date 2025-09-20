@@ -133,19 +133,25 @@ void printFile(String filename);
 void deleteAllSPIFFSFiles();
 
 /**
- * @brief Interactive CSV data input interface
+ * @brief Interactive text data input interface (CSV/TXT/LOG/JSON)
  * 
- * Allows users to create CSV files by entering data through Serial interface.
- * Data can be entered as space-separated or newline-separated values.
- * Automatically limits rows to 234 elements maximum for memory efficiency.
+ * Allows users to create files by entering data through the Serial interface.
+ * Requires a full path with extension (e.g., "/digit_data.csv"). If the path does
+ * not start with '/', it will be auto-prefixed. If no extension is provided,
+ * ".csv" will be used by default for backward compatibility.
+ * 
+ * Behavior by format:
+ * - CSV (.csv): You can enter rows separated by space or newline. Each row is
+ *   limited to 234 elements (commas + 1). Optionally runs cleanMalformedRows
+ *   if exact_columns > 0.
+ * - TXT/LOG/JSON: Each entered line is written as-is (newline separated).
  * 
  * Features:
- * - Interactive filename input (extension added automatically)
- * - Real-time data validation and row limiting
+ * - Real-time data validation and row limiting for CSV
  * - Live feedback on saved data
- * - Automatic file display upon completion
+ * - Automatic file display upon completion (configurable)
  * 
- * @note Type "END" to finish data entry. Files are saved with .csv extension.
+ * @note Type "END" on its own line to finish data entry.
  */
 String reception_data(int exact_columns = 0, bool print_file = true);
 

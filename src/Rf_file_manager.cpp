@@ -526,7 +526,7 @@ void manageSPIFFSFiles() {
         else if (operation.equals("e")) {
             // Add new file operation - isolated space
             Serial.println("\n========== ➕ ADD NEW FILE MODE ==========");
-            Serial.println("Creating new CSV file...");
+            Serial.println("You can create .csv, .txt, .log, .json. Provide full path (e.g., /digit_data.csv).");
             String newFile = reception_data(0, true);
             if (newFile.length() > 0) {
                 Serial.printf("✅ File created: %s\n", newFile.c_str());
@@ -571,6 +571,7 @@ void deleteAllSPIFFSFiles() {
 }
 
 String reception_data(int exact_columns, bool print_file) {
+    // Clear any residual input
     while (Serial.available()) {
         Serial.read();
     }
@@ -579,28 +580,52 @@ String reception_data(int exact_columns, bool print_file) {
         Serial.read();
     }
 
-    Serial.println("Enter base filename (no extension), e.g. animal_data:");
+    Serial.println("Enter full file path with extension (e.g., /digit_data.csv or digit_data.txt):");
     Serial.flush();
-    String baseName = "";
+    String fullPath = "";
 
-    while (baseName.length() == 0) {
+    // Read and normalize path
+    while (fullPath.length() == 0) {
         if (Serial.available()) {
-            baseName = Serial.readStringUntil('\n');
-            baseName.trim();
+            fullPath = Serial.readStringUntil('\n');
+            fullPath.trim();
         }
         delay(10);
     }
 
-    String fullPath = "/" + baseName + ".csv";
+    // Auto-prefix leading '/'
+    if (!fullPath.startsWith("/")) {
+        fullPath = "/" + fullPath;
+        Serial.printf("ℹ️  Auto-prefixed leading '/': %s\n", fullPath.c_str());
+    }
+
+    // Ensure an extension exists; if not, default to .csv for backward compatibility
+    int lastDot = fullPath.lastIndexOf('.');
+    if (lastDot <= 0 || lastDot == (int)fullPath.length() - 1) {
+        fullPath += ".csv";
+        Serial.printf("ℹ️  No valid extension provided. Defaulting to .csv → %s\n", fullPath.c_str());
+    }
+
+    // Determine file type
+    String lower = fullPath; lower.toLowerCase();
+    bool isCSV = lower.endsWith(".csv");
+    bool isTextFile = isCSV || lower.endsWith(".txt") || lower.endsWith(".log") || lower.endsWith(".json");
+
     Serial.printf("📁 Will save to: %s\n", fullPath.c_str());
 
     File file = SPIFFS.open(fullPath, FILE_WRITE);
     if (!file) {
         Serial.println("❌ Failed to open file for writing");
-        return baseName;
+        return fullPath;
     }
 
-    Serial.println("📥 Enter CSV lines (separated by space or newline). Type END to finish.");
+    if (isCSV) {
+        Serial.println("📥 Enter CSV rows (separated by space or newline). Type END to finish.");
+    } else if (isTextFile) {
+        Serial.println("📥 Enter text lines. Press Enter for new line. Type END on its own line to finish.");
+    } else {
+        Serial.println("⚠️ Non-text extension detected. Input will be stored as plain text lines. Type END to finish.");
+    }
 
     String buffer = "";
     int total_rows = 0;
@@ -615,47 +640,56 @@ String reception_data(int exact_columns, bool print_file) {
                 break;
             }
 
-            buffer += input + " ";
-            buffer.trim();
+            if (isCSV) {
+                // Backward-compatible: treat spaces as row separators too
+                buffer += input + " ";
+                buffer.trim();
 
-            int start = 0;
-            while (start < buffer.length()) {
-                int spaceIdx = buffer.indexOf(' ', start);
-                if (spaceIdx == -1) spaceIdx = buffer.length();
+                int start = 0;
+                while (start < buffer.length()) {
+                    int spaceIdx = buffer.indexOf(' ', start);
+                    if (spaceIdx == -1) spaceIdx = buffer.length();
 
-                String row = buffer.substring(start, spaceIdx);
-                row.trim();
+                    String row = buffer.substring(start, spaceIdx);
+                    row.trim();
 
-                if (row.length() > 0) {
-                    // Limit row to 255 elements (254 commas max)
-                    uint16_t count = 1;
-                    for (uint16_t i = 0; i < row.length(); ++i) {
-                        if (row.charAt(i) == ',') ++count;
-                        if (count > 234) {
-                            row = row.substring(0, i); // Cut off at last allowed comma
-                            break;
+                    if (row.length() > 0) {
+                        // Limit row to 234 elements (233 commas max after limit check logic)
+                        uint16_t count = 1;
+                        for (uint16_t i = 0; i < row.length(); ++i) {
+                            if (row.charAt(i) == ',') ++count;
+                            if (count > 234) {
+                                row = row.substring(0, i); // Cut off at last allowed comma
+                                break;
+                            }
                         }
+
+                        file.println(row);
+                        Serial.printf("✅ Saved (%d elements): %s\n", count > 234 ? 234 : count, row.c_str());
+                        total_rows++;
                     }
 
-                    file.println(row);
-                    Serial.printf("✅ Saved (%d elements): %s\n", count > 234 ? 234 : count, row.c_str());
+                    start = spaceIdx + 1;
                 }
 
-                start = spaceIdx + 1;
+                buffer = ""; // reset buffer each input line since we handled all tokens
+            } else {
+                // General text formats: write line as-is
+                file.println(input);
+                total_rows++;
             }
-
-            buffer = "";
-            total_rows++;
         }
         delay(30);
     }
     file.close();
-    if(exact_columns > 0) {
-        cleanMalformedRows(fullPath, exact_columns);
-    } 
-    if(print_file) printFile(fullPath);
 
-    Serial.printf("📄 Total rows: %d", total_rows);
+    // Only clean CSV files when requested
+    if (isCSV && exact_columns > 0) {
+        cleanMalformedRows(fullPath, exact_columns);
+    }
+    if (print_file) printFile(fullPath);
+
+    Serial.printf("📄 Total lines written: %d\n", total_rows);
 
     return fullPath; // Return the full path of the created file
 }

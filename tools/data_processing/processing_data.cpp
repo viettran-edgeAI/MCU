@@ -1009,6 +1009,7 @@ void generateDatasetParamsCSV(std::string path, const DatasetInfo& datasetInfo, 
     
     // Calculate samples per label from the validation results
     mcu::vector<uint32_t> samplesPerLabel(datasetInfo.labelMapping.size(), 0);
+    uint32_t actualTotalSamples = 0;
     
     // Read the generated CSV to count actual samples per label
     std::ifstream csvFile(path);
@@ -1023,6 +1024,7 @@ void generateDatasetParamsCSV(std::string path, const DatasetInfo& datasetInfo, 
                 int labelValue = std::stoi(cells[0]);
                 if (labelValue >= 0 && static_cast<size_t>(labelValue) < samplesPerLabel.size()) {
                     samplesPerLabel[labelValue]++;
+                    actualTotalSamples++;
                 }
             } catch (...) {
                 // Skip invalid labels
@@ -1042,7 +1044,7 @@ void generateDatasetParamsCSV(std::string path, const DatasetInfo& datasetInfo, 
     fout << "max_feature_value," << static_cast<int>(getMaxFeatureValue()) << "\n";
     fout << "features_per_byte," << static_cast<int>(getFeaturesPerByte()) << "\n";
     fout << "num_features," << actualFeatures << "\n";
-    fout << "num_samples," << datasetInfo.numSamples << "\n";
+    fout << "num_samples," << actualTotalSamples << "\n";
     fout << "num_labels," << datasetInfo.labelMapping.size() << "\n";
     
     // Write samples per label
@@ -1057,7 +1059,7 @@ void generateDatasetParamsCSV(std::string path, const DatasetInfo& datasetInfo, 
     std::cout << "   📊 Parameters summary:\n";
     std::cout << "     Quantization: " << static_cast<int>(quantization_coefficient) << " bits per feature\n";
     std::cout << "     Features: " << actualFeatures << "\n";
-    std::cout << "     Samples: " << datasetInfo.numSamples << "\n";
+    std::cout << "     Samples: " << actualTotalSamples << "\n";
     std::cout << "     Labels: " << datasetInfo.labelMapping.size() << "\n";
     std::cout << "     Compression: " << (float)actualFeatures / packedFeatureBytes << ":1\n";
 }

@@ -55,6 +55,7 @@ namespace mcu {
 
         Pair* table = nullptr;
         uint8_t size_ = 0;
+        uint8_t dead_size_ = 0;     // used + tombstones 
         uint8_t fullness_ = 92; //(%)       . virtual_cap = cap_ * fullness_ / 100
         uint8_t virtual_cap = 0; // virtual capacity
         uint8_t step_ = 0;
@@ -78,6 +79,7 @@ namespace mcu {
             slots_init(newCap);
 
             size_ = 0;
+            dead_size_ = 0;
             cap_ = newCap;
             virtual_cap = cap_to_virtual();
             step_ = calStep(newCap);
@@ -106,8 +108,8 @@ namespace mcu {
         }
         template<typename U, typename R> friend class ChainedUnorderedMap;
         template<typename U> friend class ChainedUnorderedSet;
-        
-    protected:
+    // protected:
+    public:
         int16_t getValue(V key) noexcept {
             uint8_t index     = hashFunction(cap_, key, best_hashers_16[cap_ - 1]);
             uint8_t attempts= 0;
@@ -154,7 +156,7 @@ namespace mcu {
             }
             return -1;
         }
-    
+
         
     public:
         // default constructor
@@ -181,6 +183,7 @@ namespace mcu {
         unordered_map(const unordered_map& other) noexcept : hash_kernel(),
             slot_handler(other),        
             size_(other.size_),
+            dead_size_(other.dead_size_),
             fullness_(other.fullness_),
             virtual_cap(other.virtual_cap),
             step_(other.step_)
@@ -191,7 +194,7 @@ namespace mcu {
                     table[i] = other.table[i];
             }
         }
-    
+
 
         /**
          * @brief Move constructor, transfers ownership of resources.
@@ -200,6 +203,7 @@ namespace mcu {
         unordered_map(unordered_map&& other) noexcept : hash_kernel(),
         slot_handler(std::move(other)),  // ← steal flags & cap_
         size_(other.size_),
+        dead_size_(other.dead_size_),
         fullness_(other.fullness_),
         virtual_cap(other.virtual_cap),
         step_(other.step_)
@@ -207,6 +211,7 @@ namespace mcu {
             table       = other.table;
             other.table = nullptr;
             other.size_ = 0;
+            other.dead_size_ = 0;
             other.fullness_ = 92;
             other.virtual_cap = 0;
             other.step_ = 0;
@@ -245,6 +250,7 @@ namespace mcu {
                 delete[] table;
                 slot_handler::operator=(std::move(other)); // steal flags & cap_
                 size_      = other.size_;
+                dead_size_ = other.dead_size_;
                 fullness_  = other.fullness_;
                 table      = other.table;
                 virtual_cap = other.virtual_cap;
@@ -252,6 +258,7 @@ namespace mcu {
                 // reset other
                 other.table = nullptr;
                 other.size_ = 0;
+                other.dead_size_ = 0;
                 other.cap_  = 0;
                 other.fullness_ = 92;
                 other.virtual_cap = 0;
@@ -330,8 +337,8 @@ namespace mcu {
 
     private:
         pair<iterator, bool> insert_core(Pair&& p) noexcept {
-            if (is_full()) {
-                if (cap_ == MAX_CAP)
+            if (dead_size_ >= virtual_cap) {
+                if (size_ == map_ability())
                     return { end(), false };
                 uint16_t dbl = cap_ ? cap_ * 2: INIT_CAP;
                 if (dbl > MAX_CAP) dbl = MAX_CAP;
@@ -340,37 +347,28 @@ namespace mcu {
 
             V key       = p.first;
             uint8_t index     = hashFunction(cap_, key, best_hashers_16[cap_ - 1]);
-            uint8_t attempts= 0;
-            bool saw_deleted = false;
 
             while (getState(index) != slotState::Empty) {
                 slotState st = getState(index);
-                if (attempts++ == cap_) {
-                    // too many tombstones → clean up and retry
-                    if (saw_deleted) {
-                        rehash(cap_);
-                        return insert_core(std::move(p));
-                    }
-                    return { end(), false };
-                }
                 if (table[index].first == key) {
                     if (st == slotState::Used) {
                         // existing element
                         return { iterator(this, index), false };
                     }
-                    if (st == slotState::Deleted) {
-                        // reuse this tombstone
+                    if (st == slotState::Deleted) {         // reuse this tombstone
                         break;
                     }
                 }
-                if (st == slotState::Deleted)
-                    saw_deleted = true;
                 index = linearProbe(cap_, index, step_);
             }
 
+            slotState old_state = getState(index);
             table[index] = std::move(p);
             setState(index, slotState::Used);
             ++size_;
+            if (old_state == slotState::Empty) {
+                ++dead_size_;  
+            }
             return { iterator(this, index), true };
         }
     public:
@@ -457,7 +455,7 @@ namespace mcu {
             return end();
         }
 
-    
+
         /**
          * @brief Access or insert an element.
          * @param key The key to find or insert.
@@ -586,6 +584,7 @@ namespace mcu {
         void clear() noexcept {
             memset(flags, 0, (cap_ * 2 + 7) / 8);
             size_ = 0;
+            dead_size_ = 0;
         }
 
         /**
@@ -651,6 +650,7 @@ namespace mcu {
             std::swap(flags, other.flags);
             std::swap(cap_, other.cap_);
             std::swap(size_, other.size_);
+            std::swap(dead_size_, other.dead_size_);
             std::swap(fullness_, other.fullness_);
             std::swap(virtual_cap, other.virtual_cap);
             std::swap(step_, other.step_);
@@ -667,11 +667,9 @@ namespace mcu {
     template<typename T>
     class unordered_set : public hash_kernel, public slot_handler {
     private:
-        static constexpr uint8_t MAX_CAP = 255;
-        static constexpr uint8_t INIT_CAP = 10;
-
         T* table = nullptr;
         uint8_t size_ = 0;
+        uint8_t dead_size_ = 0;     // used + tombstones
         uint8_t fullness_ = 92; //(%)       . virtual_cap = cap_ * fullness_ / 100
         uint8_t virtual_cap = 0; // virtual capacity
         uint8_t step_ = 0;
@@ -689,6 +687,7 @@ namespace mcu {
             memset(flags, 0, (newCap * 2 + 7) / 8);
 
             size_ = 0;
+            dead_size_ = 0;
             cap_ = newCap;
             virtual_cap = cap_to_virtual();
             step_ = calStep(newCap);
@@ -749,6 +748,7 @@ namespace mcu {
         {
             cap_ = other.cap_;
             size_ = other.size_;
+            dead_size_ = other.dead_size_;
             table = new T[cap_];
             for (uint8_t i = 0; i < cap_; ++i) {
                 if (getState(i) == slotState::Used)
@@ -765,6 +765,7 @@ namespace mcu {
         unordered_set(unordered_set&& other) noexcept : hash_kernel(),
         slot_handler(std::move(other)),  // ← steal flags & cap_,
         size_(other.size_),
+        dead_size_(other.dead_size_),
         fullness_(other.fullness_),
         virtual_cap(other.virtual_cap),
         step_(other.step_){
@@ -774,6 +775,7 @@ namespace mcu {
             other.fullness_ = 92;
             other.virtual_cap = 0;
             other.step_ = 0;
+            other.dead_size_ = 0;
         }
 
         /**
@@ -790,6 +792,7 @@ namespace mcu {
                 step_ = other.step_;
                 cap_ = other.cap_;
                 size_ = other.size_;
+                dead_size_ = other.dead_size_;
                 table = new T[cap_];
                 for (uint8_t i = 0; i < cap_; ++i) {
                     if (getState(i) == slotState::Used)
@@ -809,6 +812,7 @@ namespace mcu {
                 delete[] table;
                 slot_handler::operator=(std::move(other)); // steal flags & cap_
                 size_      = other.size_;
+                dead_size_ = other.dead_size_;
                 fullness_  = other.fullness_;
                 table      = other.table;
                 virtual_cap = other.virtual_cap;
@@ -816,6 +820,7 @@ namespace mcu {
                 // reset other
                 other.table = nullptr;
                 other.size_ = 0;
+                other.dead_size_ = 0;
                 other.cap_  = 0;
                 other.fullness_ = 92;
                 other.virtual_cap = 0;
@@ -908,26 +913,18 @@ namespace mcu {
          */
         template<typename U>
         bool insert(U&& value) noexcept {
-            if (is_full()) {
-                if (cap_ == MAX_CAP) return false;
-                uint16_t doubled = cap_ ? cap_ * 2: INIT_CAP;
-                if (doubled > MAX_CAP) doubled = MAX_CAP;
-                rehash(static_cast<uint8_t>(doubled));
+            if (dead_size_ >= virtual_cap) {
+                if (size_ == set_ability())
+                    return false;
+                uint16_t dbl = cap_ ? cap_ * 2: INIT_CAP;
+                if (dbl > MAX_CAP) dbl = MAX_CAP;
+                rehash(static_cast<uint8_t>(dbl));
             }
             
             uint8_t index = hashFunction(cap_, value, best_hashers_16[cap_ - 1]);
-            uint8_t attempts = 0;
-            bool saw_deleted = false;
             
             while (getState(index) != slotState::Empty) {
                 auto st = getState(index);
-                if (attempts++ == cap_) {
-                    if (saw_deleted) {
-                        rehash(cap_);
-                        return insert(std::forward<U>(value));
-                    }
-                    return false;
-                }
                 if(table[index] == value){
                     if(st == slotState::Used){
                         return false;       // duplicate
@@ -936,12 +933,12 @@ namespace mcu {
                         break;
                     }
                 }
-                if(st == slotState::Deleted){
-                    saw_deleted = true;
-                }
                 index = linearProbe(cap_, index, step_);
             }
-
+            slotState oldState = getState(index);
+            if(oldState == slotState::Empty){
+                ++dead_size_;
+            }
             table[index] = std::forward<U>(value);
             setState(index, slotState::Used);
             ++size_;
@@ -1158,6 +1155,7 @@ namespace mcu {
         void clear() noexcept {
             memset(flags, 0, (cap_ * 2 + 7) / 8);
             size_ = 0;
+            dead_size_ = 0;
         }
 
         /**
@@ -1180,6 +1178,7 @@ namespace mcu {
             std::swap(flags, other.flags);
             std::swap(cap_, other.cap_);
             std::swap(size_, other.size_);
+            std::swap(dead_size_, other.dead_size_);
             std::swap(fullness_, other.fullness_);
             std::swap(virtual_cap, other.virtual_cap);
             std::swap(step_, other.step_);

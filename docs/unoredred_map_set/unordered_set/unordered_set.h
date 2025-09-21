@@ -20,6 +20,7 @@ private:
 
     T* table = nullptr;
     uint8_t size_ = 0;
+    uint8_t dead_size_ = 0;     // used + tombstones
     uint8_t fullness_ = 92; //(%)       . virtual_cap = cap_ * fullness_ / 100
     uint8_t virtual_cap = 0; // virtual capacity
     uint8_t step_ = 0;
@@ -37,6 +38,7 @@ private:
         memset(flags, 0, (newCap * 2 + 7) / 8);
 
         size_ = 0;
+        dead_size_ = 0;
         cap_ = newCap;
         virtual_cap = cap_to_virtual();
         step_ = calStep(newCap);
@@ -97,6 +99,7 @@ public:
     {
         cap_ = other.cap_;
         size_ = other.size_;
+        dead_size_ = other.dead_size_;
         table = new T[cap_];
         for (uint8_t i = 0; i < cap_; ++i) {
             if (getState(i) == slotState::Used)
@@ -113,6 +116,7 @@ public:
     unordered_set(unordered_set&& other) noexcept : hash_kernel(),
     slot_handler(std::move(other)),  // ← steal flags & cap_,
     size_(other.size_),
+    dead_size_(other.dead_size_),
     fullness_(other.fullness_),
     virtual_cap(other.virtual_cap),
     step_(other.step_){
@@ -122,6 +126,7 @@ public:
         other.fullness_ = 92;
         other.virtual_cap = 0;
         other.step_ = 0;
+        other.dead_size_ = 0;
     }
 
     /**
@@ -138,6 +143,7 @@ public:
             step_ = other.step_;
             cap_ = other.cap_;
             size_ = other.size_;
+            dead_size_ = other.dead_size_;
             table = new T[cap_];
             for (uint8_t i = 0; i < cap_; ++i) {
                 if (getState(i) == slotState::Used)
@@ -157,6 +163,7 @@ public:
             delete[] table;
             slot_handler::operator=(std::move(other)); // steal flags & cap_
             size_      = other.size_;
+            dead_size_ = other.dead_size_;
             fullness_  = other.fullness_;
             table      = other.table;
             virtual_cap = other.virtual_cap;
@@ -164,6 +171,7 @@ public:
             // reset other
             other.table = nullptr;
             other.size_ = 0;
+            other.dead_size_ = 0;
             other.cap_  = 0;
             other.fullness_ = 92;
             other.virtual_cap = 0;
@@ -256,26 +264,18 @@ public:
      */
     template<typename U>
     bool insert(U&& value) noexcept {
-        if (is_full()) {
-            if (cap_ == MAX_CAP) return false;
-            uint16_t doubled = cap_ ? cap_ * 2: INIT_CAP;
-            if (doubled > MAX_CAP) doubled = MAX_CAP;
-            rehash(static_cast<uint8_t>(doubled));
+        if (dead_size_ >= virtual_cap) {
+            if (size_ == set_ability())
+                return false;
+            uint16_t dbl = cap_ ? cap_ * 2: INIT_CAP;
+            if (dbl > MAX_CAP) dbl = MAX_CAP;
+            rehash(static_cast<uint8_t>(dbl));
         }
         
         uint8_t index = hashFunction(cap_, value, best_hashers_16[cap_ - 1]);
-        uint8_t attempts = 0;
-        bool saw_deleted = false;
         
         while (getState(index) != slotState::Empty) {
             auto st = getState(index);
-            if (attempts++ == cap_) {
-                if (saw_deleted) {
-                    rehash(cap_);
-                    return insert(std::forward<U>(value));
-                }
-                return false;
-            }
             if(table[index] == value){
                 if(st == slotState::Used){
                     return false;       // duplicate
@@ -284,12 +284,12 @@ public:
                     break;
                 }
             }
-            if(st == slotState::Deleted){
-                saw_deleted = true;
-            }
             index = linearProbe(cap_, index, step_);
         }
-
+        slotState oldState = getState(index);
+        if(oldState == slotState::Empty){
+            ++dead_size_;
+        }
         table[index] = std::forward<U>(value);
         setState(index, slotState::Used);
         ++size_;
@@ -506,6 +506,7 @@ public:
     void clear() noexcept {
         memset(flags, 0, (cap_ * 2 + 7) / 8);
         size_ = 0;
+        dead_size_ = 0;
     }
 
     /**
@@ -528,6 +529,7 @@ public:
         std::swap(flags, other.flags);
         std::swap(cap_, other.cap_);
         std::swap(size_, other.size_);
+        std::swap(dead_size_, other.dead_size_);
         std::swap(fullness_, other.fullness_);
         std::swap(virtual_cap, other.virtual_cap);
         std::swap(step_, other.step_);

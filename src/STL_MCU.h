@@ -8,6 +8,8 @@
 #include <cassert>
 #include <utility>
 
+#define hashers best_hashers_16 // change to best_hashers_8 to save 255 bytes of disk space, but more collisions
+
 // #include <cstring>
 // #include <iostream>
 namespace mcu {
@@ -111,7 +113,7 @@ namespace mcu {
     // protected:
     public:
         int16_t getValue(V key) noexcept {
-            uint8_t index     = hashFunction(cap_, key, best_hashers_16[cap_ - 1]);
+            uint8_t index     = hashFunction(cap_, key, hashers[cap_ - 1]);
             uint8_t attempts= 0;
 
             while(getState(index) != slotState::Empty) {
@@ -134,7 +136,7 @@ namespace mcu {
             return -1;
         }
         int16_t getValue(V key) const noexcept {
-            uint8_t index     = hashFunction(cap_, key, best_hashers_16[cap_ - 1]);
+            uint8_t index     = hashFunction(cap_, key, hashers[cap_ - 1]);
             uint8_t attempts= 0;
 
             while(getState(index) != slotState::Empty) {
@@ -346,7 +348,7 @@ namespace mcu {
             }
 
             V key       = p.first;
-            uint8_t index     = hashFunction(cap_, key, best_hashers_16[cap_ - 1]);
+            uint8_t index     = hashFunction(cap_, key, hashers[cap_ - 1]);
 
             while (getState(index) != slotState::Empty) {
                 slotState st = getState(index);
@@ -407,7 +409,7 @@ namespace mcu {
          * @return true if an element was removed, false otherwise.
          */
         bool erase(V key) noexcept {
-            uint8_t index = hashFunction(cap_, key, best_hashers_16[cap_ - 1]);
+            uint8_t index = hashFunction(cap_, key, hashers[cap_ - 1]);
             uint8_t attempt = 0;
 
             while (getState(index) != slotState::Empty) {
@@ -433,7 +435,7 @@ namespace mcu {
          * @return Iterator to the element if found, otherwise end().
          */
         iterator find(V key) noexcept {
-            uint8_t index = hashFunction(cap_, key, best_hashers_16[cap_ - 1]);
+            uint8_t index = hashFunction(cap_, key, hashers[cap_ - 1]);
             uint8_t attempt = 0;
             // Search for a cell whose is used and matched key
             slotState st = getState(index);
@@ -921,7 +923,7 @@ namespace mcu {
                 rehash(static_cast<uint8_t>(dbl));
             }
             
-            uint8_t index = hashFunction(cap_, value, best_hashers_16[cap_ - 1]);
+            uint8_t index = hashFunction(cap_, value, hashers[cap_ - 1]);
             
             while (getState(index) != slotState::Empty) {
                 auto st = getState(index);
@@ -951,7 +953,7 @@ namespace mcu {
          * @return true if an element was removed, false otherwise.
          */
         bool erase(const T& value) noexcept {
-            uint8_t index = hashFunction(cap_, value, best_hashers_16[cap_ - 1]);
+            uint8_t index = hashFunction(cap_, value, hashers[cap_ - 1]);
             uint8_t attempt = 0;
             while(getState(index) != slotState::Empty){
                 if(attempt++ == cap_){
@@ -978,7 +980,7 @@ namespace mcu {
          * @return Iterator to the element if found, otherwise end().
          */
         iterator find(const T& value) noexcept {
-            uint8_t index = hashFunction(cap_, value, best_hashers_16[cap_ - 1]);
+            uint8_t index = hashFunction(cap_, value, hashers[cap_ - 1]);
             uint8_t attempt = 0;
             while(getState(index) != slotState::Empty){
                 if(attempt++ >= cap_){

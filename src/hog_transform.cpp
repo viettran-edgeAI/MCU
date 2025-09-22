@@ -1,22 +1,189 @@
 #include "hog_transform.h"
-#include <FS.h>
-#include <SPIFFS.h>
 
-HOGDescriptorMCU::HOGDescriptorMCU(const Params& p) : params(p) {}HOGDescriptorMCU::Params calculateOptimalHOGParams(uint8_t image_size, uint8_t desired_features);
+// Default constructor with optimal parameters for 32x32 images
+HOG_MCU::HOG_MCU() : processed_image_buffer(nullptr) {
+    params.img_width = 32;
+    params.img_height = 32;
+    params.cell_size = 8;
+    params.block_size = 16;
+    params.block_stride = 6;
+    params.nbins = 4;
+    
+    // Set default image processing configuration
+    img_config.input_format = ImageProcessing::PixelFormat::GRAYSCALE;
+    img_config.output_format = ImageProcessing::PixelFormat::GRAYSCALE;
+    img_config.input_width = 320;
+    img_config.input_height = 240;
+    img_config.output_width = 32;
+    img_config.output_height = 32;
+    img_config.resize_method = ImageProcessing::ResizeMethod::BILINEAR;
+    img_config.maintain_aspect_ratio = false;
+    
+    initializeBuffers();
+}
 
-void HOGDescriptorMCU::compute(const uint8_t* grayImage, mcu::vector<float>& outVec) {
+// Constructor with custom parameters
+HOG_MCU::HOG_MCU(const Params& p) : params(p), processed_image_buffer(nullptr) {
+    // Set default image processing configuration
+    img_config.input_format = ImageProcessing::PixelFormat::GRAYSCALE;
+    img_config.output_format = ImageProcessing::PixelFormat::GRAYSCALE;
+    img_config.input_width = 320;
+    img_config.input_height = 240;
+    img_config.output_width = params.img_width;
+    img_config.output_height = params.img_height;
+    img_config.resize_method = ImageProcessing::ResizeMethod::BILINEAR;
+    img_config.maintain_aspect_ratio = false;
+    
+    initializeBuffers();
+}
+
+HOG_MCU::~HOG_MCU() {
+    cleanupBuffers();
+}
+
+void HOG_MCU::setImageProcessingConfig(const ImageProcessing::ProcessingConfig& config) {
+    img_config = config;
+    
+    // Update HOG parameters to match output dimensions
+    params.img_width = config.output_width;
+    params.img_height = config.output_height;
+    
+    // Reinitialize buffers with new dimensions
+    cleanupBuffers();
+    initializeBuffers();
+}
+
+const ImageProcessing::ProcessingConfig& HOG_MCU::getImageProcessingConfig() const {
+    return img_config;
+}
+
+void HOG_MCU::transform(const void* cameraBuffer) {
+    features.clear();
+    
+    if (!cameraBuffer || !processed_image_buffer) {
+        return;
+    }
+    
+    // Process the camera buffer (format conversion + resizing)
+    if (ImageProcessing::processImage(cameraBuffer, img_config, processed_image_buffer)) {
+        compute(processed_image_buffer);
+    }
+}
+
+void HOG_MCU::transformGrayscale(const uint8_t* grayscaleImage) {
+    features.clear();
+    
+    if (!grayscaleImage) {
+        return;
+    }
+    
+    // If the input is already the correct size, use it directly
+    if (img_config.input_width == params.img_width && 
+        img_config.input_height == params.img_height) {
+        compute(grayscaleImage);
+    } else {
+        // Need to resize the grayscale image
+        if (processed_image_buffer) {
+            if (ImageProcessing::resizeBilinear(grayscaleImage, 
+                                              img_config.input_width, img_config.input_height,
+                                              processed_image_buffer, 
+                                              params.img_width, params.img_height)) {
+                compute(processed_image_buffer);
+            }
+        }
+    }
+}
+
+const mcu::b_vector<float, 144>& HOG_MCU::getFeatures() const {
+    return features;
+}
+
+void HOG_MCU::set_config(int img_width, int img_height, int cell_size, int block_size, int block_stride, int nbins) {
+    params.img_width = img_width;
+    params.img_height = img_height;
+    params.cell_size = cell_size;
+    params.block_size = block_size;
+    params.block_stride = block_stride;
+    params.nbins = nbins;
+    
+    // Update image processing output dimensions
+    img_config.output_width = img_width;
+    img_config.output_height = img_height;
+    
+    // Reinitialize buffers
+    cleanupBuffers();
+    initializeBuffers();
+}
+
+void HOG_MCU::setConfig(const Config& config) {
+    // Configure image processing
+    img_config.input_format = config.input_format;
+    img_config.output_format = ImageProcessing::PixelFormat::GRAYSCALE;
+    img_config.input_width = config.input_width;
+    img_config.input_height = config.input_height;
+    img_config.output_width = config.hog_img_width;
+    img_config.output_height = config.hog_img_height;
+    img_config.resize_method = config.resize_method;
+    img_config.maintain_aspect_ratio = false;
+    
+    // Configure HOG parameters
+    params.img_width = config.hog_img_width;
+    params.img_height = config.hog_img_height;
+    params.cell_size = config.cell_size;
+    params.block_size = config.block_size;
+    params.block_stride = config.block_stride;
+    params.nbins = config.nbins;
+    
+    // Reinitialize buffers with new configuration
+    cleanupBuffers();
+    initializeBuffers();
+}
+
+void HOG_MCU::setupForESP32CAM(ImageProcessing::PixelFormat input_format, int input_width, int input_height) {
+    Config config(input_format, input_width, input_height);
+    // Use default HOG parameters (32x32, cell_size=8, block_size=16, block_stride=6, nbins=4)
+    setConfig(config);
+}
+
+void HOG_MCU::initializeBuffers() {
+    size_t buffer_size = params.img_width * params.img_height;
+    if (buffer_size > 0) {
+        processed_image_buffer = new uint8_t[buffer_size];
+        if (!processed_image_buffer) {
+            Serial.println("Error: Failed to allocate image processing buffer");
+        }
+    }
+}
+
+void HOG_MCU::cleanupBuffers() {
+    if (processed_image_buffer) {
+        delete[] processed_image_buffer;
+        processed_image_buffer = nullptr;
+    }
+}
+
+void HOG_MCU::compute(const uint8_t* grayImage) {
     int numBlocksY = (params.img_height - params.block_size) / params.block_stride + 1;
     int numBlocksX = (params.img_width - params.block_size) / params.block_stride + 1;
 
-    outVec.reserve(numBlocksX * numBlocksY * (4 * params.nbins));
-
     for (int by = 0; by < numBlocksY; ++by) {
         for (int bx = 0; bx < numBlocksX; ++bx) {
-            mcu::vector<float> blockHist(params.nbins * 4, 0.0f);
+            mcu::b_vector<float, 16> blockHist; // 4 cells * 4 bins = 16 features per block
+            blockHist.clear();
+            
+            // Initialize block histogram
+            for (int i = 0; i < params.nbins * 4; ++i) {
+                blockHist.push_back(0.0f);
+            }
 
             for (int cy = 0; cy < 2; ++cy) {
                 for (int cx = 0; cx < 2; ++cx) {
-                    mcu::vector<float> hist(params.nbins, 0.0f);
+                    mcu::b_vector<float, 4> hist; // nbins = 4
+                    hist.clear();
+                    for (int i = 0; i < params.nbins; ++i) {
+                        hist.push_back(0.0f);
+                    }
+                    
                     int startX = bx * params.block_stride + cx * params.cell_size;
                     int startY = by * params.block_stride + cy * params.cell_size;
 
@@ -43,193 +210,37 @@ void HOGDescriptorMCU::compute(const uint8_t* grayImage, mcu::vector<float>& out
                         }
                     }
 
-                    for (int i = 0; i < params.nbins; ++i)
+                    for (int i = 0; i < params.nbins; ++i) {
                         blockHist[(cy * 2 + cx) * params.nbins + i] = hist[i];
+                    }
                 }
             }
 
+            // Normalize block histogram
             float norm = 0.0f;
-            for (float v : blockHist) norm += v * v;
+            for (int i = 0; i < blockHist.size(); ++i) {
+                norm += blockHist[i] * blockHist[i];
+            }
             norm = sqrt(norm + 1e-6f);
-            for (float& v : blockHist) v /= norm;
+            for (int i = 0; i < blockHist.size(); ++i) {
+                blockHist[i] /= norm;
+            }
 
-            outVec.insert(outVec.end(), blockHist.begin(), blockHist.end());
+            // Add normalized block features to feature vector
+            for (int i = 0; i < blockHist.size(); ++i) {
+                if (features.size() < 144) { // Ensure we don't exceed capacity
+                    features.push_back(blockHist[i]);
+                }
+            }
         }
     }
 }
 
-float HOGDescriptorMCU::computeGradientMagnitude(int gx, int gy) {
+float HOG_MCU::computeGradientMagnitude(int gx, int gy) {
     return sqrt(gx * gx + gy * gy);
 }
 
-float HOGDescriptorMCU::computeGradientAngle(int gx, int gy) {
+float HOG_MCU::computeGradientAngle(int gx, int gy) {
     return atan2(gy, gx) * 180.0f / PI;
-}
-
-// Helper: extract label from filename (expects format: ..._<label>_<sample>.txt)
-static float extractLabelFromFilename(const char* filename) {
-    // Find last '/' or '\\'
-    const char* base = filename;
-    for (const char* p = filename; *p; ++p) {
-        if (*p == '/' || *p == '\\') base = p + 1;
-    }
-    // Find first '_' after dataset name
-    const char* first_ = strchr(base, '_');
-    if (!first_) return -1;
-    const char* second_ = strchr(first_ + 1, '_');
-    if (!second_) return -1;
-    // Extract label substring
-    int label = 0;
-    for (const char* p = first_ + 1; p < second_; ++p) {
-        if (*p < '0' || *p > '9') return -1;
-        label = label * 10 + (*p - '0');
-    }
-    return (float)label;
-}
-
-mcu::vector<float> processImageToCSV(const uint8_t* imageData, int imageSize, float label, 
-                      HOGDescriptorMCU& hog, const char* csvFilePath) {
-    mcu::vector<float> features;
-
-    // Compute HOG features
-    hog.compute(imageData, features);
-
-    // Append to CSV file if path is provided
-    if (csvFilePath && strlen(csvFilePath) > 0) {
-        File file = SPIFFS.open(csvFilePath, FILE_APPEND);
-        if (!file) {
-            Serial.println("Error: Cannot open CSV file for writing");
-            return features;
-        }
-
-        // Write label first, then features
-        file.print(label, 1);
-        for (size_t i = 0; i < features.size(); ++i) {
-            file.print(",");
-            file.print(features[i], 6);
-        }
-        file.println();
-        file.close();
-        Serial.println(" features written to CSV");
-    }
-
-    Serial.print("Image processed: ");
-    Serial.print(features.size());
-
-    return features;
-}
-
-HOGDescriptorMCU::Params calculateOptimalHOGParams(uint8_t image_size, uint8_t desired_features) {
-    HOGDescriptorMCU::Params params;
-    params.img_width = image_size;
-    params.img_height = image_size;
-    
-    // Pre-calculated optimal configurations for common cases
-    // Format: {cell_size, block_stride, nbins} -> approximate features
-    
-    if (image_size == 32) {
-        if (desired_features <= 36) {
-            // 32x32: 6 features per block, 6 blocks -> 36 features
-            params.cell_size = 16;
-            params.block_stride = 16;
-            params.nbins = 6;
-        } else if (desired_features <= 96) {
-            // 32x32: 24 features per block, 4 blocks -> 96 features  
-            params.cell_size = 8;
-            params.block_stride = 16;
-            params.nbins = 6;
-        } else {
-            // 32x32: 24 features per block, 9 blocks -> 216 features
-            params.cell_size = 8;
-            params.block_stride = 8;
-            params.nbins = 6;
-        }
-    } else if (image_size == 48) {
-        if (desired_features <= 64) {
-            // 48x48: 16 features per block, 4 blocks -> 64 features
-            params.cell_size = 12;
-            params.block_stride = 24;
-            params.nbins = 4;
-        } else if (desired_features <= 144) {
-            // 48x48: 16 features per block, 9 blocks -> 144 features
-            params.cell_size = 8;
-            params.block_stride = 16;
-            params.nbins = 4;
-        } else {
-            // 48x48: 24 features per block, 16 blocks -> 384 features
-            params.cell_size = 6;
-            params.block_stride = 12;
-            params.nbins = 6;
-        }
-    } else if (image_size == 64) {
-        if (desired_features <= 96) {
-            // 64x64: 24 features per block, 4 blocks -> 96 features
-            params.cell_size = 16;
-            params.block_stride = 32;
-            params.nbins = 6;
-        } else if (desired_features <= 384) {
-            // 64x64: 24 features per block, 16 blocks -> 384 features
-            params.cell_size = 8;
-            params.block_stride = 16;
-            params.nbins = 6;
-        } else {
-            // 64x64: 24 features per block, 49 blocks -> 1176 features
-            params.cell_size = 8;
-            params.block_stride = 8;
-            params.nbins = 6;
-        }
-    } else {
-        // Default fallback configuration
-        params.cell_size = image_size / 4;
-        params.block_stride = image_size / 2;
-        params.nbins = 6;
-    }
-    
-    params.block_size = params.cell_size * 2; // Always 2x2 cells per block
-    return params;
-}
-
-
-// Simplified overloaded function
-mcu::vector<float> processImageToCSV(const uint8_t* imageData, uint8_t image_size, uint8_t desired_features, 
-                      const char* inputFileName, const char* csvFilePath) {
-    mcu::vector<float> features;
-    int imageSize = image_size * image_size;
-
-    // Extract label from filename
-    float label = extractLabelFromFilename(inputFileName);
-
-    // Calculate optimal HOG parameters
-    HOGDescriptorMCU::Params params = calculateOptimalHOGParams(image_size, desired_features);
-
-    // Create HOG descriptor with calculated parameters
-    HOGDescriptorMCU hog(params);
-
-    // Compute HOG features
-    hog.compute(imageData, features);
-
-    // Append to CSV file
-    if (csvFilePath && strlen(csvFilePath) > 0) {
-        File file = SPIFFS.open(csvFilePath, FILE_APPEND);
-        if (!file) {
-            Serial.println("Error: Cannot open CSV file for writing");
-            return features;
-        }
-
-        // Write label first, then features
-        file.print(label, 1);
-        for (float f : features) {
-            file.print(",");
-            file.print(f, 6);
-        }
-        file.println();
-        file.close();
-        Serial.println(" features written to CSV");
-    }
-
-    Serial.print("Image processed: ");
-    Serial.print(features.size());
-
-    return features;
 }
 

@@ -4220,34 +4220,39 @@ namespace mcu {
                 tree_nodes.clear();
                 tree_leaves.clear();
             }
-            size_t total_nodes(){
+            size_t total_nodes() const {
                 size_t total = 0;
                 for(auto& n : tree_nodes) total += n;
                 return total;
             }
 
-            size_t total_leaves(){
+            size_t total_leaves() const {
                 size_t total = 0;
                 for(auto& n : tree_leaves) total += n;
                 return total;
             }
 
-            float avg_depth(){
+            float avg_depth() const {
                 float total = 0;
                 for(auto& d : tree_depths) total += d;
                 return total / tree_depths.size();
             }
 
-            float avg_nodes(){
+            float avg_nodes() const {
                 float total = 0;
                 for(auto& n : tree_nodes) total += n;
                 return total / tree_nodes.size();
             }
 
-            float avg_leaves(){
+            float avg_leaves() const {
                 float total = 0;
                 for(auto& n : tree_leaves) total += n;
                 return total / tree_leaves.size();
+            }
+            uint16_t max_depth_tree() const {
+                uint16_t max_d = 0;
+                for(auto& d : tree_depths) if(d > max_d) max_d = d;
+                return max_d;
             }
             void add_tree(Rf_tree&& tree){
                 tree_depths.push_back(tree.getTreeDepth());

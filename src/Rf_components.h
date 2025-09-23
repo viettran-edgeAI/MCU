@@ -4844,13 +4844,30 @@ namespace mcu {
         }
 
         // Write prediction which given actual label (0 < actual_label < 255) to the inference log file
+        // New format: magic (4 bytes) + prediction_count (4 bytes) + pairs of (predicted_label, actual_label) as uint8_t each
         void write_to_infer_log(const char* infer_log_file, int num_labels){
             if(buffer.empty()) return;
             
             // Check if file exists to determine if header needs to be written
             bool file_exists = SPIFFS.exists(infer_log_file);
-            File file = SPIFFS.open(infer_log_file, file_exists ? FILE_APPEND : FILE_WRITE);
+            uint32_t current_prediction_count = 0;
             
+            // If file exists, read current prediction count from header
+            if(file_exists) {
+                File read_file = SPIFFS.open(infer_log_file, FILE_READ);
+                if(read_file && read_file.size() >= 8) {
+                    uint8_t magic_bytes[4];
+                    read_file.read(magic_bytes, 4);
+                    // Verify magic number
+                    if(magic_bytes[0] == 0x49 && magic_bytes[1] == 0x4E && 
+                       magic_bytes[2] == 0x46 && magic_bytes[3] == 0x4C) {
+                        read_file.read((uint8_t*)&current_prediction_count, 4);
+                    }
+                }
+                read_file.close();
+            }
+            
+            File file = SPIFFS.open(infer_log_file, file_exists ? FILE_APPEND : FILE_WRITE);
             if(!file) {
                 Serial.printf("❌ Failed to open inference log file: %s\n", infer_log_file);
                 return;
@@ -4858,68 +4875,87 @@ namespace mcu {
             
             // Write header if new file
             if(!file_exists) {
-                // Magic number (4 bytes) + num_labels (1 byte) + reserved space for prediction counts per label
-                uint32_t magic = 0x494E4652; // "INFR" in hex
-                file.write((uint8_t*)&magic, 4);
-                file.write((uint8_t*)&num_labels, 1);
-                
-                // Write initial prediction counts (2 bytes per label - total predictions for each label)
-                for(int i = 0; i < num_labels; i++) {
-                    uint16_t count = 0;
-                    file.write((uint8_t*)&count, 2);
+                // Magic number (4 bytes): 'I', 'N', 'F', 'L' (INFL)
+                uint8_t magic_bytes[4] = {0x49, 0x4E, 0x46, 0x4C};
+                size_t written = file.write(magic_bytes, 4);
+                if(written != 4) {
+                    Serial.printf("❌ Failed to write magic number: wrote %d bytes instead of 4\n", written);
                 }
+                
+                // Write initial prediction count (4 bytes)
+                uint32_t initial_count = 0;
+                written = file.write((uint8_t*)&initial_count, 4);
+                if(written != 4) {
+                    Serial.printf("❌ Failed to write prediction count: wrote %d bytes instead of 4\n", written);
+                }
+                
+                file.flush();
+                Serial.printf("✅ Wrote inference log header: magic=[0x%02X,0x%02X,0x%02X,0x%02X], count=%u\n", 
+                             magic_bytes[0], magic_bytes[1], magic_bytes[2], magic_bytes[3], initial_count);
             }
             
-            // Collect prediction results for valid samples
-            b_vector<uint8_t> prediction_bits;
-            b_vector<uint8_t> label_counts_increment(num_labels, 0);
+            // Collect and write prediction pairs for valid samples
+            b_vector<uint8_t> prediction_pairs;
+            uint32_t new_predictions = 0;
             
             for(uint16_t i = 0; i < buffer.size() && i < actual_labels.size(); i++) {
-                if(actual_labels[i] < 255 && actual_labels[i] < num_labels) {
+                if(actual_labels[i] < 255) { // Valid actual label provided
                     uint8_t predicted_label = buffer[i].label;
                     uint8_t actual_label = actual_labels[i];
                     
-                    // Prediction is correct if predicted == actual
-                    bool is_correct = (predicted_label == actual_label);
-                    prediction_bits.push_back(is_correct ? 1 : 0);
-                    label_counts_increment[actual_label]++;
+                    // Write predicted_label followed by actual_label
+                    prediction_pairs.push_back(predicted_label);
+                    prediction_pairs.push_back(actual_label);
+                    new_predictions++;
                 }
             }
             
-            if(!prediction_bits.empty()) {
-                // Pack prediction bits into bytes (8 predictions per byte)
-                b_vector<uint8_t> packed_predictions;
-                for(size_t i = 0; i < prediction_bits.size(); i += 8) {
-                    uint8_t packed_byte = 0;
-                    for(int bit = 0; bit < 8 && (i + bit) < prediction_bits.size(); bit++) {
-                        if(prediction_bits[i + bit]) {
-                            packed_byte |= (1 << bit);
+            if(!prediction_pairs.empty()) {
+                // Write prediction pairs to end of file
+                size_t written = file.write(prediction_pairs.data(), prediction_pairs.size());
+                if(written != prediction_pairs.size()) {
+                    Serial.printf("❌ Failed to write prediction pairs: wrote %d bytes instead of %d\n", 
+                                 written, prediction_pairs.size());
+                }
+                
+                file.flush();
+                file.close();
+                
+                // Update prediction count in header - read entire file and rewrite
+                File read_file = SPIFFS.open(infer_log_file, FILE_READ);
+                if(read_file) {
+                    size_t file_size = read_file.size();
+                    b_vector<uint8_t> file_data(file_size);
+                    read_file.read(file_data.data(), file_size);
+                    read_file.close();
+                    
+                    // Update prediction count in the header (bytes 4-7)
+                    uint32_t updated_count = current_prediction_count + new_predictions;
+                    memcpy(&file_data[4], &updated_count, 4);
+                    
+                    // Write back the entire file
+                    File write_file = SPIFFS.open(infer_log_file, FILE_WRITE);
+                    if(write_file) {
+                        write_file.write(file_data.data(), file_data.size());
+                        write_file.flush();
+                        write_file.close();
+                        
+                        if constexpr (RF_DEBUG_LEVEL >= 2) {
+                            Serial.printf("✅ Added %u prediction pairs to log (total: %u)\n", 
+                                         new_predictions, updated_count);
                         }
                     }
-                    packed_predictions.push_back(packed_byte);
                 }
-                
-                // Write packed prediction data
-                file.write(packed_predictions.data(), packed_predictions.size());
-                
-                // Update prediction counts in header
-                file.seek(5); // Skip magic (4) + num_labels (1)
-                for(int i = 0; i < num_labels; i++) {
-                    uint16_t current_count;
-                    file.read((uint8_t*)&current_count, 2);
-                    file.seek(file.position() - 2); // Go back to overwrite
-                    current_count += label_counts_increment[i];
-                    file.write((uint8_t*)&current_count, 2);
-                }
+            } else {
+                file.close();
             }
-            
-            file.close();
             
             // Trim file if it exceeds max size
             trim_log_file(infer_log_file);
         }
 
         // trim log file if it exceeds max size (MAX_INFER_LOGFILE_SIZE)
+        // New format: magic (4 bytes) + prediction_count (4 bytes) + pairs of (predicted_label, actual_label)
         void trim_log_file(const char* infer_log_file) {
             if(!SPIFFS.exists(infer_log_file)) return;
             
@@ -4935,47 +4971,78 @@ namespace mcu {
             file = SPIFFS.open(infer_log_file, FILE_READ);
             if(!file) return;
             
-            // Calculate how much data to keep (keep last MAX_INFER_LOGFILE_SIZE/2 bytes to have room for growth)
-            size_t keep_size = MAX_INFER_LOGFILE_SIZE / 2;
-            size_t skip_size = file_size - keep_size;
+            // Read and verify header
+            uint8_t magic_bytes[4];
+            uint32_t total_predictions;
             
-            // Read header first to preserve it
-            uint32_t magic;
-            uint8_t num_labels;
-            file.read((uint8_t*)&magic, 4);
-            file.read((uint8_t*)&num_labels, 1);
-            
-            // Read prediction counts
-            b_vector<uint16_t> prediction_counts(num_labels);
-            for(int i = 0; i < num_labels; i++) {
-                file.read((uint8_t*)&prediction_counts[i], 2);
+            if(file.read(magic_bytes, 4) != 4 || 
+               magic_bytes[0] != 0x49 || magic_bytes[1] != 0x4E || 
+               magic_bytes[2] != 0x46 || magic_bytes[3] != 0x4C) {
+                file.close();
+                Serial.printf("❌ Invalid magic number in log file: %s\n", infer_log_file);
+                return;
             }
             
-            size_t header_size = 5 + (num_labels * 2); // magic + num_labels + counts
+            if(file.read((uint8_t*)&total_predictions, 4) != 4) {
+                file.close();
+                Serial.printf("❌ Failed to read prediction count from log file: %s\n", infer_log_file);
+                return;
+            }
+            
+            size_t header_size = 8; // magic (4) + prediction_count (4)
+            size_t data_size = file_size - header_size;
+            size_t prediction_pairs_count = data_size / 2; // Each prediction is 2 bytes (predicted + actual)
+            
+            // Calculate how many prediction pairs to keep
+            size_t max_data_size = MAX_INFER_LOGFILE_SIZE - header_size;
+            size_t max_pairs_to_keep = max_data_size / 2;
+            
+            if(prediction_pairs_count <= max_pairs_to_keep) {
+                file.close();
+                return; // No trimming needed
+            }
+            
+            // Keep the most recent prediction pairs
+            size_t pairs_to_keep = max_pairs_to_keep / 2; // Keep half to allow room for growth
+            size_t pairs_to_skip = prediction_pairs_count - pairs_to_keep;
+            size_t bytes_to_skip = pairs_to_skip * 2;
             
             // Skip to the position we want to keep from
-            file.seek(skip_size);
+            file.seek(header_size + bytes_to_skip);
             
-            // Read remaining data
-            size_t remaining_data_size = file_size - skip_size;
+            // Read remaining prediction pairs
+            size_t remaining_data_size = pairs_to_keep * 2;
             b_vector<uint8_t> remaining_data(remaining_data_size);
-            file.read(remaining_data.data(), remaining_data_size);
+            size_t bytes_read = file.read(remaining_data.data(), remaining_data_size);
             file.close();
+            
+            if(bytes_read != remaining_data_size) {
+                Serial.printf("❌ Failed to read remaining data: read %d bytes instead of %d\n", 
+                             bytes_read, remaining_data_size);
+                return;
+            }
             
             // Rewrite file with header and trimmed data
             file = SPIFFS.open(infer_log_file, FILE_WRITE);
-            if(!file) return;
-            
-            // Write header
-            file.write((uint8_t*)&magic, 4);
-            file.write((uint8_t*)&num_labels, 1);
-            for(int i = 0; i < num_labels; i++) {
-                file.write((uint8_t*)&prediction_counts[i], 2);
+            if(!file) {
+                Serial.printf("❌ Failed to reopen log file for writing: %s\n", infer_log_file);
+                return;
             }
             
-            // Write remaining data
+            // Write header with updated prediction count
+            file.write(magic_bytes, 4);
+            uint32_t new_prediction_count = pairs_to_keep;
+            file.write((uint8_t*)&new_prediction_count, 4);
+            
+            // Write remaining prediction pairs
             file.write(remaining_data.data(), remaining_data.size());
+            file.flush();
             file.close();
+            
+            if constexpr (RF_DEBUG_LEVEL >= 2) {
+                Serial.printf("✅ Trimmed log file: %u -> %u predictions (removed %u oldest)\n", 
+                             total_predictions, new_prediction_count, pairs_to_skip);
+            }
         }
 
         // Public method to flush pending data when buffer is full or on demand

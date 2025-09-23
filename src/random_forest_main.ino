@@ -1,33 +1,31 @@
 #define DEV_STAGE         // development stage - enable test_data 
-#define RF_DEBUG_LEVEL 2
+#define RF_DEBUG_LEVEL 1
 
 #include "Rf_components.h"
 
 using namespace mcu;
 
 class RandomForest{
-public:
     String model_name;  // base_name
 
     Rf_data base_data;
     Rf_data train_data;
     Rf_data test_data;
-    Rf_data validation_data; // validation data, used for evaluating the model
+    Rf_data validation_data;
 
     Rf_base base;
     Rf_config config;
     Rf_logger logger;
     Rf_random random_generator;
     Rf_categorizer categorizer; 
-    Rf_node_predictor node_predictor; // Node predictor number of nodes required for a tree based on min_split and max_depth
+    Rf_node_predictor  node_pred;
+    Rf_pending_data pending_data; 
+    Rf_tree_container forest_container; 
 
-private:
-    Rf_tree_container forest_container; // Tree container managing all trees and forest state
-    b_vector<ID_vector<uint16_t,2>> dataList; // each ID_vector stores sample IDs of a sub_dataset, reference to index of allSamples vector in train_data
-    unordered_map<uint8_t, uint8_t> predictClass;   // for predicting class of a sample
-
-    Rf_pending_data pending_data; // pending data waiting for true labels from feedback action 
-    bool clean_yet = false; 
+    b_vector<ID_vector<uint16_t,2>> dataList; 
+    unordered_map<uint8_t, uint8_t> predictClass;  
+    bool clean_yet = false;
+    bool print_log = false;
 
 public:
     RandomForest(){};
@@ -35,27 +33,25 @@ public:
         this->model_name = String(model_name);
 
         // initial components
+        base.init(model_name); 
         logger.init(model_name);
-        base.init(model_name); // Initialize base with the provided base name
         config.init(base.get_configFile());
         categorizer.init(base.get_ctgFile());
+        node_pred.init(base.get_nodePredictFile());
         random_generator.init(config.random_seed, true);
-        node_predictor.init(base.get_nodePredictFile());
+        predictClass.reserve(config.num_labels);
 
         // load resources
-        config.loadConfig();  // load config file
-        categorizer.loadCategorizer(); // load categorizer
-        node_predictor.loadPredictor(); // load node predictor
+        config.loadConfig(); 
+        node_pred.loadPredictor();
+        categorizer.loadCategorizer(); 
         forest_container.init(this->model_name, config.num_trees, config.num_labels, base, logger);
 
         // init base data (make a clone of base_data to avoid modifying original)
-        // cloneFile(base.get_base_data().c_str(), temp_base_data);
-        // base_data.init(temp_base_data);
+        cloneFile(base.get_base_data().c_str(), temp_base_data);
+        base_data.init(temp_base_data);
 
-        base_data.init(base.get_base_data().c_str());
-
-
-        predictClass.reserve(config.num_labels);
+        if constexpr (RF_DEBUG_LEVEL > 2) print_log = true;
     }
     
     // Enhanced destructor
@@ -65,22 +61,34 @@ public:
 
     void clean_forest(){
         if(!clean_yet){
-            Serial.println("🧹 Cleaning files... ");
-            // clear all Rf_data
+            if constexpr (RF_DEBUG_LEVEL > 0)  Serial.println("🧹 Cleaning files... ");
+
             //clone temp data back to base data after add new samples
-            // remove(base.get_base_data().c_str());
-            // cloneFile(temp_base_data, base.get_base_data().c_str());
-            // base_data.purgeData();
+            // if temp_base_data file size > original base_data file size, replace original file
+            File tempFile = SPIFFS.open(temp_base_data, FILE_READ);
+            size_t tempSize = tempFile ? tempFile.size() : 0;
+            tempFile.close();
+            File baseFile = SPIFFS.open(base.get_base_data().c_str(), FILE_READ);
+            size_t baseSize = baseFile ? baseFile.size() : 0;
+            baseFile.close();
+            if(tempSize > baseSize && config.enable_retrain){
+                remove(base.get_base_data().c_str());
+                cloneFile(temp_base_data, base.get_base_data().c_str());
+            }
+
+            // clear all Rf_data
+            base_data.purgeData();
             train_data.purgeData();
             test_data.purgeData();
             validation_data.purgeData();
             // re_train node predictor after each training session
-            node_predictor.re_train(); 
+            node_pred.re_train(); 
             clean_yet = true;
         }
     }
 
     void build_model(){
+        if constexpr (RF_DEBUG_LEVEL > 0)  Serial.println("🌲 Building model... ");
         // initialize data
         dataList.reserve(config.num_trees);
         train_data.init("/train_data.bin", config.num_features);
@@ -88,48 +96,42 @@ public:
         if(config.use_validation()){
             validation_data.init("/valid_data.bin", config.num_features);
         }
-        logger.m_log("forest init");
+        logger.m_log("forest init", print_log);
 
         // data splitting
         vector<pair<float, Rf_data*>> dest;
+        dest.reserve(3);
         dest.push_back(make_pair(config.train_ratio, &train_data));
         dest.push_back(make_pair(config.test_ratio, &test_data));
         if(config.use_validation()){
             dest.push_back(make_pair(config.valid_ratio, &validation_data));
         }
-        logger.m_log("before split data");
         size_t a1 = logger.drop_anchor();
         splitData(base_data, dest);
-        size_t a2 = logger.drop_anchor();
-        logger.t_log("split time", a1, a2, "s");
+        dest.clear(); 
         ClonesData();
-        size_t a3 = logger.drop_anchor();
-        logger.t_log("clones time", a2, a3, "s");
         MakeForest();
-        size_t a4 = logger.drop_anchor();
-        logger.t_log("make forest", a3, a4, "s");
     }
 
 private:
     void MakeForest(){
+        size_t start = logger.drop_anchor();
         // Clear any existing forest first
         forest_container.clearForest();
-        logger.m_log("START MAKING FOREST...");
+        logger.m_log("start building forest", print_log, false);
+        if constexpr (RF_DEBUG_LEVEL > 0)  Serial.println("<- building forest ->");
 
         // Get queue_nodes reference from container
         auto& queue_nodes = forest_container.getQueueNodes();
         
         // pre_allocate necessary resources
         queue_nodes.clear();
-        uint16_t estimated_nodes = node_predictor.estimate(config.min_split, config.max_depth) * 100 / node_predictor.accuracy;
-        uint16_t peak_nodes = min(120, estimated_nodes * node_predictor.peak_percent / 100);
+        uint16_t estimated_nodes = node_pred.estimate(config.min_split, config.max_depth) * 100 / node_pred.accuracy;
+        uint16_t peak_nodes = min(120, estimated_nodes * node_pred.peak_percent / 100);
         queue_nodes.reserve(peak_nodes); // Conservative estimate
         node_data n_data(config.min_split, config.max_depth,0);
 
-        logger.m_log("after reserving queue nodes");
-
         train_data.loadData();
-        logger.m_log("after loading train data");
         for(uint8_t i = 0; i < config.num_trees; i++){
             Serial.printf("%d, ", i);
             Rf_tree tree(i);
@@ -141,32 +143,40 @@ private:
             tree.isLoaded = true; 
             tree.releaseTree(this->model_name); // Save tree to SPIFFS
             forest_container.add_tree(std::move(tree));
+            logger.m_log();
         }
         
         // Release train_data after all trees are built
         train_data.releaseData(); // Keep metadata but release sample data
         n_data.total_nodes /= config.num_trees; // Average nodes per tree
-        node_predictor.buffer.push_back(n_data); // Add node data to predictor buffer
+        node_pred.buffer.push_back(n_data); // Add node data to predictor buffer
 
-        Serial.printf("Total nodes: %d, Average nodes per tree: %d\n", n_data.total_nodes * config.num_trees, n_data.total_nodes);
+        if constexpr (RF_DEBUG_LEVEL > 0)  Serial.println("\n🌲 Forest built successfully.");
+        size_t end = logger.drop_anchor();
+        logger.t_log("forest building time", start, end, "s", print_log);;
     }
+    
     // ----------------------------------------------------------------------------------
     // Split data into training and testing sets. Dest data must be init() before called by this function
     void splitData(Rf_data& source, vector<pair<float, Rf_data*>>& dest) {
-        Serial.println("<-- split data -->");
+        size_t start = logger.drop_anchor();
+        if constexpr (RF_DEBUG_LEVEL > 0)  Serial.println("<- splitting data ->");
         if(dest.empty() || source.size() == 0) {
-            Serial.println("Error: No data to split or destination is empty.");
+            if constexpr (RF_DEBUG_LEVEL > 0)
+            Serial.println("❌ Error: No data to split or destination is empty.");
             return;
         } 
         float total_ratio = 0.0f;
         for(auto& d : dest) {
             if(d.first <= 0.0f || d.first > 1.0f) {
-                Serial.printf("Error: Invalid ratio %.2f. Must be in (0.0, 1.0].\n", d.first);
+                if constexpr (RF_DEBUG_LEVEL > 0)
+                Serial.printf("❌ Error: Invalid ratio %.2f. Must be in (0.0, 1.0].\n", d.first);
                 return;
             }
             total_ratio += d.first;
             if(total_ratio > 1.0f) {
-                Serial.println("Error: Total split ratios exceed 1.0.");
+                if constexpr (RF_DEBUG_LEVEL > 0)
+                Serial.println("❌ Error: Total split ratios exceed 1.0.");
                 return;
             }
         }
@@ -186,14 +196,16 @@ private:
                 }
             }
             dest[i].second->loadData(source, sink_IDs, true);
-            dest[i].second->releaseData(false); // Write to binary SPIFFS, clear RAM
-            if(i==dest.size()-1) logger.m_log("split data");
+            if(i == 0) logger.m_log("split data", print_log);       // log memory after train data loaded (lowest ram moment)
+            dest[i].second->releaseData(false); 
         }
+        size_t end = logger.drop_anchor();
+        logger.t_log("split time", start, end, "ms", print_log);
     }
-
-    // ---------------------------------------------------------------------------------
+    
     void ClonesData() {
-        Serial.println("<- clones data ->");
+        size_t start = logger.drop_anchor();
+        if constexpr (RF_DEBUG_LEVEL > 0) Serial.println("<- clones data ->");
         dataList.clear();
         dataList.reserve(config.num_trees);
         uint16_t numSample = train_data.size();
@@ -277,10 +289,11 @@ private:
                 }
             }
             dataList.push_back(std::move(treeDataset));
+            logger.m_log();
         }
-        
-        Serial.println();
-        logger.m_log("after clones data");  
+        logger.m_log("clones data", print_log);  
+        size_t end = logger.drop_anchor();
+        logger.t_log("clones data time", start, end, "ms", print_log);
     }  
     
     typedef struct SplitInfo {
@@ -322,7 +335,6 @@ private:
         }
     };
 
-    // New: Range-based variant operating on a shared indices array
     SplitInfo findBestSplitRange(const b_vector<uint16_t, 8>& indices, uint16_t begin, uint16_t end,
                                  const unordered_set<uint16_t>& selectedFeatures, bool use_Gini, uint8_t numLabels) {
         SplitInfo bestSplit;
@@ -437,6 +449,9 @@ private:
         
         // Root covers the whole slice
         queue_nodes.push_back(NodeToBuild(0, 0, static_cast<uint16_t>(indices.size()), 0));
+
+        uint16_t queue_cap = queue_nodes.capacity();
+        bool log_yet = false;
         
         // Process nodes breadth-first with minimal allocations
         while (!queue_nodes.empty()) {
@@ -448,6 +463,7 @@ private:
             stats.analyzeSamplesRange(indices, current.begin, current.end, config.num_labels, train_data);
 
             if(current.nodeIndex >= MAX_NODES){
+                if constexpr (RF_DEBUG_LEVEL > 2)
                 Serial.println("⚠️ Warning: Exceeded maximum node limit. Forcing leaf node 🌿.");
                 uint8_t leafLabel = stats.majorityLabel;
                 tree.nodes[current.nodeIndex].setIsLeaf(true);
@@ -542,13 +558,14 @@ private:
                 tree.nodes[rightChildIndex].setLabel(leafLabel);
                 tree.nodes[rightChildIndex].setFeatureID(0);
             }
+            if(queue_nodes.size() >= queue_cap && !log_yet){
+                logger.m_log("tree creation", print_log);
+                log_yet = true;
+            }
         }
-        
         tree.nodes.fit();
-        logger.m_log("tree creation",false);
     }
-
-    // Overload for raw array input (uint8_t* features)
+    
     uint8_t predClassSample(const packed_vector<2>& features) {
         int16_t totalPredict = 0;
         predictClass.clear();
@@ -585,10 +602,11 @@ private:
     // Helper function: evaluate the entire forest using OOB (Out-of-Bag) score
     // Iterates over all samples in training data and evaluates using trees that didn't see each sample
     float get_oob_score(){
-        Serial.println("Get OOB score... ");
+        if constexpr (RF_DEBUG_LEVEL > 1) Serial.println("Get OOB score... ");
 
         // Check if we have trained trees and data
         if(dataList.empty() || forest_container.empty()){
+            if constexpr (RF_DEBUG_LEVEL > 0)
             Serial.println("❌ No trained trees available for OOB evaluation!");
             return 0.0f;
         }
@@ -609,13 +627,14 @@ private:
 
         // Load forest into memory for evaluation
         forest_container.loadForest();
-        logger.m_log("get OOB score");
+        logger.m_log("get OOB score", print_log);
 
         // Process training samples in chunks for OOB evaluation
         for(size_t chunk_index = 0; chunk_index < train_data.total_chunks(); chunk_index++){
             // Load samples for this chunk
             train_samples_buffer.loadChunk(train_data, chunk_index, true);
             if(train_samples_buffer.size() == 0){
+                if constexpr (RF_DEBUG_LEVEL > 0)
                 Serial.println("❌ Failed to load training samples chunk!");
                 continue;
             }
@@ -674,25 +693,29 @@ private:
                 // Update OOB metrics using matrix scorer
                 oob_scorer.update_prediction(actualLabel, oobPredictedLabel);
             }
+            logger.m_log();
         }
         train_samples_buffer.purgeData();
 
         // Calculate and return OOB score
-        return oob_scorer.calculate_score("OOB");
+        return oob_scorer.calculate_score();
     }
 
     // Helper function: evaluate the entire forest using validation score
     // Evaluates using validation dataset if available
     float get_valid_score(){
+        if constexpr (RF_DEBUG_LEVEL > 1)
         Serial.println("Get validation score... ");
 
         // Check if validation is enabled and we have trained trees
         if(!config.use_validation()){
+            if constexpr (RF_DEBUG_LEVEL > 0)
             Serial.println("❌ Validation is not enabled!");
             return 0.0f;
         }
 
         if(forest_container.empty()){
+            if constexpr (RF_DEBUG_LEVEL > 0)
             Serial.println("❌ No trained trees available for validation evaluation!");
             return 0.0f;
         }
@@ -702,7 +725,6 @@ private:
 
         // Load forest into memory for evaluation
         forest_container.loadForest();
-        logger.m_log("get validation score");
 
         // Validation evaluation
         Serial.println("Evaluating on validation set...");
@@ -745,24 +767,28 @@ private:
             // Update validation metrics using matrix scorer
             valid_scorer.update_prediction(actualLabel, validPredictedLabel);
         }
+        logger.m_log("get validation score", print_log);
         validation_data.releaseData(true);
 
         // Calculate and return validation score
-        return valid_scorer.calculate_score("Validation");
+        return valid_scorer.calculate_score();
     }
 
     // Performs k-fold cross validation on train_data
     // train_data -> base_data, fold_train_data ~ train_data, fold_valid_data ~ validation_data
     float get_cross_validation_score(){
+        if constexpr (RF_DEBUG_LEVEL > 1)
         Serial.println("Get k-fold cross validation score... ");
 
         if(config.k_fold < 2 || config.k_fold > 10){
+            if constexpr (RF_DEBUG_LEVEL > 0)
             Serial.println("❌ Invalid k_fold value! Must be between 2 and 10.");
             return 0.0f;
         }
 
         uint16_t totalSamples = base_data.size();
         if(totalSamples < config.k_fold * config.num_labels * 2){
+            if constexpr (RF_DEBUG_LEVEL > 0)
             Serial.println("❌ Not enough samples for k-fold cross validation!");
             return 0.0f;
         }
@@ -770,6 +796,7 @@ private:
 
         uint16_t foldSize = totalSamples / config.k_fold;
         float k_fold_score = 0.0f;
+        logger.m_log("Perform k-fold", print_log);
         // Perform k-fold cross validation
         for(uint8_t fold = 0; fold < config.k_fold; fold++){
             scorer.reset();
@@ -783,7 +810,7 @@ private:
             // create train_data and valid data for current fold 
             validation_data.loadData(base_data, fold_valid_sampleIDs, true);
             validation_data.releaseData(false);
-            train_data.loadData(base_data, fold_train_sampleIDs, true);
+            train_data.loadData(base_data, fold_train_sampleIDs, true);      logger.m_log();
             train_data.releaseData(false); 
             
             ClonesData();
@@ -805,17 +832,14 @@ private:
             validation_data.releaseData();
             forest_container.releaseForest();
             
-            return scorer.calculate_score("K-fold score");
+            return scorer.calculate_score();
         }
         k_fold_score /= config.k_fold;
-        Serial.printf("✅ K-fold cross validation completed.\n");
 
         // Calculate and return k-fold score
         return k_fold_score;
     }
-
-
-    // Helper function: evaluate the entire forest using combined OOB and validation scores
+    
     float get_training_evaluation_index(){
         if(config.training_score == Rf_training_score::OOB_SCORE){
             return get_oob_score();
@@ -831,32 +855,38 @@ private:
     // -----------------------------------------------------------------------------------
     // Memory-Efficient Grid Search Training Function
     void training(){
-        Serial.println("Starting training with memory-efficient grid search...");
+        size_t start = logger.drop_anchor();
+        if constexpr (RF_DEBUG_LEVEL > 0)  Serial.println("🌲 Starting training...");
         uint8_t min_ms = config.min_split_range.first;
         uint8_t max_ms = config.min_split_range.second;
         uint8_t min_md = config.max_depth_range.first;
         uint8_t max_md = config.max_depth_range.second;
         int total_combinations = ((max_ms - min_ms) / 2 + 1) * ((max_md - min_md) / 2 + 1);
-        Serial.printf("Total combinations: %d\n", total_combinations);
+        if constexpr (RF_DEBUG_LEVEL > 1)
+            Serial.printf("Total combinations: %d\n", total_combinations);
 
         int loop_count = 0;
         int best_min_split = config.min_split;
         int best_max_depth = config.max_depth;
 
         float best_score = get_training_evaluation_index();
-        Serial.printf("training score : %s\n", 
-                      (config.training_score == Rf_training_score::OOB_SCORE) ? "OOB" : 
-                      (config.training_score == Rf_training_score::VALID_SCORE) ? "VALID" : 
-                      (config.training_score == Rf_training_score::K_FOLD_SCORE) ? "K-FOLD" : "UNKNOWN");
+        if constexpr (RF_DEBUG_LEVEL > 1){
+            Serial.printf("training score : %s\n", 
+                        (config.training_score == Rf_training_score::OOB_SCORE) ? "OOB" : 
+                        (config.training_score == Rf_training_score::VALID_SCORE) ? "VALID" : 
+                        (config.training_score == Rf_training_score::K_FOLD_SCORE) ? "K-FOLD" : "UNKNOWN");
 
-        Serial.printf("Initial score with min_split=%d, max_depth=%d: %.3f\n", 
-                      config.min_split, config.max_depth, best_score);
-
+            Serial.printf("Initial score with min_split=%d, max_depth=%d: %.3f\n", 
+                        config.min_split, config.max_depth, best_score);
+        }
+          
+        Rf_data old_base_data("/temp_base_data.bin");
         if(config.training_score == Rf_training_score::K_FOLD_SCORE){
             // convert train_data to base_data
+            old_base_data = base_data; // backup
             base_data = train_data; 
             // init validation_data if not yet
-            if(validation_data.isProperlyInitialized() == false){
+            if(!validation_data.isProperlyInitialized()){
                 validation_data.init("/valid_data.bin", config.num_features);
             }
         }
@@ -873,6 +903,7 @@ private:
                     MakeForest();
                     score = get_training_evaluation_index();
                 }
+                if constexpr (RF_DEBUG_LEVEL > 1)
                 Serial.printf("Score with min_split=%d, max_depth=%d: %.3f\n", 
                               min_split, max_depth, score);
                 if(score > best_score){
@@ -881,6 +912,7 @@ private:
                     best_max_depth = max_depth;
                     config.result_score = best_score;
                     //save best forest
+                    if constexpr (RF_DEBUG_LEVEL > 0)
                     Serial.printf("New best score: %.3f with min_split=%d, max_depth=%d\n", 
                                   best_score, min_split, max_depth);
                     if(config.training_score != Rf_training_score::K_FOLD_SCORE){
@@ -888,70 +920,31 @@ private:
                         forest_container.releaseForest(); // Release current trees from RAM
                     }
                 }
-                // if(loop_count++ > 2) return;
+                logger.m_log();
+                // if(loop_count++ > 2) break; // For demo, limit to 3 iterations
             }
         }
         // Set config to best found parameters
         config.min_split = best_min_split;
         config.max_depth = best_max_depth;
+
+        // restore datas and rebuild model with best params if using K-FOLD
         if(config.training_score == Rf_training_score::K_FOLD_SCORE){
-            // rebuild model with full train_data 
             train_data = base_data;     // restore train_data
+            base_data = old_base_data;  // restore base_data
+            old_base_data.purgeData();
             ClonesData();
             MakeForest();
             forest_container.releaseForest();
         }
+        if constexpr (RF_DEBUG_LEVEL > 1)
         Serial.printf("Best parameters: min_split=%d, max_depth=%d with score=%.3f\n", 
                       best_min_split, best_max_depth, best_score);
-        clean_forest();
-    }
-
-    // overwrite training_flag
-    void set_training_flag(Rf_training_flags flag) {
-        config.train_flag = flag;
-    }
-
-    //  combined training_flag with user input
-    void add_training_flag(Rf_training_flags flag) {
-        config.train_flag |= flag;
-    }
-
-    // set training_score
-    void set_training_score(Rf_training_score score) {
-        config.training_score = score;
-        if(score == Rf_training_score::VALID_SCORE) {
-            if(config.num_samples / config.num_labels > 150){
-                config.train_ratio = 0.7f;
-                config.test_ratio = 0.15f;
-                config.valid_ratio = 0.15f;
-            }else{
-                config.train_ratio = 0.6f;
-                config.test_ratio = 0.2f;
-                config.valid_ratio = 0.2f;
-            }
-        } 
-    }
-
-    bool enable_extend_base_data(bool enable){
-        config.extend_base_data = enable;
-        return config.extend_base_data;
-    }
-
-    void set_ramdom_seed(uint32_t seed) {
-        random_generator.seed(seed);
-    }
-    
-    // Public methods to access forest container functionality
-    void loadForest() {
-        forest_container.loadForest();
-    }
-    
-    void releaseForest() {
-        forest_container.releaseForest();
-    }
-
-    void set_model_name(const String& name) {
-        base.set_model_name(name.c_str());
+        if constexpr (RF_DEBUG_LEVEL > 0)
+        Serial.println("🌲 Training complete.");
+        size_t end = logger.drop_anchor();
+        logger.t_log("total training time", start, end, "s", print_log);
+        // clean_forest();
     }
 
     // Public API: predict() takes raw float data and returns actual label (String)
@@ -982,105 +975,18 @@ private:
         return categorizer.getOriginalLabel(i_label);
     }
 
-    public:
-    // Get practical inference score based on logged predictions and actual labels
-    float get_practical_inference_score(uint8_t flag) {
-        String logFile = base.get_inferenceLogFile();
-        if(!SPIFFS.exists(logFile.c_str())) {
-            Serial.println("❌ Inference log file does not exist");
-            return 0.0f;
-        }
-        
-        File file = SPIFFS.open(logFile.c_str(), FILE_READ);
-        if(!file) {
-            Serial.println("❌ Failed to open inference log file");
-            return 0.0f;
-        }
-        
-        // Read header
-        uint32_t magic;
-        uint8_t num_labels;
-        if(file.read((uint8_t*)&magic, 4) != 4 || 
-           file.read((uint8_t*)&num_labels, 1) != 1 ||
-           magic != 0x494E4652) { // "INFR" magic
-            Serial.println("❌ Invalid inference log file header");
-            file.close();
-            return 0.0f;
-        }
-        
-        // Read prediction counts for each label
-        b_vector<uint16_t> prediction_counts(num_labels);
-        for(int i = 0; i < num_labels; i++) {
-            if(file.read((uint8_t*)&prediction_counts[i], 2) != 2) {
-                Serial.println("❌ Failed to read prediction counts");
-                file.close();
-                return 0.0f;
-            }
-        }
-        
-        // Initialize matrix score calculator
-        Rf_matrix_score scorer(num_labels, flag);
-        
-        // Read and process packed prediction data
-        uint8_t packed_byte;
-        uint8_t bit_position = 0;
-        uint8_t current_label = 0;
-        uint16_t label_prediction_index = 0;
-        
-        while(file.available() > 0 && file.read(&packed_byte, 1) == 1) {
-            // Process each bit in the packed byte
-            for(int bit = 0; bit < 8 && current_label < num_labels; bit++) {
-                if(label_prediction_index >= prediction_counts[current_label]) {
-                    // Move to next label
-                    current_label++;
-                    label_prediction_index = 0;
-                    if(current_label >= num_labels) break;
-                }
-                
-                // Extract prediction result (correct/incorrect)
-                bool is_correct = (packed_byte & (1 << bit)) != 0;
-                
-                // For practical scoring, we need to simulate actual vs predicted
-                // Since we only have correctness, we assume predicted_label = actual_label when correct
-                // and predicted_label = (actual_label + 1) % num_labels when incorrect
-                uint8_t actual_label = current_label;
-                uint8_t predicted_label = is_correct ? actual_label : ((actual_label + 1) % num_labels);
-                
-                scorer.update_prediction(actual_label, predicted_label);
-                label_prediction_index++;
-            }
-        }
-        
-        file.close();
-        
-        // Calculate and return score based on training flags
-        return scorer.calculate_score("Practical");
+    /**
+     * @brief: Set feedback timeout in milliseconds.
+     * If actual label feedback is not received within this timeout after the previous feedback,
+     * the corresponding pending sample will be discarded.
+     * @param timeout: Timeout duration in milliseconds.
+     */
+    void set_feedback_timeout(long unsigned timeout){
+        pending_data.set_max_wait_time(timeout);
     }
 
-    //overload version without flag: uses model training_flag 
-    float get_practical_inference_score() {
-        return get_practical_inference_score(static_cast<uint8_t>(config.train_flag));
-    }
-
-    // get number of inference saved in log
-    size_t get_logged_inference_count() const {
-        String logFile = base.get_inferenceLogFile();
-        if(!SPIFFS.exists(logFile.c_str())) {
-            return 0;
-        }   
-        File file = SPIFFS.open(logFile.c_str(), FILE_READ);
-        if(!file) {
-            return 0;
-        }
-        size_t file_size = file.size();
-        file.close();
-        if(file_size < 5 + config.num_labels * 2) {
-            return 0; // Invalid file size
-        }
-        size_t data_size = file_size - (5 + config.num_labels * 2);
-        return data_size * 8; // Each byte contains 8 predictions
-    } 
-
+    // Add actual label into stack of pending data.
+    // accepts String, const char*, char[], int, float
     void add_actual_label(const String& label){
         uint8_t i_label = categorizer.getNormalizedLabel(label);
         if(i_label < config.num_labels){
@@ -1090,7 +996,9 @@ private:
             Serial.printf("❌ Unknown label: %s\n", label.c_str());
         }
     }
-    // overload for another type of label input : const char*, char*, const char[N], int, float
+
+    // Add actual label into stack of pending data.
+    // accepts String, const char*, char[], int, float
     template<typename T>
     void add_actual_label(const T& label) {
         using U = std::decay_t<T>;
@@ -1104,19 +1012,332 @@ private:
         add_actual_label(String(label));
     }
 
-    // Manually flush pending data to base dataset and inference log
+    /**
+     * @brief: Manual flush stack of pending data 
+     * This function writes all pending samples with their actual labels (given from feedback) 
+     * to the base dataset and logs the predictions to the inference log file.
+     */
     void flush_pending_data() {
         pending_data.flush_pending_data(base_data, config, base.get_inferenceLogFile().c_str());
     }
+
+    /**
+     * @brief: write all pending samples with their actual labels (given from feedback) to base dataset
+     * This function does NOT log the predictions to the inference log file. 
+     * sample stack and real label stack remains in pending_data after this operation.
+     */
+    void write_pending_data_to_dataset(){
+        pending_data.write_to_base_data(base_data, config);
+    }
+
+    /**
+     * @brief: Log all pending samples' predictions to the inference log file.
+     * @note : sample stack and real label stack remains in pending_data after this operation.
+     */
+    void log_pending_data() {
+        pending_data.write_to_infer_log(base.get_inferenceLogFile().c_str(), config.num_labels);
+    }
+
+    void enable_retrain(){
+        config.enable_retrain = true;
+    }
+
+    void disable_retrain(){
+        config.enable_retrain = false;
+    }
+
+    // get number of inference saved in log (which has actual label feedback)
+    size_t get_total_logged_inference() const {
+        String logFile = base.get_inferenceLogFile();
+        if(!SPIFFS.exists(logFile.c_str())) {
+            if constexpr (RF_DEBUG_LEVEL >= 0)
+            Serial.println("❌ Inference log file does not exist");
+            return 0;
+        }   
+        File file = SPIFFS.open(logFile.c_str(), FILE_READ);
+        if(!file) {
+            if constexpr (RF_DEBUG_LEVEL >= 0)
+            Serial.println("❌ Failed to open inference log file");
+            return 0;
+        }
+        
+        // Read header to get prediction count - new format: magic (4) + prediction_count (4)
+        uint8_t magic_bytes[4];
+        uint32_t prediction_count;
+        
+        if(file.read(magic_bytes, 4) != 4 || 
+           file.read((uint8_t*)&prediction_count, 4) != 4) {
+            file.close();
+            return 0; // Failed to read header
+        }
+        
+        // Verify magic number
+        if(magic_bytes[0] != 0x49 || magic_bytes[1] != 0x4E || 
+           magic_bytes[2] != 0x46 || magic_bytes[3] != 0x4C) {
+            file.close();
+            return 0; // Invalid header
+        }
+        
+        file.close();
+        return static_cast<size_t>(prediction_count);
+    } 
+
+
+    /**
+     * @brief: Calculate inference score based on the last N logged predictions.
+     * @param num_inference: Number of recent predictions to consider for score calculation.
+     * @param flag: Training flag indicating the scoring method (ACCURACY, PRECISSION, F1_SCORE, RECALL).
+     * @note : if num_inference exceeds total logged predictions, all logged predictions will be used.
+     */
+    float get_last_n_inference_score(size_t num_inference, uint8_t flag) {
+        String logFile = base.get_inferenceLogFile();
+        if(!SPIFFS.exists(logFile.c_str())) {
+            Serial.println("❌ Inference log file does not exist");
+            return 0.0f;
+        }
+        
+        File file = SPIFFS.open(logFile.c_str(), FILE_READ);
+        if(!file) {
+            Serial.println("❌ Failed to open inference log file");
+            return 0.0f;
+        }
+        
+        // Read and verify header - new format: magic (4) + prediction_count (4)
+        uint8_t magic_bytes[4];
+        uint32_t prediction_count;
+        
+        if(file.read(magic_bytes, 4) != 4) {
+            if constexpr (RF_DEBUG_LEVEL >= 0)
+            Serial.println("❌ Failed to read magic number from inference log");
+            file.close();
+            return 0.0f;
+        }
+        
+        if(file.read((uint8_t*)&prediction_count, 4) != 4) {
+            if constexpr (RF_DEBUG_LEVEL >= 0)
+            Serial.println("❌ Failed to read prediction count from inference log");
+            file.close();
+            return 0.0f;
+        }
+        
+        // Check magic number "INFL" = [0x49, 0x4E, 0x46, 0x4C]
+        if(magic_bytes[0] != 0x49 || magic_bytes[1] != 0x4E || 
+           magic_bytes[2] != 0x46 || magic_bytes[3] != 0x4C) {
+            if constexpr (RF_DEBUG_LEVEL >= 0)
+            Serial.printf("❌ Invalid inference log file header - magic: [0x%02X, 0x%02X, 0x%02X, 0x%02X] (expected: [0x49, 0x4E, 0x46, 0x4C])\n", 
+                         magic_bytes[0], magic_bytes[1], magic_bytes[2], magic_bytes[3]);
+            file.close();
+            return 0.0f;
+        }
+        
+        if(prediction_count == 0) {
+            if constexpr (RF_DEBUG_LEVEL >= 0)
+            Serial.println("⚠️ No predictions recorded in inference log");
+            file.close();
+            return 0.0f;
+        }
+        
+        // Initialize matrix score calculator
+        Rf_matrix_score scorer(config.num_labels, flag);
+        
+        // Read prediction pairs: alternating predicted_label, actual_label
+        for(uint32_t i = 0; i < prediction_count && i < num_inference; i++) {
+            uint8_t predicted_label, actual_label;
+            
+            if(file.read(&predicted_label, 1) != 1) {
+                if constexpr (RF_DEBUG_LEVEL >= 0)
+                Serial.printf("❌ Failed to read predicted label at prediction %u\n", i);
+                break;
+            }
+            
+            if(file.read(&actual_label, 1) != 1) {
+                if constexpr (RF_DEBUG_LEVEL >= 0)
+                Serial.printf("❌ Failed to read actual label at prediction %u\n", i);
+                break;
+            }
+            
+            // Validate labels are within expected range
+            if(predicted_label < config.num_labels && actual_label < config.num_labels) {
+                scorer.update_prediction(actual_label, predicted_label);
+            } else {
+                if constexpr (RF_DEBUG_LEVEL == 3) {
+                    Serial.printf("⚠️ Invalid labels at prediction %u: predicted=%u, actual=%u (max=%u)\n", 
+                                 i, predicted_label, actual_label, config.num_labels);
+                }
+            }
+        }
+        
+        file.close();
+        
+        // Calculate and return score based on training flags
+        return scorer.calculate_score();
+    }
+
+    /**
+     * @brief: Overloaded function to calculate inference score using current training flag.
+     * @param num_inference: Number of recent predictions to consider for score calculation.
+     * @note : if num_inference exceeds total logged predictions, all logged predictions will be used.
+     */
+    float get_last_n_inference_score(size_t num_inference) {
+        return get_last_n_inference_score(num_inference, static_cast<uint8_t>(config.train_flag));
+    }
+    /**
+     * @brief: Calculate practical inference score based on logged predictions and actual labels.
+     * @param flag: Training flag indicating the scoring method (ACCURACY, PRECISSION, F1_SCORE, RECALL).
+     */
+    float get_practical_inference_score(uint8_t flag) {
+        size_t total_logged = get_total_logged_inference();
+        if(total_logged == 0) {
+            if constexpr (RF_DEBUG_LEVEL > 0)
+            Serial.println("⚠️ No logged inferences found for practical score calculation");
+            return 0.0f;
+        }
+        return get_last_n_inference_score(total_logged, flag);
+    }
+
+    /**
+     * @brief: Overloaded function to calculate practical inference score using current training flag.
+     */
+    float get_practical_inference_score() {
+        return get_practical_inference_score(static_cast<uint8_t>(config.train_flag));
+    }
+
+    // -----------------------------------------------------------------------------------
+
+    // overwrite training_flag
+    void set_training_flag(Rf_training_flags flag) {
+        config.train_flag = flag;
+    }
+
+    //  combined training_flag with user input
+    void add_training_flag(Rf_training_flags flag) {
+        config.train_flag |= flag;
+    }
+
+    // set training_score
+    void set_training_score(Rf_training_score score) {
+        config.training_score = score;
+        if(score == Rf_training_score::VALID_SCORE) {
+            if(config.num_samples / config.num_labels > 150){
+                #ifdef DEV_STAGE
+                    config.train_ratio = 0.7f;
+                    config.test_ratio = 0.15f;
+                    config.valid_ratio = 0.15f;
+                #else
+                    config.train_ratio = 0.8f;
+                    config.test_ratio = 0.0f;
+                    config.valid_ratio = 0.2f;
+                #endif
+            }else{
+                #ifdef DEV_STAGE
+                    config.train_ratio = 0.6f;
+                    config.test_ratio = 0.2f;
+                    config.valid_ratio = 0.2f;
+                #else
+                    config.train_ratio = 0.7f;
+                    config.test_ratio = 0.0f;
+                    config.valid_ratio = 0.3f;
+                #endif
+            }
+        } 
+    }
+
+    // allow dataset to grow when new data is added, but limited to max_samples/max_dataset_size
+    void enable_extend_base_data(){
+        config.extend_base_data = true;
+    }
+
+    // keep dataset size fixed when new data is added (oldest data will be removed)
+    void disable_extend_base_data(){
+        config.extend_base_data = false;
+    }
+
+    // set random seed , default is 37
+    void set_random_seed(uint32_t seed) {
+        random_generator.seed(seed);
+    }
+
+    void use_default_seed() {
+        random_generator.seed(0ULL);
+    }
     
-    void set_feedback_timeout(long unsigned timeout){
-        pending_data.set_max_wait_time(timeout);
+    // load forest from SPIFFS to RAM
+    bool loadForest() {
+        bool success = forest_container.loadForest();
+        if (!success) {
+            if constexpr (RF_DEBUG_LEVEL > 0)
+            Serial.println("❌ Failed to load forest from SPIFFS");
+        }else{
+            if constexpr (RF_DEBUG_LEVEL > 1)
+            Serial.println("✅ Forest loaded from SPIFFS");
+        }
+        return success;
+    }
+    
+    // release forest from RAM to SPIFFS
+    bool releaseForest() {
+        bool success = forest_container.releaseForest();
+        if (!success) {
+            if constexpr (RF_DEBUG_LEVEL > 0)
+            Serial.println("❌ Failed to release forest to SPIFFS");
+        }else{
+            if constexpr (RF_DEBUG_LEVEL > 1)
+            Serial.println("✅ Forest released to SPIFFS"); 
+        }
+        return success;
+    }
+
+    //  rename model.  This action will rename all forest file components.
+    void set_model_name(const String& name) {
+        base.set_model_name(name.c_str());
+    }
+
+    // get name of model (forest)
+    String get_model_name() const {
+        return String(base.get_model_name().c_str());
+    }
+
+    size_t lowest_ram() const {
+        return logger.lowest_ram;
+    }
+    size_t lowest_spiffs() const {
+        return logger.lowest_rom;
+    }
+
+    // get total nodes in model (forest). Each node is 4 bytes
+    size_t total_nodes() const {
+        return forest_container.total_nodes();
+    }
+    
+    //  get total leaves in model (forest)
+    size_t total_leaves() const {
+        return forest_container.total_leaves();
+    }
+
+    // get average nodes per tree
+    float avg_nodes_per_tree() const {
+        return forest_container.avg_nodes();
+    }
+    // get average leaves per tree
+    float avg_leaves_per_tree() const {
+        return forest_container.avg_leaves();
+    }
+    // get average depth per tree
+    float avg_depth_per_tree() const {
+        return forest_container.avg_depth();
+    }
+
+    // get tree which has maximum depth
+    uint16_t max_depth_tree() const {
+        return forest_container.max_depth_tree();
     }
 
     // methods for development stage - detailed metrics
-    #ifdef DEV_STAGE
+#ifdef DEV_STAGE
     // New combined prediction metrics function
     b_vector<b_vector<pair<uint8_t, float>>> predict(Rf_data& data) {
+        size_t start = logger.drop_anchor();
+        Serial.printf("Predicting on dataset : %s", data.getFilename().c_str());
         bool pre_load_data = true;
         if(!data.isLoaded){
             data.loadData();
@@ -1150,10 +1371,72 @@ private:
         if(!pre_load_data) data.releaseData();
         forest_container.releaseForest();
         return result;
+        size_t end = logger.drop_anchor();
+        logger.t_log("data prediction time", start, end, "ms", print_log);
     }
-    b_vector<b_vector<pair<uint8_t, float>>> result_on_test_set() {
-        return predict(test_data);
+
+    // print metrix score on test set
+    void training_report(){
+        if(config.test_ratio == 0.0f || test_data.size() == 0){
+            Serial.println("❌ No test set available for evaluation!");
+            return;
+        }
+        auto result = predict(test_data);
+        // Calculate Precision
+        Serial.println("Precision in test set:");
+        b_vector<pair<uint8_t, float>> precision = result[0];
+        for (const auto& p : precision) {
+        Serial.printf("Label: %d - %.3f\n", p.first, p.second);
+        }
+        float avgPrecision = 0.0f;
+        for (const auto& p : precision) {
+        avgPrecision += p.second;
+        }
+        avgPrecision /= precision.size();
+        Serial.printf("Avg: %.3f\n", avgPrecision);
+
+        // Calculate Recall
+        Serial.println("Recall in test set:");
+        b_vector<pair<uint8_t, float>> recall = result[1];
+        for (const auto& r : recall) {
+        Serial.printf("Label: %d - %.3f\n", r.first, r.second);
+        }
+        float avgRecall = 0.0f;
+        for (const auto& r : recall) {
+        avgRecall += r.second;
+        }
+        avgRecall /= recall.size();
+        Serial.printf("Avg: %.3f\n", avgRecall);
+
+        // Calculate F1 Score
+        Serial.println("F1 Score in test set:");
+        b_vector<pair<uint8_t, float>> f1_scores = result[2];
+        for (const auto& f1 : f1_scores) {
+        Serial.printf("Label: %d - %.3f\n", f1.first, f1.second);
+        }
+        float avgF1 = 0.0f;
+        for (const auto& f1 : f1_scores) {
+        avgF1 += f1.second;
+        }
+        avgF1 /= f1_scores.size();
+        Serial.printf("Avg: %.3f\n", avgF1);
+
+        // Calculate Overall Accuracy
+        b_vector<pair<uint8_t, float>> accuracies = result[3];
+        float avgAccuracy = 0.0f;
+        for (const auto& acc : accuracies) {
+        avgAccuracy += acc.second;
+        }
+        avgAccuracy /= accuracies.size();
+
+        Serial.printf("\n📊 FINAL SUMMARY:\n");
+        Serial.printf("Dataset: %s\n", base.get_base_data().c_str());
+        Serial.printf("Average Precision: %.3f\n", avgPrecision);
+        Serial.printf("Average Recall: %.3f\n", avgRecall);
+        Serial.printf("Average F1-Score: %.3f\n", avgF1);
+        Serial.printf("Accuracy: %.3f\n", avgAccuracy);
     }
+
     float precision(Rf_data& data) {
         // Create a temporary scorer to calculate precision
         Rf_matrix_score scorer(config.num_labels, 0x02); // PRECISION flag only
@@ -1175,7 +1458,7 @@ private:
         data.releaseData();
         forest_container.releaseForest();
         
-        return scorer.calculate_score("Precision");
+        return scorer.calculate_score();
     }
 
     float recall(Rf_data& data) {
@@ -1199,7 +1482,7 @@ private:
         data.releaseData();
         forest_container.releaseForest();
         
-        return scorer.calculate_score("Recall");
+        return scorer.calculate_score();
     }
 
     float f1_score(Rf_data& data) {
@@ -1223,7 +1506,7 @@ private:
         data.releaseData();
         forest_container.releaseForest();
         
-        return scorer.calculate_score("F1-Score");
+        return scorer.calculate_score();
     }
 
     float accuracy(Rf_data& data) {
@@ -1247,9 +1530,10 @@ private:
         data.releaseData();
         forest_container.releaseForest();
         
-        return scorer.calculate_score("Accuracy");
+        return scorer.calculate_score();
     } 
     
+    // printout predicted & actual label for each sample in test set
     void visual_result() {
         forest_container.loadForest(); // Ensure all trees are loaded before prediction
         test_data.loadData(); // Load test set data if not already loaded
@@ -1262,7 +1546,7 @@ private:
         test_data.releaseData(true); // Release test set data after use
         forest_container.releaseForest(); // Release all trees after prediction
     }
-    #endif
+#endif
 
 };
 
@@ -1291,73 +1575,14 @@ void setup() {
 
     // forest.training();
 
-    // auto result = forest.result_on_test_set();
-    // Serial.printf("\nlowest RAM: %d\n", forest.logger.lowest_ram);
-    // Serial.printf("lowest ROM: %d\n", forest.logger.lowest_rom);
+    Serial.printf("\nlowest RAM: %d\n", forest.lowest_ram());
+    Serial.printf("lowest ROM: %d\n", forest.lowest_spiffs());
 
-    // // Calculate Precision
-    // Serial.println("Precision in test set:");
-    // b_vector<pair<uint8_t, float>> precision = result[0];
-    // for (const auto& p : precision) {
-    //   Serial.printf("Label: %d - %.3f\n", p.first, p.second);
-    // }
-    // float avgPrecision = 0.0f;
-    // for (const auto& p : precision) {
-    //   avgPrecision += p.second;
-    // }
-    // avgPrecision /= precision.size();
-    // Serial.printf("Avg: %.3f\n", avgPrecision);
+    forest.training_report();
 
-    // // Calculate Recall
-    // Serial.println("Recall in test set:");
-    // b_vector<pair<uint8_t, float>> recall = result[1];
-    // for (const auto& r : recall) {
-    //   Serial.printf("Label: %d - %.3f\n", r.first, r.second);
-    // }
-    // float avgRecall = 0.0f;
-    // for (const auto& r : recall) {
-    //   avgRecall += r.second;
-    // }
-    // avgRecall /= recall.size();
-    // Serial.printf("Avg: %.3f\n", avgRecall);
-
-    // // Calculate F1 Score
-    // Serial.println("F1 Score in test set:");
-    // b_vector<pair<uint8_t, float>> f1_scores = result[2];
-    // for (const auto& f1 : f1_scores) {
-    //   Serial.printf("Label: %d - %.3f\n", f1.first, f1.second);
-    // }
-    // float avgF1 = 0.0f;
-    // for (const auto& f1 : f1_scores) {
-    //   avgF1 += f1.second;
-    // }
-    // avgF1 /= f1_scores.size();
-    // Serial.printf("Avg: %.3f\n", avgF1);
-
-    // // Calculate Overall Accuracy
-    // Serial.println("Overall Accuracy in test set:");
-    // b_vector<pair<uint8_t, float>> accuracies = result[3];
-    // for (const auto& acc : accuracies) {
-    //   Serial.printf("Label: %d - %.3f\n", acc.first, acc.second);
-    // }
-    // float avgAccuracy = 0.0f;
-    // for (const auto& acc : accuracies) {
-    //   avgAccuracy += acc.second;
-    // }
-    // avgAccuracy /= accuracies.size();
-    // Serial.printf("Avg: %.3f\n", avgAccuracy);
-
-    // Serial.printf("\n📊 FINAL SUMMARY:\n");
-    // Serial.printf("Dataset: %s\n", filename);
-    // Serial.printf("Average Precision: %.3f\n", avgPrecision);
-    // Serial.printf("Average Recall: %.3f\n", avgRecall);
-    // Serial.printf("Average F1-Score: %.3f\n", avgF1);
-    // Serial.printf("Average Accuracy: %.3f\n", avgAccuracy);
 
     forest.loadForest();
-    forest.enable_extend_base_data(true);
-
-
+    forest.enable_extend_base_data();
 
     // // check actual prediction time 
     b_vector<float> sample_1 = MAKE_FLOAT_LIST(0,0,0,0,0,0,0.319597,0,0,0,0.0155578,0,0.602115,0,0.731487,0,0,0,0.0427323,0,0.100705,0.0183983,0.43727,0.279462,0.244308,0,0.55038,0,0.338926,0.284307,0.130816,0.378115,0.0443502,0.0208504,0.543977,0.166894,0.0697761,0,0,0.149815,0.551409,0.322199,0.338399,0.0939219,0.0580764,0,0,0.334588,0,0,0,0,0.329144,0,0.590239,0,0.00454205,0,0.393911,0,0.417964,0,0.428854,0.171716,0.0930952,0,0.399416,0,0.306163,0.17656,0.195359,0.337671,0.354709,0,0.45624,0.13206,0.0282058,0.209302,0.253028,0.307674,0.395338,0.204116,0.440053,0.128077,0.0669144,0,0,0.262297,0.137504,0.235855,0.372225,0.0570641,0.0712728,0.0407601,0.160617,0.519457,0,0,0.291677,0,0.638353,0,0.444923,0.0625388,0.0395925,0.22281,0.16253,0,0.370294,0.177272,0.20518,0.131503,0.450441,0,0.484771,0.0470593,0.0975183,0.284126,0.189368,0.357239,0.21504,0.214781,0.116269,0.089935,0.209008,0.245536,0.198381,0.221044,0.297168,0.321228,0.234775,0.0348076,0.0206753,0,0.0894389,0.493047,0.231743,0.303444,0.284468,0.0372155,0.402831,0.0840795,0.073505,0.312755);
@@ -1383,7 +1608,7 @@ void setup() {
     samples.push_back(sample_9);
     samples.push_back(sample_10);
 
-    vector<uint8_t> true_labels = MAKE_UINT8_LIST(4, 4, 7, 1, 3, 1, 6, 4, 8, 0);
+    vector<uint8_t> true_labels = MAKE_UINT8_LIST(4,4,7,1,3,1,6,5,8,0);
 
     for (int i = 0; i < samples.size(); i++){
         String label = forest.predict(samples[i]);
@@ -1392,6 +1617,11 @@ void setup() {
     }    
     forest.releaseForest();
     forest.flush_pending_data();
+
+    float p_score = forest.get_practical_inference_score();
+    Serial.printf("Practical Inference Score : %.3f\n", p_score);
+    int total_logged = forest.get_total_logged_inference();
+    Serial.printf("Total Logged Inference with actual label feedback : %d\n", total_logged);
 
     // forest.visual_result(forest.test_data); // Optional visualization
 

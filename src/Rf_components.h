@@ -18,19 +18,19 @@
 #ifndef RF_DEBUG_LEVEL
     #define RF_DEBUG_LEVEL 1
 #else
-    #if RF_DEBUG_LEVEL > 4
+    #if RF_DEBUG_LEVEL > 3
         #undef RF_DEBUG_LEVEL
-        #define RF_DEBUG_LEVEL 4
+        #define RF_DEBUG_LEVEL 3
     #endif
 #endif
 
 /*
- NOTE : RF_DEBUG_LEVEL
+ RF_DEBUG_LEVEL :
     0 : silent mode - no messages
     1 : forest messages (start, end, major events) 
-    2 : logger messages (errors, warnings, memory usage, timing)
-    3 : messages at components level
-    4 : extremely detailed debug (not recommended for normal use)
+    2 : messages at components level + warnings
+    3 : all memory and event timing log messages & detailed info
+ note: all errors messages (lead to failed process) will be enabled with RF_DEBUG_LEVEL >=1
 */
 
 static constexpr uint16_t MAX_LABELS             = 255;         // maximum number of unique labels supported 
@@ -38,7 +38,7 @@ static constexpr uint16_t MAX_NUM_FEATURES       = 1023;       // maximum number
 static constexpr uint16_t MAX_NUM_SAMPLES        = 65535;     // maximum number of samples in a dataset
 static constexpr uint16_t MAX_NODES              = 2047;     // Maximum nodes per tree 
 static constexpr size_t   MAX_DATASET_SIZE       = 150000;  // Max dataset file size - 150kB
-constexpr static size_t   MAX_INFER_LOGFILE_SIZE = 2048;   // Max log file size in bytes 
+constexpr static size_t   MAX_INFER_LOGFILE_SIZE = 2048;   // Max log file size in bytes (1000 inferences)
 
 using sampleID_set = mcu::ID_vector<uint16_t>;       // set of unique sample IDs
 
@@ -135,7 +135,7 @@ namespace mcu {
             filename = fname;
             bitsPerSample = numFeatures * 2;
             updateSamplesEachChunk();
-            if constexpr(RF_DEBUG_LEVEL > 2)
+            if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.printf("ℹ️ Rf_data initialized: %s with %d features (%d bits/sample, %d samples/chunk)\n", 
                        filename.c_str(), numFeatures, bitsPerSample, samplesEachChunk);
             isLoaded = false;
@@ -154,7 +154,7 @@ namespace mcu {
             // read header to get size_ and bitsPerSample
             File file = SPIFFS.open(filename.c_str(), FILE_READ);
             if (!file) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.println("❌ Failed to open binary file for reading.");
                 if(SPIFFS.exists(filename.c_str())) {
                     SPIFFS.remove(filename.c_str());
@@ -168,7 +168,7 @@ namespace mcu {
             
             if(file.read((uint8_t*)&numSamples, sizeof(numSamples)) != sizeof(numSamples) ||
             file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
-                if constexpr(RF_DEBUG_LEVEL > 3) Serial.println("❌ Failed to read binary header.");
+                if constexpr(RF_DEBUG_LEVEL > 0) Serial.println("❌ Failed to read binary header.");
                 file.close();
                 return;
             }
@@ -176,7 +176,7 @@ namespace mcu {
             bitsPerSample = numFeatures * 2;
             updateSamplesEachChunk();
             file.close();
-            if constexpr(RF_DEBUG_LEVEL > 2)
+            if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.printf("ℹ️ Rf_data initialized: %s with %d features (%d bits/sample, %d samples/chunk, %d samples total)\n", 
                           filename.c_str(), numFeatures, bitsPerSample, samplesEachChunk, size_);
         }
@@ -186,7 +186,7 @@ namespace mcu {
             filename = "";
             bitsPerSample = numFeatures * 2;
             updateSamplesEachChunk();
-            if constexpr(RF_DEBUG_LEVEL > 2)
+            if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.printf("ℹ️ Rf_data initialized with %d features (%d bits/sample, %d samples/chunk)\n", 
                         numFeatures, bitsPerSample, samplesEachChunk);
             isLoaded = false;
@@ -278,12 +278,12 @@ namespace mcu {
         // Helper method to reconstruct Rf_sample from chunked packed storage
         Rf_sample getSample(size_t sampleIndex) const {
             if (!isLoaded) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 2)
                     Serial.println("❌ Rf_data not loaded. Call loadData() first.");
                 return Rf_sample();
             }
             if(sampleIndex >= size_){
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 2)
                     Serial.printf("❌ Sample index %d out of bounds (size=%d)\n", sampleIndex, size_);
                 return Rf_sample();
             }
@@ -299,7 +299,7 @@ namespace mcu {
         // Helper method to store Rf_sample in chunked packed storage
         void storeSample(const Rf_sample& sample, size_t sampleIndex) {
             if (!isProperlyInitialized()) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 2)
                     Serial.println("❌ Rf_data not properly initialized. Use constructor with numFeatures or loadData from another Rf_data.");
                 return;
             }
@@ -361,7 +361,7 @@ namespace mcu {
             
             File file = SPIFFS.open(csvFilename.c_str(), FILE_READ);
             if (!file) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.println("❌ Failed to open CSV file for reading.");
                 return;
             }
@@ -371,7 +371,7 @@ namespace mcu {
                 String line = file.readStringUntil('\n');
                 line.trim();
                 if (line.length() == 0) {
-                    if constexpr(RF_DEBUG_LEVEL > 3)
+                    if constexpr(RF_DEBUG_LEVEL > 0)
                         Serial.println("❌ CSV file is empty or missing header.");
                     file.close();
                     return;
@@ -391,7 +391,7 @@ namespace mcu {
                 // Validate that the provided numFeatures matches the initialized bitsPerSample
                 uint16_t expectedFeatures = bitsPerSample / 2;
                 if (numFeatures != expectedFeatures) {
-                    if constexpr(RF_DEBUG_LEVEL > 3)
+                    if constexpr(RF_DEBUG_LEVEL > 0)
                         Serial.printf("❌ Feature count mismatch: initialized for %d features, CSV has %d\n", 
                                 expectedFeatures, numFeatures);
                     file.close();
@@ -446,14 +446,14 @@ namespace mcu {
                 
                 // Validate the sample
                 if (fieldIdx != numFeatures + 1) {
-                    if constexpr(RF_DEBUG_LEVEL > 3)
+                    if constexpr(RF_DEBUG_LEVEL > 1)
                         Serial.printf("❌ Line %d: Expected %d fields, got %d\n", linesProcessed, numFeatures + 1, fieldIdx);
                     invalidSamples++;
                     continue;
                 }
                 
                 if (s.features.size() != numFeatures) {
-                    if constexpr(RF_DEBUG_LEVEL > 3)
+                    if constexpr(RF_DEBUG_LEVEL > 1)
                         Serial.printf("❌ Line %d: Expected %d features, got %d\n", linesProcessed, numFeatures, s.features.size());
                     invalidSamples++;
                     continue;
@@ -466,19 +466,22 @@ namespace mcu {
                 validSamples++;
                 
                 if (validSamples >= 50000) {
+                    if constexpr (RF_DEBUG_LEVEL > 1)
                     Serial.println("⚠️  Reached sample limit (50000)");
                     break;
                 }
             }
             size_ = validSamples;
             
-            Serial.printf("📋 CSV Processing Results:\n");
-            Serial.printf("   Lines processed: %d\n", linesProcessed);
-            Serial.printf("   Empty lines: %d\n", emptyLines);
-            Serial.printf("   Valid samples: %d\n", validSamples);
-            Serial.printf("   Invalid samples: %d\n", invalidSamples);
-            Serial.printf("   Total samples in memory: %d\n", size_);
-            Serial.printf("   Chunks used: %d\n", sampleChunks.size());
+            if constexpr(RF_DEBUG_LEVEL > 1){
+                Serial.printf("📋 CSV Processing Results:\n");
+                Serial.printf("   Lines processed: %d\n", linesProcessed);
+                Serial.printf("   Empty lines: %d\n", emptyLines);
+                Serial.printf("   Valid samples: %d\n", validSamples);
+                Serial.printf("   Invalid samples: %d\n", invalidSamples);
+                Serial.printf("   Total samples in memory: %d\n", size_);
+                Serial.printf("   Chunks used: %d\n", sampleChunks.size());
+            }
             
             allLabels.fit();
             for (auto& chunk : sampleChunks) {
@@ -487,7 +490,7 @@ namespace mcu {
             file.close();
             isLoaded = true;
             SPIFFS.remove(csvFilename);
-            if constexpr(RF_DEBUG_LEVEL > 2) Serial.println("✅ CSV data loaded and file removed.");
+            if constexpr(RF_DEBUG_LEVEL > 1) Serial.println("✅ CSV data loaded and file removed.");
         }
 
     public:
@@ -504,6 +507,10 @@ namespace mcu {
 
         size_t size() const {
             return size_;
+        }
+
+        String getFilename() const {
+            return filename;
         }
 
         // Fast accessors for training-time hot paths (avoid reconstructing Rf_sample)
@@ -532,7 +539,7 @@ namespace mcu {
         // Reserve space for a specified number of samples
         void reserve(size_t numSamples) {
             if (!isProperlyInitialized()) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 2)
                     Serial.println("❌ Cannot reserve space: Rf_data not properly initialized");
                 return;
             }
@@ -542,17 +549,17 @@ namespace mcu {
 
             // Ensure we have enough chunks for the requested number of samples
             ensureChunkCapacity(numSamples);
-
+            if constexpr(RF_DEBUG_LEVEL > 2)
             Serial.printf("📦 Reserved space for %d samples (%d chunks)\n", 
                         numSamples, sampleChunks.size());
         }
 
         void convertCSVtoBinary(String csvFilename, uint8_t numFeatures = 0) {
-            if constexpr (RF_DEBUG_LEVEL > 2)
+            if constexpr (RF_DEBUG_LEVEL > 1)
                 Serial.println("🔄 Converting CSV to binary format...");
             loadCSVData(csvFilename, numFeatures);
             releaseData(false); // Save to binary and clear memory
-            if constexpr (RF_DEBUG_LEVEL > 2)
+            if constexpr (RF_DEBUG_LEVEL > 1)
                 Serial.println("✅ CSV conversion complete.");
         }
 
@@ -565,7 +572,7 @@ namespace mcu {
             if(!isLoaded) return;
             
             if(!reuse){
-                if constexpr(RF_DEBUG_LEVEL > 2)
+                if constexpr(RF_DEBUG_LEVEL > 1)
                     Serial.println("💾 Saving data to SPIFFS and clearing from RAM...");
                 // Remove any existing file
                 if (SPIFFS.exists(filename.c_str())) {
@@ -574,7 +581,7 @@ namespace mcu {
 
                 File file = SPIFFS.open(filename.c_str(), FILE_WRITE);
                 if (!file) {
-                    if constexpr(RF_DEBUG_LEVEL > 3)
+                    if constexpr(RF_DEBUG_LEVEL > 0)
                         Serial.println("❌ Failed to open binary file for writing.");
                     return;
                 }
@@ -627,7 +634,7 @@ namespace mcu {
             allLabels.fit();
             isLoaded = false;
 
-            if constexpr(RF_DEBUG_LEVEL > 2)
+            if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.printf("✅ Data saved: %s (%d samples, %d features, %d bytes)\n", 
                             filename.c_str(), size_, bitsPerSample / 2, memory_usage());
         }
@@ -635,12 +642,12 @@ namespace mcu {
         // Load data using sequential indices 
         void loadData(bool re_use = true) {
             if(isLoaded || filename.length() < 1) return;
-            if constexpr(RF_DEBUG_LEVEL > 2)
+            if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.printf("📂 Loading data from: %s\n", filename.c_str());
             
             File file = SPIFFS.open(filename.c_str(), FILE_READ);
             if (!file) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.println("❌ Failed to open binary file for reading.");
                 if(SPIFFS.exists(filename.c_str())) {
                     SPIFFS.remove(filename.c_str());
@@ -654,16 +661,18 @@ namespace mcu {
             
             if(file.read((uint8_t*)&numSamples, sizeof(numSamples)) != sizeof(numSamples) ||
             file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
+                if constexpr(RF_DEBUG_LEVEL > 0)
                 Serial.println("❌ Failed to read binary header.");
                 file.close();
                 return;
             }
 
-            if constexpr(RF_DEBUG_LEVEL > 2) {
+            if constexpr(RF_DEBUG_LEVEL > 3) {
                 Serial.printf("📊 Header read: %d samples, %d features\n", numSamples, numFeatures);
             }
 
             if(numFeatures * 2 != bitsPerSample) {
+                if constexpr(RF_DEBUG_LEVEL > 0)
                 Serial.printf("❌ Feature count mismatch: expected %d features, file has %d\n", 
                             bitsPerSample / 2, numFeatures);
                 file.close();
@@ -695,6 +704,7 @@ namespace mcu {
             const size_t MAX_BATCH_BYTES = 2048; // conservative for MCU
             uint8_t* ioBuf = (uint8_t*)malloc(MAX_BATCH_BYTES);
             if (!ioBuf) {
+                if constexpr(RF_DEBUG_LEVEL > 2)
                 Serial.println("⚠️ Falling back to scalar load (no IO buffer)");
             }
 
@@ -711,6 +721,7 @@ namespace mcu {
                     while (bytesRead < bytesToRead) {
                         int r = file.read(ioBuf + bytesRead, bytesToRead - bytesRead);
                         if (r <= 0) {
+                            if constexpr(RF_DEBUG_LEVEL > 2)
                             Serial.println("❌ Failed to read batch from file");
                             if (ioBuf) free(ioBuf);
                             file.close();
@@ -747,7 +758,7 @@ namespace mcu {
                     batchSamples = 1;
                     uint8_t lbl;
                     if (file.read(&lbl, sizeof(lbl)) != sizeof(lbl)) {
-                        if constexpr(RF_DEBUG_LEVEL > 3)
+                        if constexpr(RF_DEBUG_LEVEL > 0)
                         Serial.printf("❌ Failed to read label for sample %u\n", (unsigned)processed);
                         file.close();
                         return;
@@ -755,7 +766,7 @@ namespace mcu {
                     allLabels.push_back(lbl);
                     uint8_t packed[packedFeatureBytes];
                     if (file.read(packed, packedFeatureBytes) != packedFeatureBytes) {
-                        if constexpr(RF_DEBUG_LEVEL > 3)
+                        if constexpr(RF_DEBUG_LEVEL > 0)
                         Serial.printf("❌ Failed to read packed features for sample %u\n", (unsigned)processed);
                         file.close();
                         return;
@@ -788,8 +799,8 @@ namespace mcu {
                     Serial.println("💾 Single-load mode: removing SPIFFS file after loading.");
                 SPIFFS.remove(filename.c_str()); // Remove file after loading in single mode
             }
-            if constexpr(RF_DEBUG_LEVEL > 2)
-            Serial.printf("✅ Data loaded fast: %s (using %d chunks)\n", filename.c_str(), sampleChunks.size());
+            if constexpr(RF_DEBUG_LEVEL > 1)
+            Serial.printf("✅ Data loaded %s (using %d chunks)\n", filename.c_str(), sampleChunks.size());
         }
 
         /**
@@ -800,24 +811,24 @@ namespace mcu {
          * @note: The state of the source data will be automatically restored, no need to reload.
          */
         void loadData(Rf_data& source, const sampleID_set& sample_IDs, bool save_ram = true) {
-            if constexpr(RF_DEBUG_LEVEL > 2)
+            if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.printf("📂 Loading %d specific samples from source Rf_data: %s\n", 
                 sample_IDs.size(), source.filename.c_str());
             if (source.filename.length() == 0) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 0)
                 Serial.println("❌ Source Rf_data has no filename for SPIFFS loading.");
                 return;
             }
 
             if (!SPIFFS.exists(source.filename.c_str())) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 0)
                 Serial.printf("❌ Source file does not exist: %s\n", source.filename.c_str());
                 return;
             }
 
             File file = SPIFFS.open(source.filename.c_str(), FILE_READ);
             if (!file) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 0)
                 Serial.printf("❌ Failed to open source file: %s\n", source.filename.c_str());
                 return;
             }
@@ -832,6 +843,7 @@ namespace mcu {
             
             if(file.read((uint8_t*)&numSamples, sizeof(numSamples)) != sizeof(numSamples) ||
             file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
+                if constexpr(RF_DEBUG_LEVEL > 0)
                 Serial.println("❌ Failed to read binary header from source file.");
                 file.close();
                 return;
@@ -851,14 +863,15 @@ namespace mcu {
             size_t numRequestedSamples = sample_IDs.size();
             allLabels.reserve(numRequestedSamples);
             
+            if constexpr(RF_DEBUG_LEVEL > 2)
             Serial.printf("📦 Loading %d samples from SPIFFS: %s\n", numRequestedSamples, source.filename.c_str());
             
             size_t addedSamples = 0;
             // Since sample_IDs are sorted in ascending order, we can read efficiently
             for(uint16_t sampleIdx : sample_IDs) {
                 if(sampleIdx >= numSamples) {
-                    if constexpr(RF_DEBUG_LEVEL > 3)
-                    Serial.printf("❌ Sample ID %d exceeds file sample count %d\n", sampleIdx, numSamples);
+                    if constexpr(RF_DEBUG_LEVEL > 2)
+                    Serial.printf("⚠️ Sample ID %d exceeds file sample count %d\n", sampleIdx, numSamples);
                     continue;
                 }
                 
@@ -868,8 +881,8 @@ namespace mcu {
                 
                 // Seek to the sample position
                 if (!file.seek(sampleFilePos)) {
-                    if constexpr(RF_DEBUG_LEVEL > 3)
-                    Serial.printf("❌ Failed to seek to sample %d position %d\n", sampleIdx, sampleFilePos);
+                    if constexpr(RF_DEBUG_LEVEL > 2)
+                    Serial.printf("⚠️ Failed to seek to sample %d position %d\n", sampleIdx, sampleFilePos);
                     continue;
                 }
                 
@@ -877,8 +890,8 @@ namespace mcu {
                 
                 // Read label
                 if(file.read(&s.label, sizeof(s.label)) != sizeof(s.label)) {
-                    if constexpr(RF_DEBUG_LEVEL > 3)
-                    Serial.printf("❌ Failed to read label for sample %d\n", sampleIdx);
+                    if constexpr(RF_DEBUG_LEVEL > 2)
+                    Serial.printf("⚠️ Failed to read label for sample %d\n", sampleIdx);
                     continue;
                 }
                 
@@ -888,8 +901,8 @@ namespace mcu {
                 
                 uint8_t packedBuffer[packedFeatureBytes];
                 if(file.read(packedBuffer, packedFeatureBytes) != packedFeatureBytes) {
-                    if constexpr(RF_DEBUG_LEVEL > 3)
-                    Serial.printf("❌ Failed to read packed features for sample %d\n", sampleIdx);
+                    if constexpr(RF_DEBUG_LEVEL > 2)
+                    Serial.printf("⚠️ Failed to read packed features for sample %d\n", sampleIdx);
                     continue;
                 }
                 
@@ -920,7 +933,7 @@ namespace mcu {
                 Serial.println("♻️ Restoring source Rf_data state after loading.");
                 source.loadData(); // reload source if it was pre-loaded
             }
-            if constexpr(RF_DEBUG_LEVEL > 2)
+            if constexpr(RF_DEBUG_LEVEL > 1)
             Serial.printf("✅ Loaded %d samples from SPIFFS file: %s (using %d chunks)\n", 
                         addedSamples, source.filename.c_str(), sampleChunks.size());
         }
@@ -933,11 +946,11 @@ namespace mcu {
          * @note: this function will call loadData(source, chunkIDs) internally.
          */
         void loadChunk(Rf_data& source, size_t chunkIndex, bool save_ram = true) {
-            if constexpr(RF_DEBUG_LEVEL > 3)
+            if constexpr(RF_DEBUG_LEVEL > 2)
                 Serial.printf("📂 Loading chunk %d from source Rf_data: %s\n", 
                 chunkIndex, source.filename.c_str());
             if(chunkIndex >= source.total_chunks()) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 2)
                 Serial.printf("❌ Chunk index %d out of bounds (total chunks=%d)\n", chunkIndex, source.total_chunks());
                 return; 
             }
@@ -949,7 +962,7 @@ namespace mcu {
                 endSample = source.size();
             }
             if(startSample >= endSample) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 0)
                 Serial.printf("❌ Invalid chunk range: start %d, end %d\n", startSample, endSample);
                 return;
             }
@@ -990,7 +1003,7 @@ namespace mcu {
             // Then remove the SPIFFS file if one was specified
             if (filename.length() > 0 && SPIFFS.exists(filename.c_str())) {
                 SPIFFS.remove(filename.c_str());
-                if constexpr(RF_DEBUG_LEVEL > 2)
+                if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.printf("🗑️ Deleted file %s\n", filename.c_str());
             }
         }
@@ -1006,19 +1019,19 @@ namespace mcu {
         mcu::b_vector<uint8_t> addNewData(const mcu::b_vector<Rf_sample>& samples, bool extend = true) {
             mcu::b_vector<uint8_t> deletedLabels;
             if (filename.length() == 0) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 1)
                     Serial.println("❌ No filename specified for addNewData operation");
                 return deletedLabels;
             }
 
             if (!SPIFFS.exists(filename.c_str())) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.printf("❌ File does not exist: %s\n", filename.c_str());
                 return deletedLabels;
             }
 
             if (samples.size() == 0) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 1)
                     Serial.println("❌ No samples to add");
                 return deletedLabels;
             }
@@ -1026,7 +1039,7 @@ namespace mcu {
             // Read current file header to get existing info
             File file = SPIFFS.open(filename.c_str(), FILE_READ);
             if (!file) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.printf("❌ Failed to open file for reading: %s\n", filename.c_str());
                 return deletedLabels;
             }
@@ -1036,7 +1049,7 @@ namespace mcu {
             
             if (file.read((uint8_t*)&currentNumSamples, sizeof(currentNumSamples)) != sizeof(currentNumSamples) ||
                 file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.println("❌ Failed to read file header");
                 file.close();
                 return deletedLabels;
@@ -1045,7 +1058,7 @@ namespace mcu {
 
             // Validate feature count compatibility
             if (samples.size() > 0 && samples[0].features.size() != numFeatures) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.printf("❌ Feature count mismatch: file has %d, samples have %d\n", 
                                 numFeatures, samples[0].features.size());
                 return deletedLabels;
@@ -1093,7 +1106,7 @@ namespace mcu {
                 (newNumSamples - currentNumSamples) : 
                 min((uint32_t)samples.size(), newNumSamples);
 
-            if constexpr(RF_DEBUG_LEVEL > 2) {
+            if constexpr(RF_DEBUG_LEVEL > 1) {
                 Serial.printf("📝 Adding %d samples to %s (extend=%s)\n", 
                             samplesToWrite, filename.c_str(), extend ? "true" : "false");
                 Serial.printf("📊 Dataset info: current=%d, new_total=%d, samples_to_write=%d\n", 
@@ -1103,19 +1116,19 @@ namespace mcu {
             // Open file for writing (r+ mode to update existing file)
             file = SPIFFS.open(filename.c_str(), "r+");
             if (!file) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.printf("❌ Failed to open file for writing: %s\n", filename.c_str());
                 return deletedLabels;
             }
 
             // In overwrite mode, read the labels that will be overwritten
             if (!extend && samplesToWrite > 0) {
-                if constexpr(RF_DEBUG_LEVEL > 2)
+                if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.printf("📋 Reading %d labels that will be overwritten...\n", samplesToWrite);
                 
                 // Seek to the start of data section to read existing labels
                 if (!file.seek(headerSize)) {
-                    if constexpr(RF_DEBUG_LEVEL > 3)
+                    if constexpr(RF_DEBUG_LEVEL > 0)
                         Serial.println("❌ Failed to seek to data section for reading labels");
                     file.close();
                     return deletedLabels;
@@ -1128,7 +1141,7 @@ namespace mcu {
                 for (uint32_t i = 0; i < samplesToWrite; ++i) {
                     uint8_t existingLabel;
                     if (file.read(&existingLabel, sizeof(existingLabel)) != sizeof(existingLabel)) {
-                        if constexpr(RF_DEBUG_LEVEL > 3)
+                        if constexpr(RF_DEBUG_LEVEL > 0)
                             Serial.printf("❌ Failed to read existing label %d\n", i);
                         break;
                     }
@@ -1136,13 +1149,13 @@ namespace mcu {
                     
                     // Skip the packed features to get to next label
                     if (!file.seek(file.position() + packedFeatureBytes)) {
-                        if constexpr(RF_DEBUG_LEVEL > 3)
+                        if constexpr(RF_DEBUG_LEVEL > 0)
                             Serial.printf("❌ Failed to skip features for sample %d\n", i);
                         break;
                     }
                 }
                 
-                if constexpr(RF_DEBUG_LEVEL > 2)
+                if constexpr(RF_DEBUG_LEVEL > 1)
                     Serial.printf("📋 Collected %d labels that will be overwritten\n", deletedLabels.size());
             }
 
@@ -1153,7 +1166,7 @@ namespace mcu {
 
             // Seek to write position
             if (!file.seek(writePosition)) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.printf("❌ Failed to seek to position %d\n", writePosition);
                 file.close();
                 return deletedLabels;
@@ -1166,7 +1179,7 @@ namespace mcu {
                 
                 // Validate sample feature count
                 if (sample.features.size() != numFeatures) {
-                    if constexpr(RF_DEBUG_LEVEL > 3)
+                    if constexpr(RF_DEBUG_LEVEL > 2)
                         Serial.printf("❌ Sample %d has %d features, expected %d\n", 
                                     i, sample.features.size(), numFeatures);
                     continue;
@@ -1174,7 +1187,7 @@ namespace mcu {
 
                 // Write label
                 if (file.write(&sample.label, sizeof(sample.label)) != sizeof(sample.label)) {
-                    if constexpr(RF_DEBUG_LEVEL > 3)
+                    if constexpr(RF_DEBUG_LEVEL > 2)
                         Serial.printf("❌ Failed to write label for sample %d\n", i);
                     break;
                 }
@@ -1195,7 +1208,7 @@ namespace mcu {
                 }
                 
                 if (file.write(packedBuffer, packedFeatureBytes) != packedFeatureBytes) {
-                    if constexpr(RF_DEBUG_LEVEL > 3)
+                    if constexpr(RF_DEBUG_LEVEL > 2)
                         Serial.printf("❌ Failed to write features for sample %d\n", i);
                     break;
                 }
@@ -1208,11 +1221,11 @@ namespace mcu {
             // Update internal size if data is loaded in memory
             if (isLoaded) {
                 size_ = newNumSamples;
-                if constexpr(RF_DEBUG_LEVEL > 2)
+                if constexpr(RF_DEBUG_LEVEL > 1)
                     Serial.println("ℹ️ Updated internal size. Consider reloading data for consistency.");
             }
 
-            if constexpr(RF_DEBUG_LEVEL > 2) {
+            if constexpr(RF_DEBUG_LEVEL > 1) {
                 Serial.printf("✅ Successfully wrote %d samples to %s (total samples now: %d)\n", 
                             written, filename.c_str(), newNumSamples);
                 if (!extend && deletedLabels.size() > 0) {
@@ -1357,12 +1370,12 @@ namespace mcu {
         void releaseTree(String model_name,  bool re_use = false) {
             if(!re_use){
                 if (index == 255 || nodes.empty()) {
-                    if constexpr(RF_DEBUG_LEVEL > 3)
+                    if constexpr(RF_DEBUG_LEVEL > 1)
                          Serial.println("❌ No valid index specified or tree is empty for saving");
                     return;
                 }
 
-                if constexpr(RF_DEBUG_LEVEL > 2){
+                if constexpr(RF_DEBUG_LEVEL > 1){
                     Serial.printf("🔄 Saving tree %d \n", index);
                 }
 
@@ -1372,7 +1385,7 @@ namespace mcu {
                 // Skip exists/remove check - just overwrite directly for performance
                 File file = SPIFFS.open(filename, FILE_WRITE);
                 if (!file) {
-                    if constexpr(RF_DEBUG_LEVEL > 3)
+                    if constexpr(RF_DEBUG_LEVEL > 0)
                          Serial.printf("❌ Failed to save tree: %s\n", filename);
                     return;
                 }
@@ -1404,7 +1417,7 @@ namespace mcu {
                         free(buffer);
                         
                         if(written != totalSize) {
-                            if constexpr(RF_DEBUG_LEVEL > 5)
+                            if constexpr(RF_DEBUG_LEVEL > 2)
                                 Serial.printf("⚠️ Incomplete write: %d/%d bytes\n", written, totalSize);
                         }
                     } else {
@@ -1416,7 +1429,7 @@ namespace mcu {
                 }    
                 file.close();
             }
-            if constexpr(RF_DEBUG_LEVEL > 2){
+            if constexpr(RF_DEBUG_LEVEL > 1){
                 uint16_t countLeaf = countLeafNodes();
                 Serial.printf("✅ Tree saved: %d (%d nodes, %d leaves, depth %d, %d bytes)\n", 
                               index, nodes.size(), countLeaf, getTreeDepth(), memory_usage());
@@ -1432,7 +1445,7 @@ namespace mcu {
             if (isLoaded) return;
             
             if (index == 255) {
-                if constexpr(RF_DEBUG_LEVEL > 3) 
+                if constexpr(RF_DEBUG_LEVEL > 0) 
                     Serial.println("❌ No valid index specified for tree loading");
                 return;
             }
@@ -1440,13 +1453,13 @@ namespace mcu {
             char path_to_use[32];
             snprintf(path_to_use, sizeof(path_to_use), "/%s_tree_%d.bin", model_name.c_str(), index);
 
-            if constexpr(RF_DEBUG_LEVEL > 3){
+            if constexpr(RF_DEBUG_LEVEL > 1){
                 Serial.printf("🔄 Loading tree from: %s\n", path_to_use);
             }
             
             File file = SPIFFS.open(path_to_use, FILE_READ);
             if (!file) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.printf("❌ Failed to open tree file: %s\n", path_to_use);
                 return;
             }
@@ -1454,7 +1467,7 @@ namespace mcu {
             // Read and verify magic number
             uint32_t magic;
             if (file.read((uint8_t*)&magic, sizeof(magic)) != sizeof(magic) || magic != 0x54524545) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.printf("❌ Invalid tree file format: %s\n", path_to_use);
                 file.close();
                 return;
@@ -1463,14 +1476,14 @@ namespace mcu {
             // Read number of nodes
             uint32_t nodeCount;
             if (file.read((uint8_t*)&nodeCount, sizeof(nodeCount)) != sizeof(nodeCount)) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.printf("❌ Failed to read node count: %s\n", path_to_use);
                 file.close();
                 return;
             }
             
             if (nodeCount == 0 || nodeCount > 2047) { // 11-bit limit for child indices
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.printf("❌ Invalid node count: %d\n", nodeCount);
                 file.close();
                 return;
@@ -1484,7 +1497,7 @@ namespace mcu {
             for (uint32_t i = 0; i < nodeCount; i++) {
                 Tree_node node;
                 if (file.read((uint8_t*)&node.packed_data, sizeof(node.packed_data)) != sizeof(node.packed_data)) {
-                    if constexpr(RF_DEBUG_LEVEL > 3)
+                    if constexpr(RF_DEBUG_LEVEL > 0)
                         Serial.printf("❌ Failed to read node %d from: %s\n", i, path_to_use);
                     nodes.clear();
                     file.close();
@@ -1497,12 +1510,12 @@ namespace mcu {
             
             // Update state
             isLoaded = true;
-            if constexpr(RF_DEBUG_LEVEL > 2){
+            if constexpr(RF_DEBUG_LEVEL > 1){
                 Serial.printf("✅ Tree loaded: %s (%d nodes, %d bytes)\n", 
                         path_to_use, nodeCount, memory_usage());
             }
             if (!re_use) {
-                if constexpr(RF_DEBUG_LEVEL > 2)
+                if constexpr(RF_DEBUG_LEVEL > 1)
                     Serial.printf("🗑️ Removing tree file after load: %s\n", path_to_use);    
                 SPIFFS.remove(path_to_use); // Remove file after loading in single mode
             }
@@ -1518,7 +1531,7 @@ namespace mcu {
                 uint16_t featureID = nodes[currentIndex].getFeatureID();
                 // Bounds check for feature access
                 if (featureID >= packed_features.size()) {
-                    if constexpr(RF_DEBUG_LEVEL > 3)
+                    if constexpr(RF_DEBUG_LEVEL > 2)
                         Serial.println("❌ Feature ID out of bounds during prediction");
                     return 0; // Invalid feature access
                 }
@@ -1557,7 +1570,7 @@ namespace mcu {
                 snprintf(filename, sizeof(filename), "/%s_tree_%d.bin", model_name.c_str(), index);
                 if (SPIFFS.exists(filename)) {
                     SPIFFS.remove(filename);
-                    if constexpr(RF_DEBUG_LEVEL > 2) Serial.printf("✅ Tree file removed: %s\n", filename);
+                    if constexpr(RF_DEBUG_LEVEL > 1) Serial.printf("✅ Tree file removed: %s\n", filename);
                 } 
             }
             index = 255;
@@ -1695,7 +1708,7 @@ namespace mcu {
         }
 
         void init(const String& fn){
-            if constexpr(RF_DEBUG_LEVEL > 2)
+            if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.printf("🔧 Initializing Rf_config with file: %s\n", fn.c_str());
             filename = fn;
             isLoaded = false;
@@ -1707,8 +1720,8 @@ namespace mcu {
 
             File file = SPIFFS.open(filename.c_str(), FILE_READ);
             if (!file) {
-                if constexpr(RF_DEBUG_LEVEL > 3){
-                    Serial.printf("❌ Failed to open config file: %s\n", filename.c_str());
+                if constexpr(RF_DEBUG_LEVEL > 2){
+                    Serial.printf("⚠️ Failed to open config file: %s\n", filename.c_str());
                     Serial.println("Switching to default configuration.");
                 }
                 return;
@@ -1720,7 +1733,7 @@ namespace mcu {
             // Parse JSON manually (simple parsing for known structure)
             parseJSONConfig(jsonString);
             isLoaded = true;
-            if constexpr(RF_DEBUG_LEVEL > 2) {
+            if constexpr(RF_DEBUG_LEVEL > 1) {
                 Serial.printf("✅ Config loaded: %s\n", filename.c_str());
                 Serial.printf("   Trees: %d, max_depth: %d, min_split: %d\n", num_trees, max_depth, min_split);
                 Serial.printf("   Estimated RAM: %d bytes\n", estimatedRAM);
@@ -1732,12 +1745,11 @@ namespace mcu {
             loadDpFile(); // Load dataset parameters
             
             // Validate configuration after loading
-            if constexpr(RF_DEBUG_LEVEL > 2) {
-                if (validateSamplesPerLabel()) {
-                    Serial.println("✅ samples_per_label data is consistent");
-                } else {
-                    Serial.println("⚠️ Warning: samples_per_label data inconsistency detected");
-                }
+            if (validateSamplesPerLabel()) {
+                Serial.println("✅ samples_per_label data is consistent");
+            } else {
+                if constexpr(RF_DEBUG_LEVEL > 2)
+                Serial.println("⚠️ Warning: samples_per_label data inconsistency detected");
             }
         }
 
@@ -1745,13 +1757,14 @@ namespace mcu {
         void loadDpFile() {
             String path = getDpFilename();
             if (path.length() < 1 || !SPIFFS.exists(path.c_str())) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
-                    Serial.printf("❌ Dataset params file not found: %s\n", path.c_str());
+                if constexpr(RF_DEBUG_LEVEL > 1)
+                    Serial.printf("⚠️ Dataset params file not found: %s\n", path.c_str());
                 return;
             }
             // Read dataset parameters from /dataset_params.csv
             File file = SPIFFS.open(path.c_str(), "r");
             if (!file) {
+                if constexpr(RF_DEBUG_LEVEL > 0)
                 Serial.println("❌ Failed to open data_params file.");
                 return;
             }
@@ -1814,19 +1827,21 @@ namespace mcu {
             }
 
             // Dataset summary output
-            Serial.printf("📊 Dataset Summary (from params file):\n");
-            Serial.printf("  Total samples: %u\n", numSamples);
-            Serial.printf("  Total features: %u\n", numFeatures);
-            Serial.printf("  Unique labels: %u\n", numLabels);
+            if constexpr(RF_DEBUG_LEVEL > 1){
+                Serial.printf("📊 Dataset Summary (from params file):\n");
+                Serial.printf("  Total samples: %u\n", numSamples);
+                Serial.printf("  Total features: %u\n", numFeatures);
+                Serial.printf("  Unique labels: %u\n", numLabels);
 
-            Serial.println("  Label distribution:");
-            float lowest_distribution = 100.0f;
-            for (uint8_t i = 0; i < numLabels; i++) {
-                if (samples_per_label[i] > 0) {
-                    float percent = (float)samples_per_label[i] / numSamples * 100.0f;
-                    Serial.printf("    Label %u: %u samples (%.1f%%)\n", i, samples_per_label[i], percent);
-                    if (percent < lowest_distribution) {
-                        lowest_distribution = percent;
+                Serial.println("  Label distribution:");
+                float lowest_distribution = 100.0f;
+                for (uint8_t i = 0; i < numLabels; i++) {
+                    if (samples_per_label[i] > 0) {
+                        float percent = (float)samples_per_label[i] / numSamples * 100.0f;
+                        Serial.printf("    Label %u: %u samples (%.1f%%)\n", i, samples_per_label[i], percent);
+                        if (percent < lowest_distribution) {
+                            lowest_distribution = percent;
+                        }
                     }
                 }
             }
@@ -1851,12 +1866,14 @@ namespace mcu {
             if(min_split == 0 || max_depth == 0) {
                 min_split = (min_minSplit + max_minSplit) / 2;
                 max_depth = (min_maxDepth + max_maxDepth) / 2;
-                Serial.println("⚙️ Not found minSplit/maxDepth in .");
-                Serial.printf("Setting minSplit to %u and maxDepth to %u based on dataset size.\n", 
-                            min_split, max_depth);
+                if constexpr(RF_DEBUG_LEVEL > 1){
+                    Serial.println("⚙️ Not found minSplit/maxDepth in config, setting to optimal values.");
+                    Serial.printf("Setting minSplit to %u and maxDepth to %u based on dataset size.\n", 
+                                min_split, max_depth);
+                }
             }
 
-            if constexpr(RF_DEBUG_LEVEL > 2){
+            if constexpr(RF_DEBUG_LEVEL > 1){
                 Serial.printf("⚙️ Setting minSplit range: %d to %d (current: %d)\n", 
                             min_minSplit, max_minSplit, min_split);
                 Serial.printf("⚙️ Setting maxDepth range: %d to %d (current: %d)\n", 
@@ -1877,11 +1894,12 @@ namespace mcu {
             if (path.length() < 1) return;
             File file = SPIFFS.open(path.c_str(), "w");
             if (!file) {
+                if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.println("❌ Failed to open data_params file for writing.");
                 return;
             }
             
-            if constexpr(RF_DEBUG_LEVEL > 2)
+            if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.printf("💾 Saving dataset parameters to: %s\n", path.c_str());
             
             // Write header
@@ -1903,12 +1921,12 @@ namespace mcu {
             
             file.close();   
             
-            if constexpr(RF_DEBUG_LEVEL > 2)
+            if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.println("✅ Dataset parameters saved successfully.");
         }
         // Save configuration to JSON file in SPIFFS  
         void releaseConfig() {
-            if constexpr(RF_DEBUG_LEVEL > 2)
+            if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.printf("💾 Saving config to SPIFFS: %s\n", filename.c_str());
             // Read existing file to preserve timestamp and author
 
@@ -1928,6 +1946,7 @@ namespace mcu {
 
             File file = SPIFFS.open(filename.c_str(), FILE_WRITE);
             if (!file) {
+                if constexpr(RF_DEBUG_LEVEL > 0)
                 Serial.printf("❌ Failed to create config file: %s\n", filename.c_str());
                 return;
             }
@@ -1973,13 +1992,13 @@ namespace mcu {
         
             // Clear from RAM  
             purgeConfig();
-            if constexpr(RF_DEBUG_LEVEL > 2)
+            if constexpr(RF_DEBUG_LEVEL > 1)
             Serial.printf("✅ Config saved to: %s\n", filename.c_str());
         }
 
         // Update timestamp in the JSON file
         void update_timestamp() {
-            if constexpr(RF_DEBUG_LEVEL > 2)
+            if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.printf("⏱️ Updating timestamp in config file: %s\n", filename.c_str());
             if (!SPIFFS.exists(filename.c_str())) return;
             
@@ -2054,7 +2073,7 @@ namespace mcu {
             }
             // If not found in JSON, enable_retrain keeps its default value (true)
             
-            if constexpr(RF_DEBUG_LEVEL > 2) {
+            if constexpr(RF_DEBUG_LEVEL > 1) {
                 Serial.printf("   extend_base_data: %s, enable_retrain: %s\n", 
                             extend_base_data ? "true" : "false",
                             enable_retrain ? "true" : "false");
@@ -2215,10 +2234,11 @@ namespace mcu {
         }
 
         void init(const char* model_name){
-            if constexpr(RF_DEBUG_LEVEL > 2)
+            if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.printf("🔧 Initializing the base with model name: %s\n", model_name ? model_name : "NULL");
             if (!model_name || strlen(model_name) == 0) {
-                Serial.println("❌ Base name is empty.");
+                if constexpr(RF_DEBUG_LEVEL > 0)
+                Serial.println("⚠️ Base name is empty.");
                 return;
             } else {
                 this->model_name = String(model_name);
@@ -2239,8 +2259,8 @@ namespace mcu {
                     if(SPIFFS.exists(categorizerFile.c_str())) {
                         flags |= static_cast<Rf_base_flags>(EXIST_CATEGORIZER);
                     } else {
-                        if constexpr(RF_DEBUG_LEVEL > 2){
-                            Serial.printf("❌ No categorizer file found : %s\n", categorizerFile.c_str());
+                        if constexpr(RF_DEBUG_LEVEL > 1){
+                            Serial.printf("⚠️ No categorizer file found : %s\n", categorizerFile.c_str());
                             Serial.println("-> Model still able to re_train or run inference, but cannot re_train with new data later.");
                         }
                     }
@@ -2250,8 +2270,8 @@ namespace mcu {
                         // If data_params exists, able to training
                         flags |= static_cast<Rf_base_flags>(ABLE_TO_TRAINING);
                     } else {
-                        if constexpr(RF_DEBUG_LEVEL > 2){
-                            Serial.printf("❌ No data_parameters file found: %s\n", dataParamsFile.c_str());
+                        if constexpr(RF_DEBUG_LEVEL > 1){
+                            Serial.printf("⚠️ No data_parameters file found: %s\n", dataParamsFile.c_str());
                             Serial.println("Re_training and inference are not available..\n");
                         }
                     }
@@ -2275,7 +2295,7 @@ namespace mcu {
                             if (SPIFFS.exists(treeFile.c_str())) {
                                 tree_count++;
                             } else {
-                                if constexpr(RF_DEBUG_LEVEL > 3)
+                                if constexpr(RF_DEBUG_LEVEL > 1)
                                 Serial.printf("❌ Missing tree file: %s\n", treeFile.c_str());
                                 break; // Stop when we find a missing tree file
                             }
@@ -2283,7 +2303,7 @@ namespace mcu {
                         
                         if (tree_count > 0) {
                             all_trees_exist = true;
-                            if constexpr(RF_DEBUG_LEVEL > 2)
+                            if constexpr(RF_DEBUG_LEVEL > 1)
                             Serial.printf("✅ Found %d individual tree files\n", tree_count);
                         }
                     }
@@ -2300,7 +2320,7 @@ namespace mcu {
                     } 
                     
                 } else {
-                    if constexpr(RF_DEBUG_LEVEL > 2)
+                    if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.printf("❌ Base dataset does not exist: %s\n", model_dataset.c_str());
                     // setup flags to indicate no base file
                     flags = static_cast<Rf_base_flags>(0);
@@ -2557,7 +2577,7 @@ namespace mcu {
         }
 
         Rf_node_predictor(const char* fn) : filename(fn), is_trained(false), accuracy(0), peak_percent(0) {
-            if constexpr(RF_DEBUG_LEVEL > 2)
+            if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.printf("🔧 Initializing node predictor with file: %s\n", fn ? fn : "NULL");
             for (int i = 0; i < 3; i++) {
                 coefficients[i] = 0.0f;
@@ -2618,11 +2638,11 @@ namespace mcu {
         
         // Load trained model from SPIFFS (updated format without version)
         bool loadPredictor() {
-            if constexpr(RF_DEBUG_LEVEL > 2)
+            if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.printf("🔍 Loading node predictor from file: %s\n", filename.c_str());
             if(is_trained) return true;
             if (!SPIFFS.exists(filename.c_str())) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.printf("❌ No predictor file found: %s !\n", filename.c_str());
                 Serial.println("Switching to use default predictor.");
                 return false;
@@ -2630,7 +2650,7 @@ namespace mcu {
             
             File file = SPIFFS.open(filename.c_str(), FILE_READ);
             if (!file) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 0)
                 Serial.printf("❌ Failed to open predictor file: %s\n", filename.c_str());
                 return false;
             }
@@ -2638,7 +2658,7 @@ namespace mcu {
             // Read and verify magic number
             uint32_t magic;
             if (file.read((uint8_t*)&magic, sizeof(magic)) != sizeof(magic) || magic != 0x4E4F4445) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 0)
                 Serial.printf("❌ Invalid predictor file format: %s\n", filename.c_str());
                 file.close();
                 return false;
@@ -2647,7 +2667,7 @@ namespace mcu {
             // Read training status (but don't use it to set is_trained - that's set after successful loading)
             bool file_is_trained;
             if (file.read((uint8_t*)&file_is_trained, sizeof(file_is_trained)) != sizeof(file_is_trained)) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.println("❌ Failed to read training status");
                 file.close();
                 return false;
@@ -2655,14 +2675,14 @@ namespace mcu {
             
             // Read accuracy and peak_percent
             if (file.read((uint8_t*)&accuracy, sizeof(accuracy)) != sizeof(accuracy)) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.println("❌ Failed to read accuracy");
                 file.close();
                 return false;
             }
             
             if (file.read((uint8_t*)&peak_percent, sizeof(peak_percent)) != sizeof(peak_percent)) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.println("❌ Failed to read peak_percent");
                 file.close();
                 return false;
@@ -2671,7 +2691,7 @@ namespace mcu {
             // Read number of coefficients
             uint8_t num_coefficients;
             if (file.read((uint8_t*)&num_coefficients, sizeof(num_coefficients)) != sizeof(num_coefficients) || num_coefficients != 3) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.printf("❌ Invalid coefficient count: %d (expected 3)\n", num_coefficients);
                 file.close();
                 return false;
@@ -2679,7 +2699,7 @@ namespace mcu {
             
             // Read coefficients
             if (file.read((uint8_t*)coefficients, sizeof(float) * 3) != sizeof(float) * 3) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.println("❌ Failed to read coefficients");
                 file.close();
                 return false;
@@ -2694,9 +2714,10 @@ namespace mcu {
                 // Fix PC version's peak_percent bug where it often saves 0%
                 if (peak_percent == 0) {
                     peak_percent = 30; // Use reasonable default for binary trees
-                    Serial.printf("⚠️  Fixed peak_percent from 0%% to 30%% (PC version bug)\n");
+                    if constexpr(RF_DEBUG_LEVEL > 2)
+                    Serial.printf("⚠️  Fixed peak_percent from 0%% to 30%% \n");
                 }
-                if constexpr(RF_DEBUG_LEVEL > 2){
+                if constexpr(RF_DEBUG_LEVEL > 1){
                 Serial.printf("✅ Node_predictor loaded: %s (accuracy: %d%%, peak: %d%%)\n", 
                             filename.c_str(), accuracy, peak_percent);
                 Serial.printf("   Coefficients: bias=%.2f, split=%.2f, depth=%.2f\n", 
@@ -2718,11 +2739,12 @@ namespace mcu {
                 SPIFFS.remove(filename.c_str());
             }
 
-            if constexpr(RF_DEBUG_LEVEL > 2)
+            if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.printf("💾 Saving node predictor to file: %s\n", filename.c_str());
             
             File file = SPIFFS.open(filename.c_str(), FILE_WRITE);
             if (!file) {
+                if constexpr(RF_DEBUG_LEVEL > 0)
                 Serial.printf("❌ Failed to create node_predictor file: %s\n", filename.c_str());
                 return false;
             }
@@ -2747,7 +2769,7 @@ namespace mcu {
             
             file.close();
             
-            if constexpr(RF_DEBUG_LEVEL > 2)
+            if constexpr(RF_DEBUG_LEVEL > 1)
             Serial.printf("✅ Node_predictor saved: %s (%d bytes, accuracy: %d%%, peak: %d%%)\n", 
                         filename.c_str(), 
                         sizeof(magic) + sizeof(is_trained) + sizeof(accuracy) + sizeof(peak_percent) + 
@@ -2788,11 +2810,12 @@ namespace mcu {
 
             File file = SPIFFS.open(node_predictor_log, FILE_READ);
             if (!file) {
-                if constexpr(RF_DEBUG_LEVEL > 3)
-                Serial.printf("❌ Failed to open training log: %s\n", node_predictor_log);
+                if constexpr(RF_DEBUG_LEVEL > 1)
+                Serial.printf("❌ Failed to open node_predictor log: %s\n", node_predictor_log);
                 return false;
             }
             
+            if constexpr(RF_DEBUG_LEVEL > 2)
             Serial.println("🔄 Retraining node predictor from CSV data...");
             
 
@@ -2835,7 +2858,7 @@ namespace mcu {
             file.close();
             
             if (training_data.size() < 3) {
-                // if constexpr(RF_DEBUG_LEVEL > 3)
+                if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.printf("❌ Insufficient training data: %d samples (need at least 3)\n", training_data.size());
                 return false;
             }
@@ -2871,7 +2894,7 @@ namespace mcu {
                 }
             }
             
-            // if constexpr(RF_DEBUG_LEVEL > 3)
+            if constexpr(RF_DEBUG_LEVEL > 2)
             Serial.printf("   Found %d unique min_splits, %d unique max_depths\n", 
                         unique_min_splits.size(), unique_max_depths.size());
             
@@ -3010,7 +3033,7 @@ namespace mcu {
             
             is_trained = true;
 
-            if constexpr(RF_DEBUG_LEVEL > 2){
+            if constexpr(RF_DEBUG_LEVEL > 1){
                 Serial.printf("✅ Retraining complete! Accuracy: %d%%, Peak: %d%%\n", accuracy, peak_percent);
                 Serial.printf("   Coefficients: bias=%.2f, split=%.2f, depth=%.2f\n", 
                             coefficients[0], coefficients[1], coefficients[2]);
@@ -3123,7 +3146,8 @@ namespace mcu {
 
         String memory_log_file;
         String time_log_file;
-
+    
+    public:
         Rf_logger() : freeHeap(0), largestBlock(0), starting_time(0), fragmentation(0), log_time(0.0f) {
         }
 
@@ -3171,7 +3195,7 @@ namespace mcu {
             m_log("init tracker", false, true); // Initial log without printing
         }
 
-        void m_log(const char* msg = "", bool print = true, bool log = true){
+        void m_log(const char* msg, bool print = true, bool log = true){
             freeHeap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
             freeDisk = SPIFFS.totalBytes() - SPIFFS.usedBytes();
 
@@ -3212,6 +3236,10 @@ namespace mcu {
             }
         }
 
+        // fast log : just for measure and update : lowest ram and fragmentation
+        void m_log(){
+            m_log("", false, false);
+        }
         uint16_t drop_anchor(){
             time_anchor anchor;
             anchor.anchor_time = GET_CURRENT_TIME_IN_MILLISECONDS;
@@ -3245,7 +3273,7 @@ namespace mcu {
             long unsigned end_time = time_anchors[end_anchor_idex].anchor_time;
             float elapsed = (end_time - begin_time)/ratio;
             if(print){
-                if constexpr(RF_DEBUG_LEVEL > 1) {         
+                if constexpr(RF_DEBUG_LEVEL >= 1) {         
                     if(msg && strlen(msg) > 0){
                         Serial.print("⏱️  ");
                         Serial.print(msg);
@@ -3323,7 +3351,7 @@ namespace mcu {
                     }
                     logFile.close();
                 }else{
-                    if constexpr(RF_DEBUG_LEVEL > 3)
+                    if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.printf("❌ Failed to open time log file: %s\n", time_log_file.c_str());
                 }
             }
@@ -3408,7 +3436,7 @@ namespace mcu {
         // Optimized feature categorization
         uint8_t categorizeFeature(uint16_t featureIdx, float value) const {
             if (!isLoaded || featureIdx >= numFeatures) {
-                if constexpr(RF_DEBUG_LEVEL > 4)
+                if constexpr(RF_DEBUG_LEVEL > 3)
                     Serial.println("❌ Categorizer not loaded or invalid feature index");
                 return 0;
             }
@@ -3472,7 +3500,7 @@ namespace mcu {
         Rf_categorizer(const String& csvFilename) : filename(csvFilename), isLoaded(false) {}
 
         void init(const String& csvFilename) {
-            if constexpr(RF_DEBUG_LEVEL > 2)
+            if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.println("🔧 Initializing categorizer with file: " + csvFilename);
             filename = csvFilename;
             isLoaded = false;
@@ -3480,24 +3508,23 @@ namespace mcu {
         
         // Load categorizer data from CTG v2 format
         bool loadCategorizer(bool re_use = true) {
-            if constexpr (RF_DEBUG_LEVEL > 2)
-                Serial.println("📂 Loading categorizer from file: " + filename);
             if (!SPIFFS.exists(filename)) {
+                if constexpr(RF_DEBUG_LEVEL > 0)
                 Serial.println("❌ Categorizer file not found: " + filename);
                 return false;
             }
             
             File file = SPIFFS.open(filename, "r");
             if (!file) {
+                if constexpr(RF_DEBUG_LEVEL > 0)
                 Serial.println("❌ Failed to open Categorizer file: " + filename);
                 return false;
             }
             
-            Serial.println("📂 Loading Categorizer from: " + filename);
-            
             try {
                 // Read header: Categorizer,numFeatures,groupsPerFeature,numLabels,numSharedPatterns,scaleFactor
                 if (!file.available()) {
+                    if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.println("❌ Empty Categorizer file");
                     file.close();
                     return false;
@@ -3508,6 +3535,7 @@ namespace mcu {
                 auto headerParts = split(headerLine, ',');
                 
                 if (headerParts.size() != 6 || headerParts[0] != "CTG2") {
+                    if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.println("❌ Invalid Categorizer header format");
                     file.close();
                     return false;
@@ -3519,6 +3547,7 @@ namespace mcu {
                 uint16_t numSharedPatterns = headerParts[4].toInt();
                 scaleFactor = headerParts[5].toInt();
                 
+                if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.println("📊 Features: " + String(numFeatures) + ", Groups: " + String(groupsPerFeature) + 
                              ", Labels: " + String(numLabels) + ", Patterns: " + String(numSharedPatterns) + 
                              ", Scale: " + String(scaleFactor));
@@ -3572,6 +3601,7 @@ namespace mcu {
                 // Read shared patterns: P,patternId,edgeCount,e1,e2,...
                 for (uint16_t i = 0; i < numSharedPatterns; i++) {
                     if (!file.available()) {
+                        if constexpr(RF_DEBUG_LEVEL > 0)
                         Serial.println("❌ Unexpected end of file reading patterns");
                         file.close();
                         return false;
@@ -3582,6 +3612,7 @@ namespace mcu {
                     auto parts = split(patternLine, ',');
                     
                     if (parts.size() < 3 || parts[0] != "P") {
+                        if constexpr(RF_DEBUG_LEVEL > 0)
                         Serial.println("❌ Invalid pattern line format");
                         file.close();
                         return false;
@@ -3591,6 +3622,7 @@ namespace mcu {
                     uint16_t edgeCount = parts[2].toInt();
                     
                     if (parts.size() != (3 + edgeCount)) {
+                        if constexpr(RF_DEBUG_LEVEL > 0)
                         Serial.println("❌ Pattern edge count mismatch");
                         file.close();
                         return false;
@@ -3605,6 +3637,7 @@ namespace mcu {
                 // Read feature definitions
                 for (uint16_t i = 0; i < numFeatures; i++) {
                     if (!file.available()) {
+                        if constexpr(RF_DEBUG_LEVEL > 0)
                         Serial.println("❌ Unexpected end of file reading features");
                         file.close();
                         return false;
@@ -3615,7 +3648,7 @@ namespace mcu {
                     auto parts = split(featureLine, ',');
                     
                     if (parts.size() < 1) {
-                        Serial.println("❌ Invalid feature line");
+                        if constexpr(RF_DEBUG_LEVEL > 0) Serial.println("❌ Invalid feature line");
                         file.close();
                         return false;
                     }
@@ -3627,14 +3660,14 @@ namespace mcu {
                     else if (parts[0] == "DC") {
                         // Discrete custom values
                         if (parts.size() < 2) {
-                            Serial.println("❌ Invalid DC line format");
+                            if constexpr(RF_DEBUG_LEVEL > 0) Serial.println("❌ Invalid DC line format");
                             file.close();
                             return false;
                         }
                         
                         uint8_t count = parts[1].toInt();
                         if (parts.size() != (2 + count)) {
-                            Serial.println("❌ DC value count mismatch");
+                            if constexpr(RF_DEBUG_LEVEL > 0) Serial.println("❌ DC value count mismatch");
                             file.close();
                             return false;
                         }
@@ -3649,7 +3682,7 @@ namespace mcu {
                     else if (parts[0] == "CS") {
                         // Continuous shared pattern
                         if (parts.size() != 2) {
-                            Serial.println("❌ Invalid CS line format");
+                            if constexpr(RF_DEBUG_LEVEL > 0) Serial.println("❌ Invalid CS line format");
                             file.close();
                             return false;
                         }
@@ -3660,13 +3693,14 @@ namespace mcu {
                     else if (parts[0] == "CU") {
                         // Continuous unique edges
                         if (parts.size() < 2) {
-                            Serial.println("❌ Invalid CU line format");
+                            if constexpr(RF_DEBUG_LEVEL > 0) Serial.println("❌ Invalid CU line format");
                             file.close();
                             return false;
                         }
                         
                         uint8_t edgeCount = parts[1].toInt();
                         if (parts.size() != (2 + edgeCount)) {
+                            if constexpr(RF_DEBUG_LEVEL > 0)
                             Serial.println("❌ CU edge count mismatch");
                             file.close();
                             return false;
@@ -3680,6 +3714,7 @@ namespace mcu {
                         featureRefs.push_back(FeatureRef(FT_CU, edgeCount, offset));
                     }
                     else {
+                        if constexpr(RF_DEBUG_LEVEL > 0)
                         Serial.println("❌ Unknown feature type: " + parts[0]);
                         file.close();
                         return false;
@@ -3689,8 +3724,10 @@ namespace mcu {
                 file.close();
                 isLoaded = true;
                 
-                Serial.println("✅ Categorizer loaded successfully!");
-                Serial.println("   Memory usage: " + String(memory_usage()) + " bytes");
+                if constexpr(RF_DEBUG_LEVEL > 1) {
+                    Serial.println("✅ Categorizer loaded successfully!");
+                    Serial.println("   Memory usage: " + String(memory_usage()) + " bytes");
+                }
                 
                 // Clean up file if not reusing
                 if (!re_use) {
@@ -3700,6 +3737,7 @@ namespace mcu {
                 return true;
                 
             } catch (...) {
+                if constexpr(RF_DEBUG_LEVEL > 0)
                 Serial.println("❌ Error parsing Categorizer file");
                 file.close();
                 return false;
@@ -3710,6 +3748,7 @@ namespace mcu {
         // Release loaded data from memory
         void releaseCategorizer(bool re_use = true) {
             if (!isLoaded) {
+                if constexpr(RF_DEBUG_LEVEL > 2)
                 Serial.println("🧹 Categorizer already released");
                 return;
             }
@@ -3724,13 +3763,14 @@ namespace mcu {
             #endif
             
             isLoaded = false;
+            if constexpr(RF_DEBUG_LEVEL > 1)
             Serial.println("🧹 Categorizer data released from memory");
         }
 
         // categorize features array
         mcu::packed_vector<2> categorizeFeatures(const float* features, size_t featureCount = 0) const {
             if (featureCount == 0) {
-                if constexpr (RF_DEBUG_LEVEL > 6)
+                if constexpr (RF_DEBUG_LEVEL > 2)
                     Serial.printf("⚠️ Feature count not provided, assuming %d\n", numFeatures);
                 featureCount = numFeatures;
             }
@@ -3747,6 +3787,7 @@ namespace mcu {
         mcu::packed_vector<2> categorizeFeatures(const T& features) const {
             static_assert(is_supported_vector<T>::value, "Unsupported vector type for categorizeFeatures");
             if (features.size() != numFeatures) {
+                if constexpr (RF_DEBUG_LEVEL > 2)
                 Serial.printf("❌ Feature count mismatch: expected %d, got %d\n", numFeatures, features.size());
                 return mcu::packed_vector<2>();
             }
@@ -3974,7 +4015,6 @@ namespace mcu {
     */
 
     class Rf_matrix_score{
-    public:
         // Confusion matrix components
         b_vector<uint16_t, 4> tp;
         b_vector<uint16_t, 4> fp;
@@ -3985,6 +4025,7 @@ namespace mcu {
         uint8_t num_labels;
         uint8_t training_flag;
 
+        public:
         // Constructor
         Rf_matrix_score(uint8_t num_labels, uint8_t training_flag) 
             : num_labels(num_labels), training_flag(training_flag) {
@@ -4088,9 +4129,10 @@ namespace mcu {
         }
 
         // Calculate combined score based on training flags
-        float calculate_score(const char* score_type = "Combined") {
+        float calculate_score() {
             if(total_predict == 0) {
-                Serial.printf("❌ No valid %s predictions found!\n", score_type);
+                if constexpr(RF_DEBUG_LEVEL > 1)
+                Serial.printf("❌ No valid predictions found!\n");
                 return 0.0f;
             }
 
@@ -4100,7 +4142,8 @@ namespace mcu {
             // Calculate accuracy
             if(training_flag & 0x01) { // ACCURACY flag
                 float accuracy = static_cast<float>(correct_predict) / total_predict;
-                Serial.printf("%s Accuracy: %.3f (%d/%d)\n", score_type, accuracy, correct_predict, total_predict);
+                if constexpr(RF_DEBUG_LEVEL > 1)
+                Serial.printf("Accuracy: %.3f (%d/%d)\n", accuracy, correct_predict, total_predict);
                 combined_result += accuracy;
                 numFlags++;
             }
@@ -4118,7 +4161,8 @@ namespace mcu {
                 }
                 
                 float precision = valid_labels > 0 ? total_precision / valid_labels : 0.0f;
-                Serial.printf("%s Precision: %.3f\n", score_type, precision);
+                if constexpr(RF_DEBUG_LEVEL > 1)
+                Serial.printf("Precision: %.3f\n", precision);
                 combined_result += precision;
                 numFlags++;
             }
@@ -4136,7 +4180,8 @@ namespace mcu {
                 }
                 
                 float recall = valid_labels > 0 ? total_recall / valid_labels : 0.0f;
-                Serial.printf("%s Recall: %.3f\n", score_type, recall);
+                if constexpr(RF_DEBUG_LEVEL > 1)
+                Serial.printf("Recall: %.3f\n", recall);
                 combined_result += recall;
                 numFlags++;
             }
@@ -4159,7 +4204,8 @@ namespace mcu {
                 }
                 
                 float f1_score = valid_labels > 0 ? total_f1 / valid_labels : 0.0f;
-                Serial.printf("%s F1-Score: %.3f\n", score_type, f1_score);
+                if constexpr(RF_DEBUG_LEVEL > 1)
+                Serial.printf("F1-Score: %.3f\n",  f1_score);
                 combined_result += f1_score;
                 numFlags++;
             }
@@ -4297,6 +4343,7 @@ namespace mcu {
                     String oldForestFile = base_ptr->get_unifiedModelFile();
                     if(SPIFFS.exists(oldForestFile.c_str())) {
                         SPIFFS.remove(oldForestFile.c_str());
+                        if constexpr(RF_DEBUG_LEVEL > 1)
                         Serial.printf("🗑️ Removed old forest file: %s\n", oldForestFile.c_str());
                     }
                 }
@@ -4337,20 +4384,22 @@ namespace mcu {
             iterator end()   { return iterator(this, trees.size()); }
 
             // Forest loading functionality - moved from RandomForest class
-            void loadForest(){
+            bool loadForest(){
                 // Safety check: Don't load if already loaded
                 if(is_loaded) {
+                    if constexpr(RF_DEBUG_LEVEL > 2)
                     Serial.println("✅ Forest already loaded in memory");
-                    return;
+                    return false;
                 }
                 
                 // Memory safety check
                 size_t freeMemory = ESP.getFreeHeap();
                 size_t minMemoryRequired = 20000; // 20KB minimum threshold
                 if(freeMemory < minMemoryRequired) {
+                    if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.printf("❌ Insufficient memory to load forest (need %d bytes, have %d)\n", 
                                 minMemoryRequired, freeMemory);
-                    return;
+                    return false;
                 }
                 
                 unsigned long start = GET_CURRENT_TIME_IN_MILLISECONDS;
@@ -4371,6 +4420,7 @@ namespace mcu {
                            magic == 0x464F5253 && 
                            file.read((uint8_t*)&treeCount, sizeof(treeCount)) == sizeof(treeCount)) {
                             
+                            if constexpr(RF_DEBUG_LEVEL > 1)
                             Serial.printf("🔧 Initializing forest structure from unified file (%d trees)\n", treeCount);
                             
                             // Reserve space and create empty trees
@@ -4399,6 +4449,7 @@ namespace mcu {
                                     // Skip the node data for now (we'll read it in the main loading logic)
                                     file.seek(file.position() + nodeCount * sizeof(uint32_t));
                                 } else {
+                                    if constexpr(RF_DEBUG_LEVEL > 1)
                                     Serial.printf("❌ Failed to read tree %d metadata from unified file\n", i);
                                     break;
                                 }
@@ -4410,8 +4461,9 @@ namespace mcu {
                 
                 // Safety check: Ensure forest exists (either pre-populated or loaded from file)
                 if(trees.empty()) {
+                    if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.println("❌ No trees in forest to load!");
-                    return;
+                    return false;
                 }
                 
                 // Choose loading strategy based on Rf_base detection
@@ -4419,31 +4471,36 @@ namespace mcu {
                     // Load from unified file (optimized format)
                     File file = SPIFFS.open(unifiedFilename.c_str(), FILE_READ);
                     if(!file) {
+                        if constexpr(RF_DEBUG_LEVEL > 0)
                         Serial.printf("❌ Failed to open unified forest file: %s\n", unifiedFilename.c_str());
-                        return;
+                        return false;
                     }
                     
                     // Read forest header with error checking
                     uint32_t magic;
                     if(file.read((uint8_t*)&magic, sizeof(magic)) != sizeof(magic)) {
+                        if constexpr(RF_DEBUG_LEVEL > 0)
                         Serial.println("❌ Failed to read magic number");
                         file.close();
-                        return;
+                        return false;
                     }
                     
                     if(magic != 0x464F5253) { // "FORS" 
+                        if constexpr(RF_DEBUG_LEVEL > 0)
                         Serial.println("❌ Invalid forest file format");
                         file.close();
-                        return;
+                        return false;
                     }
                     
                     uint8_t treeCount;
                     if(file.read((uint8_t*)&treeCount, sizeof(treeCount)) != sizeof(treeCount)) {
+                        if constexpr(RF_DEBUG_LEVEL > 0)
                         Serial.println("❌ Failed to read tree count");
                         file.close();
-                        return;
+                        return false;
                     }
                     
+                    if constexpr(RF_DEBUG_LEVEL > 1)
                     Serial.printf("Loading %d trees from forest file...\n", treeCount);
                     
                     // Read all trees with comprehensive error checking
@@ -4451,24 +4508,28 @@ namespace mcu {
                     for(uint8_t i = 0; i < treeCount; i++) {
                         // Memory check during loading
                         if(ESP.getFreeHeap() < 10000) { // 10KB safety buffer
+                            if constexpr(RF_DEBUG_LEVEL > 1)
                             Serial.printf("❌ Insufficient memory during tree loading (have %d bytes)\n", ESP.getFreeHeap());
                             break;
                         }
                         
                         uint8_t treeIndex;
                         if(file.read((uint8_t*)&treeIndex, sizeof(treeIndex)) != sizeof(treeIndex)) {
+                            if constexpr(RF_DEBUG_LEVEL > 1)
                             Serial.printf("❌ Failed to read tree index for tree %d\n", i);
                             break;
                         }
                         
                         uint32_t nodeCount;
                         if(file.read((uint8_t*)&nodeCount, sizeof(nodeCount)) != sizeof(nodeCount)) {
+                            if constexpr(RF_DEBUG_LEVEL > 1)
                             Serial.printf("❌ Failed to read node count for tree %d\n", treeIndex);
                             break;
                         }
                         
                         // Validate node count
                         if(nodeCount == 0 || nodeCount > 2047) {
+                            if constexpr(RF_DEBUG_LEVEL > 1)
                             Serial.printf("❌ Invalid node count %d for tree %d\n", nodeCount, treeIndex);
                             // Skip this tree's data
                             file.seek(file.position() + nodeCount * sizeof(uint32_t));
@@ -4483,10 +4544,11 @@ namespace mcu {
                                 // Memory check before loading this tree
                                 size_t requiredMemory = nodeCount * sizeof(Tree_node);
                                 if(ESP.getFreeHeap() < requiredMemory + 5000) { // 5KB safety buffer per tree
+                                    if constexpr(RF_DEBUG_LEVEL > 1)
                                     Serial.printf("❌ Insufficient memory to load tree %d (need %d bytes, have %d)\n", 
                                                 treeIndex, requiredMemory, ESP.getFreeHeap());
                                     file.close();
-                                    return;
+                                    return false;
                                 }
                                 
                                 tree.nodes.clear();
@@ -4497,6 +4559,7 @@ namespace mcu {
                                 for(uint32_t j = 0; j < nodeCount; j++) {
                                     Tree_node node;
                                     if(file.read((uint8_t*)&node.packed_data, sizeof(node.packed_data)) != sizeof(node.packed_data)) {
+                                        if constexpr(RF_DEBUG_LEVEL > 1)
                                         Serial.printf("❌ Failed to read node %d for tree %d\n", j, treeIndex);
                                         nodeReadSuccess = false;
                                         break;
@@ -4525,6 +4588,7 @@ namespace mcu {
                         }
                         
                         if(!treeFound) {
+                            if constexpr(RF_DEBUG_LEVEL > 1)
                             Serial.printf("⚠️ Tree %d not found in forest structure, skipping\n", treeIndex);
                             // Skip the node data for this tree
                             file.seek(file.position() + nodeCount * sizeof(uint32_t));
@@ -4534,20 +4598,24 @@ namespace mcu {
                     file.close();
                     
                     if(successfullyLoaded == 0) {
+                        if constexpr(RF_DEBUG_LEVEL > 0)
                         Serial.println("❌ No trees successfully loaded from unified forest file!");
-                        return;
+                        return false;
                     }
                     
+                    if constexpr(RF_DEBUG_LEVEL > 1)
                     Serial.printf("✅ Loaded %d trees from unified format\n", successfullyLoaded);
                     
                 } else {
                     // Fallback to individual tree files (legacy format)
+                    if constexpr(RF_DEBUG_LEVEL > 2)
                     Serial.println("📁 Unified format not found, using individual tree files...");
                     uint8_t successfullyLoaded = 0;
                     for (auto& tree : trees) {
                         if (!tree.isLoaded) {
                             // Memory check before loading each tree
                             if(ESP.getFreeHeap() < 15000) { // 15KB threshold per tree
+                                if constexpr(RF_DEBUG_LEVEL > 1)
                                 Serial.printf("❌ Insufficient memory to load more trees (have %d bytes)\n", ESP.getFreeHeap());
                                 break;
                             }
@@ -4555,6 +4623,7 @@ namespace mcu {
                                 tree.loadTree(this->model_name);
                                 if(tree.isLoaded) successfullyLoaded++;
                             } catch (...) {
+                                if constexpr(RF_DEBUG_LEVEL > 1)
                                 Serial.printf("❌ Exception loading tree %d\n", tree.index);
                                 tree.isLoaded = false;
                             }
@@ -4562,10 +4631,11 @@ namespace mcu {
                     }
                     
                     if(successfullyLoaded == 0) {
+                        if constexpr(RF_DEBUG_LEVEL > 2)
                         Serial.println("❌ No trees successfully loaded from individual files!");
-                        return;
+                        return false;
                     }
-                    
+                    if constexpr(RF_DEBUG_LEVEL > 1)
                     Serial.printf("✅ Loaded %d trees from individual format\n", successfullyLoaded);
                 }
                 
@@ -4580,24 +4650,27 @@ namespace mcu {
                 }
                 
                 if(loadedTrees == 0) {
+                    if constexpr(RF_DEBUG_LEVEL > 1)
                     Serial.println("❌ No trees successfully loaded!");
                     is_loaded = false;
-                    return;
+                    return false;
                 }
                 
                 is_loaded = true;
                 unsigned long end = GET_CURRENT_TIME_IN_MILLISECONDS;
                 String formatUsed = (base_ptr && base_ptr->is_unified_model()) ? "unified" : "individual";
+                if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.printf("✅ Forest loaded (%s format): %d/%d trees (%d nodes) in %lu ms \n", 
                             formatUsed.c_str(), loadedTrees, trees.size(), totalNodes, end - start);
+                return true;
             }
 
             // Release forest from RAM into SPIFFS (optimized single-file approach)
-            void releaseForest(){
+            bool releaseForest(){
                 if(!is_loaded) {
-                    if constexpr (RF_DEBUG_LEVEL > 2) 
+                    if constexpr (RF_DEBUG_LEVEL > 1) 
                         Serial.println("✅ Forest is not loaded in memory, nothing to release.");
-                    return;
+                    return false;
                 }
                 if(logger_ptr) logger_ptr->m_log("before release forest");
                 
@@ -4612,9 +4685,10 @@ namespace mcu {
                 }
                 
                 if(loadedCount == 0) {
+                    if constexpr(RF_DEBUG_LEVEL > 1)
                     Serial.println("✅ No loaded trees to release");
                     is_loaded = false;
-                    return;
+                    return false;
                 }
                 
                 // Check available SPIFFS space before writing
@@ -4624,38 +4698,43 @@ namespace mcu {
                 size_t estimatedSize = totalNodes * sizeof(uint32_t) + 100; // nodes + headers
                 
                 if(freeFS < estimatedSize) {
+                    if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.printf("❌ Insufficient SPIFFS space (need ~%d bytes, have %d)\n", estimatedSize, freeFS);
-                    return;
+                    return false;
                 }
                 
                 // Single file approach - write all trees to unified forest file
                 String unifiedFilename = base_ptr ? base_ptr->get_unifiedModelFile() : "";
                 if(unifiedFilename.isEmpty()) {
+                    if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.println("❌ Cannot release forest: no base reference for file management");
-                    return;
+                    return false;
                 }
                 
                 unsigned long fileStart = GET_CURRENT_TIME_IN_MILLISECONDS;
                 File file = SPIFFS.open(unifiedFilename.c_str(), FILE_WRITE);
                 if (!file) {
+                    if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.printf("❌ Failed to create unified forest file: %s\n", unifiedFilename.c_str());
-                    return;
+                    return false;
                 }
                 
                 // Write forest header
                 uint32_t magic = 0x464F5253; // "FORS" in hex (forest)
                 if(file.write((uint8_t*)&magic, sizeof(magic)) != sizeof(magic)) {
+                    if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.println("❌ Failed to write magic number");
                     file.close();
                     SPIFFS.remove(unifiedFilename.c_str());
-                    return;
+                    return false;
                 }
                 
                 if(file.write((uint8_t*)&loadedCount, sizeof(loadedCount)) != sizeof(loadedCount)) {
+                    if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.println("❌ Failed to write tree count");
                     file.close();
                     SPIFFS.remove(unifiedFilename.c_str());
-                    return;
+                    return false;
                 }
                 
                 unsigned long writeStart = GET_CURRENT_TIME_IN_MILLISECONDS;
@@ -4667,12 +4746,14 @@ namespace mcu {
                     if (tree.isLoaded && tree.index != 255 && !tree.nodes.empty()) {
                         // Write tree header
                         if(file.write((uint8_t*)&tree.index, sizeof(tree.index)) != sizeof(tree.index)) {
+                            if constexpr(RF_DEBUG_LEVEL > 1)
                             Serial.printf("❌ Failed to write tree index %d\n", tree.index);
                             break;
                         }
                         
                         uint32_t nodeCount = tree.nodes.size();
                         if(file.write((uint8_t*)&nodeCount, sizeof(nodeCount)) != sizeof(nodeCount)) {
+                            if constexpr(RF_DEBUG_LEVEL > 1)
                             Serial.printf("❌ Failed to write node count for tree %d\n", tree.index);
                             break;
                         }
@@ -4682,6 +4763,7 @@ namespace mcu {
                         for (uint32_t i = 0; i < tree.nodes.size(); i++) {
                             const auto& node = tree.nodes[i];
                             if(file.write((uint8_t*)&node.packed_data, sizeof(node.packed_data)) != sizeof(node.packed_data)) {
+                                if constexpr(RF_DEBUG_LEVEL > 1)    
                                 Serial.printf("❌ Failed to write node %d for tree %d\n", i, tree.index);
                                 writeSuccess = false;
                                 break;
@@ -4690,11 +4772,13 @@ namespace mcu {
                             
                             // Check for memory issues during write
                             if(ESP.getFreeHeap() < 5000) { // 5KB safety threshold
+                                if constexpr(RF_DEBUG_LEVEL > 1)
                                 Serial.printf("⚠️ Low memory during write (tree %d, node %d)\n", tree.index, i);
                             }
                         }
                         
                         if(!writeSuccess) {
+                            if constexpr(RF_DEBUG_LEVEL > 1)
                             Serial.printf("❌ Failed to save tree %d completely\n", tree.index);
                             break;
                         }
@@ -4708,7 +4792,7 @@ namespace mcu {
                 if(savedCount != loadedCount) {
                     Serial.printf("❌ Save incomplete: %d/%d trees saved\n", savedCount, loadedCount);
                     SPIFFS.remove(unifiedFilename.c_str());
-                    return;
+                    return false;
                 }
                 
                 // Only clear trees from RAM after successful save
@@ -4723,11 +4807,13 @@ namespace mcu {
                 }
                 
                 is_loaded = false;
-                if(logger_ptr) logger_ptr->m_log("after release forest");
+                if(logger_ptr) logger_ptr->m_log("after release forest",  false, true);
                 
                 unsigned long end = GET_CURRENT_TIME_IN_MILLISECONDS;
+                if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.printf("✅ Released %d trees to unified format (%d bytes) in %lu ms \n", 
                             clearedCount, totalBytes, end - fileStart);
+                return true;
             }
     };
 
@@ -4798,6 +4884,7 @@ namespace mcu {
         // write valid samples (with 0 < actual_label < 255) to base_data file
         bool write_to_base_data(Rf_data& base_data, Rf_config& config){
             if(buffer.empty()) {
+                if constexpr (RF_DEBUG_LEVEL >= 1)
                 Serial.println("⚠️ No pending samples to write to base data");
                 return false;
             }
@@ -4869,6 +4956,7 @@ namespace mcu {
             
             File file = SPIFFS.open(infer_log_file, file_exists ? FILE_APPEND : FILE_WRITE);
             if(!file) {
+                if constexpr (RF_DEBUG_LEVEL > 0)
                 Serial.printf("❌ Failed to open inference log file: %s\n", infer_log_file);
                 return;
             }
@@ -4879,6 +4967,7 @@ namespace mcu {
                 uint8_t magic_bytes[4] = {0x49, 0x4E, 0x46, 0x4C};
                 size_t written = file.write(magic_bytes, 4);
                 if(written != 4) {
+                    if constexpr (RF_DEBUG_LEVEL > 0)
                     Serial.printf("❌ Failed to write magic number: wrote %d bytes instead of 4\n", written);
                 }
                 
@@ -4886,10 +4975,12 @@ namespace mcu {
                 uint32_t initial_count = 0;
                 written = file.write((uint8_t*)&initial_count, 4);
                 if(written != 4) {
+                    if constexpr (RF_DEBUG_LEVEL > 0)
                     Serial.printf("❌ Failed to write prediction count: wrote %d bytes instead of 4\n", written);
                 }
                 
                 file.flush();
+                if constexpr (RF_DEBUG_LEVEL >= 2)
                 Serial.printf("✅ Wrote inference log header: magic=[0x%02X,0x%02X,0x%02X,0x%02X], count=%u\n", 
                              magic_bytes[0], magic_bytes[1], magic_bytes[2], magic_bytes[3], initial_count);
             }
@@ -4914,6 +5005,7 @@ namespace mcu {
                 // Write prediction pairs to end of file
                 size_t written = file.write(prediction_pairs.data(), prediction_pairs.size());
                 if(written != prediction_pairs.size()) {
+                    if constexpr (RF_DEBUG_LEVEL > 0)
                     Serial.printf("❌ Failed to write prediction pairs: wrote %d bytes instead of %d\n", 
                                  written, prediction_pairs.size());
                 }
@@ -4979,13 +5071,15 @@ namespace mcu {
                magic_bytes[0] != 0x49 || magic_bytes[1] != 0x4E || 
                magic_bytes[2] != 0x46 || magic_bytes[3] != 0x4C) {
                 file.close();
-                Serial.printf("❌ Invalid magic number in log file: %s\n", infer_log_file);
+                if constexpr (RF_DEBUG_LEVEL > 1)
+                Serial.printf("❌ Invalid magic number in infer log file: %s\n", infer_log_file);
                 return;
             }
             
             if(file.read((uint8_t*)&total_predictions, 4) != 4) {
                 file.close();
-                Serial.printf("❌ Failed to read prediction count from log file: %s\n", infer_log_file);
+                if constexpr (RF_DEBUG_LEVEL > 1)
+                Serial.printf("❌ Failed to read prediction count from infer log file: %s\n", infer_log_file);
                 return;
             }
             
@@ -5017,6 +5111,7 @@ namespace mcu {
             file.close();
             
             if(bytes_read != remaining_data_size) {
+                if constexpr (RF_DEBUG_LEVEL > 1)
                 Serial.printf("❌ Failed to read remaining data: read %d bytes instead of %d\n", 
                              bytes_read, remaining_data_size);
                 return;
@@ -5025,6 +5120,7 @@ namespace mcu {
             // Rewrite file with header and trimmed data
             file = SPIFFS.open(infer_log_file, FILE_WRITE);
             if(!file) {
+                if constexpr (RF_DEBUG_LEVEL > 1)
                 Serial.printf("❌ Failed to reopen log file for writing: %s\n", infer_log_file);
                 return;
             }

@@ -1,13 +1,11 @@
 #define DEV_STAGE         // development stage - enable test_data 
-#define RF_DEBUG_LEVEL 1
+#define RF_DEBUG_LEVEL 2
 
 #include "Rf_components.h"
 
 using namespace mcu;
 
 class RandomForest{
-    String model_name;  // base_name
-
     Rf_data base_data;
     Rf_data train_data;
     Rf_data test_data;
@@ -22,33 +20,34 @@ class RandomForest{
     Rf_pending_data pending_data; 
     Rf_tree_container forest_container; 
 
-    b_vector<ID_vector<uint16_t,2>> dataList; 
-    unordered_map<uint8_t, uint8_t> predictClass;  
+    vector<ID_vector<uint16_t,2>> dataList; 
     bool clean_yet = false;
     bool print_log = false;
 
 public:
     RandomForest(){};
     RandomForest(const char* model_name) {
-        this->model_name = String(model_name);
+        init(model_name);
+    }
 
+    void init(const char* model_name){
         // initial components
-        base.init(model_name); 
-        logger.init(model_name);
-        config.init(base.get_configFile());
-        categorizer.init(base.get_ctgFile());
-        node_pred.init(base.get_nodePredictFile());
+        base.init(model_name);      // base must be init first
+        logger.init(&base);
+        config.init(&base);
+        config.loadConfig();        // config must be load before forest_container and random_generator init
+        categorizer.init(&base);
+        node_pred.init(&base);
+        pending_data.init(&base, &config);
+        forest_container.init(&base, &config);               
         random_generator.init(config.random_seed, true);
-        predictClass.reserve(config.num_labels);
 
         // load resources
-        config.loadConfig(); 
         node_pred.loadPredictor();
         categorizer.loadCategorizer(); 
-        forest_container.init(this->model_name, config.num_trees, config.num_labels, base, logger);
 
-        // init base data (make a clone of base_data to avoid modifying original)
-        cloneFile(base.get_base_data().c_str(), temp_base_data);
+        // backup base data (make a clone of base_data to avoid modifying original)
+        cloneFile(base.get_base_data_file().c_str(), temp_base_data);
         base_data.init(temp_base_data);
 
         if constexpr (RF_DEBUG_LEVEL > 2) print_log = true;
@@ -68,12 +67,12 @@ public:
             File tempFile = SPIFFS.open(temp_base_data, FILE_READ);
             size_t tempSize = tempFile ? tempFile.size() : 0;
             tempFile.close();
-            File baseFile = SPIFFS.open(base.get_base_data().c_str(), FILE_READ);
+            File baseFile = SPIFFS.open(base.get_base_data_file().c_str(), FILE_READ);
             size_t baseSize = baseFile ? baseFile.size() : 0;
             baseFile.close();
             if(tempSize > baseSize && config.enable_retrain){
-                remove(base.get_base_data().c_str());
-                cloneFile(temp_base_data, base.get_base_data().c_str());
+                remove(base.get_base_data_file().c_str());
+                cloneFile(temp_base_data, base.get_base_data_file().c_str());
             }
 
             // clear all Rf_data
@@ -121,7 +120,7 @@ private:
         logger.m_log("start building forest", print_log, false);
         if constexpr (RF_DEBUG_LEVEL > 0)  Serial.println("<- building forest ->");
 
-        // Get queue_nodes reference from container
+        // Get queue_nodes from container
         auto& queue_nodes = forest_container.getQueueNodes();
         
         // pre_allocate necessary resources
@@ -129,9 +128,10 @@ private:
         uint16_t estimated_nodes = node_pred.estimate(config.min_split, config.max_depth) * 100 / node_pred.accuracy;
         uint16_t peak_nodes = min(120, estimated_nodes * node_pred.peak_percent / 100);
         queue_nodes.reserve(peak_nodes); // Conservative estimate
-        node_data n_data(config.min_split, config.max_depth,0);
+        node_data n_data(config.min_split, config.max_depth,0);     //collect for node_log file
 
         train_data.loadData();
+        String model_name = base.get_model_name();
         for(uint8_t i = 0; i < config.num_trees; i++){
             Serial.printf("%d, ", i);
             Rf_tree tree(i);
@@ -140,14 +140,12 @@ private:
 
             buildTree(tree, dataList[i], queue_nodes);
             n_data.total_nodes += tree.countNodes();
-            tree.isLoaded = true; 
-            tree.releaseTree(this->model_name); // Save tree to SPIFFS
             forest_container.add_tree(std::move(tree));
             logger.m_log();
         }
-        
-        // Release train_data after all trees are built
-        train_data.releaseData(); // Keep metadata but release sample data
+        train_data.releaseData(); 
+        forest_container.is_loaded = false;
+        forest_container.set_to_individual_form();
         n_data.total_nodes /= config.num_trees; // Average nodes per tree
         node_pred.buffer.push_back(n_data); // Add node data to predictor buffer
 
@@ -196,11 +194,11 @@ private:
                 }
             }
             dest[i].second->loadData(source, sink_IDs, true);
-            if(i == 0) logger.m_log("split data", print_log);       // log memory after train data loaded (lowest ram moment)
+            if(i == 0)  logger.m_log("split data", print_log);       // log memory after train data loaded (lowest ram moment)
             dest[i].second->releaseData(false); 
         }
         size_t end = logger.drop_anchor();
-        logger.t_log("split time", start, end, "ms", print_log);
+        logger.t_log("split time", start, end, "s", print_log);
     }
     
     void ClonesData() {
@@ -291,9 +289,11 @@ private:
             dataList.push_back(std::move(treeDataset));
             logger.m_log();
         }
+
         logger.m_log("clones data", print_log);  
         size_t end = logger.drop_anchor();
         logger.t_log("clones data time", start, end, "ms", print_log);
+        Serial.println("\n🎉 All datasets created.");
     }  
     
     typedef struct SplitInfo {
@@ -566,39 +566,6 @@ private:
         tree.nodes.fit();
     }
     
-    uint8_t predClassSample(const packed_vector<2>& features) {
-        int16_t totalPredict = 0;
-        predictClass.clear();
-        
-        // Use streaming prediction 
-        for(auto& tree : forest_container){
-            uint8_t predict = tree.predictSample(features); 
-            if(predict < config.num_labels){
-                predictClass[predict]++;
-                totalPredict++;
-            }
-        }
-        if(predictClass.empty() || totalPredict == 0) {
-            return 255; // Unknown class
-        }
-        // Find most predicted class
-        int16_t max = -1;
-        uint8_t mostPredict = 255;
-        
-        for(const auto& predict : predictClass){
-            if(predict.second > max){
-                max = predict.second;
-                mostPredict = predict.first;
-            }
-        }
-        
-        // Check certainty threshold
-        float certainty = static_cast<float>(max) / totalPredict;
-        if(certainty < config.unity_threshold) {
-            return 255; // Unknown class if certainty is too low
-        }
-        return mostPredict;
-    }
     // Helper function: evaluate the entire forest using OOB (Out-of-Bag) score
     // Iterates over all samples in training data and evaluates using trees that didn't see each sample
     float get_oob_score(){
@@ -664,7 +631,7 @@ private:
 
                 for(const uint8_t& treeIdx : activeTrees){
                     if(treeIdx < forest_container.size()){
-                        uint8_t predict = forest_container[treeIdx].predictSample(sample.features);
+                        uint8_t predict = forest_container[treeIdx].predict_features(sample.features);
                         if(predict < config.num_labels){
                             oobPredictClass[predict]++;
                             oobTotalPredict++;
@@ -739,7 +706,7 @@ private:
 
             // Use all trees for validation prediction
             for(uint8_t t = 0; t < config.num_trees && t < forest_container.size(); t++){
-                uint8_t predict = forest_container[t].predictSample(sample.features);
+                uint8_t predict = forest_container[t].predict_features(sample.features);
                 if(predict < config.num_labels){
                     validPredictClass[predict]++;
                     validTotalPredict++;
@@ -822,7 +789,7 @@ private:
             for(uint16_t i = 0; i < validation_data.size(); i++){
                 const Rf_sample& sample = validation_data[i];
                 uint8_t actual = sample.label;
-                uint8_t pred = predClassSample(sample.features);
+                uint8_t pred = forest_container.predict_features(sample.features);
             
                 if(actual < config.num_labels && pred < config.num_labels) {
                     scorer.update_prediction(actual, pred);
@@ -891,8 +858,8 @@ private:
             }
         }
 
-        for(uint8_t min_split = min_ms; min_split < max_ms; min_split += 2){
-            for(uint8_t max_depth = min_md; max_depth < max_md; max_depth += 2){
+        for(uint8_t min_split = min_ms; min_split <= max_ms; min_split += 2){
+            for(uint8_t max_depth = min_md; max_depth <= max_md; max_depth += 2){
                 config.min_split = min_split;
                 config.max_depth = max_depth;
                 float score;
@@ -921,7 +888,7 @@ private:
                     }
                 }
                 logger.m_log();
-                // if(loop_count++ > 2) break; // For demo, limit to 3 iterations
+                if(loop_count++ > 1) break; // For demo, limit to 3 iterations
             }
         }
         // Set config to best found parameters
@@ -964,13 +931,13 @@ private:
         }
 
         packed_vector<2> c_features = categorizer.categorizeFeatures(features, length);
-        uint8_t i_label = predClassSample(c_features);
+        uint8_t i_label = forest_container.predict_features(c_features);
         if(config.enable_retrain){
             // Add sample to pending data for potential retraining
             Rf_sample sample;
             sample.features = c_features;
             sample.label = i_label; // Store predicted label
-            pending_data.add_pending_sample(sample, base_data, &config, base.get_inferenceLogFile().c_str());
+            pending_data.add_pending_sample(sample, base_data);
         }
         return categorizer.getOriginalLabel(i_label);
     }
@@ -1018,7 +985,7 @@ private:
      * to the base dataset and logs the predictions to the inference log file.
      */
     void flush_pending_data() {
-        pending_data.flush_pending_data(base_data, config, base.get_inferenceLogFile().c_str());
+        pending_data.flush_pending_data(base_data);
     }
 
     /**
@@ -1027,7 +994,7 @@ private:
      * sample stack and real label stack remains in pending_data after this operation.
      */
     void write_pending_data_to_dataset(){
-        pending_data.write_to_base_data(base_data, config);
+        pending_data.write_to_base_data(base_data);
     }
 
     /**
@@ -1035,7 +1002,7 @@ private:
      * @note : sample stack and real label stack remains in pending_data after this operation.
      */
     void log_pending_data() {
-        pending_data.write_to_infer_log(base.get_inferenceLogFile().c_str(), config.num_labels);
+        pending_data.write_to_infer_log();
     }
 
     void enable_retrain(){
@@ -1048,7 +1015,7 @@ private:
 
     // get number of inference saved in log (which has actual label feedback)
     size_t get_total_logged_inference() const {
-        String logFile = base.get_inferenceLogFile();
+        String logFile = base.get_infer_log_file();
         if(!SPIFFS.exists(logFile.c_str())) {
             if constexpr (RF_DEBUG_LEVEL >= 0)
             Serial.println("❌ Inference log file does not exist");
@@ -1090,7 +1057,7 @@ private:
      * @note : if num_inference exceeds total logged predictions, all logged predictions will be used.
      */
     float get_last_n_inference_score(size_t num_inference, uint8_t flag) {
-        String logFile = base.get_inferenceLogFile();
+        String logFile = base.get_infer_log_file();
         if(!SPIFFS.exists(logFile.c_str())) {
             Serial.println("❌ Inference log file does not exist");
             return 0.0f;
@@ -1306,12 +1273,12 @@ private:
 
     // get total nodes in model (forest). Each node is 4 bytes
     size_t total_nodes() const {
-        return forest_container.total_nodes();
+        return forest_container.get_total_nodes();
     }
     
     //  get total leaves in model (forest)
     size_t total_leaves() const {
-        return forest_container.total_leaves();
+        return forest_container.get_total_leaves();
     }
 
     // get average nodes per tree
@@ -1352,7 +1319,7 @@ private:
         for (uint16_t i = 0; i < data.size(); i++) {
             const Rf_sample& sample = data[i];
             uint8_t actual = sample.label;
-            uint8_t pred = predClassSample(sample.features);
+            uint8_t pred = forest_container.predict_features(sample.features);
             
             // Update metrics using matrix scorer
             if(actual < config.num_labels && pred < config.num_labels) {
@@ -1430,7 +1397,7 @@ private:
         avgAccuracy /= accuracies.size();
 
         Serial.printf("\n📊 FINAL SUMMARY:\n");
-        Serial.printf("Dataset: %s\n", base.get_base_data().c_str());
+        Serial.printf("Dataset: %s\n", base.get_base_data_file().c_str());
         Serial.printf("Average Precision: %.3f\n", avgPrecision);
         Serial.printf("Average Recall: %.3f\n", avgRecall);
         Serial.printf("Average F1-Score: %.3f\n", avgF1);
@@ -1448,7 +1415,7 @@ private:
         for (uint16_t i = 0; i < data.size(); i++) {
             const Rf_sample& sample = data[i];
             uint8_t actual = sample.label;
-            uint8_t pred = predClassSample(sample.features);
+            uint8_t pred = forest_container.predict_features(sample.features);
             
             if(actual < config.num_labels && pred < config.num_labels) {
                 scorer.update_prediction(actual, pred);
@@ -1472,7 +1439,7 @@ private:
         for (uint16_t i = 0; i < data.size(); i++) {
             const Rf_sample& sample = data[i];
             uint8_t actual = sample.label;
-            uint8_t pred = predClassSample(sample.features);
+            uint8_t pred = forest_container.predict_features(sample.features);
             
             if(actual < config.num_labels && pred < config.num_labels) {
                 scorer.update_prediction(actual, pred);
@@ -1496,7 +1463,7 @@ private:
         for (uint16_t i = 0; i < data.size(); i++) {
             const Rf_sample& sample = data[i];
             uint8_t actual = sample.label;
-            uint8_t pred = predClassSample(sample.features);
+            uint8_t pred = forest_container.predict_features(sample.features);
             
             if(actual < config.num_labels && pred < config.num_labels) {
                 scorer.update_prediction(actual, pred);
@@ -1520,7 +1487,7 @@ private:
         for (uint16_t i = 0; i < data.size(); i++) {
             const Rf_sample& sample = data[i];
             uint8_t actual = sample.label;
-            uint8_t pred = predClassSample(sample.features);
+            uint8_t pred = forest_container.predict_features(sample.features);
             
             if(actual < config.num_labels && pred < config.num_labels) {
                 scorer.update_prediction(actual, pred);
@@ -1540,7 +1507,7 @@ private:
         Serial.println("SampleID, Predicted, Actual");
         for (uint16_t i = 0; i < test_data.size(); i++) {
             const Rf_sample& sample = test_data[i];
-            uint8_t pred = predClassSample(sample.features);
+            uint8_t pred = forest_container.predict_features(sample.features);
             Serial.printf("%d, %d, %d\n", i, pred, sample.label);
         }
         test_data.releaseData(true); // Release test set data after use
@@ -1566,14 +1533,14 @@ void setup() {
     // const char* filename = "/walker_fall.bin";    // medium dataset : use_Gini = false | boostrap = true; 92% - sklearn : 85%  (5,3)
     const char* filename = "digit_data"; // hard dataset : use_Gini = true/false | boostrap = true; 89/92% - sklearn : 90% (6,5);
     RandomForest forest = RandomForest(filename); // reproducible by default (can omit random_seed)
-    forest.set_training_score(Rf_training_score::K_FOLD_SCORE);
+    forest.set_training_score(Rf_training_score::OOB_SCORE);
 
     // printout size of forest object in stack
     Serial.printf("RandomForest object size: %d bytes\n", sizeof(forest));
 
-    // forest.build_model();
+    forest.build_model();
 
-    // forest.training();
+    forest.training();
 
     Serial.printf("\nlowest RAM: %d\n", forest.lowest_ram());
     Serial.printf("lowest ROM: %d\n", forest.lowest_spiffs());
@@ -1581,49 +1548,49 @@ void setup() {
     forest.training_report();
 
 
-    forest.loadForest();
-    forest.enable_extend_base_data();
+    // forest.loadForest();
+    // forest.enable_extend_base_data();
 
-    // // check actual prediction time 
-    b_vector<float> sample_1 = MAKE_FLOAT_LIST(0,0,0,0,0,0,0.319597,0,0,0,0.0155578,0,0.602115,0,0.731487,0,0,0,0.0427323,0,0.100705,0.0183983,0.43727,0.279462,0.244308,0,0.55038,0,0.338926,0.284307,0.130816,0.378115,0.0443502,0.0208504,0.543977,0.166894,0.0697761,0,0,0.149815,0.551409,0.322199,0.338399,0.0939219,0.0580764,0,0,0.334588,0,0,0,0,0.329144,0,0.590239,0,0.00454205,0,0.393911,0,0.417964,0,0.428854,0.171716,0.0930952,0,0.399416,0,0.306163,0.17656,0.195359,0.337671,0.354709,0,0.45624,0.13206,0.0282058,0.209302,0.253028,0.307674,0.395338,0.204116,0.440053,0.128077,0.0669144,0,0,0.262297,0.137504,0.235855,0.372225,0.0570641,0.0712728,0.0407601,0.160617,0.519457,0,0,0.291677,0,0.638353,0,0.444923,0.0625388,0.0395925,0.22281,0.16253,0,0.370294,0.177272,0.20518,0.131503,0.450441,0,0.484771,0.0470593,0.0975183,0.284126,0.189368,0.357239,0.21504,0.214781,0.116269,0.089935,0.209008,0.245536,0.198381,0.221044,0.297168,0.321228,0.234775,0.0348076,0.0206753,0,0.0894389,0.493047,0.231743,0.303444,0.284468,0.0372155,0.402831,0.0840795,0.073505,0.312755);
-    b_vector<float> sample_2 = MAKE_FLOAT_LIST(0,0,0,0,0,0,0,0,0,0,0,0,0.174492,0,0.984659,0,0,0,0,0,0,0,0.0841288,0.0219022,0,0,0.222325,0,0.57933,0.0204313,0.778785,0.0216055,0,0,0.0061709,0,0.00511314,0,0.068674,0.0573897,0.175482,0.0181766,0.811145,0,0.544805,0,0.0512002,0.0584059,0,0,0,0,0,0,0.179298,0,0,0,0.211284,0.00151423,0.528726,0.0103828,0.776789,0.20037,0,0,0.0142657,0,0.157209,0.00189016,0.457445,0.0266492,0.235635,0,0.507783,0.139537,0.514762,0.0178007,0.387424,0.129923,0.0192672,0.00214049,0.440721,0,0.322496,0,0.0934634,0.0902834,0.522127,0.0201582,0.571542,0.16255,0.210484,0,0,0.118699,0,0,0.0344402,0.00131337,0.4124,0.00900558,0.688182,0,0,0.16296,0.151445,0,0.0551359,0.401566,0.325127,0.188597,0.189033,0,0.396294,0.000995046,0.562154,0.018721,0.380578,0,0.0349963,0.359648,0.190518,0.134021,0.260099,0.189424,0.167082,0.172423,0.499019,0.0216759,0.58545,0,0.320087,0,0,0,0.272465,0.238068,0.298211,0.185451,0.109965,0.0963578,0,0.172309);
-    b_vector<float> sample_3 = MAKE_FLOAT_LIST(0,0,0,0,0.0884918,0.401737,0.497088,0.181131,0,0,0,0,0.0509315,0.0918492,0.734739,0,0.0721371,0.226002,0.333084,0.0755246,0.16162,0.101488,0.124187,0.409836,0,0.0513397,0.3246,0,0.642339,0.0235343,0.293441,0,0.163562,0.14088,0.192565,0.422734,0.065712,0,0,0.0499875,0.621695,0.0524913,0.584353,0,0.00832314,0,0,0,0,0,0,0,0.0990201,0.550154,0.607643,0,0,0,0,0,0.326628,0.328588,0.321932,0,0.0763265,0.293448,0.181584,0,0.673102,0.132283,0.325746,0,0,0.234372,0.247478,0,0.426425,0.0199028,0.0016461,0,0.670186,0.206763,0.496628,0,0.0726361,0,0,0,0.422666,0.205566,0.187832,0,0,0,0,0,0,0,0,0,0.458715,0.460922,0.759692,0,0,0,0,0,0,0,0,0,0,0.314857,0.503596,0,0.80188,0.0267376,0.0594196,0,0,0,0,0,0,0,0,0,0.82105,0.285276,0.494465,0,0,0,0,0,0,0,0,0,0,0,0,0);
-    b_vector<float> sample_4 = MAKE_FLOAT_LIST(0,0.0908824,0.104416,0,0.0755478,0.188405,0.618161,0.00479052,0,0.0124262,0,0,0.0939856,0.725348,0.149571,0,0.0591422,0.218639,0.561053,0.00375024,0.237376,0,0.00461243,0.259768,0.0735761,0.577562,0.100979,0,0.283351,0,0.0161121,0.283411,0.32871,0.0914897,0.179426,0.359717,0,0,0,0,0.392375,0.623118,0.160412,0.392457,0,0,0,0,0,0.104163,0.0268341,0,0.170936,0.830073,0.0611818,0,0,0,0,0,0,0.365051,0.364944,0,0.131691,0.719745,0.054991,0,0.281157,0,0.0128174,0.281268,0,0.281239,0.255798,0,0.281157,0,0.0253593,0.281167,0.34306,0.539029,0.0559995,0.343196,0,0,0,0,0.34306,0.34316,0.34306,0.343072,0,0,0,0,0,0,0,0,0,0.551749,0.435521,0,0,0,0,0,0,0.533102,0.470847,0,0,0.401093,0.29057,0,0.358815,0,0.0260317,0.35883,0,0.370335,0.289866,0,0.299172,0.0172022,0.0524152,0.42754,0.348799,0.389897,0.307764,0.348813,0,0,0,0,0.290821,0.37672,0.332727,0.415605,0,0,0,0);
-    b_vector<float> sample_5 = MAKE_FLOAT_LIST(0,0,0.0257681,0,0,0,0.309993,0.505646,0,0,0.00933626,0,0,0.766647,0.244392,0,0,0,0.245919,0.228898,0,0,0,0.565774,0,0.420417,0.0258278,0,0.26965,0.344006,0.445602,0,0,0,0,0.492467,0,0,0,0.358769,0.0668883,0.422763,0.400113,0,0.530191,0,0.00500874,0.0658773,0,0,0.0304377,0,0,0.664732,0.200389,0.202783,0,0,0,0,0,0.421736,0.545955,0,0,0.408206,0.17382,0.0890006,0.0700646,0.334014,0.256451,0.407654,0,0.208234,0.275031,0,0.296742,0.328262,0.209232,0.297013,0,0.394298,0.210135,0.288849,0.39401,0,0.00467149,0.386712,0.147898,0.400611,0.331816,0.109612,0.103576,0,0.000111226,0.311318,0,0,0,0,0,0.164061,0.84378,0,0,0,0.094193,0.187499,0,0.46593,0,0,0,0.0776083,0.277926,0,0.370533,0.0140897,0.406248,0.288246,0,0.132818,0,0.0478734,0.000134187,0.710945,0.0748341,0.011894,0.162469,0.0493664,0.542014,0.12041,0.291901,0,0,0.183158,0,0.512065,0.00989686,0,0.0920044,0.236779,0.0721718,0.460531);
-    b_vector<float> sample_6 = MAKE_FLOAT_LIST(0,0,0,0,0.110356,0.2904,0.746565,0.00741822,0,0,0,0,0,0.418218,0.413725,0,0.0800193,0.201106,0.45076,0.00292075,0.142429,0.0438233,0.178908,0.478748,0,0,0.270083,0,0.256167,0.352733,0.0788601,0.44423,0.219892,0.155945,0.453719,0.473245,0,0,0,0,0.253222,0.348679,0.344932,0.439124,0,0,0,0,0,0,0,0,0.0525942,0.466355,0.413942,0,0,0,0,0,0.104759,0.505657,0.584128,0.0230307,0.0363423,0.0756487,0.233643,0,0.164194,0.275148,0.0777276,0.46132,0,0.189648,0.293133,0.0156375,0.449763,0.318571,0.146253,0.411754,0.189863,0.303688,0.294798,0.436768,0,0,0,0,0.383877,0.448993,0.356127,0.333922,0.0419486,0.00217724,0,0.070723,0,0,0,0,0,0.331257,0.838403,0.0280708,0,0,0,0,0.127685,0.412624,0.000248414,0,0,0,0.433516,0.019445,0.321854,0.287001,0.209887,0.609271,0,0.235824,0.000190637,0,0.334644,0.207032,0,0,0.294638,0.2814,0.55393,0.525371,0.0209346,0,0,0.0910735,0.295027,0.392776,0,0,0.0330847,0.00280374,0,0);
-    b_vector<float> sample_7 = MAKE_FLOAT_LIST(0,0,0,0,0.108834,0,0.437133,0.023986,0,0,0.168557,0,0.599053,0.019216,0.63085,0.104296,0.00267646,0,0.253298,0.00460033,0.191034,0.11192,0.193409,0.302132,0.370827,0,0.59976,0.0398637,0.179314,0.228867,0.14511,0.392041,0.245114,0.136185,0.381898,0.210643,0.00596307,0.00543424,0.0364883,0.350574,0.472319,0.196829,0.288241,0.397918,0.250737,0.0927714,0.0156852,0.178572,0,0,0.063585,0,0.48504,0,0.617058,0.0640887,0,0.0883194,0.316275,0,0.503125,0.0325585,0.105083,0.0525187,0.284177,0,0.531324,0.0147548,0.270062,0.215936,0.151484,0.203114,0.364786,0.0772039,0.360402,0.0449211,0.142917,0.251891,0.175516,0.259497,0.542759,0.197855,0.285101,0.270339,0.233413,0.0901442,0.0478907,0.203382,0.246279,0.338169,0.273016,0.094915,0.214486,0,0,0.317919,0,0.0317341,0.343292,0,0.564818,0.0354346,0.317224,0.0951488,0,0.163634,0.0926272,0,0.240753,0.441633,0.0974575,0.391571,0.33,0.0232024,0.408423,0.0302801,0.0784008,0.222093,0.103505,0.391034,0.100299,0.396753,0.0689499,0.234754,0.434848,0.0294039,0.29209,0.0336653,0.263316,0.32756,0.260274,0.353796,0.0744787,0.00353458,0,0.309082,0.418655,0.12424,0.432625,0.184899,0.342497,0,0,0);
-    b_vector<float> sample_8 = MAKE_FLOAT_LIST(0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0.115915,0,0.480182,0,0.821055,0.286107,0,0,0,0,0,0,0,0,0.0176644,0,0.850128,0.0573638,0.482478,0,0,0.202226,0,0,0,0,0,0,0.12943,0,0,0,0.0183514,0,0.337471,0.0161549,0.932075,0,0,0,0,0,0.164763,0,0.40888,0.174718,0.148629,0,0.563784,0,0.610492,0.0148088,0.247736,0.0301245,0.00173257,0,0.481645,0.04548,0.243463,0,0,0.160332,0.526687,0.0174442,0.521358,0,0.359842,0,0,0.0442927,0,0,0,0,0.112102,0.0134528,0.634836,0,0,0.212109,0.239858,0,0.47967,0.201275,0.444878,0.114901,0.0119875,0,0.354204,0,0.521324,0.0130347,0.260678,0,0.37499,0.261378,0.351315,0.0873781,0.338345,0.0902905,0.213164,0.162583,0.218548,0.0152442,0.505454,0,0.417659,0,0,0,0.49842,0.147229,0.282697,0.126012,0.286362,0.0586704,0,0.265971);
-    b_vector<float> sample_9 = MAKE_FLOAT_LIST(0,0.0956604,0.098247,0,0.417734,0.220911,0.311895,0.324612,0,0.0231785,0.176474,0,0.564824,0.26379,0.346738,0.121338,0.249292,0.178207,0.275597,0.211925,0.153124,0.295389,0.26327,0.215302,0.353519,0.154717,0.353768,0.0528112,0.154179,0.467658,0.0669753,0.187208,0.19745,0.391921,0.303989,0.158605,0.234772,0.00180255,0.0387419,0.299266,0.251029,0.405501,0.0871662,0.151347,0.130699,0.205678,0,0.475739,0,0.0554978,0.077552,0,0.395509,0.351504,0.332694,0.369725,0,0.191861,0.123412,0,0.152125,0.368935,0.140668,0.482139,0.231082,0.242545,0.249301,0.210294,0.218287,0.340427,0.242107,0.204602,0.109795,0.391003,0.118778,0.321611,0.165454,0.127155,0.436234,0.032522,0.236854,0.375758,0.313202,0.262977,0.258655,0.068365,0,0.326493,0.0739646,0.0689581,0.378467,0.177771,0.447888,0.1274,0.185436,0.14489,0,0.22332,0.233887,0,0.446044,0.122845,0.205414,0.509487,0,0.0106548,0,0,0.098534,0.597537,0.0810833,0.0784841,0.320192,0.251493,0.291953,0.34017,0.0168087,0.324574,0.407311,0.0504237,0,0.396094,0,0.0574232,0.410932,0.112823,0.131985,0,0.089675,0.199537,0.329405,0.1731,0.382723,0.265848,0.254029,0.391817,0.388143,0.338448,0.189057,0.0704277,0.269279,0.00718677,0,0);
-    b_vector<float> sample_10 = MAKE_FLOAT_LIST(0,0,0,0,0.194082,0.0751852,0.499238,0.147238,0,0.0405393,0.236777,0,0.688561,0.00110666,0.39235,0,0.082613,0,0.333312,0.0264274,0.0623509,0.166592,0.0295297,0.456743,0.500441,0.0294637,0.457245,0,0.0352748,0.376655,0.127081,0.143553,0.193715,0.231421,0.198166,0.505423,0.00542692,0,0,0.144223,0.159241,0.52323,0.0786903,0,0.194092,0,0.0978441,0.490717,0,0,0.155868,0,0.656508,0.0694687,0.498978,0,0,0.146742,0.139485,0,0.241342,0.232652,0.0794702,0.362242,0.415125,0,0.466054,0,0.0783402,0.431813,0.0610619,0.263295,0.171763,0.270015,0.15583,0.257808,0.083755,0.0525776,0.376662,0,0.290653,0.553989,0.0411409,0.0619111,0.0972659,0,0.0371976,0.448568,0.0306256,0.0674538,0.374664,0.0311766,0.477389,0,0.10857,0.067192,0,0.148076,0.187634,0,0.35235,0.133719,0.132428,0.247639,0,0,0.0379139,0,0.0783612,0.727448,0.0579085,0.426452,0.26896,0.215103,0.244314,0.189031,0.0708566,0.116052,0.344431,0,0.0314912,0.48739,0.0446864,0.25373,0.452102,0.115131,0.348031,0.0717939,0.0179453,0.14906,0.290717,0,0.441574,0,0.151681,0.152095,0.314451,0.302861,0.446024,0.305773,0.410823,0,0.000996961,0);
+    // // // check actual prediction time 
+    // b_vector<float> sample_1 = MAKE_FLOAT_LIST(0,0,0,0,0,0,0.319597,0,0,0,0.0155578,0,0.602115,0,0.731487,0,0,0,0.0427323,0,0.100705,0.0183983,0.43727,0.279462,0.244308,0,0.55038,0,0.338926,0.284307,0.130816,0.378115,0.0443502,0.0208504,0.543977,0.166894,0.0697761,0,0,0.149815,0.551409,0.322199,0.338399,0.0939219,0.0580764,0,0,0.334588,0,0,0,0,0.329144,0,0.590239,0,0.00454205,0,0.393911,0,0.417964,0,0.428854,0.171716,0.0930952,0,0.399416,0,0.306163,0.17656,0.195359,0.337671,0.354709,0,0.45624,0.13206,0.0282058,0.209302,0.253028,0.307674,0.395338,0.204116,0.440053,0.128077,0.0669144,0,0,0.262297,0.137504,0.235855,0.372225,0.0570641,0.0712728,0.0407601,0.160617,0.519457,0,0,0.291677,0,0.638353,0,0.444923,0.0625388,0.0395925,0.22281,0.16253,0,0.370294,0.177272,0.20518,0.131503,0.450441,0,0.484771,0.0470593,0.0975183,0.284126,0.189368,0.357239,0.21504,0.214781,0.116269,0.089935,0.209008,0.245536,0.198381,0.221044,0.297168,0.321228,0.234775,0.0348076,0.0206753,0,0.0894389,0.493047,0.231743,0.303444,0.284468,0.0372155,0.402831,0.0840795,0.073505,0.312755);
+    // b_vector<float> sample_2 = MAKE_FLOAT_LIST(0,0,0,0,0,0,0,0,0,0,0,0,0.174492,0,0.984659,0,0,0,0,0,0,0,0.0841288,0.0219022,0,0,0.222325,0,0.57933,0.0204313,0.778785,0.0216055,0,0,0.0061709,0,0.00511314,0,0.068674,0.0573897,0.175482,0.0181766,0.811145,0,0.544805,0,0.0512002,0.0584059,0,0,0,0,0,0,0.179298,0,0,0,0.211284,0.00151423,0.528726,0.0103828,0.776789,0.20037,0,0,0.0142657,0,0.157209,0.00189016,0.457445,0.0266492,0.235635,0,0.507783,0.139537,0.514762,0.0178007,0.387424,0.129923,0.0192672,0.00214049,0.440721,0,0.322496,0,0.0934634,0.0902834,0.522127,0.0201582,0.571542,0.16255,0.210484,0,0,0.118699,0,0,0.0344402,0.00131337,0.4124,0.00900558,0.688182,0,0,0.16296,0.151445,0,0.0551359,0.401566,0.325127,0.188597,0.189033,0,0.396294,0.000995046,0.562154,0.018721,0.380578,0,0.0349963,0.359648,0.190518,0.134021,0.260099,0.189424,0.167082,0.172423,0.499019,0.0216759,0.58545,0,0.320087,0,0,0,0.272465,0.238068,0.298211,0.185451,0.109965,0.0963578,0,0.172309);
+    // b_vector<float> sample_3 = MAKE_FLOAT_LIST(0,0,0,0,0.0884918,0.401737,0.497088,0.181131,0,0,0,0,0.0509315,0.0918492,0.734739,0,0.0721371,0.226002,0.333084,0.0755246,0.16162,0.101488,0.124187,0.409836,0,0.0513397,0.3246,0,0.642339,0.0235343,0.293441,0,0.163562,0.14088,0.192565,0.422734,0.065712,0,0,0.0499875,0.621695,0.0524913,0.584353,0,0.00832314,0,0,0,0,0,0,0,0.0990201,0.550154,0.607643,0,0,0,0,0,0.326628,0.328588,0.321932,0,0.0763265,0.293448,0.181584,0,0.673102,0.132283,0.325746,0,0,0.234372,0.247478,0,0.426425,0.0199028,0.0016461,0,0.670186,0.206763,0.496628,0,0.0726361,0,0,0,0.422666,0.205566,0.187832,0,0,0,0,0,0,0,0,0,0.458715,0.460922,0.759692,0,0,0,0,0,0,0,0,0,0,0.314857,0.503596,0,0.80188,0.0267376,0.0594196,0,0,0,0,0,0,0,0,0,0.82105,0.285276,0.494465,0,0,0,0,0,0,0,0,0,0,0,0,0);
+    // b_vector<float> sample_4 = MAKE_FLOAT_LIST(0,0.0908824,0.104416,0,0.0755478,0.188405,0.618161,0.00479052,0,0.0124262,0,0,0.0939856,0.725348,0.149571,0,0.0591422,0.218639,0.561053,0.00375024,0.237376,0,0.00461243,0.259768,0.0735761,0.577562,0.100979,0,0.283351,0,0.0161121,0.283411,0.32871,0.0914897,0.179426,0.359717,0,0,0,0,0.392375,0.623118,0.160412,0.392457,0,0,0,0,0,0.104163,0.0268341,0,0.170936,0.830073,0.0611818,0,0,0,0,0,0,0.365051,0.364944,0,0.131691,0.719745,0.054991,0,0.281157,0,0.0128174,0.281268,0,0.281239,0.255798,0,0.281157,0,0.0253593,0.281167,0.34306,0.539029,0.0559995,0.343196,0,0,0,0,0.34306,0.34316,0.34306,0.343072,0,0,0,0,0,0,0,0,0,0.551749,0.435521,0,0,0,0,0,0,0.533102,0.470847,0,0,0.401093,0.29057,0,0.358815,0,0.0260317,0.35883,0,0.370335,0.289866,0,0.299172,0.0172022,0.0524152,0.42754,0.348799,0.389897,0.307764,0.348813,0,0,0,0,0.290821,0.37672,0.332727,0.415605,0,0,0,0);
+    // b_vector<float> sample_5 = MAKE_FLOAT_LIST(0,0,0.0257681,0,0,0,0.309993,0.505646,0,0,0.00933626,0,0,0.766647,0.244392,0,0,0,0.245919,0.228898,0,0,0,0.565774,0,0.420417,0.0258278,0,0.26965,0.344006,0.445602,0,0,0,0,0.492467,0,0,0,0.358769,0.0668883,0.422763,0.400113,0,0.530191,0,0.00500874,0.0658773,0,0,0.0304377,0,0,0.664732,0.200389,0.202783,0,0,0,0,0,0.421736,0.545955,0,0,0.408206,0.17382,0.0890006,0.0700646,0.334014,0.256451,0.407654,0,0.208234,0.275031,0,0.296742,0.328262,0.209232,0.297013,0,0.394298,0.210135,0.288849,0.39401,0,0.00467149,0.386712,0.147898,0.400611,0.331816,0.109612,0.103576,0,0.000111226,0.311318,0,0,0,0,0,0.164061,0.84378,0,0,0,0.094193,0.187499,0,0.46593,0,0,0,0.0776083,0.277926,0,0.370533,0.0140897,0.406248,0.288246,0,0.132818,0,0.0478734,0.000134187,0.710945,0.0748341,0.011894,0.162469,0.0493664,0.542014,0.12041,0.291901,0,0,0.183158,0,0.512065,0.00989686,0,0.0920044,0.236779,0.0721718,0.460531);
+    // b_vector<float> sample_6 = MAKE_FLOAT_LIST(0,0,0,0,0.110356,0.2904,0.746565,0.00741822,0,0,0,0,0,0.418218,0.413725,0,0.0800193,0.201106,0.45076,0.00292075,0.142429,0.0438233,0.178908,0.478748,0,0,0.270083,0,0.256167,0.352733,0.0788601,0.44423,0.219892,0.155945,0.453719,0.473245,0,0,0,0,0.253222,0.348679,0.344932,0.439124,0,0,0,0,0,0,0,0,0.0525942,0.466355,0.413942,0,0,0,0,0,0.104759,0.505657,0.584128,0.0230307,0.0363423,0.0756487,0.233643,0,0.164194,0.275148,0.0777276,0.46132,0,0.189648,0.293133,0.0156375,0.449763,0.318571,0.146253,0.411754,0.189863,0.303688,0.294798,0.436768,0,0,0,0,0.383877,0.448993,0.356127,0.333922,0.0419486,0.00217724,0,0.070723,0,0,0,0,0,0.331257,0.838403,0.0280708,0,0,0,0,0.127685,0.412624,0.000248414,0,0,0,0.433516,0.019445,0.321854,0.287001,0.209887,0.609271,0,0.235824,0.000190637,0,0.334644,0.207032,0,0,0.294638,0.2814,0.55393,0.525371,0.0209346,0,0,0.0910735,0.295027,0.392776,0,0,0.0330847,0.00280374,0,0);
+    // b_vector<float> sample_7 = MAKE_FLOAT_LIST(0,0,0,0,0.108834,0,0.437133,0.023986,0,0,0.168557,0,0.599053,0.019216,0.63085,0.104296,0.00267646,0,0.253298,0.00460033,0.191034,0.11192,0.193409,0.302132,0.370827,0,0.59976,0.0398637,0.179314,0.228867,0.14511,0.392041,0.245114,0.136185,0.381898,0.210643,0.00596307,0.00543424,0.0364883,0.350574,0.472319,0.196829,0.288241,0.397918,0.250737,0.0927714,0.0156852,0.178572,0,0,0.063585,0,0.48504,0,0.617058,0.0640887,0,0.0883194,0.316275,0,0.503125,0.0325585,0.105083,0.0525187,0.284177,0,0.531324,0.0147548,0.270062,0.215936,0.151484,0.203114,0.364786,0.0772039,0.360402,0.0449211,0.142917,0.251891,0.175516,0.259497,0.542759,0.197855,0.285101,0.270339,0.233413,0.0901442,0.0478907,0.203382,0.246279,0.338169,0.273016,0.094915,0.214486,0,0,0.317919,0,0.0317341,0.343292,0,0.564818,0.0354346,0.317224,0.0951488,0,0.163634,0.0926272,0,0.240753,0.441633,0.0974575,0.391571,0.33,0.0232024,0.408423,0.0302801,0.0784008,0.222093,0.103505,0.391034,0.100299,0.396753,0.0689499,0.234754,0.434848,0.0294039,0.29209,0.0336653,0.263316,0.32756,0.260274,0.353796,0.0744787,0.00353458,0,0.309082,0.418655,0.12424,0.432625,0.184899,0.342497,0,0,0);
+    // b_vector<float> sample_8 = MAKE_FLOAT_LIST(0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0.115915,0,0.480182,0,0.821055,0.286107,0,0,0,0,0,0,0,0,0.0176644,0,0.850128,0.0573638,0.482478,0,0,0.202226,0,0,0,0,0,0,0.12943,0,0,0,0.0183514,0,0.337471,0.0161549,0.932075,0,0,0,0,0,0.164763,0,0.40888,0.174718,0.148629,0,0.563784,0,0.610492,0.0148088,0.247736,0.0301245,0.00173257,0,0.481645,0.04548,0.243463,0,0,0.160332,0.526687,0.0174442,0.521358,0,0.359842,0,0,0.0442927,0,0,0,0,0.112102,0.0134528,0.634836,0,0,0.212109,0.239858,0,0.47967,0.201275,0.444878,0.114901,0.0119875,0,0.354204,0,0.521324,0.0130347,0.260678,0,0.37499,0.261378,0.351315,0.0873781,0.338345,0.0902905,0.213164,0.162583,0.218548,0.0152442,0.505454,0,0.417659,0,0,0,0.49842,0.147229,0.282697,0.126012,0.286362,0.0586704,0,0.265971);
+    // b_vector<float> sample_9 = MAKE_FLOAT_LIST(0,0.0956604,0.098247,0,0.417734,0.220911,0.311895,0.324612,0,0.0231785,0.176474,0,0.564824,0.26379,0.346738,0.121338,0.249292,0.178207,0.275597,0.211925,0.153124,0.295389,0.26327,0.215302,0.353519,0.154717,0.353768,0.0528112,0.154179,0.467658,0.0669753,0.187208,0.19745,0.391921,0.303989,0.158605,0.234772,0.00180255,0.0387419,0.299266,0.251029,0.405501,0.0871662,0.151347,0.130699,0.205678,0,0.475739,0,0.0554978,0.077552,0,0.395509,0.351504,0.332694,0.369725,0,0.191861,0.123412,0,0.152125,0.368935,0.140668,0.482139,0.231082,0.242545,0.249301,0.210294,0.218287,0.340427,0.242107,0.204602,0.109795,0.391003,0.118778,0.321611,0.165454,0.127155,0.436234,0.032522,0.236854,0.375758,0.313202,0.262977,0.258655,0.068365,0,0.326493,0.0739646,0.0689581,0.378467,0.177771,0.447888,0.1274,0.185436,0.14489,0,0.22332,0.233887,0,0.446044,0.122845,0.205414,0.509487,0,0.0106548,0,0,0.098534,0.597537,0.0810833,0.0784841,0.320192,0.251493,0.291953,0.34017,0.0168087,0.324574,0.407311,0.0504237,0,0.396094,0,0.0574232,0.410932,0.112823,0.131985,0,0.089675,0.199537,0.329405,0.1731,0.382723,0.265848,0.254029,0.391817,0.388143,0.338448,0.189057,0.0704277,0.269279,0.00718677,0,0);
+    // b_vector<float> sample_10 = MAKE_FLOAT_LIST(0,0,0,0,0.194082,0.0751852,0.499238,0.147238,0,0.0405393,0.236777,0,0.688561,0.00110666,0.39235,0,0.082613,0,0.333312,0.0264274,0.0623509,0.166592,0.0295297,0.456743,0.500441,0.0294637,0.457245,0,0.0352748,0.376655,0.127081,0.143553,0.193715,0.231421,0.198166,0.505423,0.00542692,0,0,0.144223,0.159241,0.52323,0.0786903,0,0.194092,0,0.0978441,0.490717,0,0,0.155868,0,0.656508,0.0694687,0.498978,0,0,0.146742,0.139485,0,0.241342,0.232652,0.0794702,0.362242,0.415125,0,0.466054,0,0.0783402,0.431813,0.0610619,0.263295,0.171763,0.270015,0.15583,0.257808,0.083755,0.0525776,0.376662,0,0.290653,0.553989,0.0411409,0.0619111,0.0972659,0,0.0371976,0.448568,0.0306256,0.0674538,0.374664,0.0311766,0.477389,0,0.10857,0.067192,0,0.148076,0.187634,0,0.35235,0.133719,0.132428,0.247639,0,0,0.0379139,0,0.0783612,0.727448,0.0579085,0.426452,0.26896,0.215103,0.244314,0.189031,0.0708566,0.116052,0.344431,0,0.0314912,0.48739,0.0446864,0.25373,0.452102,0.115131,0.348031,0.0717939,0.0179453,0.14906,0.290717,0,0.441574,0,0.151681,0.152095,0.314451,0.302861,0.446024,0.305773,0.410823,0,0.000996961,0);
     
-    vector<b_vector<float>> samples;
-    samples.push_back(sample_1);
-    samples.push_back(sample_2);
-    samples.push_back(sample_3);
-    samples.push_back(sample_4);
-    samples.push_back(sample_5);
-    samples.push_back(sample_6);
-    samples.push_back(sample_7);
-    samples.push_back(sample_8);
-    samples.push_back(sample_9);
-    samples.push_back(sample_10);
+    // vector<b_vector<float>> samples;
+    // samples.push_back(sample_1);
+    // samples.push_back(sample_2);
+    // samples.push_back(sample_3);
+    // samples.push_back(sample_4);
+    // samples.push_back(sample_5);
+    // samples.push_back(sample_6);
+    // samples.push_back(sample_7);
+    // samples.push_back(sample_8);
+    // samples.push_back(sample_9);
+    // samples.push_back(sample_10);
 
-    vector<uint8_t> true_labels = MAKE_UINT8_LIST(4,4,7,1,3,1,6,5,8,0);
+    // vector<uint8_t> true_labels = MAKE_UINT8_LIST(4,4,7,1,3,1,6,5,8,0);
 
-    for (int i = 0; i < samples.size(); i++){
-        String label = forest.predict(samples[i]);
-        forest.add_actual_label(true_labels[i]);
-        Serial.printf("Sample %d - Predicted: %s - Actual: %d\n", i+1, label.c_str(), true_labels[i]);
-    }    
-    forest.releaseForest();
-    forest.flush_pending_data();
+    // for (int i = 0; i < samples.size(); i++){
+    //     String label = forest.predict(samples[i]);
+    //     forest.add_actual_label(true_labels[i]);
+    //     Serial.printf("Sample %d - Predicted: %s - Actual: %d\n", i+1, label.c_str(), true_labels[i]);
+    // }    
+    // forest.releaseForest();
+    // forest.flush_pending_data();
 
-    float p_score = forest.get_practical_inference_score();
-    Serial.printf("Practical Inference Score : %.3f\n", p_score);
-    int total_logged = forest.get_total_logged_inference();
-    Serial.printf("Total Logged Inference with actual label feedback : %d\n", total_logged);
+    // float p_score = forest.get_practical_inference_score();
+    // Serial.printf("Practical Inference Score : %.3f\n", p_score);
+    // int total_logged = forest.get_total_logged_inference();
+    // Serial.printf("Total Logged Inference with actual label feedback : %d\n", total_logged);
 
-    // forest.visual_result(forest.test_data); // Optional visualization
+    // // forest.visual_result(forest.test_data); // Optional visualization
 
 
     long unsigned end_forest = GET_CURRENT_TIME_IN_MILLISECONDS;

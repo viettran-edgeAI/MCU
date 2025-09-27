@@ -33,6 +33,7 @@
  note: all errors messages (lead to failed process) will be enabled with RF_DEBUG_LEVEL >=1
 */
 
+static constexpr uint8_t  MAX_TREES              = 100;         // maximum number of trees in a forest
 static constexpr uint16_t MAX_LABELS             = 255;         // maximum number of unique labels supported 
 static constexpr uint16_t MAX_NUM_FEATURES       = 1023;       // maximum number of features
 static constexpr uint16_t MAX_NUM_SAMPLES        = 65535;     // maximum number of samples in a dataset
@@ -47,7 +48,7 @@ using sampleID_set = mcu::ID_vector<uint16_t>;       // set of unique sample IDs
  NOTE : Forest file components (with each model)
     1. model_name_nml.bin       : base data (dataset)
     2. model_name_config.json   : model configuration file 
-    3. model_name_ctg.bin       : categorizer (feature quantizer and label mapping)
+    3. model_name_ctg.csv       : categorizer (feature quantizer and label mapping)
     4. model_name_dp.csv        : information about dataset (num_features, num_labels...)
     5. model_name_forest.bin    : model file (all trees) in unified format
     6. model_name_tree_*.bin    : model files (tree files) in individual format. (Given from pc/used during training)
@@ -75,7 +76,7 @@ namespace mcu {
     class Rf_tree;              // decision tree
     class Rf_config;            // forest configuration & dataset parameters
     class Rf_base;              // Manage and monitor the status of forest components and resources
-    class Rf_node_predictor;    // Helper class: predict and pre-allocate resources needed during tree building
+    class Rf_node_predictor;    // Helper class: predict and pre-allocate resources needed before building/loading a tree
     class Rf_categorizer;       // sample quantizer (categorize features and labels mapping)
     class Rf_logger;            // logging forest events timing, memory usage, messages, errors
     class Rf_random;            // random generator (for stability across platforms and runs)
@@ -168,7 +169,7 @@ namespace mcu {
             
             if(file.read((uint8_t*)&numSamples, sizeof(numSamples)) != sizeof(numSamples) ||
             file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
-                if constexpr(RF_DEBUG_LEVEL > 0) Serial.println("❌ Failed to read binary header.");
+                if constexpr(RF_DEBUG_LEVEL > 0) Serial.println("❌ Failed to read dataset header.");
                 file.close();
                 return;
             }
@@ -662,7 +663,7 @@ namespace mcu {
             if(file.read((uint8_t*)&numSamples, sizeof(numSamples)) != sizeof(numSamples) ||
             file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
                 if constexpr(RF_DEBUG_LEVEL > 0)
-                Serial.println("❌ Failed to read binary header.");
+                Serial.println("❌ Failed to read data header.");
                 file.close();
                 return;
             }
@@ -812,7 +813,7 @@ namespace mcu {
          */
         void loadData(Rf_data& source, const sampleID_set& sample_IDs, bool save_ram = true) {
             if constexpr(RF_DEBUG_LEVEL > 1)
-                Serial.printf("📂 Loading %d specific samples from source Rf_data: %s\n", 
+                Serial.printf("📂 Loading %d samples from source Rf_data: %s\n", 
                 sample_IDs.size(), source.filename.c_str());
             if (source.filename.length() == 0) {
                 if constexpr(RF_DEBUG_LEVEL > 0)
@@ -844,7 +845,7 @@ namespace mcu {
             if(file.read((uint8_t*)&numSamples, sizeof(numSamples)) != sizeof(numSamples) ||
             file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
                 if constexpr(RF_DEBUG_LEVEL > 0)
-                Serial.println("❌ Failed to read binary header from source file.");
+                Serial.println("❌ Failed to read source data header.");
                 file.close();
                 return;
             }
@@ -975,14 +976,59 @@ namespace mcu {
          *@brief: copy assignment (but not copy filename to avoid SPIFFS over-writing)
          *@note : Rf_data will be put into release state. loadData() to reload into RAM if needed.
         */
+        // Rf_data& operator=(const Rf_data& other) {
+        //     purgeData(); // Clear existing data safely
+        //     if (this != &other) {
+        //         cloneFile(other.filename, filename);
+        //         bitsPerSample = other.bitsPerSample;
+        //         samplesEachChunk = other.samplesEachChunk;
+        //         size_ = other.size_;
+        //         // Deep copy of labels
+        //         allLabels = other.allLabels; // b_vector has its own copy semantics
+        //     }
+        //     return *this;   
+        // }
+
         Rf_data& operator=(const Rf_data& other) {
             purgeData(); // Clear existing data safely
             if (this != &other) {
-                cloneFile(other.filename, filename);
+                // Only clone file if source has valid data file
+                if (other.filename.length() > 0 && SPIFFS.exists(other.filename.c_str())) {
+                    // Verify source file has valid header before cloning
+                    File testFile = SPIFFS.open(other.filename.c_str(), FILE_READ);
+                    if (testFile) {
+                        uint32_t testNumSamples;
+                        uint16_t testNumFeatures;
+                        bool headerValid = (testFile.read((uint8_t*)&testNumSamples, sizeof(testNumSamples)) == sizeof(testNumSamples) &&
+                                          testFile.read((uint8_t*)&testNumFeatures, sizeof(testNumFeatures)) == sizeof(testNumFeatures) &&
+                                          testNumSamples > 0 && testNumFeatures > 0);
+                        testFile.close();
+                        
+                        if (headerValid) {
+                            if (!cloneFile(other.filename, filename)) {
+                                if constexpr(RF_DEBUG_LEVEL > 0)
+                                Serial.printf("⚠️ Failed to clone file %s to %s\n", 
+                                            other.filename.c_str(), filename.c_str());
+                            }
+                        } else {
+                            if constexpr(RF_DEBUG_LEVEL > 0)
+                            Serial.printf("⚠️ Source file %s has invalid header, skipping clone\n", 
+                                        other.filename.c_str());
+                        }
+                    } else {
+                        if constexpr(RF_DEBUG_LEVEL > 0)
+                        Serial.printf("⚠️ Cannot open source file %s for verification\n", 
+                                    other.filename.c_str());
+                    }
+                } else {
+                    if constexpr(RF_DEBUG_LEVEL > 1)
+                    Serial.printf("⚠️ Source file %s does not exist, skipping clone\n", 
+                                other.filename.c_str());
+                }
                 bitsPerSample = other.bitsPerSample;
                 samplesEachChunk = other.samplesEachChunk;
                 size_ = other.size_;
-                // Deep copy of labels
+                // Deep copy of labels if loaded in memory
                 allLabels = other.allLabels; // b_vector has its own copy semantics
             }
             return *this;   
@@ -1332,13 +1378,46 @@ namespace mcu {
 
     class Rf_tree {
     public:
-        mcu::b_vector<Tree_node> nodes;  // Vector-based tree storage
+        mcu::vector<Tree_node> nodes;  // Vector-based tree storage
         uint8_t index;
         bool isLoaded;
 
         Rf_tree() : index(255), isLoaded(false) {}
         
         Rf_tree(uint8_t idx) : index(idx), isLoaded(false) {}
+
+        // Copy constructor
+        Rf_tree(const Rf_tree& other) 
+            : nodes(other.nodes), index(other.index), isLoaded(other.isLoaded) {}
+
+        // Copy assignment operator
+        Rf_tree& operator=(const Rf_tree& other) {
+            if (this != &other) {
+                nodes = other.nodes;
+                index = other.index;
+                isLoaded = other.isLoaded;
+            }
+            return *this;
+        }
+
+        // Move constructor
+        Rf_tree(Rf_tree&& other) noexcept 
+            : nodes(std::move(other.nodes)), index(other.index), isLoaded(other.isLoaded) {
+            other.index = 255;
+            other.isLoaded = false;
+        }
+
+        // Move assignment operator
+        Rf_tree& operator=(Rf_tree&& other) noexcept {
+            if (this != &other) {
+                nodes = std::move(other.nodes);
+                index = other.index;
+                isLoaded = other.isLoaded;
+                other.index = 255;
+                other.isLoaded = false;
+            }
+            return *this;
+        }
 
         // Count total number of nodes in the tree (including leaf nodes)
         uint32_t countNodes() const {
@@ -1522,7 +1601,7 @@ namespace mcu {
         }
 
         // predict single (normalized)sample - packed features
-        uint8_t predictSample(const mcu::packed_vector<2>& packed_features) const {
+        uint8_t predict_features(const mcu::packed_vector<2>& packed_features) const {
             if (nodes.empty() || !isLoaded) return 0;
             
             uint16_t currentIndex = 0;  // Start from root
@@ -1554,7 +1633,6 @@ namespace mcu {
             return (currentIndex < nodes.size()) ? nodes[currentIndex].getLabel() : 0;
         }
 
-
         void clearTree(bool freeMemory = false) {
             nodes.clear();
             nodes.fit();
@@ -1570,7 +1648,7 @@ namespace mcu {
                 snprintf(filename, sizeof(filename), "/%s_tree_%d.bin", model_name.c_str(), index);
                 if (SPIFFS.exists(filename)) {
                     SPIFFS.remove(filename);
-                    if constexpr(RF_DEBUG_LEVEL > 1) Serial.printf("✅ Tree file removed: %s\n", filename);
+                    if constexpr(RF_DEBUG_LEVEL > 2) Serial.printf("✅ Tree file removed: %s\n", filename);
                 } 
             }
             index = 255;
@@ -1606,6 +1684,378 @@ namespace mcu {
     
     /*
     ------------------------------------------------------------------------------------------------------------------
+    -------------------------------------------------- RF_BASE -------------------------------------------------------
+    ------------------------------------------------------------------------------------------------------------------
+    */
+    // flags indicating the status of member files
+    typedef enum Rf_base_flags : uint16_t{
+        BASE_DATA_EXIST         = 1 << 0,
+        DP_FILE_EXIST           = 1 << 1,
+        CTG_FILE_EXIST          = 1 << 2,
+        CONFIG_FILE_EXIST       = 1 << 3,
+        INFER_LOG_FILE_EXIST    = 1 << 4,
+        UNIFIED_FOREST_EXIST    = 1 << 5,
+        NODE_PRED_FILE_EXIST    = 1 << 6,
+        ABLE_TO_INFERENCE       = 1 << 7,
+        ABLE_TO_TRAINING        = 1 << 8,
+        BASE_DATA_IS_CSV        = 1 << 9
+    } Rf_base_flags;
+
+    // Base file management class for Random Forest project status
+    class Rf_base {
+    private:
+        uint16_t flags = 0; // flags indicating the status of member files
+        String model_name = "";
+    public:
+        Rf_base() : flags(static_cast<Rf_base_flags>(0)), model_name("") {}
+        Rf_base(const char* bn) : flags(static_cast<Rf_base_flags>(0)), model_name(bn) {
+            init(bn);
+        }
+
+        void init(const char* model_name){
+            if constexpr(RF_DEBUG_LEVEL > 1)
+                Serial.println("🔧 Initializing model resource manager");
+            if (!model_name || strlen(model_name) == 0) {
+                if constexpr(RF_DEBUG_LEVEL > 0)
+                Serial.println("❌ Model name is empty. The process is aborted.");
+                return;
+            } else {
+                this->model_name = String(model_name);
+                
+                // check : base data exists (binary or csv)
+                String base_data_file = get_base_data_file();
+                if (!SPIFFS.exists(base_data_file.c_str())) {
+                    // try to find csv file
+                    String csv_file = "/" + this->model_name + "_nml.csv";
+                    if (SPIFFS.exists(csv_file.c_str())) {
+                        if constexpr(RF_DEBUG_LEVEL > 1)
+                        Serial.println("⚠️ Warning: Found csv dataset, need to be converted to binary format before use.");
+                        flags |= static_cast<Rf_base_flags>(BASE_DATA_IS_CSV);
+                    }else{
+                        if constexpr(RF_DEBUG_LEVEL > 0)
+                        Serial.println("❌ No base data file found \n");
+                        this->model_name = "";
+                    }
+                }
+                if constexpr(RF_DEBUG_LEVEL > 1)
+                Serial.printf("✅ Found base data file: %s\n", base_data_file.c_str()); 
+                flags |= static_cast<Rf_base_flags>(BASE_DATA_EXIST);
+
+                // check : categorizer file exists
+                String ctg_file = get_ctg_file();
+                if (SPIFFS.exists(ctg_file.c_str())) {
+                    if constexpr(RF_DEBUG_LEVEL > 1)
+                    Serial.printf("✅ Found categorizer file: %s\n", ctg_file.c_str());
+                    flags |= static_cast<Rf_base_flags>(CTG_FILE_EXIST);
+                } else {
+                    if constexpr(RF_DEBUG_LEVEL > 0)
+                    Serial.printf("❌ No categorizer file found: %s\n", ctg_file.c_str());
+                    this->model_name = "";
+                }
+                
+                // check : dp file exists
+                String dp_file = get_dp_file();
+                if (SPIFFS.exists(dp_file.c_str())) {
+                    if constexpr(RF_DEBUG_LEVEL > 1)
+                    Serial.printf("✅ Found data_params file: %s\n", dp_file.c_str());
+                    flags |= static_cast<Rf_base_flags>(DP_FILE_EXIST);
+                } else {
+                    if constexpr(RF_DEBUG_LEVEL > 1)
+                    Serial.printf("⚠️ Warning: no data_params file found: %s\n", dp_file.c_str());
+                    Serial.println("🔂 Dataset will be scanned, which may take time...🕒\n");
+                }
+
+                // check : config file exists
+                String config_file = get_config_file();
+                if (SPIFFS.exists(config_file.c_str())) {
+                    if constexpr(RF_DEBUG_LEVEL > 1)
+                    Serial.printf("✅ Found config file: %s\n", config_file.c_str());
+                    flags |= static_cast<Rf_base_flags>(CONFIG_FILE_EXIST);
+                } else {
+                    if constexpr(RF_DEBUG_LEVEL > 1)
+                    Serial.printf("⚠️ Warning: no config file found: %s\n", config_file.c_str());
+                    Serial.println("🔂 Switching to manual configuration");
+                }
+                
+                // check : forest file exists (unified form)
+                String uni_forest = get_forest_file();
+                if (SPIFFS.exists(uni_forest.c_str())) {
+                    if constexpr(RF_DEBUG_LEVEL > 1)
+                    Serial.printf("✅ Found unified forest file: %s\n", uni_forest.c_str());
+                    flags |= static_cast<Rf_base_flags>(UNIFIED_FOREST_EXIST);
+                } else {
+                    if constexpr(RF_DEBUG_LEVEL > 2)
+                    Serial.printf("⚠️ No unified forest file found: %s\n", uni_forest.c_str());
+                }
+
+                // check : node predictor file exists
+                String node_pred_file = get_node_predict_file();
+                if (SPIFFS.exists(node_pred_file.c_str())) {
+                    if constexpr(RF_DEBUG_LEVEL > 1)
+                    Serial.printf("✅ Found node predictor file: %s\n", node_pred_file.c_str());
+                    flags |= static_cast<Rf_base_flags>(NODE_PRED_FILE_EXIST);
+                } else {
+                    if constexpr(RF_DEBUG_LEVEL > 2){
+                        Serial.printf("⚠️ No node predictor file found: %s\n", node_pred_file.c_str());
+                        Serial.println("🔂 Switching to use default node_predictor");
+                    }
+                }
+
+                // able to inference : forest file + categorizer
+                if ((flags & UNIFIED_FOREST_EXIST) && (flags & CTG_FILE_EXIST)) {
+                    flags |= static_cast<Rf_base_flags>(ABLE_TO_INFERENCE);
+                    if constexpr(RF_DEBUG_LEVEL > 1)
+                    Serial.println("✅ Model is ready for inference.");
+                } else {
+                    if constexpr(RF_DEBUG_LEVEL > 0)
+                    Serial.println("⚠️ Model is NOT ready for inference.");
+                }
+
+                // able to re-training : base data + categorizer 
+                if ((flags & BASE_DATA_EXIST) && (flags & CTG_FILE_EXIST)) {
+                    flags |= static_cast<Rf_base_flags>(ABLE_TO_TRAINING);
+                    if constexpr(RF_DEBUG_LEVEL > 1)
+                    Serial.println("✅ Model is ready for re-training.");
+                } else {
+                    if constexpr(RF_DEBUG_LEVEL > 0)
+                    Serial.println("⚠️ Model is NOT ready for re-training.");
+                }
+            }
+        }
+
+        //  operator =
+        Rf_base& operator=(const Rf_base& other) {
+            if (this != &other) {
+                this->flags = other.flags;
+                this->model_name = other.model_name;
+            }
+            return *this;
+        }
+
+        // copy constructor
+        Rf_base(const Rf_base& other) {
+            this->flags = other.flags;
+            this->model_name = other.model_name;
+        }
+
+        // base loaded check
+        inline bool ready_to_use() const {
+            return model_name.length() > 0;
+        }
+
+        // Get mode name 
+        inline String get_model_name() const {
+            return model_name;
+        }
+
+        // for Rf_data: baseData 
+        inline String get_base_data_file() const {
+            return "/" + model_name + "_nml.bin";
+        }
+
+        // for Rf_config 
+        inline String get_dp_file() const {
+            return "/" + model_name + "_dp.csv";
+        }
+
+        // for Rf_categorizer
+        inline String get_ctg_file() const {
+            return "/" + model_name + "_ctg.csv";
+        }
+
+        // for Rf_base 
+        inline String get_infer_log_file() const {
+            return "/" + model_name + "_infer_log.bin";
+        }
+
+        // for Rf_config
+        inline String get_config_file() const {
+            return "/" + model_name + "_config.json";
+        }
+
+        // for Rf_node_predictor
+        inline String get_node_predict_file() const {
+            return "/" + model_name + "_node_pred.bin";
+        }
+
+        // for Rf_node_predictor log
+        inline String get_node_log_file() const {
+            return "/" + model_name + "_node_log.csv";
+        }
+
+        // for unified model format (all trees in one file)
+        inline String get_forest_file() const {
+            return "/" + model_name + "_forest.bin";
+        }
+
+        // for logger
+        inline String get_time_log_file() const {
+            return "/" + model_name + "_time_log.csv";
+        }
+        // for logger
+        inline String get_memory_log_file() const {
+            return "/" + model_name + "_memory_log.csv";
+        }
+
+        bool dp_file_exists() const {
+            return (flags & DP_FILE_EXIST) != 0;
+        }
+
+        bool config_file_exists() const {
+            return (flags & CONFIG_FILE_EXIST) != 0;
+        }
+
+        bool node_pred_file_exists() const {
+            return (flags & NODE_PRED_FILE_EXIST) != 0;
+        }
+
+        // Check if base file is in CSV format (always false now as we only use binary)
+        bool base_data_is_csv() const {
+            return false; // Always binary format now
+        }
+
+        // Check if model uses unified format (model_name_forest.bin)
+        inline bool forest_file_exist() const {
+            return (flags & UNIFIED_FOREST_EXIST) != 0;
+        }
+
+        // Fast check for able to training
+        inline bool able_to_training() const {
+            return (flags & ABLE_TO_TRAINING) != 0;
+        }
+
+        // fast check for able to inference
+        inline bool able_to_inference() const {
+            return (flags & ABLE_TO_INFERENCE) != 0;
+        }
+
+        // set name of model 
+        void set_model_name(const char* bn) {
+            String old_model_name = model_name;
+            if (bn && strlen(bn) > 0) {
+                model_name = String(bn);
+                // find and rename all existing related files
+
+                String old_file, new_file;
+
+                // base file
+                old_file = "/" + old_model_name + "_nml.bin";
+                new_file = "/" + model_name + "_nml.bin";
+                cloneFile(old_file, new_file);
+                SPIFFS.remove(old_file.c_str());
+
+                // data_params file
+                old_file = "/" + old_model_name + "_dp.csv";
+                new_file = "/" + model_name + "_dp.csv";
+                cloneFile(old_file, new_file);
+                SPIFFS.remove(old_file.c_str());
+
+                // categorizer file
+                old_file = "/" + old_model_name + "_ctg.csv";
+                new_file = "/" + model_name + "_ctg.csv";
+                cloneFile(old_file, new_file);
+                SPIFFS.remove(old_file.c_str());
+
+                // inference log file
+                old_file = "/" + old_model_name + "_infer_log.bin";
+                new_file = "/" + model_name + "_infer_log.bin";
+                cloneFile(old_file, new_file);
+                SPIFFS.remove(old_file.c_str());
+
+                // node predictor file
+                old_file = "/" + old_model_name + "_node_pred.bin";
+                new_file = "/" + model_name + "_node_pred.bin";
+                cloneFile(old_file, new_file);
+                SPIFFS.remove(old_file.c_str());
+                
+                // node predict log file
+                old_file = "/" + old_model_name + "_node_log.bin";
+                new_file = "/" + model_name + "_node_log.bin";
+                cloneFile(old_file, new_file);
+                SPIFFS.remove(old_file.c_str());
+
+                // config file
+                old_file = "/" + old_model_name + "_config.json";
+                new_file = "/" + model_name + "_config.json";
+                cloneFile(old_file, new_file);
+                SPIFFS.remove(old_file.c_str());
+
+                // tree files - handle both individual and unified formats
+                old_file = "/" + old_model_name + "_forest.bin";
+                new_file = "/" + model_name + "_forest.bin";
+                
+                if (SPIFFS.exists(old_file.c_str())) {
+                    // Handle unified model format
+                    cloneFile(old_file, new_file);
+                    SPIFFS.remove(old_file.c_str());
+                } else {
+                    // Handle individual tree files
+                    for(uint8_t i = 0; i < 50; i++) { // Max 50 trees check
+                        old_file = "/" + old_model_name + "_tree_" + String(i) + ".bin";
+                        new_file = "/" + model_name + "_tree_" + String(i) + ".bin";
+                        if (SPIFFS.exists(old_file.c_str())) {
+                            cloneFile(old_file, new_file);
+                            SPIFFS.remove(old_file.c_str());
+                        }else{
+                            break; // Stop when we find a missing tree file
+                        }
+                    }
+                }
+
+                // log files - optional, not critical
+                // model_name_memory_log.csv 
+                old_file = "/" + old_model_name + "_memory_log.csv";
+                new_file = "/" + model_name + "_memory_log.csv";
+                cloneFile(old_file, new_file);
+                SPIFFS.remove(old_file.c_str());
+
+                // model_name_time_log.csv
+                old_file = "/" + old_model_name + "_time_log.csv";
+                new_file = "/" + model_name + "_time_log.csv";
+                cloneFile(old_file, new_file);
+                SPIFFS.remove(old_file.c_str());
+
+                // Re-initialize flags based on new base name
+                init(model_name.c_str());  
+            }
+        }
+
+        bool set_config_status(bool exists) {
+            if (exists) {
+                flags |= static_cast<Rf_base_flags>(CONFIG_FILE_EXIST);
+            } else {
+                flags &= ~static_cast<Rf_base_flags>(CONFIG_FILE_EXIST);
+            }
+            return config_file_exists();
+        }
+
+        bool set_dp_status(bool exists) {
+            if (exists) {
+                flags |= static_cast<Rf_base_flags>(DP_FILE_EXIST);
+            } else {
+                flags &= ~static_cast<Rf_base_flags>(DP_FILE_EXIST);
+            }
+            return dp_file_exists();
+        }
+
+        bool set_node_pred_status(bool exists) {
+            if (exists) {
+                flags |= static_cast<Rf_base_flags>(NODE_PRED_FILE_EXIST);
+            } else {
+                flags &= ~static_cast<Rf_base_flags>(NODE_PRED_FILE_EXIST);
+            }
+            return (flags & NODE_PRED_FILE_EXIST) != 0;
+        }
+
+        size_t memory_usage() const {
+            size_t total = sizeof(Rf_base);
+            total += model_name.length() * sizeof(char);
+            return total + 2;
+        }
+    };
+
+    /*
+    ------------------------------------------------------------------------------------------------------------------
     ---------------------------------------------------- RF_CONFIG ---------------------------------------------------
     ------------------------------------------------------------------------------------------------------------------
     */
@@ -1628,6 +2078,10 @@ namespace mcu {
     // Configuration class for Random Forest parameters
     // handle 2 files: model_name_config.json (config file) and model_name_dp.csv (dp file)
     class Rf_config {
+        Rf_base* base_ptr = nullptr;
+        bool has_base() const {
+            return base_ptr != nullptr && base_ptr->ready_to_use();
+        }
     public:
         // Core model configuration
         uint8_t num_trees;
@@ -1646,8 +2100,10 @@ namespace mcu {
         Rf_training_score training_score;
         uint8_t train_flag;
         float result_score;
-        bool keep_trees_in_memory; // Performance flag to avoid releasing trees during evaluation
         uint32_t estimatedRAM;
+
+        mcu::pair<uint8_t, uint8_t> min_split_range;
+        mcu::pair<uint8_t, uint8_t> max_depth_range; 
 
         bool extend_base_data;
         bool enable_retrain;
@@ -1655,34 +2111,239 @@ namespace mcu {
         // Dataset parameters (set after loading data)
         uint16_t num_samples;
         uint16_t num_features;
-        uint8_t num_labels;
-        mcu::pair<uint8_t, uint8_t> min_split_range;
-        mcu::pair<uint8_t, uint8_t> max_depth_range;  
+        uint8_t num_labels; 
 
         b_vector<uint16_t> samples_per_label; // index = label, value = count
         
-        String filename;
+        // String filename;
         bool isLoaded;
 
     private:
-        // get dpfile from config filename : "/model_name_config.json" -> "/model_name_dp.csv"
-        String getDpFilename() {
-            if (filename.length() < 1) return "";
-            int slashIdx = filename.lastIndexOf('/');
-            int dotIdx = filename.lastIndexOf("_config.json");
-            String baseName = (slashIdx >= 0) ? filename.substring(slashIdx, dotIdx) : filename.substring(0, dotIdx);
-            return baseName + "_dp.csv";
+        //  scan base_data file to get dataset parameters (when no dp file found)
+        bool scan_base_data(){
+            String base_filename = base_ptr->get_base_data_file();
+            if constexpr(RF_DEBUG_LEVEL > 1)
+            Serial.printf("📊 Scanning base data: %s\n", base_filename.c_str());
+
+            File file = SPIFFS.open(base_filename.c_str(), FILE_READ);
+            if (!file) {
+                if constexpr(RF_DEBUG_LEVEL > 0)
+                    Serial.println("❌ Failed to open base data file for scanning");
+                return false;
+            }
+
+            // Read binary header
+            uint32_t numSamples;
+            uint16_t numFeatures;
+            
+            if(file.read((uint8_t*)&numSamples, sizeof(numSamples)) != sizeof(numSamples) ||
+               file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
+                if constexpr(RF_DEBUG_LEVEL > 0)
+                    Serial.println("❌ Failed to read dataset header during scan");
+                file.close();
+                return false;
+            }
+
+            // Set basic parameters
+            num_samples = numSamples;
+            num_features = numFeatures;
+
+            if constexpr(RF_DEBUG_LEVEL > 2)
+                Serial.printf("📋 Header scan: %d samples, %d features\n", num_samples, num_features);
+
+            // Calculate packed feature bytes per sample
+            const uint16_t packedFeatureBytes = (numFeatures + 3) / 4; // 4 values per byte (2 bits each)
+            const size_t recordSize = sizeof(uint8_t) + packedFeatureBytes; // label + packed features
+
+            // Track unique labels and their counts
+            mcu::unordered_map<uint8_t, uint16_t> label_counts;
+            uint8_t max_label = 0;
+
+            // Scan through all samples to collect label statistics
+            for(uint32_t i = 0; i < numSamples; i++) {
+                uint8_t label;
+                if(file.read(&label, sizeof(label)) != sizeof(label)) {
+                    if constexpr(RF_DEBUG_LEVEL > 0)
+                        Serial.printf("❌ Failed to read label for sample %d during scan\n", i);
+                    file.close();
+                    return false;
+                }
+
+                // Track label statistics
+                auto it = label_counts.find(label);
+                if(it != label_counts.end()) {
+                    it->second++;
+                } else {
+                    label_counts[label] = 1;
+                }
+
+                if(label > max_label) {
+                    max_label = label;
+                }
+
+                // Skip packed features for this sample
+                if(file.seek(file.position() + packedFeatureBytes) == false) {
+                    if constexpr(RF_DEBUG_LEVEL > 0)
+                        Serial.printf("❌ Failed to skip features for sample %d during scan\n", i);
+                    file.close();
+                    return false;
+                }
+            }
+
+            file.close();
+
+            // Set number of labels
+            num_labels = label_counts.size();
+
+            // Initialize samples_per_label vector with proper size
+            samples_per_label.clear();
+            samples_per_label.resize(max_label + 1, 0);
+
+            // Fill samples_per_label with counts
+            for(auto& pair : label_counts) {
+                samples_per_label[pair.first] = pair.second;
+            }
+
+            if constexpr(RF_DEBUG_LEVEL > 2) {
+                Serial.printf("✅ Base data scan complete:\n");
+                Serial.printf("   📊 Samples: %d\n", num_samples);
+                Serial.printf("   🔢 Features: %d\n", num_features);
+                Serial.printf("   🏷️  Labels: %d (max: %d)\n", num_labels, max_label);
+                Serial.printf("   📈 Samples per label: ");
+                for(size_t i = 0; i < samples_per_label.size(); i++) {
+                    if(samples_per_label[i] > 0) {
+                        Serial.printf("L%d:%d ", i, samples_per_label[i]);
+                    }
+                }
+                Serial.println();
+            }
+            return true;
         }
+        
+        // setup config manually (when no config file)
+        void setup_config_manual(){
+            // set train_flag based on dataset balance
+            if(samples_per_label.size() > 0){
+                uint16_t minorityCount = num_samples;
+                uint16_t majorityCount = 0;
+
+                for (auto& count : samples_per_label) {
+                    if (count > majorityCount) {
+                        majorityCount = count;
+                    }
+                    if (count < minorityCount) {
+                        minorityCount = count;
+                    }
+                }
+
+                float maxImbalanceRatio = 0.0f;
+                if (minorityCount > 0) {
+                    maxImbalanceRatio = (float)majorityCount / minorityCount;
+                }
+
+                if (maxImbalanceRatio > 10.0f) {
+                    train_flag = Rf_training_flags::RECALL;
+                    if constexpr(RF_DEBUG_LEVEL > 1)
+                    Serial.printf("⚠️ Highly imbalanced dataset (ratio: %.2f). Setting trainFlag to RECALL.\n", maxImbalanceRatio);
+                } else if (maxImbalanceRatio > 3.0f) {
+                    train_flag = Rf_training_flags::F1_SCORE;
+                    if constexpr(RF_DEBUG_LEVEL > 1)
+                    Serial.printf("⚠️ Moderately imbalanced dataset (ratio: %.2f). Setting trainFlag to F1_SCORE.\n", maxImbalanceRatio);
+                } else if (maxImbalanceRatio > 1.5f) {
+                    train_flag = Rf_training_flags::PRECISION;
+                    if constexpr(RF_DEBUG_LEVEL > 1)
+                    Serial.printf("⚠️ Slightly imbalanced dataset (ratio: %.2f). Setting trainFlag to PRECISION.\n", maxImbalanceRatio);
+                } else {
+                    train_flag = Rf_training_flags::ACCURACY;
+                    if constexpr(RF_DEBUG_LEVEL > 1)
+                    Serial.printf("✅ Balanced dataset (ratio: %.2f). Setting trainFlag to ACCURACY.\n", maxImbalanceRatio);
+                }
+            }
+            uint16_t avg_samples_per_label = num_samples / max(1, static_cast<int>(num_labels));
+        
+            // set training_score method
+            if (avg_samples_per_label < 200){
+                training_score = K_FOLD_SCORE;
+            }else if (avg_samples_per_label < 500){
+                training_score = OOB_SCORE;
+            }else{
+                training_score = VALID_SCORE;
+            }
+
+            // set train/test/valid ratio
+            if (avg_samples_per_label < 150){
+                train_ratio = 0.6f;
+                test_ratio = 0.2f;
+                valid_ratio = 0.2f;
+            }else{
+                train_ratio = 0.7f;
+                test_ratio = 0.15f;
+                valid_ratio = 0.15f;
+            }
+            if (training_score != VALID_SCORE){
+                train_ratio += valid_ratio;
+                valid_ratio = 0.0f;
+            }
+            if (!ENABLE_TEST_DATA){
+                train_ratio += test_ratio;
+                test_ratio = 0.0f;
+            }
+
+            set_ranges();
+        }
+
+        // set optimal ranges for min_split and max_depth based on dataset size
+        void set_ranges(){
+            // Calculate optimal min_split, max_depth and ranges
+            int baseline_minsplit_ratio = 100 * (num_samples / 500 + 1); 
+            if (baseline_minsplit_ratio > 500) baseline_minsplit_ratio = 500; 
+            uint8_t min_minSplit = max(2, (int)(num_samples / baseline_minsplit_ratio) - 2);
+            int dynamic_max_split = min(min_minSplit + 6, (int)(log2(num_samples) / 4 + num_features / 25.0f));
+            uint8_t max_minSplit = min(24, dynamic_max_split) - 2; // Cap at 24 to prevent overly simple trees.
+            if (max_minSplit <= min_minSplit) max_minSplit = min_minSplit + 4; // Ensure a valid range.
+
+
+            int base_maxDepth = max((int)log2(num_samples * 2.0f), (int)(log2(num_features) * 2.5f));
+            uint8_t max_maxDepth = max(6, base_maxDepth) + 8;
+            int dynamic_min_depth = max(4, (int)(log2(num_features) + 2));
+            uint8_t min_maxDepth = min((int)max_maxDepth - 2, dynamic_min_depth) + 2; // Ensure a valid range.
+            if (min_maxDepth >= max_maxDepth) min_maxDepth = max_maxDepth - 2;
+            if (min_maxDepth < 4) min_maxDepth = 4;
+
+            if(min_split == 0 || max_depth == 0) {
+                min_split = (min_minSplit + max_minSplit) / 2;
+                max_depth = (min_maxDepth + max_maxDepth) / 2;
+                if constexpr(RF_DEBUG_LEVEL > 1){
+                    Serial.println("⚙️ Not found minSplit/maxDepth in config, setting to optimal values.");
+                    Serial.printf("Setting minSplit to %u and maxDepth to %u based on dataset size.\n", 
+                                min_split, max_depth);
+                }
+            }
+
+            if constexpr(RF_DEBUG_LEVEL > 1){
+                Serial.printf("⚙️ Setting minSplit range: %d to %d (current: %d)\n", 
+                            min_minSplit, max_minSplit, min_split);
+                Serial.printf("⚙️ Setting maxDepth range: %d to %d (current: %d)\n", 
+                            min_maxDepth, max_maxDepth, max_depth);
+            }
+
+            min_split_range = make_pair(min_minSplit, max_minSplit);
+            max_depth_range = make_pair(min_maxDepth, max_maxDepth);
+        }
+
     public:
-        Rf_config() : isLoaded(false) {
+
+        void init(Rf_base* base) {
+            base_ptr = base;
+            isLoaded = false;
             // Set default values
             num_trees = 20;
             random_seed = 37;
             min_split = 2;
             max_depth = 13;
             use_boostrap = true;
-            boostrap_ratio = 0.632f; // Default bootstrap ratio
-            use_gini = false;
+            boostrap_ratio = 0.632f; 
+            use_gini = true;
             k_fold = 4;
             unity_threshold = 0.125;
             impurity_threshold = 0.1;
@@ -1692,81 +2353,35 @@ namespace mcu {
             training_score = OOB_SCORE;
             train_flag = 0x01; // ACCURACY
             result_score = 0.0;
-            keep_trees_in_memory = true; // Default to keeping trees for better performance
             estimatedRAM = 0;
             
             // Set defaults for new properties (not in initial config file)
             extend_base_data = true;
             enable_retrain = true;
-            
-            filename = "";
+        }
+        
+        Rf_config() {
+            init(nullptr);
+        }
+        Rf_config(Rf_base* base) {
+            init(base);
         }
 
         ~Rf_config() {
             releaseConfig();
-            releaseDpFile();
+            base_ptr = nullptr;
         }
 
-        void init(const String& fn){
-            if constexpr(RF_DEBUG_LEVEL > 1)
-                Serial.printf("🔧 Initializing Rf_config with file: %s\n", fn.c_str());
-            filename = fn;
-            isLoaded = false;
-        }
-
-        // Load configuration from JSON file in SPIFFS
-        void loadConfig() {
-            if (isLoaded) return;
-
-            File file = SPIFFS.open(filename.c_str(), FILE_READ);
-            if (!file) {
-                if constexpr(RF_DEBUG_LEVEL > 2){
-                    Serial.printf("⚠️ Failed to open config file: %s\n", filename.c_str());
-                    Serial.println("Switching to default configuration.");
-                }
-                return;
-            }
-
-            String jsonString = file.readString();
-            file.close();
-
-            // Parse JSON manually (simple parsing for known structure)
-            parseJSONConfig(jsonString);
-            isLoaded = true;
-            if constexpr(RF_DEBUG_LEVEL > 1) {
-                Serial.printf("✅ Config loaded: %s\n", filename.c_str());
-                Serial.printf("   Trees: %d, max_depth: %d, min_split: %d\n", num_trees, max_depth, min_split);
-                Serial.printf("   Estimated RAM: %d bytes\n", estimatedRAM);
-                Serial.printf("   extend_base_data: %s, enable_retrain: %s\n", 
-                            extend_base_data ? "true" : "false",
-                            enable_retrain ? "true" : "false");
-            }
-
-            loadDpFile(); // Load dataset parameters
-            
-            // Validate configuration after loading
-            if (validateSamplesPerLabel()) {
-                Serial.println("✅ samples_per_label data is consistent");
-            } else {
-                if constexpr(RF_DEBUG_LEVEL > 2)
-                Serial.println("⚠️ Warning: samples_per_label data inconsistency detected");
-            }
-        }
-
+    private:
         // read dataset parameters from /dataset_dp.csv and write to config
-        void loadDpFile() {
-            String path = getDpFilename();
-            if (path.length() < 1 || !SPIFFS.exists(path.c_str())) {
-                if constexpr(RF_DEBUG_LEVEL > 1)
-                    Serial.printf("⚠️ Dataset params file not found: %s\n", path.c_str());
-                return;
-            }
+        bool loadDpFile() {
+            String path = base_ptr->get_dp_file();
             // Read dataset parameters from /dataset_params.csv
             File file = SPIFFS.open(path.c_str(), "r");
             if (!file) {
                 if constexpr(RF_DEBUG_LEVEL > 0)
                 Serial.println("❌ Failed to open data_params file.");
-                return;
+                return false;
             }
 
             // Skip header line
@@ -1846,51 +2461,11 @@ namespace mcu {
                 }
             }
             // this->lowest_distribution = lowest_distribution / 100.0f; // Store as fraction
-
-            // Calculate optimal parameters based on dataset size
-            int baseline_minsplit_ratio = 100 * (num_samples / 500 + 1); 
-            if (baseline_minsplit_ratio > 500) baseline_minsplit_ratio = 500; 
-            uint8_t min_minSplit = max(2, (int)(num_samples / baseline_minsplit_ratio) - 2);
-            int dynamic_max_split = min(min_minSplit + 6, (int)(log2(num_samples) / 4 + num_features / 25.0f));
-            uint8_t max_minSplit = min(24, dynamic_max_split) - 2; // Cap at 24 to prevent overly simple trees.
-            if (max_minSplit <= min_minSplit) max_minSplit = min_minSplit + 4; // Ensure a valid range.
-
-
-            int base_maxDepth = max((int)log2(num_samples * 2.0f), (int)(log2(num_features) * 2.5f));
-            uint8_t max_maxDepth = max(6, base_maxDepth) + 8;
-            int dynamic_min_depth = max(4, (int)(log2(num_features) + 2));
-            uint8_t min_maxDepth = min((int)max_maxDepth - 2, dynamic_min_depth) + 2; // Ensure a valid range.
-            if (min_maxDepth >= max_maxDepth) min_maxDepth = max_maxDepth - 2;
-            if (min_maxDepth < 4) min_maxDepth = 4;
-
-            if(min_split == 0 || max_depth == 0) {
-                min_split = (min_minSplit + max_minSplit) / 2;
-                max_depth = (min_maxDepth + max_maxDepth) / 2;
-                if constexpr(RF_DEBUG_LEVEL > 1){
-                    Serial.println("⚙️ Not found minSplit/maxDepth in config, setting to optimal values.");
-                    Serial.printf("Setting minSplit to %u and maxDepth to %u based on dataset size.\n", 
-                                min_split, max_depth);
-                }
-            }
-
-            if constexpr(RF_DEBUG_LEVEL > 1){
-                Serial.printf("⚙️ Setting minSplit range: %d to %d (current: %d)\n", 
-                            min_minSplit, max_minSplit, min_split);
-                Serial.printf("⚙️ Setting maxDepth range: %d to %d (current: %d)\n", 
-                            min_maxDepth, max_maxDepth, max_depth);
-            }
-
-            min_split_range = make_pair(min_minSplit, max_minSplit);
-            max_depth_range = make_pair(min_maxDepth, max_maxDepth);
-            // at deployment, test_set is not used, merge it to train_set
-            if (!ENABLE_TEST_DATA){
-                train_ratio += test_ratio;
-            }
+            return true;
         }
-
         // write back to dataset_params file
         void releaseDpFile() {
-            String path = getDpFilename();
+            String path = base_ptr->get_dp_file();
             if (path.length() < 1) return;
             File file = SPIFFS.open(path.c_str(), "w");
             if (!file) {
@@ -1924,11 +2499,96 @@ namespace mcu {
             if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.println("✅ Dataset parameters saved successfully.");
         }
+    public:
+        // Load configuration from JSON file in SPIFFS
+        bool loadConfig() {
+            if (isLoaded) return true;
+            if (!has_base()) {
+                if constexpr(RF_DEBUG_LEVEL > 0)
+                    Serial.println("❌ Cannot load config: base pointer is null");
+                return false;
+            }
+
+            // load dataset parameters session 
+            bool dp_ok =  false;
+            if(base_ptr->dp_file_exists()){
+                if(!loadDpFile()){
+                    if constexpr(RF_DEBUG_LEVEL > 1)
+                    Serial.println("❌ Cannot load dataset parameters, try to scan base data");
+                    if (scan_base_data()){         // try to scan manually 
+                        if constexpr(RF_DEBUG_LEVEL > 1)
+                        Serial.println("✅ Base data scanned successfully");
+                        dp_ok = true;
+                    }
+                }else dp_ok = true;
+            }else{
+                if(scan_base_data()){
+                    if constexpr(RF_DEBUG_LEVEL > 1)
+                        Serial.println("✅ Base data scanned successfully");
+                    base_ptr->set_dp_status(true);
+                    dp_ok = true;
+                }
+            }
+            if(!dp_ok){
+                if constexpr(RF_DEBUG_LEVEL > 0)
+                Serial.println("❌ Cannot load dataset parameters for configuration");
+                return false;
+            }
+            // load config session
+            if(base_ptr->config_file_exists()){
+                String filename = base_ptr->get_config_file();
+                File file = SPIFFS.open(filename.c_str(), FILE_READ);
+                if (!file) {
+                    if constexpr(RF_DEBUG_LEVEL > 2){
+                        Serial.printf("⚠️ Failed to open config file: %s\n", filename.c_str());
+                        Serial.println("Switching to default configuration.");
+                    }
+                    return false;
+                }
+
+                String jsonString = file.readString();
+                file.close();
+
+                // Parse JSON manually (simple parsing for known structure)
+                parseJSONConfig(jsonString);
+                if constexpr(RF_DEBUG_LEVEL > 1) {
+                    Serial.printf("✅ Config loaded: %s\n", filename.c_str());
+                    Serial.printf("   Trees: %d, max_depth: %d, min_split: %d\n", num_trees, max_depth, min_split);
+                    Serial.printf("   Estimated RAM: %d bytes\n", estimatedRAM);
+                    Serial.printf("   extend_base_data: %s, enable_retrain: %s\n", 
+                                extend_base_data ? "true" : "false",
+                                enable_retrain ? "true" : "false");
+                }
+            } else {
+                if constexpr(RF_DEBUG_LEVEL > 1)
+                    Serial.println("⚠️ No config file found, using default configuration.");
+                setup_config_manual();
+            }
+            set_ranges();
+            // Validate configuration after loading
+            if (validateSamplesPerLabel()) {
+                if constexpr(RF_DEBUG_LEVEL > 2)
+                Serial.println("✅ samples_per_label data is consistent");
+            } else {
+                if constexpr(RF_DEBUG_LEVEL > 1)
+                Serial.println("⚠️ Warning: samples_per_label data inconsistency detected");
+            }
+            isLoaded = true;
+            if constexpr(RF_DEBUG_LEVEL > 1)
+            Serial.println("✅ Configuration loaded and ready.");
+            return true;
+        }
+    
         // Save configuration to JSON file in SPIFFS  
         void releaseConfig() {
+            if (!isLoaded || !has_base()){
+                if constexpr(RF_DEBUG_LEVEL > 1)
+                    Serial.println("⚠️ Config not loaded or base pointer is null, skipping save.");
+                return;
+            }
+            String filename = base_ptr->get_config_file();
             if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.printf("💾 Saving config to SPIFFS: %s\n", filename.c_str());
-            // Read existing file to preserve timestamp and author
 
             String existingTimestamp = "";
             String existingAuthor = "Viettran";
@@ -1992,45 +2652,10 @@ namespace mcu {
         
             // Clear from RAM  
             purgeConfig();
+            releaseDpFile();
+            isLoaded = false;
             if constexpr(RF_DEBUG_LEVEL > 1)
             Serial.printf("✅ Config saved to: %s\n", filename.c_str());
-        }
-
-        // Update timestamp in the JSON file
-        void update_timestamp() {
-            if constexpr(RF_DEBUG_LEVEL > 1)
-                Serial.printf("⏱️ Updating timestamp in config file: %s\n", filename.c_str());
-            if (!SPIFFS.exists(filename.c_str())) return;
-            
-            // Read existing file
-            File readFile = SPIFFS.open(filename.c_str(), FILE_READ);
-            if (!readFile) return;
-            
-            String jsonContent = readFile.readString();
-            readFile.close();
-            
-            // Get current timestamp
-            String currentTime = String(GET_CURRENT_TIME_IN_MILLISECONDS); // Simple timestamp, can be improved
-            
-            // Find and replace timestamp
-            int timestampStart = jsonContent.indexOf("\"timestamp\":");
-            if (timestampStart != -1) {
-                int valueStart = jsonContent.indexOf("\"", timestampStart + 12);
-                int valueEnd = jsonContent.indexOf("\"", valueStart + 1);
-                if (valueStart != -1 && valueEnd != -1) {
-                    String newContent = jsonContent.substring(0, valueStart + 1) + 
-                                    currentTime + 
-                                    jsonContent.substring(valueEnd);
-                    
-                    // Write updated content
-                    SPIFFS.remove(filename.c_str());
-                    File writeFile = SPIFFS.open(filename.c_str(), FILE_WRITE);
-                    if (writeFile) {
-                        writeFile.print(newContent);
-                        writeFile.close();
-                    }
-                }
-            }
         }
 
         void purgeConfig() {
@@ -2209,1157 +2834,6 @@ namespace mcu {
     
     /*
     ------------------------------------------------------------------------------------------------------------------
-    -------------------------------------------------- RF_BASE -------------------------------------------------------
-    ------------------------------------------------------------------------------------------------------------------
-    */
-    // flags indicating the status of member files
-    typedef enum Rf_base_flags : uint8_t{
-        EXIST_BASE_DATA         = 0x01,           // base data file exists
-        EXIST_DATA_PARAMS       = 0x02,          // data_params file exists
-        EXIST_CATEGORIZER       = 0x04,         // categorizer file exists
-        ABLE_TO_INFERENCE       = 0x08,        // able to run inference (all tree files exist)
-        ABLE_TO_TRAINING        = 0x10,        // able to re_train
-        UNIFIED_MODEL_FORMAT    = 0x20         // model uses unified format (model_name_forest.bin)
-    } Rf_base_flags;
-
-    // Base file management class for Random Forest project status
-    class Rf_base {
-    private:
-        uint8_t flags; // flags indicating the status of member files
-        String model_name;
-    public:
-        Rf_base() : flags(static_cast<Rf_base_flags>(0)), model_name("") {}
-        Rf_base(const char* bn) : flags(static_cast<Rf_base_flags>(0)), model_name(bn) {
-            init(bn);
-        }
-
-        void init(const char* model_name){
-            if constexpr(RF_DEBUG_LEVEL > 1)
-                Serial.printf("🔧 Initializing the base with model name: %s\n", model_name ? model_name : "NULL");
-            if (!model_name || strlen(model_name) == 0) {
-                if constexpr(RF_DEBUG_LEVEL > 0)
-                Serial.println("⚠️ Base name is empty.");
-                return;
-            } else {
-                this->model_name = String(model_name);
-                
-                // BaseFile will now always have the structure "/model_name_nml.bin"
-                String model_dataset = "/" + this->model_name + "_nml.bin";
-                
-                // Check if binary base file exists
-                if(SPIFFS.exists(model_dataset.c_str())) {
-                    // setup flags to indicate base file exists
-                    flags = static_cast<Rf_base_flags>(EXIST_BASE_DATA);
-                    
-                    // generate filenames for data_params and categorizer based on model_name
-                    String dataParamsFile = "/" + this->model_name + "_dp.csv"; // data_params file
-                    String categorizerFile = "/" + this->model_name + "_ctg.csv"; // categorizer file
-
-                    //  check categorizer file
-                    if(SPIFFS.exists(categorizerFile.c_str())) {
-                        flags |= static_cast<Rf_base_flags>(EXIST_CATEGORIZER);
-                    } else {
-                        if constexpr(RF_DEBUG_LEVEL > 1){
-                            Serial.printf("⚠️ No categorizer file found : %s\n", categorizerFile.c_str());
-                            Serial.println("-> Model still able to re_train or run inference, but cannot re_train with new data later.");
-                        }
-                    }
-                    // check data_params file
-                    if(SPIFFS.exists(dataParamsFile.c_str())) {
-                        flags |= static_cast<Rf_base_flags>(EXIST_DATA_PARAMS);
-                        // If data_params exists, able to training
-                        flags |= static_cast<Rf_base_flags>(ABLE_TO_TRAINING);
-                    } else {
-                        if constexpr(RF_DEBUG_LEVEL > 1){
-                            Serial.printf("⚠️ No data_parameters file found: %s\n", dataParamsFile.c_str());
-                            Serial.println("Re_training and inference are not available..\n");
-                        }
-                    }
-
-                    // Check for tree files to set ABLE_TO_INFERENCE flag
-                    // Support both individual trees and unified model format
-                    String unifiedModelFile = String("/") + model_name + "_forest.bin";
-                    bool all_trees_exist = false;
-                    uint8_t tree_count = 0;
-                    
-                    // First check for unified model format
-                    if (SPIFFS.exists(unifiedModelFile.c_str())) {
-                        flags |= static_cast<Rf_base_flags>(UNIFIED_MODEL_FORMAT);
-                        all_trees_exist = true;
-                        if constexpr(RF_DEBUG_LEVEL > 2)
-                        Serial.printf("✅ Found unified model file: %s\n", unifiedModelFile.c_str());
-                    } else {
-                        // Check for individual tree files starting from tree_0.bin
-                        for(uint8_t i = 0; i < 100; i++) { // Max 100 trees check
-                            String treeFile = String("/") + model_name + "_tree_" + String(i) + ".bin";
-                            if (SPIFFS.exists(treeFile.c_str())) {
-                                tree_count++;
-                            } else {
-                                if constexpr(RF_DEBUG_LEVEL > 1)
-                                Serial.printf("❌ Missing tree file: %s\n", treeFile.c_str());
-                                break; // Stop when we find a missing tree file
-                            }
-                        }
-                        
-                        if (tree_count > 0) {
-                            all_trees_exist = true;
-                            if constexpr(RF_DEBUG_LEVEL > 1)
-                            Serial.printf("✅ Found %d individual tree files\n", tree_count);
-                        }
-                    }
-                    
-                    if(all_trees_exist && (flags & EXIST_CATEGORIZER)) {
-                        flags |= static_cast<Rf_base_flags>(ABLE_TO_INFERENCE);
-                        if (flags & UNIFIED_MODEL_FORMAT) {
-                            if constexpr(RF_DEBUG_LEVEL > 2)
-                            Serial.println("✅ Inference enabled (unified model format)");
-                        } else {
-                            if constexpr(RF_DEBUG_LEVEL > 2)
-                            Serial.printf("✅ Inference enabled (%d individual tree files)\n", tree_count);
-                        }
-                    } 
-                    
-                } else {
-                    if constexpr(RF_DEBUG_LEVEL > 0)
-                    Serial.printf("❌ Base dataset does not exist: %s\n", model_dataset.c_str());
-                    // setup flags to indicate no base file
-                    flags = static_cast<Rf_base_flags>(0);
-                    return;
-                }
-            }
-        }
-
-        // Get base name
-        String get_model_name() const {
-            return model_name;
-        }
-
-        void set_model_name(const char* bn) {
-            String old_model_name = model_name;
-            if (bn && strlen(bn) > 0) {
-                model_name = String(bn);
-                // find and rename all existing related files
-
-                String old_file, new_file;
-
-                // base file
-                old_file = "/" + old_model_name + "_nml.bin";
-                new_file = "/" + model_name + "_nml.bin";
-                cloneFile(old_file, new_file);
-                SPIFFS.remove(old_file.c_str());
-
-                // data_params file
-                old_file = "/" + old_model_name + "_dp.csv";
-                new_file = "/" + model_name + "_dp.csv";
-                cloneFile(old_file, new_file);
-                SPIFFS.remove(old_file.c_str());
-
-                // categorizer file
-                old_file = "/" + old_model_name + "_ctg.csv";
-                new_file = "/" + model_name + "_ctg.csv";
-                cloneFile(old_file, new_file);
-                SPIFFS.remove(old_file.c_str());
-
-                // inference log file
-                old_file = "/" + old_model_name + "_infer_log.bin";
-                new_file = "/" + model_name + "_infer_log.bin";
-                cloneFile(old_file, new_file);
-                SPIFFS.remove(old_file.c_str());
-
-                // node predictor file
-                old_file = "/" + old_model_name + "_node_pred.bin";
-                new_file = "/" + model_name + "_node_pred.bin";
-                cloneFile(old_file, new_file);
-                SPIFFS.remove(old_file.c_str());
-
-                // config file
-                old_file = "/" + old_model_name + "_config.json";
-                new_file = "/" + model_name + "_config.json";
-                cloneFile(old_file, new_file);
-                SPIFFS.remove(old_file.c_str());
-
-                // tree files - handle both individual and unified formats
-                old_file = "/" + old_model_name + "_forest.bin";
-                new_file = "/" + model_name + "_forest.bin";
-                
-                if (SPIFFS.exists(old_file.c_str())) {
-                    // Handle unified model format
-                    cloneFile(old_file, new_file);
-                    SPIFFS.remove(old_file.c_str());
-                } else {
-                    // Handle individual tree files
-                    for(uint8_t i = 0; i < 50; i++) { // Max 50 trees check
-                        old_file = "/" + old_model_name + "_tree_" + String(i) + ".bin";
-                        new_file = "/" + model_name + "_tree_" + String(i) + ".bin";
-                        if (SPIFFS.exists(old_file.c_str())) {
-                            cloneFile(old_file, new_file);
-                            SPIFFS.remove(old_file.c_str());
-                        }else{
-                            break; // Stop when we find a missing tree file
-                        }
-                    }
-                }
-
-                // log files - optional, not critical
-                // model_name_memory_log.csv 
-                old_file = "/" + old_model_name + "_memory_log.csv";
-                new_file = "/" + model_name + "_memory_log.csv";
-                cloneFile(old_file, new_file);
-                SPIFFS.remove(old_file.c_str());
-
-                // model_name_time_log.csv
-                old_file = "/" + old_model_name + "_time_log.csv";
-                new_file = "/" + model_name + "_time_log.csv";
-                cloneFile(old_file, new_file);
-                SPIFFS.remove(old_file.c_str());
-
-                // Re-initialize flags based on new base name
-                init(model_name.c_str());  
-            }
-        }
-
-        // for Rf_data: baseData 
-        String get_base_data() const {
-            return "/" + model_name + "_nml.bin";
-        }
-
-        // for Rf_config 
-        String get_dpFile() const {
-            return "/" + model_name + "_dp.csv";
-        }
-
-        // for Rf_categorizer
-        String get_ctgFile() const {
-            return "/" + model_name + "_ctg.csv";
-        }
-
-        // for Rf_base 
-        String get_inferenceLogFile() const {
-            return "/" + model_name + "_infer_log.bin";
-        }
-
-        // for Rf_config
-        String get_configFile() const {
-            return "/" + model_name + "_config.json";
-        }
-
-        // for Rf_node_predictor
-        String get_nodePredictFile() const {
-            return "/" + model_name + "_node_pred.bin";
-        }
-
-        // for unified model format (all trees in one file)
-        String get_unifiedModelFile() const {
-            return "/" + model_name + "_forest.bin";
-        }
-
-        // for individual tree files (tree index required)
-        String get_treeFile(uint8_t tree_index) const {
-            return "/" + model_name + "_tree_" + String(tree_index) + ".bin";
-        }
-
-        // Check if base file is in CSV format (always false now as we only use binary)
-        bool baseFile_is_csv() const {
-            return false; // Always binary format now
-        }
-
-        // Check if model uses unified format (model_name_forest.bin)
-        bool is_unified_model() const {
-            return (flags & UNIFIED_MODEL_FORMAT) != 0;
-        }
-
-        bool baseFile_exists() const {
-            return (flags & EXIST_BASE_DATA) != 0;
-        }
-
-        bool dataParams_exists() const {
-            return (flags & EXIST_DATA_PARAMS) != 0;
-        }
-        
-        bool categorizer_exists() const {
-            return (flags & EXIST_CATEGORIZER) != 0;
-        }
-
-        // Fast check for able to training
-        bool able_to_training() const {
-            return (flags & ABLE_TO_TRAINING) != 0;
-        }
-
-        // fast check for able to inference 
-        bool able_to_inference(uint8_t num_trees) const {
-            return (flags & ABLE_TO_INFERENCE) != 0;
-        }
-
-        // overloaded method for unified models (no tree count needed)
-        bool able_to_inference() const {
-            return (flags & ABLE_TO_INFERENCE) != 0;
-        }
-
-        // Get information about the model format and files
-        void print_model_info() const {
-            Serial.printf("📋 Model: %s\n", model_name.c_str());
-            Serial.printf("   Base data: %s\n", baseFile_exists() ? "✅" : "❌");
-            Serial.printf("   Data params: %s\n", dataParams_exists() ? "✅" : "❌");
-            Serial.printf("   Categorizer: %s\n", categorizer_exists() ? "✅" : "❌");
-            Serial.printf("   Training ready: %s\n", able_to_training() ? "✅" : "❌");
-            Serial.printf("   Inference ready: %s\n", able_to_inference() ? "✅" : "❌");
-            
-            if (is_unified_model()) {
-                Serial.printf("   Model file: %s\n", get_unifiedModelFile().c_str());
-            } else if (able_to_inference()) {
-                Serial.println("   Individual tree files found");
-            }
-        }
-
-        size_t memory_usage() const {
-            size_t total = sizeof(Rf_base);
-            total += model_name.length() * sizeof(char);
-            return total;
-        }
-    };
-
-    /*
-    ------------------------------------------------------------------------------------------------------------------
-    -------------------------------------------- RF_NODE_PREDCITOR ---------------------------------------------------
-    ------------------------------------------------------------------------------------------------------------------
-    */
-    struct node_data {
-        uint8_t min_split;
-        uint16_t max_depth;
-        uint16_t total_nodes;
-        
-        node_data() : min_split(0), max_depth(0), total_nodes(0) {}
-        node_data(uint8_t min_split, uint16_t max_depth) 
-            : min_split(min_split), max_depth(max_depth), total_nodes(0) {}
-        node_data(uint8_t min_split, uint16_t max_depth, uint16_t total_nodes) 
-            : min_split(min_split), max_depth(max_depth), total_nodes(total_nodes) {}
-    };
-
-    class Rf_node_predictor {
-    public:
-        float coefficients[3];  // bias, min_split_coeff, max_depth_coeff
-        bool is_trained;
-        b_vector<node_data> buffer;
-    private:
-        String filename;
-        String node_predictor_log;
-        
-        float evaluate_formula(const node_data& data) const {
-            if (!is_trained) {
-                return manual_estimate(data); // Use manual estimate if not trained
-            }
-            
-            float result = coefficients[0]; // bias
-            result += coefficients[1] * static_cast<float>(data.min_split);
-            result += coefficients[2] * static_cast<float>(data.max_depth);
-            
-            return result > 10.0f ? result : 10.0f; // ensure reasonable minimum
-        }
-
-        // if failed to load predictor, manual estimate will be used
-        float manual_estimate(const node_data& data) const {
-            if (data.min_split == 0 || data.max_depth == 0) {
-                return 100.0f; // default estimate
-            }
-            // Simple heuristic: more nodes = better accuracy
-            float estimate = 100.0f - data.min_split * 12 + data.max_depth * 3;
-            return estimate < 10.0f ? 10.0f : estimate; // ensure reasonable minimum
-        }
-
-    public:
-        uint8_t accuracy;      // in percentage
-        uint8_t peak_percent;  // number of nodes at depth with maximum number of nodes / total number of nodes in tree
-        
-        Rf_node_predictor() : filename(""), is_trained(false), accuracy(0), peak_percent(0) {
-            for (int i = 0; i < 3; i++) {
-                coefficients[i] = 0.0f;
-            }
-        }
-
-        Rf_node_predictor(const char* fn) : filename(fn), is_trained(false), accuracy(0), peak_percent(0) {
-            if constexpr(RF_DEBUG_LEVEL > 1)
-                Serial.printf("🔧 Initializing node predictor with file: %s\n", fn ? fn : "NULL");
-            for (int i = 0; i < 3; i++) {
-                coefficients[i] = 0.0f;
-            }
-            // get logfile path from filename : "/model_name_node_pred.bin" -> "/model_name_node_log.csv"
-            node_predictor_log = "";
-            if (filename.length() > 0) {
-                const int suf_len = 14; // "_node_pred.bin"
-                if (filename.length() >= suf_len &&
-                    filename.substring(filename.length() - suf_len) == "_node_pred.bin") {
-                    node_predictor_log = filename.substring(0, filename.length() - suf_len) + "_node_log.csv";
-                } else {
-                    // Fallback: strip extension and append _node_log.csv
-                    if constexpr(RF_DEBUG_LEVEL > 2)
-                    Serial.println("⚠️  Unexpected node predictor filename format, using fallback for log filename generation.");
-                    int dot = filename.lastIndexOf('.');
-                    String base = (dot >= 0) ? filename.substring(0, dot) : filename;
-                    if (base.length() >= 10 && base.substring(base.length() - 10) == "_node_pred") {
-                        base.remove(base.length() - 10);
-                    }
-                    node_predictor_log = base + "_node_log.csv";
-                }
-            }
-        }
-
-        void init(const String& fn) {
-            filename = fn;
-            is_trained = false;
-            for (int i = 0; i < 3; i++) {
-                coefficients[i] = 0.0f;
-            }
-            // get logfile path from filename : "/model_name_node_pred.bin" -> "/model_name_node_log.csv"
-            node_predictor_log = "";
-            if (filename.length() > 0) {
-                const int suf_len = 14; // "_node_pred.bin"
-                if (filename.length() >= suf_len &&
-                    filename.substring(filename.length() - suf_len) == "_node_pred.bin") {
-                    node_predictor_log = filename.substring(0, filename.length() - suf_len) + "_node_log.csv";
-                } else {
-                    // Fallback: strip extension and append _node_log.csv
-                    int dot = filename.lastIndexOf('.');
-                    String base = (dot >= 0) ? filename.substring(0, dot) : filename;
-                    if (base.length() >= 10 && base.substring(base.length() - 10) == "_node_pred") {
-                        base.remove(base.length() - 10);
-                    }
-                    node_predictor_log = base + "_node_log.csv";
-                }
-            }
-            // check if node_log file exists, if not create with header
-            if (node_predictor_log.length() > 0 && !SPIFFS.exists(node_predictor_log.c_str())) {
-                File logFile = SPIFFS.open(node_predictor_log.c_str(), FILE_WRITE);
-                if (logFile) {
-                    logFile.println("min_split,max_depth,total_nodes");
-                    logFile.close();
-                }
-            }
-        }
-        
-        // Load trained model from SPIFFS (updated format without version)
-        bool loadPredictor() {
-            if constexpr(RF_DEBUG_LEVEL > 1)
-                Serial.printf("🔍 Loading node predictor from file: %s\n", filename.c_str());
-            if(is_trained) return true;
-            if (!SPIFFS.exists(filename.c_str())) {
-                if constexpr(RF_DEBUG_LEVEL > 1)
-                Serial.printf("❌ No predictor file found: %s !\n", filename.c_str());
-                Serial.println("Switching to use default predictor.");
-                return false;
-            }
-            
-            File file = SPIFFS.open(filename.c_str(), FILE_READ);
-            if (!file) {
-                if constexpr(RF_DEBUG_LEVEL > 0)
-                Serial.printf("❌ Failed to open predictor file: %s\n", filename.c_str());
-                return false;
-            }
-            
-            // Read and verify magic number
-            uint32_t magic;
-            if (file.read((uint8_t*)&magic, sizeof(magic)) != sizeof(magic) || magic != 0x4E4F4445) {
-                if constexpr(RF_DEBUG_LEVEL > 0)
-                Serial.printf("❌ Invalid predictor file format: %s\n", filename.c_str());
-                file.close();
-                return false;
-            }
-            
-            // Read training status (but don't use it to set is_trained - that's set after successful loading)
-            bool file_is_trained;
-            if (file.read((uint8_t*)&file_is_trained, sizeof(file_is_trained)) != sizeof(file_is_trained)) {
-                if constexpr(RF_DEBUG_LEVEL > 1)
-                Serial.println("❌ Failed to read training status");
-                file.close();
-                return false;
-            }
-            
-            // Read accuracy and peak_percent
-            if (file.read((uint8_t*)&accuracy, sizeof(accuracy)) != sizeof(accuracy)) {
-                if constexpr(RF_DEBUG_LEVEL > 1)
-                Serial.println("❌ Failed to read accuracy");
-                file.close();
-                return false;
-            }
-            
-            if (file.read((uint8_t*)&peak_percent, sizeof(peak_percent)) != sizeof(peak_percent)) {
-                if constexpr(RF_DEBUG_LEVEL > 1)
-                Serial.println("❌ Failed to read peak_percent");
-                file.close();
-                return false;
-            }
-            
-            // Read number of coefficients
-            uint8_t num_coefficients;
-            if (file.read((uint8_t*)&num_coefficients, sizeof(num_coefficients)) != sizeof(num_coefficients) || num_coefficients != 3) {
-                if constexpr(RF_DEBUG_LEVEL > 1)
-                Serial.printf("❌ Invalid coefficient count: %d (expected 3)\n", num_coefficients);
-                file.close();
-                return false;
-            }
-            
-            // Read coefficients
-            if (file.read((uint8_t*)coefficients, sizeof(float) * 3) != sizeof(float) * 3) {
-                if constexpr(RF_DEBUG_LEVEL > 1)
-                Serial.println("❌ Failed to read coefficients");
-                file.close();
-                return false;
-            }
-            
-            file.close();
-            
-            // Only set is_trained to true if the file was actually trained
-            if (file_is_trained) {
-                is_trained = true;
-                
-                // Fix PC version's peak_percent bug where it often saves 0%
-                if (peak_percent == 0) {
-                    peak_percent = 30; // Use reasonable default for binary trees
-                    if constexpr(RF_DEBUG_LEVEL > 2)
-                    Serial.printf("⚠️  Fixed peak_percent from 0%% to 30%% \n");
-                }
-                if constexpr(RF_DEBUG_LEVEL > 1){
-                Serial.printf("✅ Node_predictor loaded: %s (accuracy: %d%%, peak: %d%%)\n", 
-                            filename.c_str(), accuracy, peak_percent);
-                Serial.printf("   Coefficients: bias=%.2f, split=%.2f, depth=%.2f\n", 
-                            coefficients[0], coefficients[1], coefficients[2]);
-                }
-            } else {
-                if constexpr(RF_DEBUG_LEVEL > 2)
-                Serial.printf("⚠️  predictor file exists but is not trained: %s\n", filename.c_str());
-                is_trained = false;
-            }
-            
-            return file_is_trained;
-        }
-        
-        // Save trained predictor to SPIFFS
-        bool savePredictor() {
-            // Remove existing file
-            if (SPIFFS.exists(filename.c_str())) {
-                SPIFFS.remove(filename.c_str());
-            }
-
-            if constexpr(RF_DEBUG_LEVEL > 1)
-                Serial.printf("💾 Saving node predictor to file: %s\n", filename.c_str());
-            
-            File file = SPIFFS.open(filename.c_str(), FILE_WRITE);
-            if (!file) {
-                if constexpr(RF_DEBUG_LEVEL > 0)
-                Serial.printf("❌ Failed to create node_predictor file: %s\n", filename.c_str());
-                return false;
-            }
-            
-            // Write magic number
-            uint32_t magic = 0x4E4F4445; // "NODE" in hex
-            file.write((uint8_t*)&magic, sizeof(magic));
-            
-            // Write training status
-            file.write((uint8_t*)&is_trained, sizeof(is_trained));
-            
-            // Write accuracy and peak_percent
-            file.write((uint8_t*)&accuracy, sizeof(accuracy));
-            file.write((uint8_t*)&peak_percent, sizeof(peak_percent));
-            
-            // Write number of coefficients
-            uint8_t num_coefficients = 3;
-            file.write((uint8_t*)&num_coefficients, sizeof(num_coefficients));
-            
-            // Write coefficients
-            file.write((uint8_t*)coefficients, sizeof(float) * 3);
-            
-            file.close();
-            
-            if constexpr(RF_DEBUG_LEVEL > 1)
-            Serial.printf("✅ Node_predictor saved: %s (%d bytes, accuracy: %d%%, peak: %d%%)\n", 
-                        filename.c_str(), 
-                        sizeof(magic) + sizeof(is_trained) + sizeof(accuracy) + sizeof(peak_percent) + 
-                        sizeof(num_coefficients) + sizeof(float) * 3, accuracy, peak_percent);
-            return true;
-        }
-        
-        // Predict number of nodes for given parameters
-        uint16_t estimate(const node_data& data) {
-            if(!is_trained) {
-                if(!loadPredictor()){
-                    return manual_estimate(data); // Use manual estimate if predictor is disabled 
-                }
-            }
-            
-            float prediction = evaluate_formula(data);
-            return static_cast<uint16_t>(prediction + 0.5f); // Round to nearest integer
-        }
-        uint16_t estimate(uint8_t min_split, uint16_t max_depth) {
-            node_data data(min_split, max_depth);
-            return estimate(data);
-        }
-        
-        // Retrain the predictor using data from rf_tree_log.csv (synchronized with PC version)
-        bool re_train(bool save_after_retrain = true) {
-            if constexpr (RF_DEBUG_LEVEL > 2)
-                Serial.println("🔂 Starting retraining of node predictor...");
-            if(!can_retrain()) {
-                if constexpr(RF_DEBUG_LEVEL > 2)
-                Serial.println("❌ No training data available for retraining.");
-                return false;
-            }
-            if(buffer.size() > 0){
-                add_new_samples(buffer);
-            }
-            buffer.clear();
-            buffer.fit();
-
-            File file = SPIFFS.open(node_predictor_log, FILE_READ);
-            if (!file) {
-                if constexpr(RF_DEBUG_LEVEL > 1)
-                Serial.printf("❌ Failed to open node_predictor log: %s\n", node_predictor_log);
-                return false;
-            }
-            
-            if constexpr(RF_DEBUG_LEVEL > 2)
-            Serial.println("🔄 Retraining node predictor from CSV data...");
-            
-
-            mcu::b_vector<node_data> training_data;
-            training_data.reserve(50); // Reserve space for training samples
-            
-            String line;
-            bool first_line = true;
-            
-            // Read CSV data
-            while (file.available()) {
-                line = file.readStringUntil('\n');
-                line.trim();
-                
-                if (line.length() == 0 || first_line) {
-                    first_line = false;
-                    continue; // Skip header line
-                }
-                
-                // Parse CSV line: min_split,max_depth,total_nodes
-                node_data sample;
-                int comma1 = line.indexOf(',');
-                int comma2 = line.indexOf(',', comma1 + 1);
-                
-                if (comma1 != -1 && comma2 != -1) {
-                    String min_split_str = line.substring(0, comma1);
-                    String max_depth_str = line.substring(comma1 + 1, comma2);
-                    String total_nodes_str = line.substring(comma2 + 1);
-                    
-                    sample.min_split = min_split_str.toInt();
-                    sample.max_depth = max_depth_str.toInt();
-                    sample.total_nodes = total_nodes_str.toInt();
-                    
-                    // skip invalid samples
-                    if (sample.min_split > 0 && sample.max_depth > 0 && sample.total_nodes > 0) {
-                        training_data.push_back(sample);
-                    }
-                }
-            }
-            file.close();
-            
-            if (training_data.size() < 3) {
-                if constexpr(RF_DEBUG_LEVEL > 1)
-                Serial.printf("❌ Insufficient training data: %d samples (need at least 3)\n", training_data.size());
-                return false;
-            }
-            
-            // Use PC version's trend analysis approach instead of complex regression
-            // Collect all unique min_split and max_depth values
-            mcu::b_vector<uint8_t> unique_min_splits;
-            mcu::b_vector<uint16_t> unique_max_depths;
-            
-            for (const auto& sample : training_data) {
-                // Add unique min_split values
-                bool found_split = false;
-                for (const auto& existing_split : unique_min_splits) {
-                    if (existing_split == sample.min_split) {
-                        found_split = true;
-                        break;
-                    }
-                }
-                if (!found_split) {
-                    unique_min_splits.push_back(sample.min_split);
-                }
-                
-                // Add unique max_depth values
-                bool found_depth = false;
-                for (const auto& existing_depth : unique_max_depths) {
-                    if (existing_depth == sample.max_depth) {
-                        found_depth = true;
-                        break;
-                    }
-                }
-                if (!found_depth) {
-                    unique_max_depths.push_back(sample.max_depth);
-                }
-            }
-            
-            if constexpr(RF_DEBUG_LEVEL > 2)
-            Serial.printf("   Found %d unique min_splits, %d unique max_depths\n", 
-                        unique_min_splits.size(), unique_max_depths.size());
-            
-            // Sort vectors for easier processing
-            // Simple bubble sort for small vectors
-            for (size_t i = 0; i < unique_min_splits.size(); i++) {
-                for (size_t j = i + 1; j < unique_min_splits.size(); j++) {
-                    if (unique_min_splits[i] > unique_min_splits[j]) {
-                        uint8_t temp = unique_min_splits[i];
-                        unique_min_splits[i] = unique_min_splits[j];
-                        unique_min_splits[j] = temp;
-                    }
-                }
-            }
-            
-            for (size_t i = 0; i < unique_max_depths.size(); i++) {
-                for (size_t j = i + 1; j < unique_max_depths.size(); j++) {
-                    if (unique_max_depths[i] > unique_max_depths[j]) {
-                        uint16_t temp = unique_max_depths[i];
-                        unique_max_depths[i] = unique_max_depths[j];
-                        unique_max_depths[j] = temp;
-                    }
-                }
-            }
-            
-            // Calculate effects using a simpler approach without large intermediate vectors
-            // Calculate min_split effect directly
-            float split_effect = 0.0f;
-            if (unique_min_splits.size() >= 2) {
-                // Calculate average nodes for first and last min_split values
-                float first_split_avg = 0.0f;
-                float last_split_avg = 0.0f;
-                int first_split_count = 0;
-                int last_split_count = 0;
-                
-                uint8_t first_split = unique_min_splits[0];
-                uint8_t last_split = unique_min_splits[unique_min_splits.size() - 1];
-                
-                // Calculate averages directly from training data
-                for (const auto& sample : training_data) {
-                    if (sample.min_split == first_split) {
-                        first_split_avg += sample.total_nodes;
-                        first_split_count++;
-                    } else if (sample.min_split == last_split) {
-                        last_split_avg += sample.total_nodes;
-                        last_split_count++;
-                    }
-                }
-                
-                if (first_split_count > 0 && last_split_count > 0) {
-                    first_split_avg /= first_split_count;
-                    last_split_avg /= last_split_count;
-                    
-                    float split_range = static_cast<float>(last_split - first_split);
-                    if (split_range > 0.01f) {
-                        split_effect = (last_split_avg - first_split_avg) / split_range;
-                    }
-                }
-            }
-            
-            // Calculate max_depth effect directly
-            float depth_effect = 0.0f;
-            if (unique_max_depths.size() >= 2) {
-                // Calculate average nodes for first and last max_depth values
-                float first_depth_avg = 0.0f;
-                float last_depth_avg = 0.0f;
-                int first_depth_count = 0;
-                int last_depth_count = 0;
-                
-                uint16_t first_depth = unique_max_depths[0];
-                uint16_t last_depth = unique_max_depths[unique_max_depths.size() - 1];
-                
-                // Calculate averages directly from training data
-                for (const auto& sample : training_data) {
-                    if (sample.max_depth == first_depth) {
-                        first_depth_avg += sample.total_nodes;
-                        first_depth_count++;
-                    } else if (sample.max_depth == last_depth) {
-                        last_depth_avg += sample.total_nodes;
-                        last_depth_count++;
-                    }
-                }
-                
-                if (first_depth_count > 0 && last_depth_count > 0) {
-                    first_depth_avg /= first_depth_count;
-                    last_depth_avg /= last_depth_count;
-                    
-                    float depth_range = static_cast<float>(last_depth - first_depth);
-                    if (depth_range > 0.01f) {
-                        depth_effect = (last_depth_avg - first_depth_avg) / depth_range;
-                    }
-                }
-            }
-            
-            // Calculate overall average as baseline
-            float overall_avg = 0.0f;
-            for (const auto& sample : training_data) {
-                overall_avg += sample.total_nodes;
-            }
-            overall_avg /= training_data.size();
-            
-            // Build the simple linear predictor: nodes = bias + split_coeff * min_split + depth_coeff * max_depth
-            // Calculate bias to center the predictor around the overall average
-            float reference_split = unique_min_splits.empty() ? 3.0f : static_cast<float>(unique_min_splits[0]);
-            float reference_depth = unique_max_depths.empty() ? 6.0f : static_cast<float>(unique_max_depths[0]);
-            
-            coefficients[0] = overall_avg - (split_effect * reference_split) - (depth_effect * reference_depth); // bias
-            coefficients[1] = split_effect; // min_split coefficient
-            coefficients[2] = depth_effect; // max_depth coefficient
-            
-            // Calculate accuracy using PC version's approach exactly
-            float total_error = 0.0f;
-            float total_actual = 0.0f;
-            
-            for (const auto& sample : training_data) {
-                node_data data(sample.min_split, sample.max_depth);
-                float predicted = evaluate_formula(data);
-                float actual = static_cast<float>(sample.total_nodes);
-                float error = fabs(predicted - actual);
-                total_error += error;
-                total_actual += actual;
-            }
-            
-            float mae = total_error / training_data.size(); // Mean Absolute Error
-            float mape = (total_error / total_actual) * 100.0f; // Mean Absolute Percentage Error
-            
-            // PC version returns (100.0f - mape) which gives 0-100, then multiplies by 100 in training code
-            // Let's follow the same logic but fix the overflow issue
-            float get_accuracy_result = fmax(0.0f, 100.0f - mape);
-            accuracy = static_cast<uint8_t>(fmin(255.0f, get_accuracy_result * 100.0f / 100.0f)); // Simplify to match intent
-            
-            // Actually, let's just match the logical intent rather than the bug
-            accuracy = static_cast<uint8_t>(fmin(100.0f, fmax(0.0f, 100.0f - mape)));
-            
-            peak_percent = 30; // A reasonable default for binary tree structures
-            
-            is_trained = true;
-
-            if constexpr(RF_DEBUG_LEVEL > 1){
-                Serial.printf("✅ Retraining complete! Accuracy: %d%%, Peak: %d%%\n", accuracy, peak_percent);
-                Serial.printf("   Coefficients: bias=%.2f, split=%.2f, depth=%.2f\n", 
-                            coefficients[0], coefficients[1], coefficients[2]);
-                Serial.printf("   MAE: %.2f, MAPE: %.2f%%\n", mae, mape);
-                Serial.printf("   Split effect: %.2f, Depth effect: %.2f\n", split_effect, depth_effect);
-            }
-
-            if(save_after_retrain) savePredictor(); // Save the new predictor
-            return true;
-        }
-        
-        
-        /// @brief  add new samples to the beginning of the node_predictor_log file. 
-        // If the file has more than 50 samples (rows, not including header), 
-        // remove the samples at the end of the file (limit the file to the 50 latest samples)
-        void add_new_samples(b_vector<node_data>& new_samples) {
-            // Read all existing lines
-            mcu::b_vector<String> lines;
-            File file = SPIFFS.open(node_predictor_log, FILE_READ);
-            if (file) {
-                while (file.available()) {
-                    String line = file.readStringUntil('\n');
-                    line.trim();
-                    if (line.length() > 0) lines.push_back(line);
-                }
-                file.close();
-            }
-            // Ensure header is present
-            String header = "min_split,max_depth,total_nodes";
-            if (lines.empty() || lines[0] != header) {
-                lines.insert(0, header);
-            }
-            // Remove header for easier manipulation
-            mcu::b_vector<String> data_lines;
-            for (size_t i = 1; i < lines.size(); ++i) {
-                data_lines.push_back(lines[i]);
-            }
-            // Prepend new samples
-            for (int i = new_samples.size() - 1; i >= 0; --i) {
-                const node_data& nd = new_samples[i];
-                String row = String(nd.min_split) + "," + String(nd.max_depth) + "," + String(nd.total_nodes);
-                data_lines.insert(0, row);
-            }
-            // Limit to 50 rows
-            while (data_lines.size() > 50) {
-                data_lines.pop_back();
-            }
-            // Write back to file
-            SPIFFS.remove(node_predictor_log);
-            file = SPIFFS.open(node_predictor_log, FILE_WRITE);
-            if (file) {
-                file.println(header);
-                for (const auto& row : data_lines) {
-                    file.println(row);
-                }
-                file.close();
-            }
-        }
-
-        // Check if training log is available and size of the file is greater than 0
-        bool can_retrain() const {
-            if (!SPIFFS.exists(node_predictor_log)) return false;
-            File file = SPIFFS.open(node_predictor_log, FILE_READ);
-            bool result = file && file.size() > 0;
-            // only retrain if log file has more 4 samples (excluding header)
-            if (result) {
-                size_t line_count = 0;
-                while (file.available()) {
-                    String line = file.readStringUntil('\n');
-                    line.trim();
-                    if (line.length() > 0) line_count++;
-                }
-                result = line_count > 4; // more than header + 3 samples
-            }
-            if (file) file.close();
-            return result;
-        }
-
-        size_t memory_usage() const {
-            size_t total = sizeof(Rf_node_predictor);
-            total += buffer.capacity() * sizeof(node_data);
-            total += filename.length() * sizeof(char) + 12;
-            total += node_predictor_log.length() * sizeof(char) + 12;
-            return total;
-        }
-    };
-
-    /*
-    ------------------------------------------------------------------------------------------------------------------
-    ------------------------------------------------ RF_LOGGER -------------------------------------------------------
-    ------------------------------------------------------------------------------------------------------------------
-    */
-
-    typedef struct time_anchor{
-        long unsigned anchor_time;
-        uint16_t index;
-    };
-
-    class Rf_logger {
-    public:
-        uint32_t freeHeap;
-        uint32_t largestBlock;
-        long unsigned starting_time;
-        uint8_t fragmentation;
-        uint32_t lowest_ram;
-        uint32_t lowest_rom; 
-        uint32_t freeDisk;
-        float log_time;
-        mcu::b_vector<time_anchor> time_anchors;
-
-        String memory_log_file;
-        String time_log_file;
-    
-    public:
-        Rf_logger() : freeHeap(0), largestBlock(0), starting_time(0), fragmentation(0), log_time(0.0f) {
-        }
-
-        Rf_logger(const String& model_name, bool keep_old_file = false) : freeHeap(0), largestBlock(0), starting_time(0), fragmentation(0), log_time(0.0f) {
-            init(model_name);
-        }
-        
-        void init(const String& model_name, bool keep_old_file = false){
-            time_anchors.clear();
-            starting_time = GET_CURRENT_TIME_IN_MILLISECONDS;
-            drop_anchor(); // initial anchor at index 0
-
-            lowest_ram = UINT32_MAX;
-            lowest_rom = UINT32_MAX;
-
-            //generate log file name based on model name
-            memory_log_file = "/" + model_name + "_memory_log.csv";
-            time_log_file = "/" + model_name + "_time_log.csv";
-
-            if(!keep_old_file){
-                if(SPIFFS.exists(time_log_file.c_str())){
-                    SPIFFS.remove(time_log_file.c_str()); 
-                }
-                // write header to time log file
-                File logFile = SPIFFS.open(time_log_file.c_str(), FILE_WRITE);
-                if (logFile) {
-                    logFile.println("Event,\t\tTime(ms),duration,Unit");
-                    logFile.close();
-                }
-            }
-            t_log("init tracker"); // Initial log without printing
-
-            if(!keep_old_file){                
-                // clear SPIFFS log file if it exists
-                if(SPIFFS.exists(memory_log_file.c_str())){
-                    SPIFFS.remove(memory_log_file.c_str()); 
-                }
-                // write header to log file
-                File logFile = SPIFFS.open(memory_log_file.c_str(), FILE_WRITE);
-                if (logFile) {
-                    logFile.println("Time(s),FreeHeap,Largest_Block,FreeDisk");
-                    logFile.close();
-                } 
-            }
-            m_log("init tracker", false, true); // Initial log without printing
-        }
-
-        void m_log(const char* msg, bool print = true, bool log = true){
-            freeHeap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-            freeDisk = SPIFFS.totalBytes() - SPIFFS.usedBytes();
-
-            if(freeHeap < lowest_ram) lowest_ram = freeHeap;
-            if(freeDisk < lowest_rom) lowest_rom = freeDisk;
-
-            largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-            fragmentation = 100 - (largestBlock * 100 / freeHeap);
-            if(print){       
-                if(msg && strlen(msg) > 0){
-                    Serial.print("📋 ");
-                    Serial.println(msg);
-                }
-                if constexpr(RF_DEBUG_LEVEL > 1) {
-                    Serial.print("--> RAM LEFT (heap): ");
-                    Serial.println(freeHeap);
-                    // Serial.print("Largest Free Block: ");
-                    // Serial.println(largestBlock);
-                    // Serial.printf("Fragmentation: %d", fragmentation);
-                    // Serial.println("%");
-                }
-            }
-
-            // Log to file with timestamp
-            if(log) {        
-                log_time = (GET_CURRENT_TIME_IN_MILLISECONDS - starting_time)/1000.0f; 
-                File logFile = SPIFFS.open(memory_log_file.c_str(), FILE_APPEND);
-                if (logFile) {
-                    logFile.printf("%.2f,\t%u,\t%u,\t%u",
-                                    log_time, freeHeap, largestBlock, freeDisk);
-                    if(msg && strlen(msg) > 0){
-                        logFile.printf(",\t%s\n", msg);
-                    } else {
-                        logFile.println();
-                    }
-                    logFile.close();
-                }
-            }
-        }
-
-        // fast log : just for measure and update : lowest ram and fragmentation
-        void m_log(){
-            m_log("", false, false);
-        }
-        uint16_t drop_anchor(){
-            time_anchor anchor;
-            anchor.anchor_time = GET_CURRENT_TIME_IN_MILLISECONDS;
-            anchor.index = time_anchors.size();
-            time_anchors.push_back(anchor);
-            return anchor.index;
-        }
-
-        uint16_t current_anchor() const {
-            return time_anchors.size() > 0 ? time_anchors.back().index : 0;
-        }
-
-        size_t memory_usage() const {
-            size_t total = sizeof(Rf_logger);
-            return total;
-        }
-
-        // for durtion measurement between two anchors
-        void t_log(const char* msg, size_t begin_anchor_index, size_t end_anchor_idex, const char* unit = "ms" , bool print = true){
-            float ratio = 1;  // default to ms 
-            if(strcmp(unit, "s") == 0 || strcmp(unit, "second") == 0) ratio = 1000.0f;
-            else if(strcmp(unit, "us") == 0 || strcmp(unit, "microsecond") == 0) ratio = 0.001f;
-
-            if(time_anchors.size() == 0) return; // no anchors set
-            if(begin_anchor_index >= time_anchors.size() || end_anchor_idex >= time_anchors.size()) return; // invalid index
-            if(end_anchor_idex <= begin_anchor_index) {
-                std::swap(begin_anchor_index, end_anchor_idex);
-            }
-
-            long unsigned begin_time = time_anchors[begin_anchor_index].anchor_time;
-            long unsigned end_time = time_anchors[end_anchor_idex].anchor_time;
-            float elapsed = (end_time - begin_time)/ratio;
-            if(print){
-                if constexpr(RF_DEBUG_LEVEL >= 1) {         
-                    if(msg && strlen(msg) > 0){
-                        Serial.print("⏱️  ");
-                        Serial.print(msg);
-                        Serial.print(": ");
-                    } else {
-                        Serial.print("⏱️  unknown event: ");
-                    }
-                    Serial.print(elapsed);
-                    Serial.println(unit);
-                }
-            }
-            // Log to file with timestamp
-            if(time_log_file.length() > 0) {        
-                File logFile = SPIFFS.open(time_log_file.c_str(), FILE_APPEND);
-                if (logFile) {
-                    if(msg && strlen(msg) > 0){
-                        logFile.printf("%s,\t%.1f,\t%.2f,\t%s\n", msg, begin_time/1000.0f, elapsed, unit);     // time always in s
-                    } else {
-                        if(ratio > 1.1f)
-                            logFile.printf("unknown event,\t%.1f,\t%.2f,\t%s\n", begin_time/1000.0f, elapsed, unit); 
-                        else 
-                            logFile.printf("unknown event,\t%.1f,\t%lu,\t%s\n", begin_time/1000.0f, (long unsigned)elapsed, unit);
-                    }
-                    logFile.close();
-                }
-            }
-            time_anchors[end_anchor_idex].anchor_time = GET_CURRENT_TIME_IN_MILLISECONDS; // reset end anchor to current time
-        }
-    
-        /**
-         * @brief for duration measurement from an anchor to now
-         * @param msg name of the event
-         * @param begin_anchor_index index of the begin anchor
-         * @param unit time unit, "ms" (default), "s", "us" 
-         * @param print whether to print to Serial, will be disabled if RF_DEBUG_LEVEL <= 1
-         * @note : this action will create a new anchor at the current time
-         */
-        void t_log(const char* msg, size_t begin_anchor_index, const char* unit = "ms" , bool print = true){
-            time_anchor end_anchor;
-            end_anchor.anchor_time = GET_CURRENT_TIME_IN_MILLISECONDS;
-            end_anchor.index = time_anchors.size();
-            time_anchors.push_back(end_anchor);
-            t_log(msg, begin_anchor_index, end_anchor.index, unit, print);
-        }
-
-        /**
-         * @brief log time from starting point to now
-         * @param msg name of the event
-         * @param print whether to print to Serial, will be disabled if RF_DEBUG_LEVEL <= 1
-         * @note : this action will NOT create a new anchor
-         */
-        void t_log(const char* msg, bool print = true){
-            long unsigned current_time = GET_CURRENT_TIME_IN_MILLISECONDS - starting_time;
-            if(print){
-                if constexpr(RF_DEBUG_LEVEL > 1) {         
-                    if(msg && strlen(msg) > 0){
-                        Serial.print("⏱️  ");
-                        Serial.print(msg);
-                        Serial.print(": ");
-                    } else {
-                        Serial.print("⏱️  unknown event: ");
-                    }
-                    Serial.print(current_time);       // timeline always in ms
-                    Serial.println("ms");
-                }
-            }
-            // Log to file with timestamp
-            if(time_log_file.length() > 0) {        
-                File logFile = SPIFFS.open(time_log_file.c_str(), FILE_APPEND);
-                if (logFile) {
-                    if(msg && strlen(msg) > 0){
-                        logFile.printf("%s,\t%.1f,\t_,\tms\n", msg, current_time/1000.0f); // time always in s
-                    } else {
-                        logFile.printf("unknown event,\t%.1f,\t_,\tms\n", current_time/1000.0f); // time always in s
-                    }
-                    logFile.close();
-                }else{
-                    if constexpr(RF_DEBUG_LEVEL > 0)
-                    Serial.printf("❌ Failed to open time log file: %s\n", time_log_file.c_str());
-                }
-            }
-        }
-    };
-
-    /*
-    ------------------------------------------------------------------------------------------------------------------
     ----------------------------------------------- RF_CATEGORIZER ---------------------------------------------------
     ------------------------------------------------------------------------------------------------------------------
     */
@@ -3405,10 +2879,8 @@ namespace mcu {
         uint8_t groupsPerFeature = 0;
         uint8_t numLabels = 0;
         uint32_t scaleFactor = 50000;
-    public:
-        String filename = "";
         bool isLoaded = false;
-    private:
+        Rf_base* base_ptr = nullptr;
 
         // Compact storage arrays
         mcu::vector<FeatureRef> featureRefs;              // One per feature
@@ -3417,6 +2889,9 @@ namespace mcu {
         mcu::vector<uint8_t> allDiscreteValues;           // Concatenated discrete values
         mcu::b_vector<String, 4> labelMapping; // Optional label reverse mapping
         
+        bool has_base() const {
+            return base_ptr != nullptr && base_ptr->ready_to_use();
+        }
         // Helper function to split CSV line
         mcu::b_vector<String, 4> split(const String& line, char delimiter = ',') {
             mcu::b_vector<String, 4> result;
@@ -3497,23 +2972,39 @@ namespace mcu {
     public:
         Rf_categorizer() = default;
         
-        Rf_categorizer(const String& csvFilename) : filename(csvFilename), isLoaded(false) {}
+        Rf_categorizer(Rf_base* base) {
+            init(base);
+        }
+        ~Rf_categorizer() {
+            base_ptr = nullptr;
+            isLoaded = false;
+            featureRefs.clear();
+            sharedPatterns.clear();
+            allUniqueEdges.clear();
+            allDiscreteValues.clear();
+            labelMapping.clear();
+        }
 
-        void init(const String& csvFilename) {
-            if constexpr(RF_DEBUG_LEVEL > 1)
-                Serial.println("🔧 Initializing categorizer with file: " + csvFilename);
-            filename = csvFilename;
+
+        void init(Rf_base* base) {
+            base_ptr = base;
             isLoaded = false;
         }
         
         // Load categorizer data from CTG v2 format
-        bool loadCategorizer(bool re_use = true) {
-            if (!SPIFFS.exists(filename)) {
+        bool loadCategorizer() {
+            if (isLoaded) return true;
+            if (!has_base()) {
+                if constexpr(RF_DEBUG_LEVEL > 0)
+                Serial.println("❌ Cannot load categorizer: base pointer is null");
+                return false;
+            }
+            String filename = base_ptr->get_ctg_file();
+            if (!SPIFFS.exists(filename.c_str())) {
                 if constexpr(RF_DEBUG_LEVEL > 0)
                 Serial.println("❌ Categorizer file not found: " + filename);
                 return false;
             }
-            
             File file = SPIFFS.open(filename, "r");
             if (!file) {
                 if constexpr(RF_DEBUG_LEVEL > 0)
@@ -3729,11 +3220,6 @@ namespace mcu {
                     Serial.println("   Memory usage: " + String(memory_usage()) + " bytes");
                 }
                 
-                // Clean up file if not reusing
-                if (!re_use) {
-                    SPIFFS.remove(filename);
-                }
-                
                 return true;
                 
             } catch (...) {
@@ -3758,12 +3244,9 @@ namespace mcu {
             sharedPatterns.clear();
             allUniqueEdges.clear();
             allDiscreteValues.clear();
-            #if SUPPORT_LABEL_MAPPING
             labelMapping.clear();
-            #endif
-            
             isLoaded = false;
-            if constexpr(RF_DEBUG_LEVEL > 1)
+            if constexpr(RF_DEBUG_LEVEL > 2)
             Serial.println("🧹 Categorizer data released from memory");
         }
 
@@ -3797,7 +3280,7 @@ namespace mcu {
         // Debug methods
         void printInfo() const {
             Serial.println("=== Rf_categorizer Categorizer Info ===");
-            Serial.println("File: " + filename);
+            Serial.println("File: " + String(base_ptr ? base_ptr->get_ctg_file().c_str() : "N/A"));
             Serial.println("Loaded: " + String(isLoaded ? "Yes" : "No"));
             Serial.println("Features: " + String(numFeatures));
             Serial.println("Groups per feature: " + String(groupsPerFeature));
@@ -3825,7 +3308,7 @@ namespace mcu {
             // Basic members
             usage += sizeof(numFeatures) + sizeof(groupsPerFeature) + sizeof(numLabels) + 
                     sizeof(scaleFactor) + sizeof(isLoaded);
-            usage += filename.length();
+            usage += 4;
             
             // Core data structures
             usage += featureRefs.size() * sizeof(FeatureRef);
@@ -3859,6 +3342,616 @@ namespace mcu {
             }
             // return error if not found
             return 255;
+        }
+    };
+    
+    /*
+    ------------------------------------------------------------------------------------------------------------------
+    -------------------------------------------- RF_NODE_PREDCITOR ---------------------------------------------------
+    ------------------------------------------------------------------------------------------------------------------
+    */
+    struct node_data {
+        uint8_t min_split;
+        uint16_t max_depth;
+        uint16_t total_nodes;
+        
+        node_data() : min_split(0), max_depth(0), total_nodes(0) {}
+        node_data(uint8_t min_split, uint16_t max_depth) 
+            : min_split(min_split), max_depth(max_depth), total_nodes(0) {}
+        node_data(uint8_t min_split, uint16_t max_depth, uint16_t total_nodes) 
+            : min_split(min_split), max_depth(max_depth), total_nodes(total_nodes) {}
+    };
+
+    class Rf_node_predictor {
+    public:
+        float coefficients[3];  // bias, min_split_coeff, max_depth_coeff
+        bool is_trained;
+        b_vector<node_data> buffer;
+    private:
+        // String filename;
+        // String node_predictor_log;
+        Rf_base* base_ptr = nullptr;
+        
+        bool has_base() const {
+            return base_ptr != nullptr && base_ptr->ready_to_use();
+        }
+
+        float evaluate_formula(const node_data& data) const {
+            if (!is_trained) {
+                return manual_estimate(data); // Use manual estimate if not trained
+            }
+            
+            float result = coefficients[0]; // bias
+            result += coefficients[1] * static_cast<float>(data.min_split);
+            result += coefficients[2] * static_cast<float>(data.max_depth);
+            
+            return result > 10.0f ? result : 10.0f; // ensure reasonable minimum
+        }
+
+        // if failed to load predictor, manual estimate will be used
+        float manual_estimate(const node_data& data) const {
+            if (data.min_split == 0 || data.max_depth == 0) {
+                return 100.0f; // default estimate
+            }
+            // Simple heuristic: more nodes = better accuracy
+            float estimate = 100.0f - data.min_split * 12 + data.max_depth * 3;
+            return estimate < 10.0f ? 10.0f : estimate; // ensure reasonable minimum
+        }
+
+    public:
+        uint8_t accuracy;      // in percentage
+        uint8_t peak_percent;  // number of nodes at depth with maximum number of nodes / total number of nodes in tree
+        
+        Rf_node_predictor() : is_trained(false), accuracy(0), peak_percent(0) {
+            for (int i = 0; i < 3; i++) {
+                coefficients[i] = 0.0f;
+            }
+        }
+
+        Rf_node_predictor(Rf_base* base) : base_ptr(base), is_trained(false), accuracy(0), peak_percent(0) {
+            if constexpr(RF_DEBUG_LEVEL > 1)
+                Serial.println("🔧 Initializing node predictor");
+            for (int i = 0; i < 3; i++) {
+                coefficients[i] = 0.0f;
+            }
+        }
+
+        ~Rf_node_predictor() {
+            base_ptr = nullptr;
+            is_trained = false;
+            buffer.clear();
+        }
+
+        void init(Rf_base* base) {
+            base_ptr = base;
+            is_trained = false;
+            for (int i = 0; i < 3; i++) {
+                coefficients[i] = 0.0f;
+            }
+            // get logfile path from filename : "/model_name_node_pred.bin" -> "/model_name_node_log.csv"
+            String node_predictor_log = base_ptr ? base_ptr->get_node_log_file() : "";
+            // check if node_log file exists, if not create with header
+            if (node_predictor_log.length() > 0 && !SPIFFS.exists(node_predictor_log.c_str())) {
+                File logFile = SPIFFS.open(node_predictor_log.c_str(), FILE_WRITE);
+                if (logFile) {
+                    logFile.println("min_split,max_depth,total_nodes");
+                    logFile.close();
+                }
+            }
+        }
+        
+        // Load trained model from SPIFFS (updated format without version)
+        bool loadPredictor() {
+            if (!has_base()){
+                if constexpr(RF_DEBUG_LEVEL > 0)
+                    Serial.println("❌ Base pointer is null, cannot load predictor.");
+                return false;
+            }
+            String filename = base_ptr->get_node_predict_file();
+            if constexpr(RF_DEBUG_LEVEL > 1)
+                Serial.printf("🔍 Loading node predictor from file: %s\n", filename.c_str());
+            if(is_trained) return true;
+            if (!SPIFFS.exists(filename.c_str())) {
+                if constexpr(RF_DEBUG_LEVEL > 1)
+                Serial.printf("❌ No predictor file found: %s !\n", filename.c_str());
+                Serial.println("Switching to use default predictor.");
+                return false;
+            }
+            
+            File file = SPIFFS.open(filename.c_str(), FILE_READ);
+            if (!file) {
+                if constexpr(RF_DEBUG_LEVEL > 0)
+                Serial.printf("❌ Failed to open predictor file: %s\n", filename.c_str());
+                return false;
+            }
+            
+            // Read and verify magic number
+            uint32_t magic;
+            if (file.read((uint8_t*)&magic, sizeof(magic)) != sizeof(magic) || magic != 0x4E4F4445) {
+                if constexpr(RF_DEBUG_LEVEL > 0)
+                Serial.printf("❌ Invalid predictor file format: %s\n", filename.c_str());
+                file.close();
+                return false;
+            }
+            
+            // Read training status (but don't use it to set is_trained - that's set after successful loading)
+            bool file_is_trained;
+            if (file.read((uint8_t*)&file_is_trained, sizeof(file_is_trained)) != sizeof(file_is_trained)) {
+                if constexpr(RF_DEBUG_LEVEL > 1)
+                Serial.println("❌ Failed to read training status");
+                file.close();
+                return false;
+            }
+            
+            // Read accuracy and peak_percent
+            if (file.read((uint8_t*)&accuracy, sizeof(accuracy)) != sizeof(accuracy)) {
+                if constexpr(RF_DEBUG_LEVEL > 1)
+                Serial.println("❌ Failed to read accuracy");
+                file.close();
+                return false;
+            }
+            
+            if (file.read((uint8_t*)&peak_percent, sizeof(peak_percent)) != sizeof(peak_percent)) {
+                if constexpr(RF_DEBUG_LEVEL > 1)
+                Serial.println("❌ Failed to read peak_percent");
+                file.close();
+                return false;
+            }
+            
+            // Read number of coefficients
+            uint8_t num_coefficients;
+            if (file.read((uint8_t*)&num_coefficients, sizeof(num_coefficients)) != sizeof(num_coefficients) || num_coefficients != 3) {
+                if constexpr(RF_DEBUG_LEVEL > 1)
+                Serial.printf("❌ Invalid coefficient count: %d (expected 3)\n", num_coefficients);
+                file.close();
+                return false;
+            }
+            
+            // Read coefficients
+            if (file.read((uint8_t*)coefficients, sizeof(float) * 3) != sizeof(float) * 3) {
+                if constexpr(RF_DEBUG_LEVEL > 1)
+                Serial.println("❌ Failed to read coefficients");
+                file.close();
+                return false;
+            }
+            
+            file.close();
+            
+            // Only set is_trained to true if the file was actually trained
+            if (file_is_trained) {
+                is_trained = true;
+                
+                // Fix PC version's peak_percent bug where it often saves 0%
+                if (peak_percent == 0) {
+                    peak_percent = 30; // Use reasonable default for binary trees
+                    if constexpr(RF_DEBUG_LEVEL > 2)
+                    Serial.printf("⚠️  Fixed peak_percent from 0%% to 30%% \n");
+                }
+                if constexpr(RF_DEBUG_LEVEL > 1){
+                Serial.printf("✅ Node_predictor loaded: %s (accuracy: %d%%, peak: %d%%)\n", 
+                            filename.c_str(), accuracy, peak_percent);
+                Serial.printf("   Coefficients: bias=%.2f, split=%.2f, depth=%.2f\n", 
+                            coefficients[0], coefficients[1], coefficients[2]);
+                }
+            } else {
+                if constexpr(RF_DEBUG_LEVEL > 2)
+                Serial.printf("⚠️  predictor file exists but is not trained: %s\n", filename.c_str());
+                is_trained = false;
+            }
+            
+            return file_is_trained;
+        }
+        
+        // Save trained predictor to SPIFFS
+        bool releasePredictor() {
+            if (!has_base()){
+                if constexpr(RF_DEBUG_LEVEL > 0)
+                    Serial.println("❌ Base pointer is null, cannot save predictor.");
+                return false;
+            }
+            if (!is_trained) {
+                if constexpr(RF_DEBUG_LEVEL > 0)
+                Serial.println("❌ Predictor is not trained, cannot save.");
+                return false;
+            }
+            String filename = base_ptr->get_node_predict_file();
+            // Remove existing file
+            if (SPIFFS.exists(filename.c_str())) {
+                SPIFFS.remove(filename.c_str());
+            }
+
+            if constexpr(RF_DEBUG_LEVEL > 1)
+                Serial.printf("💾 Saving node predictor to file: %s\n", filename.c_str());
+            
+            File file = SPIFFS.open(filename.c_str(), FILE_WRITE);
+            if (!file) {
+                if constexpr(RF_DEBUG_LEVEL > 0)
+                Serial.printf("❌ Failed to create node_predictor file: %s\n", filename.c_str());
+                return false;
+            }
+            
+            // Write magic number
+            uint32_t magic = 0x4E4F4445; // "NODE" in hex
+            file.write((uint8_t*)&magic, sizeof(magic));
+            
+            // Write training status
+            file.write((uint8_t*)&is_trained, sizeof(is_trained));
+            
+            // Write accuracy and peak_percent
+            file.write((uint8_t*)&accuracy, sizeof(accuracy));
+            file.write((uint8_t*)&peak_percent, sizeof(peak_percent));
+            
+            // Write number of coefficients
+            uint8_t num_coefficients = 3;
+            file.write((uint8_t*)&num_coefficients, sizeof(num_coefficients));
+            
+            // Write coefficients
+            file.write((uint8_t*)coefficients, sizeof(float) * 3);
+            
+            file.close();
+            
+            if constexpr(RF_DEBUG_LEVEL > 1)
+            Serial.printf("✅ Node_predictor saved: %s (%d bytes, accuracy: %d%%, peak: %d%%)\n", 
+                        filename.c_str(), 
+                        sizeof(magic) + sizeof(is_trained) + sizeof(accuracy) + sizeof(peak_percent) + 
+                        sizeof(num_coefficients) + sizeof(float) * 3, accuracy, peak_percent);
+            return true;
+        }
+        
+        // Predict number of nodes for given parameters
+        uint16_t estimate(const node_data& data) {
+            if(!is_trained) {
+                if(!loadPredictor()){
+                    return manual_estimate(data); // Use manual estimate if predictor is disabled 
+                }
+            }
+            
+            float prediction = evaluate_formula(data);
+            return static_cast<uint16_t>(prediction + 0.5f); // Round to nearest integer
+        }
+        uint16_t estimate(uint8_t min_split, uint16_t max_depth) {
+            node_data data(min_split, max_depth);
+            return estimate(data);
+        }
+        
+        // Retrain the predictor using data from rf_tree_log.csv (synchronized with PC version)
+        bool re_train(bool save_after_retrain = true) {
+            if (!has_base()){
+                if constexpr(RF_DEBUG_LEVEL > 0)
+                    Serial.println("❌ Base pointer is null, cannot retrain predictor.");
+                return false;
+            }
+            String node_predictor_log = base_ptr->get_node_log_file();
+            if constexpr (RF_DEBUG_LEVEL > 2)
+                Serial.println("🔂 Starting retraining of node predictor...");
+            if(!can_retrain()) {
+                if constexpr(RF_DEBUG_LEVEL > 2)
+                Serial.println("❌ No training data available for retraining.");
+                return false;
+            }
+            if(buffer.size() > 0){
+                add_new_samples(buffer);
+            }
+            buffer.clear();
+            buffer.fit();
+
+            File file = SPIFFS.open(node_predictor_log.c_str(), FILE_READ);
+            if (!file) {
+                if constexpr(RF_DEBUG_LEVEL > 1)
+                Serial.printf("❌ Failed to open node_predictor log: %s\n", node_predictor_log.c_str());
+                return false;
+            }
+            
+            if constexpr(RF_DEBUG_LEVEL > 2)
+            Serial.println("🔄 Retraining node predictor from CSV data...");
+            
+
+            mcu::b_vector<node_data> training_data;
+            training_data.reserve(50); // Reserve space for training samples
+            
+            String line;
+            bool first_line = true;
+            
+            // Read CSV data
+            while (file.available()) {
+                line = file.readStringUntil('\n');
+                line.trim();
+                
+                if (line.length() == 0 || first_line) {
+                    first_line = false;
+                    continue; // Skip header line
+                }
+                
+                // Parse CSV line: min_split,max_depth,total_nodes
+                node_data sample;
+                int comma1 = line.indexOf(',');
+                int comma2 = line.indexOf(',', comma1 + 1);
+                
+                if (comma1 != -1 && comma2 != -1) {
+                    String min_split_str = line.substring(0, comma1);
+                    String max_depth_str = line.substring(comma1 + 1, comma2);
+                    String total_nodes_str = line.substring(comma2 + 1);
+                    
+                    sample.min_split = min_split_str.toInt();
+                    sample.max_depth = max_depth_str.toInt();
+                    sample.total_nodes = total_nodes_str.toInt();
+                    
+                    // skip invalid samples
+                    if (sample.min_split > 0 && sample.max_depth > 0 && sample.total_nodes > 0) {
+                        training_data.push_back(sample);
+                    }
+                }
+            }
+            file.close();
+            
+            if (training_data.size() < 3) {
+                if constexpr(RF_DEBUG_LEVEL > 1)
+                Serial.printf("❌ Insufficient training data: %d samples (need at least 3)\n", training_data.size());
+                return false;
+            }
+            
+            // Use PC version's trend analysis approach instead of complex regression
+            // Collect all unique min_split and max_depth values
+            mcu::b_vector<uint8_t> unique_min_splits;
+            mcu::b_vector<uint16_t> unique_max_depths;
+            
+            for (const auto& sample : training_data) {
+                // Add unique min_split values
+                bool found_split = false;
+                for (const auto& existing_split : unique_min_splits) {
+                    if (existing_split == sample.min_split) {
+                        found_split = true;
+                        break;
+                    }
+                }
+                if (!found_split) {
+                    unique_min_splits.push_back(sample.min_split);
+                }
+                
+                // Add unique max_depth values
+                bool found_depth = false;
+                for (const auto& existing_depth : unique_max_depths) {
+                    if (existing_depth == sample.max_depth) {
+                        found_depth = true;
+                        break;
+                    }
+                }
+                if (!found_depth) {
+                    unique_max_depths.push_back(sample.max_depth);
+                }
+            }
+            
+            // if constexpr(RF_DEBUG_LEVEL > 2)
+            // Serial.printf("   Found %d unique min_splits, %d unique max_depths\n", 
+            //             unique_min_splits.size(), unique_max_depths.size());
+            
+            // Sort vectors for easier processing
+            // Simple bubble sort for small vectors
+            for (size_t i = 0; i < unique_min_splits.size(); i++) {
+                for (size_t j = i + 1; j < unique_min_splits.size(); j++) {
+                    if (unique_min_splits[i] > unique_min_splits[j]) {
+                        uint8_t temp = unique_min_splits[i];
+                        unique_min_splits[i] = unique_min_splits[j];
+                        unique_min_splits[j] = temp;
+                    }
+                }
+            }
+            
+            for (size_t i = 0; i < unique_max_depths.size(); i++) {
+                for (size_t j = i + 1; j < unique_max_depths.size(); j++) {
+                    if (unique_max_depths[i] > unique_max_depths[j]) {
+                        uint16_t temp = unique_max_depths[i];
+                        unique_max_depths[i] = unique_max_depths[j];
+                        unique_max_depths[j] = temp;
+                    }
+                }
+            }
+            
+            // Calculate effects using a simpler approach without large intermediate vectors
+            // Calculate min_split effect directly
+            float split_effect = 0.0f;
+            if (unique_min_splits.size() >= 2) {
+                // Calculate average nodes for first and last min_split values
+                float first_split_avg = 0.0f;
+                float last_split_avg = 0.0f;
+                int first_split_count = 0;
+                int last_split_count = 0;
+                
+                uint8_t first_split = unique_min_splits[0];
+                uint8_t last_split = unique_min_splits[unique_min_splits.size() - 1];
+                
+                // Calculate averages directly from training data
+                for (const auto& sample : training_data) {
+                    if (sample.min_split == first_split) {
+                        first_split_avg += sample.total_nodes;
+                        first_split_count++;
+                    } else if (sample.min_split == last_split) {
+                        last_split_avg += sample.total_nodes;
+                        last_split_count++;
+                    }
+                }
+                
+                if (first_split_count > 0 && last_split_count > 0) {
+                    first_split_avg /= first_split_count;
+                    last_split_avg /= last_split_count;
+                    
+                    float split_range = static_cast<float>(last_split - first_split);
+                    if (split_range > 0.01f) {
+                        split_effect = (last_split_avg - first_split_avg) / split_range;
+                    }
+                }
+            }
+            
+            // Calculate max_depth effect directly
+            float depth_effect = 0.0f;
+            if (unique_max_depths.size() >= 2) {
+                // Calculate average nodes for first and last max_depth values
+                float first_depth_avg = 0.0f;
+                float last_depth_avg = 0.0f;
+                int first_depth_count = 0;
+                int last_depth_count = 0;
+                
+                uint16_t first_depth = unique_max_depths[0];
+                uint16_t last_depth = unique_max_depths[unique_max_depths.size() - 1];
+                
+                // Calculate averages directly from training data
+                for (const auto& sample : training_data) {
+                    if (sample.max_depth == first_depth) {
+                        first_depth_avg += sample.total_nodes;
+                        first_depth_count++;
+                    } else if (sample.max_depth == last_depth) {
+                        last_depth_avg += sample.total_nodes;
+                        last_depth_count++;
+                    }
+                }
+                
+                if (first_depth_count > 0 && last_depth_count > 0) {
+                    first_depth_avg /= first_depth_count;
+                    last_depth_avg /= last_depth_count;
+                    
+                    float depth_range = static_cast<float>(last_depth - first_depth);
+                    if (depth_range > 0.01f) {
+                        depth_effect = (last_depth_avg - first_depth_avg) / depth_range;
+                    }
+                }
+            }
+            
+            // Calculate overall average as baseline
+            float overall_avg = 0.0f;
+            for (const auto& sample : training_data) {
+                overall_avg += sample.total_nodes;
+            }
+            overall_avg /= training_data.size();
+            
+            // Build the simple linear predictor: nodes = bias + split_coeff * min_split + depth_coeff * max_depth
+            // Calculate bias to center the predictor around the overall average
+            float reference_split = unique_min_splits.empty() ? 3.0f : static_cast<float>(unique_min_splits[0]);
+            float reference_depth = unique_max_depths.empty() ? 6.0f : static_cast<float>(unique_max_depths[0]);
+            
+            coefficients[0] = overall_avg - (split_effect * reference_split) - (depth_effect * reference_depth); // bias
+            coefficients[1] = split_effect; // min_split coefficient
+            coefficients[2] = depth_effect; // max_depth coefficient
+            
+            // Calculate accuracy using PC version's approach exactly
+            float total_error = 0.0f;
+            float total_actual = 0.0f;
+            
+            for (const auto& sample : training_data) {
+                node_data data(sample.min_split, sample.max_depth);
+                float predicted = evaluate_formula(data);
+                float actual = static_cast<float>(sample.total_nodes);
+                float error = fabs(predicted - actual);
+                total_error += error;
+                total_actual += actual;
+            }
+            
+            float mae = total_error / training_data.size(); // Mean Absolute Error
+            float mape = (total_error / total_actual) * 100.0f; // Mean Absolute Percentage Error
+            
+            // PC version returns (100.0f - mape) which gives 0-100, then multiplies by 100 in training code
+            // Let's follow the same logic but fix the overflow issue
+            float get_accuracy_result = fmax(0.0f, 100.0f - mape);
+            accuracy = static_cast<uint8_t>(fmin(255.0f, get_accuracy_result * 100.0f / 100.0f)); // Simplify to match intent
+            
+            // Actually, let's just match the logical intent rather than the bug
+            accuracy = static_cast<uint8_t>(fmin(100.0f, fmax(0.0f, 100.0f - mape)));
+            
+            peak_percent = 30; // A reasonable default for binary tree structures
+            
+            is_trained = true;
+
+            if constexpr(RF_DEBUG_LEVEL > 2){
+                Serial.printf("✅ Node predictor retraining complete! Accuracy: %d%%, Peak: %d%%\n", accuracy, peak_percent);
+                Serial.printf("   Coefficients: bias=%.2f, split=%.2f, depth=%.2f\n", 
+                            coefficients[0], coefficients[1], coefficients[2]);
+                Serial.printf("   MAE: %.2f, MAPE: %.2f%%\n", mae, mape);
+                Serial.printf("   Split effect: %.2f, Depth effect: %.2f\n", split_effect, depth_effect);
+            }
+
+            if(save_after_retrain) releasePredictor(); // Save the new predictor
+            return true;
+        }
+        
+        
+        /// @brief  add new samples to the beginning of the node_predictor_log file. 
+        // If the file has more than 50 samples (rows, not including header), 
+        // remove the samples at the end of the file (limit the file to the 50 latest samples)
+        void add_new_samples(b_vector<node_data>& new_samples) {
+            if (!has_base()){
+                if constexpr(RF_DEBUG_LEVEL > 0)
+                    Serial.println("❌ Base pointer is null, cannot add new samples.");
+                return;
+            }
+            String node_predictor_log = base_ptr->get_node_log_file();
+            if (new_samples.size() == 0) return;
+            // Read all existing lines
+            mcu::b_vector<String> lines;
+            File file = SPIFFS.open(node_predictor_log.c_str(), FILE_READ);
+            if (file) {
+                while (file.available()) {
+                    String line = file.readStringUntil('\n');
+                    line.trim();
+                    if (line.length() > 0) lines.push_back(line);
+                }
+                file.close();
+            }
+            // Ensure header is present
+            String header = "min_split,max_depth,total_nodes";
+            if (lines.empty() || lines[0] != header) {
+                lines.insert(0, header);
+            }
+            // Remove header for easier manipulation
+            mcu::b_vector<String> data_lines;
+            for (size_t i = 1; i < lines.size(); ++i) {
+                data_lines.push_back(lines[i]);
+            }
+            // Prepend new samples
+            for (int i = new_samples.size() - 1; i >= 0; --i) {
+                const node_data& nd = new_samples[i];
+                String row = String(nd.min_split) + "," + String(nd.max_depth) + "," + String(nd.total_nodes);
+                data_lines.insert(0, row);
+            }
+            // Limit to 50 rows
+            while (data_lines.size() > 50) {
+                data_lines.pop_back();
+            }
+            // Write back to file
+            SPIFFS.remove(node_predictor_log.c_str());
+            file = SPIFFS.open(node_predictor_log.c_str(), FILE_WRITE);
+            if (file) {
+                file.println(header);
+                for (const auto& row : data_lines) {
+                    file.println(row);
+                }
+                file.close();
+            }
+        }
+
+        // Check if training log is available and size of the file is greater than 0
+        bool can_retrain() const {
+            if (!has_base()) return false;
+            String node_predictor_log = base_ptr->get_node_log_file();
+            if (!SPIFFS.exists(node_predictor_log.c_str())) return false;
+            File file = SPIFFS.open(node_predictor_log.c_str(), FILE_READ);
+            bool result = file && file.size() > 0;
+            // only retrain if log file has more 4 samples (excluding header)
+            if (result) {
+                size_t line_count = 0;
+                while (file.available()) {
+                    String line = file.readStringUntil('\n');
+                    line.trim();
+                    if (line.length() > 0) line_count++;
+                }
+                result = line_count > 4; // more than header + 3 samples
+            }
+            if (file) file.close();
+            return result;
+        }
+
+        size_t memory_usage() const {
+            size_t total = sizeof(Rf_node_predictor);
+            total += buffer.capacity() * sizeof(node_data);
+            return total + 4;
         }
     };
 
@@ -4232,121 +4325,170 @@ namespace mcu {
 
     class Rf_tree_container{
         private:
-            String model_name;
+            // String model_name;
+            Rf_base* base_ptr = nullptr;
+            Rf_config* config_ptr = nullptr;
+
             vector<Rf_tree> trees;        // b_vector storing root nodes of trees (now manages SPIFFS filenames)
-            b_vector<uint16_t> tree_depths;     // store depth of each tree
-            b_vector<uint16_t> tree_nodes;     // store number of nodes of each tree
-            b_vector<uint16_t> tree_leaves;   // store number of leaves of each tree
-            Rf_base* base_ptr;               // Pointer to the base 
-            Rf_logger* logger_ptr;          // Pointer to logger 
+            size_t   total_depths;       // store total depth of all trees
+            size_t   total_nodes;        // store total nodes of all trees
+            size_t   total_leaves;       // store total leaves of all trees
             b_vector<NodeToBuild> queue_nodes; // Queue for breadth-first tree building
+
+            mcu::unordered_map<uint8_t, uint16_t> predictClass; // Map to count predictions per class during inference
+
+            bool is_unified = true;  // Default to unified form (used at the end of training and inference)
+
+            inline bool has_base() const { 
+                return config_ptr!= nullptr && base_ptr != nullptr && base_ptr->ready_to_use(); 
+            }
+            
+        public:
             bool is_loaded = false;
 
-        public:
             Rf_tree_container(){};
-            Rf_tree_container(const String& model_name, uint8_t num_trees, uint8_t num_labels, Rf_base& base, Rf_logger& logger){
-                init(model_name, num_trees, num_labels, base, logger);
+            Rf_tree_container(Rf_base* base, Rf_config* config){
+                init(base, config);
             }
 
-            void init(const String& model_name, uint8_t num_trees, uint8_t num_labels, Rf_base& base, Rf_logger& logger){
-                this->model_name = model_name;
-                this->base_ptr = &base;
-                this->logger_ptr = &logger;
-                trees.reserve(num_trees);
+            void init(Rf_base* base, Rf_config* config){
+                base_ptr = base;
+                config_ptr = config;
+                if(!has_base()) {
+                    if constexpr(RF_DEBUG_LEVEL > 0)
+                    Serial.println("❌ Base pointer is null, cannot initialize tree container.");
+                    return;
+                }
+                trees.reserve(config_ptr->num_trees);
+                predictClass.reserve(config_ptr->num_trees);
                 is_loaded = false; // Initially in individual form
             }
 
             ~Rf_tree_container(){
-                for(auto& tree : trees){
-                    tree.purgeTree();   // completely remove tree - for development stage 
-                }
+                // save to SPIFFS in unified form 
+                releaseForest();
                 trees.clear();
-                queue_nodes.clear();
-                tree_depths.clear();
-                tree_nodes.clear();
-                tree_leaves.clear();
-            }
-            size_t total_nodes() const {
-                size_t total = 0;
-                for(auto& n : tree_nodes) total += n;
-                return total;
+                base_ptr = nullptr;
+                config_ptr = nullptr;
             }
 
-            size_t total_leaves() const {
-                size_t total = 0;
-                for(auto& n : tree_leaves) total += n;
-                return total;
-            }
 
-            float avg_depth() const {
-                float total = 0;
-                for(auto& d : tree_depths) total += d;
-                return total / tree_depths.size();
-            }
-
-            float avg_nodes() const {
-                float total = 0;
-                for(auto& n : tree_nodes) total += n;
-                return total / tree_nodes.size();
-            }
-
-            float avg_leaves() const {
-                float total = 0;
-                for(auto& n : tree_leaves) total += n;
-                return total / tree_leaves.size();
-            }
-            uint16_t max_depth_tree() const {
-                uint16_t max_d = 0;
-                for(auto& d : tree_depths) if(d > max_d) max_d = d;
-                return max_d;
-            }
-            void add_tree(Rf_tree&& tree){
-                tree_depths.push_back(tree.getTreeDepth());
-                tree_nodes.push_back(tree.countNodes());
-                tree_leaves.push_back(tree.countLeafNodes());
-                trees.push_back(std::move(tree));
-            }
-
-            Rf_tree& operator[](uint8_t index){
-                return trees[index];
-            }
-
-            // Get the number of trees
-            size_t size() const {
-                return trees.size();
-            }
-
-            // Check if container is empty
-            bool empty() const {
-                return trees.empty();
-            }
-
-            // Get queue_nodes for tree building
-            b_vector<NodeToBuild>& getQueueNodes() {
-                return queue_nodes;
-            }
-
-            // Clear all trees and reset state
+            // Clear all trees, old forest file and reset state to individual form (ready for rebuilding)
             void clearForest() {
+                if(!has_base()) {
+                    if constexpr(RF_DEBUG_LEVEL > 0)
+                    Serial.println("❌ Base pointer is null, cannot clear forest.");
+                    return;
+                }
+                
+                if constexpr(RF_DEBUG_LEVEL > 2)
+                Serial.printf("🧹 Clearing forest (current size: %d, target: %d)\n", 
+                            trees.size(), config_ptr->num_trees);
+                
+                String model_name = base_ptr->get_model_name();
                 // Process trees one by one to avoid heap issues
                 for (size_t i = 0; i < trees.size(); i++) {
-                    trees[i].purgeTree(this->model_name);
+                    trees[i].purgeTree(model_name);
                     // Force yield to allow garbage collection
                     yield();        
                     delay(10);
                 }
                 trees.clear();
-                // Mark forest as not loaded to force re-load after rebuilds
+                trees.fit(); // Ensure vector is completely cleared
+                // Reserve space for the expected number of trees but don't pre-size
+                trees.reserve(config_ptr->num_trees);
                 is_loaded = false;
                 // Remove old forest file to ensure clean slate
-                if(base_ptr) {
-                    String oldForestFile = base_ptr->get_unifiedModelFile();
-                    if(SPIFFS.exists(oldForestFile.c_str())) {
-                        SPIFFS.remove(oldForestFile.c_str());
-                        if constexpr(RF_DEBUG_LEVEL > 1)
-                        Serial.printf("🗑️ Removed old forest file: %s\n", oldForestFile.c_str());
+                String oldForestFile = base_ptr->get_forest_file();
+                if(SPIFFS.exists(oldForestFile.c_str())) {
+                    SPIFFS.remove(oldForestFile.c_str());
+                    if constexpr(RF_DEBUG_LEVEL > 2)
+                    Serial.printf("🗑️ Removed old forest file: %s\n", oldForestFile.c_str());
+                }
+                is_unified = false; // Now in individual form
+                total_depths = 0;
+                total_nodes = 0;
+                total_leaves = 0;
+            }
+            
+            void add_tree(Rf_tree&& tree){
+                if(!tree.isLoaded){
+                    if constexpr(RF_DEBUG_LEVEL > 2)
+                    Serial.println("🟡 Warning: Adding an unloaded tree to the container.");
+                }
+                
+                if constexpr(RF_DEBUG_LEVEL > 2)
+                Serial.printf("🌲 Adding tree %d to container (current size: %d, target: %d)\n", 
+                            tree.index, trees.size(), config_ptr->num_trees);
+                
+                total_depths += tree.getTreeDepth();
+                total_nodes += tree.countNodes(); 
+                total_leaves += tree.countLeafNodes();
+
+                // Ensure trees vector has enough space for this tree's index
+                if(tree.index != 255 && tree.index < config_ptr->num_trees) {
+                    // Resize vector if needed to accommodate this tree's index
+                    if(trees.size() <= tree.index) {
+                        trees.resize(tree.index + 1);
+                    }
+                    // Check if slot is already occupied
+                    if(trees[tree.index].isLoaded || trees[tree.index].index != 255) {
+                        if constexpr(RF_DEBUG_LEVEL > 0)
+                        Serial.printf("⚠️ Warning: Overwriting tree at index %d!\n", tree.index);
+                    }
+                    tree.releaseTree(base_ptr->get_model_name()); // Release tree nodes from memory after adding to container
+                    trees[tree.index] = std::move(tree);
+                } else {
+                    if constexpr(RF_DEBUG_LEVEL > 0)
+                    Serial.printf("❌ Invalid tree index %d (expected 0-%d)\n", tree.index, config_ptr->num_trees - 1);
+                }
+            }
+
+            // Finalize container after all trees are added - ensure proper sizing
+            void finalizeContainer() {
+                if(config_ptr && trees.size() != config_ptr->num_trees) {
+                    trees.resize(config_ptr->num_trees);
+                    if constexpr(RF_DEBUG_LEVEL > 2)
+                    Serial.printf("🔧 Finalized container size to %d trees\n", config_ptr->num_trees);
+                }
+            }
+
+            uint8_t predict_features(const packed_vector<2>& features) {
+                if(trees.empty() || !is_loaded) {
+                    if constexpr(RF_DEBUG_LEVEL > 2)
+                    Serial.println("❌ Forest not loaded or empty, cannot predict.");
+                    return 255; // Unknown class
+                }
+                int16_t totalPredict = 0;
+                predictClass.clear();
+                
+                // Use streaming prediction 
+                for(auto& tree : trees){
+                    uint8_t predict = tree.predict_features(features); 
+                    if(predict < config_ptr->num_labels){
+                        predictClass[predict]++;
+                        totalPredict++;
                     }
                 }
+                if(totalPredict == 0) {
+                    return 255; 
+                }
+
+                int16_t max = -1;
+                uint8_t mostPredict = 255;
+                for(const auto& predict : predictClass){
+                    if(predict.second > max){
+                        max = predict.second;
+                        mostPredict = predict.first;
+                    }
+                }
+                
+                // Check certainty threshold
+                float certainty = static_cast<float>(max) / totalPredict;
+                if(certainty < config_ptr->unity_threshold) {
+                    return 255; 
+                }
+                return mostPredict;
             }
 
             class iterator {
@@ -4381,298 +4523,241 @@ namespace mcu {
 
             // begin / end to support range-based for and STL-style iteration
             iterator begin() { return iterator(this, 0); }
-            iterator end()   { return iterator(this, trees.size()); }
+            iterator end()   { return iterator(this, size()); }
 
-            // Forest loading functionality - moved from RandomForest class
-            bool loadForest(){
-                // Safety check: Don't load if already loaded
-                if(is_loaded) {
-                    if constexpr(RF_DEBUG_LEVEL > 2)
-                    Serial.println("✅ Forest already loaded in memory");
+            // Forest loading functionality - dispatcher based on is_unified flag
+            bool loadForest() {
+                if (is_loaded) {
+                    if constexpr(RF_DEBUG_LEVEL > 1)
+                    Serial.println("✅ Forest already loaded, skipping load.");
+                    return true; // Already loaded
+                }
+                if(!has_base()) {
+                    if constexpr(RF_DEBUG_LEVEL > 0)
+                    Serial.println("❌ Base pointer is null, cannot load forest.");
                     return false;
                 }
-                
+                // Ensure container is properly sized before loading
+                if(trees.size() != config_ptr->num_trees) {
+                    if constexpr(RF_DEBUG_LEVEL > 2)
+                    Serial.printf("🔧 Adjusting container size from %d to %d trees\n", 
+                                trees.size(), config_ptr->num_trees);
+                    trees.resize(config_ptr->num_trees);
+                }
                 // Memory safety check
                 size_t freeMemory = ESP.getFreeHeap();
-                size_t minMemoryRequired = 20000; // 20KB minimum threshold
-                if(freeMemory < minMemoryRequired) {
+                if(freeMemory < config_ptr->estimatedRAM + 12000) {
                     if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.printf("❌ Insufficient memory to load forest (need %d bytes, have %d)\n", 
-                                minMemoryRequired, freeMemory);
+                                config_ptr->estimatedRAM + 12000, freeMemory);
                     return false;
                 }
-                
-                unsigned long start = GET_CURRENT_TIME_IN_MILLISECONDS;
-                
-                // Use Rf_base methods to determine the loading strategy
-                bool useUnifiedFormat = base_ptr && base_ptr->is_unified_model();
-                String unifiedFilename = base_ptr ? base_ptr->get_unifiedModelFile() : "";
-                
-                // If trees vector is empty and we have a unified file, populate the trees vector first
-                if(trees.empty() && useUnifiedFormat && SPIFFS.exists(unifiedFilename.c_str())) {
-                    // Read the unified file to get tree count and indices
-                    File file = SPIFFS.open(unifiedFilename.c_str(), FILE_READ);
-                    if(file) {
-                        uint32_t magic;
-                        uint8_t treeCount;
-                        
-                        if(file.read((uint8_t*)&magic, sizeof(magic)) == sizeof(magic) && 
-                           magic == 0x464F5253 && 
-                           file.read((uint8_t*)&treeCount, sizeof(treeCount)) == sizeof(treeCount)) {
-                            
-                            if constexpr(RF_DEBUG_LEVEL > 1)
-                            Serial.printf("🔧 Initializing forest structure from unified file (%d trees)\n", treeCount);
-                            
-                            // Reserve space and create empty trees
-                            trees.reserve(treeCount);
-                            tree_depths.reserve(treeCount);
-                            tree_nodes.reserve(treeCount);
-                            tree_leaves.reserve(treeCount);
-                            
-                            // Read tree indices and create corresponding empty trees
-                            for(uint8_t i = 0; i < treeCount; i++) {
-                                uint8_t treeIndex;
-                                uint32_t nodeCount;
-                                
-                                if(file.read((uint8_t*)&treeIndex, sizeof(treeIndex)) == sizeof(treeIndex) &&
-                                   file.read((uint8_t*)&nodeCount, sizeof(nodeCount)) == sizeof(nodeCount)) {
-                                    
-                                    // Create empty tree with the correct index
-                                    Rf_tree tree(treeIndex);
-                                    trees.push_back(std::move(tree));
-                                    
-                                    // Initialize metadata vectors with placeholder values
-                                    tree_depths.push_back(0);
-                                    tree_nodes.push_back(0);
-                                    tree_leaves.push_back(0);
-                                    
-                                    // Skip the node data for now (we'll read it in the main loading logic)
-                                    file.seek(file.position() + nodeCount * sizeof(uint32_t));
-                                } else {
-                                    if constexpr(RF_DEBUG_LEVEL > 1)
-                                    Serial.printf("❌ Failed to read tree %d metadata from unified file\n", i);
-                                    break;
-                                }
-                            }
-                        }
-                        file.close();
-                    }
-                }
-                
-                // Safety check: Ensure forest exists (either pre-populated or loaded from file)
-                if(trees.empty()) {
-                    if constexpr(RF_DEBUG_LEVEL > 0)
-                    Serial.println("❌ No trees in forest to load!");
-                    return false;
-                }
-                
-                // Choose loading strategy based on Rf_base detection
-                if(useUnifiedFormat && SPIFFS.exists(unifiedFilename.c_str())){ 
-                    // Load from unified file (optimized format)
-                    File file = SPIFFS.open(unifiedFilename.c_str(), FILE_READ);
-                    if(!file) {
-                        if constexpr(RF_DEBUG_LEVEL > 0)
-                        Serial.printf("❌ Failed to open unified forest file: %s\n", unifiedFilename.c_str());
-                        return false;
-                    }
-                    
-                    // Read forest header with error checking
-                    uint32_t magic;
-                    if(file.read((uint8_t*)&magic, sizeof(magic)) != sizeof(magic)) {
-                        if constexpr(RF_DEBUG_LEVEL > 0)
-                        Serial.println("❌ Failed to read magic number");
-                        file.close();
-                        return false;
-                    }
-                    
-                    if(magic != 0x464F5253) { // "FORS" 
-                        if constexpr(RF_DEBUG_LEVEL > 0)
-                        Serial.println("❌ Invalid forest file format");
-                        file.close();
-                        return false;
-                    }
-                    
-                    uint8_t treeCount;
-                    if(file.read((uint8_t*)&treeCount, sizeof(treeCount)) != sizeof(treeCount)) {
-                        if constexpr(RF_DEBUG_LEVEL > 0)
-                        Serial.println("❌ Failed to read tree count");
-                        file.close();
-                        return false;
-                    }
-                    
-                    if constexpr(RF_DEBUG_LEVEL > 1)
-                    Serial.printf("Loading %d trees from forest file...\n", treeCount);
-                    
-                    // Read all trees with comprehensive error checking
-                    uint8_t successfullyLoaded = 0;
-                    for(uint8_t i = 0; i < treeCount; i++) {
-                        // Memory check during loading
-                        if(ESP.getFreeHeap() < 10000) { // 10KB safety buffer
-                            if constexpr(RF_DEBUG_LEVEL > 1)
-                            Serial.printf("❌ Insufficient memory during tree loading (have %d bytes)\n", ESP.getFreeHeap());
-                            break;
-                        }
-                        
-                        uint8_t treeIndex;
-                        if(file.read((uint8_t*)&treeIndex, sizeof(treeIndex)) != sizeof(treeIndex)) {
-                            if constexpr(RF_DEBUG_LEVEL > 1)
-                            Serial.printf("❌ Failed to read tree index for tree %d\n", i);
-                            break;
-                        }
-                        
-                        uint32_t nodeCount;
-                        if(file.read((uint8_t*)&nodeCount, sizeof(nodeCount)) != sizeof(nodeCount)) {
-                            if constexpr(RF_DEBUG_LEVEL > 1)
-                            Serial.printf("❌ Failed to read node count for tree %d\n", treeIndex);
-                            break;
-                        }
-                        
-                        // Validate node count
-                        if(nodeCount == 0 || nodeCount > 2047) {
-                            if constexpr(RF_DEBUG_LEVEL > 1)
-                            Serial.printf("❌ Invalid node count %d for tree %d\n", nodeCount, treeIndex);
-                            // Skip this tree's data
-                            file.seek(file.position() + nodeCount * sizeof(uint32_t));
-                            continue;
-                        }
-                        
-                        // Find the corresponding tree in trees vector
-                        bool treeFound = false;
-                        for(size_t treeIdx = 0; treeIdx < trees.size(); treeIdx++) {
-                            auto& tree = trees[treeIdx];
-                            if(tree.index == treeIndex) {
-                                // Memory check before loading this tree
-                                size_t requiredMemory = nodeCount * sizeof(Tree_node);
-                                if(ESP.getFreeHeap() < requiredMemory + 5000) { // 5KB safety buffer per tree
-                                    if constexpr(RF_DEBUG_LEVEL > 1)
-                                    Serial.printf("❌ Insufficient memory to load tree %d (need %d bytes, have %d)\n", 
-                                                treeIndex, requiredMemory, ESP.getFreeHeap());
-                                    file.close();
-                                    return false;
-                                }
-                                
-                                tree.nodes.clear();
-                                tree.nodes.reserve(nodeCount);
-                                
-                                // Read all nodes for this tree with error checking
-                                bool nodeReadSuccess = true;
-                                for(uint32_t j = 0; j < nodeCount; j++) {
-                                    Tree_node node;
-                                    if(file.read((uint8_t*)&node.packed_data, sizeof(node.packed_data)) != sizeof(node.packed_data)) {
-                                        if constexpr(RF_DEBUG_LEVEL > 1)
-                                        Serial.printf("❌ Failed to read node %d for tree %d\n", j, treeIndex);
-                                        nodeReadSuccess = false;
-                                        break;
-                                    }
-                                    tree.nodes.push_back(node);
-                                }
-                                
-                                if(nodeReadSuccess) {
-                                    tree.nodes.fit();
-                                    tree.isLoaded = true;
-                                    successfullyLoaded++;
-                                    
-                                    // Update metadata vectors with actual values after loading
-                                    if(treeIdx < tree_depths.size()) tree_depths[treeIdx] = tree.getTreeDepth();
-                                    if(treeIdx < tree_nodes.size()) tree_nodes[treeIdx] = tree.countNodes();
-                                    if(treeIdx < tree_leaves.size()) tree_leaves[treeIdx] = tree.countLeafNodes();
-                                } else {
-                                    // Clean up failed tree
-                                    tree.nodes.clear();
-                                    tree.nodes.fit();
-                                    tree.isLoaded = false;
-                                }
-                                treeFound = true;
-                                break;
-                            }
-                        }
-                        
-                        if(!treeFound) {
-                            if constexpr(RF_DEBUG_LEVEL > 1)
-                            Serial.printf("⚠️ Tree %d not found in forest structure, skipping\n", treeIndex);
-                            // Skip the node data for this tree
-                            file.seek(file.position() + nodeCount * sizeof(uint32_t));
-                        }
-                    }
-                    
-                    file.close();
-                    
-                    if(successfullyLoaded == 0) {
-                        if constexpr(RF_DEBUG_LEVEL > 0)
-                        Serial.println("❌ No trees successfully loaded from unified forest file!");
-                        return false;
-                    }
-                    
-                    if constexpr(RF_DEBUG_LEVEL > 1)
-                    Serial.printf("✅ Loaded %d trees from unified format\n", successfullyLoaded);
-                    
+                if (is_unified) {
+                    return loadForestUnified();
                 } else {
-                    // Fallback to individual tree files (legacy format)
-                    if constexpr(RF_DEBUG_LEVEL > 2)
-                    Serial.println("📁 Unified format not found, using individual tree files...");
-                    uint8_t successfullyLoaded = 0;
-                    for (auto& tree : trees) {
-                        if (!tree.isLoaded) {
-                            // Memory check before loading each tree
-                            if(ESP.getFreeHeap() < 15000) { // 15KB threshold per tree
-                                if constexpr(RF_DEBUG_LEVEL > 1)
-                                Serial.printf("❌ Insufficient memory to load more trees (have %d bytes)\n", ESP.getFreeHeap());
-                                break;
-                            }
-                            try {
-                                tree.loadTree(this->model_name);
-                                if(tree.isLoaded) successfullyLoaded++;
-                            } catch (...) {
-                                if constexpr(RF_DEBUG_LEVEL > 1)
-                                Serial.printf("❌ Exception loading tree %d\n", tree.index);
-                                tree.isLoaded = false;
-                            }
-                        }
-                    }
-                    
-                    if(successfullyLoaded == 0) {
-                        if constexpr(RF_DEBUG_LEVEL > 2)
-                        Serial.println("❌ No trees successfully loaded from individual files!");
-                        return false;
-                    }
-                    if constexpr(RF_DEBUG_LEVEL > 1)
-                    Serial.printf("✅ Loaded %d trees from individual format\n", successfullyLoaded);
+                    return loadForestIndividual();
                 }
-                
+            }
+
+        private:
+            bool check_valid_after_load(){
                 // Verify trees are actually loaded
                 uint8_t loadedTrees = 0;
-                uint32_t totalNodes = 0;
                 for(const auto& tree : trees) {
                     if(tree.isLoaded && !tree.nodes.empty()) {
                         loadedTrees++;
-                        totalNodes += tree.nodes.size();
+                        total_depths += tree.getTreeDepth();
+                        total_nodes += tree.countNodes();
+                        total_leaves += tree.countLeafNodes();
                     }
                 }
                 
-                if(loadedTrees == 0) {
+                if(loadedTrees != config_ptr->num_trees) {
                     if constexpr(RF_DEBUG_LEVEL > 1)
-                    Serial.println("❌ No trees successfully loaded!");
+                    Serial.printf("⚠️ Warning: Expected %d trees, but only %d loaded!\n", 
+                                  config_ptr->num_trees, loadedTrees);
                     is_loaded = false;
                     return false;
                 }
                 
                 is_loaded = true;
-                unsigned long end = GET_CURRENT_TIME_IN_MILLISECONDS;
-                String formatUsed = (base_ptr && base_ptr->is_unified_model()) ? "unified" : "individual";
                 if constexpr(RF_DEBUG_LEVEL > 1)
-                Serial.printf("✅ Forest loaded (%s format): %d/%d trees (%d nodes) in %lu ms \n", 
-                            formatUsed.c_str(), loadedTrees, trees.size(), totalNodes, end - start);
+                Serial.printf("✅ Forest loaded (unified format): %d/%d trees (%d nodes)\n", 
+                            loadedTrees, trees.size(), total_nodes);
                 return true;
             }
+            // Load forest from unified format (single file containing all trees)
+            bool loadForestUnified() {
+                String unifiedFilename = base_ptr->get_forest_file();
+                if(unifiedFilename.isEmpty() || !SPIFFS.exists(unifiedFilename.c_str())) {
+                    if constexpr(RF_DEBUG_LEVEL > 0)
+                    Serial.printf("❌ Unified forest file not found: %s\n", unifiedFilename.c_str());
+                    return false;
+                }
+                
+                // Load from unified file (optimized format)
+                File file = SPIFFS.open(unifiedFilename.c_str(), FILE_READ);
+                if(!file) {
+                    if constexpr(RF_DEBUG_LEVEL > 0)
+                    Serial.printf("❌ Failed to open unified forest file: %s\n", unifiedFilename.c_str());
+                    return false;
+                }
+                
+                // Read forest header with error checking
+                uint32_t magic;
+                if(file.read((uint8_t*)&magic, sizeof(magic)) != sizeof(magic)) {
+                    if constexpr(RF_DEBUG_LEVEL > 0)
+                    Serial.println("❌ Failed to read magic number");
+                    file.close();
+                    return false;
+                }
+                
+                if(magic != 0x464F5253) { // "FORS" 
+                    if constexpr(RF_DEBUG_LEVEL > 0)
+                    Serial.println("❌ Invalid forest file format");
+                    file.close();
+                    return false;
+                }
+                
+                uint8_t treeCount;
+                if(file.read((uint8_t*)&treeCount, sizeof(treeCount)) != sizeof(treeCount)) {
+                    if constexpr(RF_DEBUG_LEVEL > 0)
+                    Serial.println("❌ Failed to read tree count");
+                    file.close();
+                    return false;
+                }
+                
+                if constexpr(RF_DEBUG_LEVEL > 1)
+                Serial.printf("Loading %d trees from unified forest file...\n", treeCount);
+                
+                // Read all trees with comprehensive error checking
+                uint8_t successfullyLoaded = 0;
+                for(uint8_t i = 0; i < treeCount; i++) {
+                    // Memory check during loading
+                    if(ESP.getFreeHeap() < 10000) { // 10KB safety buffer
+                        if constexpr(RF_DEBUG_LEVEL > 1)
+                        Serial.printf("❌ Insufficient memory during tree loading (have %d bytes)\n", ESP.getFreeHeap());
+                        break;
+                    }
+                    
+                    uint8_t treeIndex;
+                    if(file.read((uint8_t*)&treeIndex, sizeof(treeIndex)) != sizeof(treeIndex)) {
+                        if constexpr(RF_DEBUG_LEVEL > 1)
+                        Serial.printf("❌ Failed to read tree index for tree %d\n", i);
+                        break;
+                    }
+                    
+                    uint32_t nodeCount;
+                    if(file.read((uint8_t*)&nodeCount, sizeof(nodeCount)) != sizeof(nodeCount)) {
+                        if constexpr(RF_DEBUG_LEVEL > 1)
+                        Serial.printf("❌ Failed to read node count for tree %d\n", treeIndex);
+                        break;
+                    }
+                    
+                    // Validate node count
+                    if(nodeCount == 0 || nodeCount > 2047) {
+                        if constexpr(RF_DEBUG_LEVEL > 1)
+                        Serial.printf("❌ Invalid node count %d for tree %d\n", nodeCount, treeIndex);
+                        // Skip this tree's data
+                        file.seek(file.position() + nodeCount * sizeof(uint32_t));
+                        continue;
+                    }
+                    
+                    // Find the corresponding tree in trees vector
+                    bool treeFound = false;
+                    for(size_t treeIdx = 0; treeIdx < trees.size(); treeIdx++) {
+                        auto& tree = trees[treeIdx];
+                        if(tree.index == treeIndex) {
+                            // Memory check before loading this tree
+                            size_t requiredMemory = nodeCount * sizeof(Tree_node);
+                            if(ESP.getFreeHeap() < requiredMemory + 5000) { // 5KB safety buffer per tree
+                                if constexpr(RF_DEBUG_LEVEL > 1)
+                                Serial.printf("❌ Insufficient memory to load tree %d (need %d bytes, have %d)\n", 
+                                            treeIndex, requiredMemory, ESP.getFreeHeap());
+                                file.close();
+                                return false;
+                            }
+                            
+                            tree.nodes.clear();
+                            tree.nodes.reserve(nodeCount);
+                            
+                            // Read all nodes for this tree with error checking
+                            bool nodeReadSuccess = true;
+                            for(uint32_t j = 0; j < nodeCount; j++) {
+                                Tree_node node;
+                                if(file.read((uint8_t*)&node.packed_data, sizeof(node.packed_data)) != sizeof(node.packed_data)) {
+                                    if constexpr(RF_DEBUG_LEVEL > 1)
+                                    Serial.printf("❌ Failed to read node %d for tree %d\n", j, treeIndex);
+                                    nodeReadSuccess = false;
+                                    break;
+                                }
+                                tree.nodes.push_back(node);
+                            }
+                            
+                            if(nodeReadSuccess) {
+                                tree.nodes.fit();
+                                tree.isLoaded = true;
+                                successfullyLoaded++;
+                                
+                                // Update metadata vectors with actual values after loading
+                                total_depths += tree.getTreeDepth();
+                                total_nodes += tree.countNodes();
+                                total_leaves += tree.countLeafNodes();
+                            } else {
+                                // Clean up failed tree
+                                tree.nodes.clear();
+                                tree.nodes.fit();
+                                tree.isLoaded = false;
+                            }
+                            treeFound = true;
+                            break;
+                        }
+                    }
+                    
+                    if(!treeFound) {
+                        if constexpr(RF_DEBUG_LEVEL > 1)
+                        Serial.printf("⚠️ Tree %d not found in forest structure, skipping\n", treeIndex);
+                        // Skip the node data for this tree
+                        file.seek(file.position() + nodeCount * sizeof(uint32_t));
+                    }
+                }
+                
+                file.close();
+                return check_valid_after_load();
+            }
 
-            // Release forest from RAM into SPIFFS (optimized single-file approach)
-            bool releaseForest(){
-                if(!is_loaded) {
+            // Load forest from individual tree files (used during training)
+            bool loadForestIndividual() {
+                if constexpr(RF_DEBUG_LEVEL > 2)
+                Serial.println("📁 Loading from individual tree files...");
+                
+                uint8_t successfullyLoaded = 0;
+                for (auto& tree : trees) {
+                    if (!tree.isLoaded) {
+                        try {
+                            tree.loadTree(base_ptr->get_model_name());
+                            if(tree.isLoaded) successfullyLoaded++;
+                        } catch (...) {
+                            if constexpr(RF_DEBUG_LEVEL > 1)
+                            Serial.printf("❌ Exception loading tree %d\n", tree.index);
+                            tree.isLoaded = false;
+                        }
+                    }
+                }
+                return check_valid_after_load();
+            }
+
+        public:
+            // Release forest to unified format (single file containing all trees)
+            bool releaseForest() {
+                if(!is_loaded || trees.empty()) {
                     if constexpr (RF_DEBUG_LEVEL > 1) 
                         Serial.println("✅ Forest is not loaded in memory, nothing to release.");
                     return false;
                 }
-                if(logger_ptr) logger_ptr->m_log("before release forest");
+                if(has_base()) {
+                    // Forest release is allowed - no training check needed
+                }
                 
                 // Count loaded trees
                 uint8_t loadedCount = 0;
@@ -4704,7 +4789,7 @@ namespace mcu {
                 }
                 
                 // Single file approach - write all trees to unified forest file
-                String unifiedFilename = base_ptr ? base_ptr->get_unifiedModelFile() : "";
+                String unifiedFilename = base_ptr->get_forest_file();
                 if(unifiedFilename.isEmpty()) {
                     if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.println("❌ Cannot release forest: no base reference for file management");
@@ -4737,7 +4822,6 @@ namespace mcu {
                     return false;
                 }
                 
-                unsigned long writeStart = GET_CURRENT_TIME_IN_MILLISECONDS;
                 size_t totalBytes = 0;
                 
                 // Write all trees in sequence with error checking
@@ -4807,13 +4891,77 @@ namespace mcu {
                 }
                 
                 is_loaded = false;
-                if(logger_ptr) logger_ptr->m_log("after release forest",  false, true);
+                is_unified = true; // forest always in unified form after first time release
                 
                 unsigned long end = GET_CURRENT_TIME_IN_MILLISECONDS;
                 if constexpr(RF_DEBUG_LEVEL > 1)
-                Serial.printf("✅ Released %d trees to unified format (%d bytes) in %lu ms \n", 
+                Serial.printf("✅ Released %d trees to unified format (%d bytes) in %lu ms\n", 
                             clearedCount, totalBytes, end - fileStart);
                 return true;
+            }
+
+            public:
+            Rf_tree& operator[](uint8_t index){
+                return trees[index];
+            }
+
+            size_t get_total_nodes() const {
+                return total_nodes;
+            }
+
+            size_t get_total_leaves() const {
+                return total_leaves;
+            }
+
+            float avg_depth() const {
+                return static_cast<float>(total_depths) / config_ptr->num_trees;
+            }
+
+            float avg_nodes() const {
+                return static_cast<float>(total_nodes) / config_ptr->num_trees;
+            }
+
+            float avg_leaves() const {
+                return static_cast<float>(total_leaves) / config_ptr->num_trees;
+            }
+
+            // Get the number of trees
+            size_t size() const {
+                if(config_ptr){
+                    return config_ptr->num_trees;
+                }else{
+                    return trees.size();
+                }
+            }
+
+            // Check if container is empty
+            bool empty() const {
+                return trees.empty();
+            }
+
+            // Get queue_nodes for tree building
+            b_vector<NodeToBuild>& getQueueNodes() {
+                return queue_nodes;
+            }
+
+            void set_to_unified_form() {
+                is_unified = true;
+            }
+
+            void set_to_individual_form() {
+                is_unified = false;
+            }
+
+            // Get the maximum depth among all trees
+            uint16_t max_depth_tree() const {
+                uint16_t maxDepth = 0;
+                for (const auto& tree : trees) {
+                    uint16_t depth = tree.getTreeDepth();
+                    if (depth > maxDepth) {
+                        maxDepth = depth;
+                    }
+                }
+                return maxDepth;
             }
     };
 
@@ -4834,24 +4982,42 @@ namespace mcu {
         long unsigned last_time_received_actual_label;   
         bool first_label_received = false; // flag to indicate if the first actual label has been received 
 
+        Rf_base* base_ptr = nullptr; // pointer to base data, used for auto-flush
+        Rf_config* config_ptr = nullptr; // pointer to config, used for auto-flush
+
+        inline bool ptr_ready() const {
+            return base_ptr != nullptr && config_ptr != nullptr && base_ptr->ready_to_use();
+        }
+
         public:
         Rf_pending_data() {
+            init(nullptr, nullptr);
+        }
+        // destructor
+        ~Rf_pending_data() {
+            base_ptr = nullptr;
+            config_ptr = nullptr;
             buffer.clear();
             actual_labels.clear();
-            max_pending_samples = 100; // default max pending samples
-            // max_wait_time disabled by default (very large value)
+        }
+
+        void init(Rf_base* base, Rf_config* config){
+            base_ptr = base;
+            config_ptr = config;
+            buffer.clear();
+            actual_labels.clear();
+            set_max_pending_samples(100);
             max_wait_time = 2147483647; // ~24 days
         }
 
         // add pending sample to buffer, including the label predicted by the model
-        void add_pending_sample(const Rf_sample& sample, Rf_data& base_data, Rf_config* config_ptr = nullptr, const char* infer_log_file = nullptr){
+        void add_pending_sample(const Rf_sample& sample, Rf_data& base_data){
             buffer.push_back(sample);
             if(buffer.size() > max_pending_samples){
                 // Auto-flush if parameters are provided
-                if(config_ptr && infer_log_file) {
-                    flush_pending_data(base_data, *config_ptr, infer_log_file);
+                if(ptr_ready()){
+                    flush_pending_data(base_data);
                 } else {
-                    // Otherwise just clear buffers to prevent memory overflow
                     buffer.clear();
                     actual_labels.clear();
                 }
@@ -4882,10 +5048,15 @@ namespace mcu {
         }
 
         // write valid samples (with 0 < actual_label < 255) to base_data file
-        bool write_to_base_data(Rf_data& base_data, Rf_config& config){
+        bool write_to_base_data(Rf_data& base_data){
             if(buffer.empty()) {
                 if constexpr (RF_DEBUG_LEVEL >= 1)
                 Serial.println("⚠️ No pending samples to write to base data");
+                return false;
+            }
+            if (!ptr_ready()) {
+                if constexpr (RF_DEBUG_LEVEL >= 1)
+                Serial.println("❌ Base or config pointer not set or base data not ready");
                 return false;
             }
             // first scan 
@@ -4903,24 +5074,24 @@ namespace mcu {
                 return false; // No valid samples to add
             }
 
-            auto deleted_labels = base_data.addNewData(valid_samples, config.extend_base_data);
+            auto deleted_labels = base_data.addNewData(valid_samples, config_ptr->extend_base_data);
 
             // update config 
-            if(config.extend_base_data) {
-                config.num_samples += valid_samples_count;
-                if(config.num_samples > MAX_NUM_SAMPLES) 
-                    config.num_samples = MAX_NUM_SAMPLES;
+            if(config_ptr->extend_base_data) {
+                config_ptr->num_samples += valid_samples_count;
+                if(config_ptr->num_samples > MAX_NUM_SAMPLES) 
+                    config_ptr->num_samples = MAX_NUM_SAMPLES;
             }
 
             for(uint16_t i = 0; i < buffer.size() && i < actual_labels.size(); i++) {
                 if(actual_labels[i] < 255) { // Valid actual label provided
-                    config.samples_per_label[actual_labels[i]]++;
+                    config_ptr->samples_per_label[actual_labels[i]]++;
                 }
             }
 
             for(auto& lbl : deleted_labels) {
-                if(lbl < 255 && lbl < config.num_labels && config.samples_per_label[lbl] > 0) {
-                    config.samples_per_label[lbl]--;
+                if(lbl < 255 && lbl < config_ptr->num_labels && config_ptr->samples_per_label[lbl] > 0) {
+                    config_ptr->samples_per_label[lbl]--;
                 }
             }
 
@@ -4932,16 +5103,21 @@ namespace mcu {
 
         // Write prediction which given actual label (0 < actual_label < 255) to the inference log file
         // New format: magic (4 bytes) + prediction_count (4 bytes) + pairs of (predicted_label, actual_label) as uint8_t each
-        void write_to_infer_log(const char* infer_log_file, int num_labels){
-            if(buffer.empty()) return;
-            
+        bool write_to_infer_log(){
+            if(buffer.empty()) return false;
+            if(!ptr_ready()){
+                if constexpr (RF_DEBUG_LEVEL >= 1)
+                Serial.println("❌ Base or config pointer not set or base data not ready");
+                return false;
+            }
             // Check if file exists to determine if header needs to be written
-            bool file_exists = SPIFFS.exists(infer_log_file);
+            String infer_log_file = base_ptr->get_infer_log_file();
+            bool file_exists = SPIFFS.exists(infer_log_file.c_str());
             uint32_t current_prediction_count = 0;
             
             // If file exists, read current prediction count from header
             if(file_exists) {
-                File read_file = SPIFFS.open(infer_log_file, FILE_READ);
+                File read_file = SPIFFS.open(infer_log_file.c_str(), FILE_READ);
                 if(read_file && read_file.size() >= 8) {
                     uint8_t magic_bytes[4];
                     read_file.read(magic_bytes, 4);
@@ -4954,11 +5130,11 @@ namespace mcu {
                 read_file.close();
             }
             
-            File file = SPIFFS.open(infer_log_file, file_exists ? FILE_APPEND : FILE_WRITE);
+            File file = SPIFFS.open(infer_log_file.c_str(), file_exists ? FILE_APPEND : FILE_WRITE);
             if(!file) {
                 if constexpr (RF_DEBUG_LEVEL > 0)
-                Serial.printf("❌ Failed to open inference log file: %s\n", infer_log_file);
-                return;
+                Serial.printf("❌ Failed to open inference log file: %s\n", infer_log_file.c_str());
+                return false;
             }
             
             // Write header if new file
@@ -5014,7 +5190,7 @@ namespace mcu {
                 file.close();
                 
                 // Update prediction count in header - read entire file and rewrite
-                File read_file = SPIFFS.open(infer_log_file, FILE_READ);
+                File read_file = SPIFFS.open(infer_log_file.c_str(), FILE_READ);
                 if(read_file) {
                     size_t file_size = read_file.size();
                     b_vector<uint8_t> file_data(file_size);
@@ -5026,7 +5202,7 @@ namespace mcu {
                     memcpy(&file_data[4], &updated_count, 4);
                     
                     // Write back the entire file
-                    File write_file = SPIFFS.open(infer_log_file, FILE_WRITE);
+                    File write_file = SPIFFS.open(infer_log_file.c_str(), FILE_WRITE);
                     if(write_file) {
                         write_file.write(file_data.data(), file_data.size());
                         write_file.flush();
@@ -5041,27 +5217,38 @@ namespace mcu {
             } else {
                 file.close();
             }
-            
             // Trim file if it exceeds max size
-            trim_log_file(infer_log_file);
+            return trim_log_file(infer_log_file.c_str());
         }
 
+        // Public method to flush pending data when buffer is full or on demand
+        void flush_pending_data(Rf_data& base_data) {
+            if(buffer.empty()) return;
+            
+            write_to_base_data(base_data);
+            write_to_infer_log();
+            
+            // Clear buffers after processing
+            buffer.clear();
+            actual_labels.clear();
+        }
+
+    private:
         // trim log file if it exceeds max size (MAX_INFER_LOGFILE_SIZE)
-        // New format: magic (4 bytes) + prediction_count (4 bytes) + pairs of (predicted_label, actual_label)
-        void trim_log_file(const char* infer_log_file) {
-            if(!SPIFFS.exists(infer_log_file)) return;
+        bool trim_log_file(const char* infer_log_file) {
+            if(!SPIFFS.exists(infer_log_file)) return false;
             
             File file = SPIFFS.open(infer_log_file, FILE_READ);
-            if(!file) return;
+            if(!file) return false;
             
             size_t file_size = file.size();
             file.close();
             
-            if(file_size <= MAX_INFER_LOGFILE_SIZE) return;
+            if(file_size <= MAX_INFER_LOGFILE_SIZE) return true; // No trimming needed;
             
             // File is too large, trim from the beginning (keep most recent data)
             file = SPIFFS.open(infer_log_file, FILE_READ);
-            if(!file) return;
+            if(!file) return false;
             
             // Read and verify header
             uint8_t magic_bytes[4];
@@ -5073,14 +5260,14 @@ namespace mcu {
                 file.close();
                 if constexpr (RF_DEBUG_LEVEL > 1)
                 Serial.printf("❌ Invalid magic number in infer log file: %s\n", infer_log_file);
-                return;
+                return false;
             }
             
             if(file.read((uint8_t*)&total_predictions, 4) != 4) {
                 file.close();
                 if constexpr (RF_DEBUG_LEVEL > 1)
                 Serial.printf("❌ Failed to read prediction count from infer log file: %s\n", infer_log_file);
-                return;
+                return false;
             }
             
             size_t header_size = 8; // magic (4) + prediction_count (4)
@@ -5093,7 +5280,7 @@ namespace mcu {
             
             if(prediction_pairs_count <= max_pairs_to_keep) {
                 file.close();
-                return; // No trimming needed
+                return true; // No trimming needed
             }
             
             // Keep the most recent prediction pairs
@@ -5114,7 +5301,7 @@ namespace mcu {
                 if constexpr (RF_DEBUG_LEVEL > 1)
                 Serial.printf("❌ Failed to read remaining data: read %d bytes instead of %d\n", 
                              bytes_read, remaining_data_size);
-                return;
+                return false;
             }
             
             // Rewrite file with header and trimmed data
@@ -5122,7 +5309,7 @@ namespace mcu {
             if(!file) {
                 if constexpr (RF_DEBUG_LEVEL > 1)
                 Serial.printf("❌ Failed to reopen log file for writing: %s\n", infer_log_file);
-                return;
+                return false;
             }
             
             // Write header with updated prediction count
@@ -5139,21 +5326,269 @@ namespace mcu {
                 Serial.printf("✅ Trimmed log file: %u -> %u predictions (removed %u oldest)\n", 
                              total_predictions, new_prediction_count, pairs_to_skip);
             }
-        }
-
-        // Public method to flush pending data when buffer is full or on demand
-        void flush_pending_data(Rf_data& base_data, Rf_config& config, const char* infer_log_file) {
-            if(buffer.empty()) return;
-            
-            write_to_base_data(base_data, config);
-            write_to_infer_log(infer_log_file, config.num_labels);
-            
-            // Clear buffers after processing
-            buffer.clear();
-            actual_labels.clear();
+            return true;
         }
 
     };
 
+    /*
+    ------------------------------------------------------------------------------------------------------------------
+    ------------------------------------------------ RF_LOGGER -------------------------------------------------------
+    ------------------------------------------------------------------------------------------------------------------
+    */
+
+    typedef struct time_anchor{
+        long unsigned anchor_time;
+        uint16_t index;
+    };
+
+    class Rf_logger {
+        Rf_base* base_ptr = nullptr; // pointer to base data, used for file names
+        bool has_base() const {
+            return base_ptr != nullptr && base_ptr->ready_to_use();
+        }   
+    public:
+        uint32_t freeHeap;
+        uint32_t largestBlock;
+        long unsigned starting_time;
+        uint8_t fragmentation;
+        uint32_t lowest_ram;
+        uint32_t lowest_rom; 
+        uint32_t freeDisk;
+        float log_time;
+        mcu::b_vector<time_anchor> time_anchors;
+    
+    public:
+        Rf_logger() : freeHeap(0), largestBlock(0), starting_time(0), fragmentation(0), log_time(0.0f) {
+        }
+
+        Rf_logger(Rf_base* base, bool keep_old_file = false) : freeHeap(0), largestBlock(0), starting_time(0), fragmentation(0), log_time(0.0f) {
+            init(base, keep_old_file);
+        }
+
+        ~Rf_logger(){
+            base_ptr = nullptr;
+            time_anchors.clear();
+        }
+        
+        void init(Rf_base* base, bool keep_old_file = false){
+            if constexpr(RF_DEBUG_LEVEL > 1)
+            Serial.println("🔧 Initializing logger");
+
+            base_ptr = base;
+            time_anchors.clear();
+            starting_time = GET_CURRENT_TIME_IN_MILLISECONDS;
+            drop_anchor(); // initial anchor at index 0
+
+            lowest_ram = UINT32_MAX;
+            lowest_rom = UINT32_MAX;
+
+            String time_log_file = base_ptr->get_time_log_file();
+            String memory_log_file = base_ptr->get_memory_log_file();
+            if(!keep_old_file){
+                if(SPIFFS.exists(time_log_file.c_str())){
+                    SPIFFS.remove(time_log_file.c_str()); 
+                }
+                // write header to time log file
+                File logFile = SPIFFS.open(time_log_file.c_str(), FILE_WRITE);
+                if (logFile) {
+                    logFile.println("Event,\t\tTime(ms),duration,Unit");
+                    logFile.close();
+                }
+            }
+            t_log("init tracker"); // Initial log without printing
+
+            if(!keep_old_file){                
+                // clear SPIFFS log file if it exists
+                if(SPIFFS.exists(memory_log_file.c_str())){
+                    SPIFFS.remove(memory_log_file.c_str()); 
+                }
+                // write header to log file
+                File logFile = SPIFFS.open(memory_log_file.c_str(), FILE_WRITE);
+                if (logFile) {
+                    logFile.println("Time(s),FreeHeap,Largest_Block,FreeDisk");
+                    logFile.close();
+                } 
+            }
+            m_log("init tracker", false, true); // Initial log without printing
+        }
+
+        void m_log(const char* msg, bool print = true, bool log = true){
+            freeHeap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+            freeDisk = SPIFFS.totalBytes() - SPIFFS.usedBytes();
+
+            if(freeHeap < lowest_ram) lowest_ram = freeHeap;
+            if(freeDisk < lowest_rom) lowest_rom = freeDisk;
+
+            largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+            fragmentation = 100 - (largestBlock * 100 / freeHeap);
+            if(print){       
+                if(msg && strlen(msg) > 0){
+                    Serial.print("📋 ");
+                    Serial.println(msg);
+                }
+                if constexpr(RF_DEBUG_LEVEL > 1) {
+                    Serial.print("--> RAM LEFT (heap): ");
+                    Serial.println(freeHeap);
+                    // Serial.print("Largest Free Block: ");
+                    // Serial.println(largestBlock);
+                    // Serial.printf("Fragmentation: %d", fragmentation);
+                    // Serial.println("%");
+                }
+            }
+
+            // Log to file with timestamp
+            if(log) {        
+                log_time = (GET_CURRENT_TIME_IN_MILLISECONDS - starting_time)/1000.0f; 
+                if(has_base()){
+                    String memory_log_file = base_ptr->get_memory_log_file();
+                    File logFile = SPIFFS.open(memory_log_file.c_str(), FILE_APPEND);
+                    if (logFile) {
+                        logFile.printf("%.2f,\t%u,\t%u,\t%u",
+                                        log_time, freeHeap, largestBlock, freeDisk);
+                        if(msg && strlen(msg) > 0){
+                            logFile.printf(",\t%s\n", msg);
+                        } else {
+                            logFile.println();
+                        }
+                        logFile.close();
+                    }
+                }else{
+                    if constexpr(RF_DEBUG_LEVEL > 2)
+                    Serial.println("❌ Unable to log: base_ptr is null or not ready");
+                }
+            }
+        }
+
+        // fast log : just for measure and update : lowest ram and fragmentation
+        void m_log(){
+            m_log("", false, false);
+        }
+        uint16_t drop_anchor(){
+            time_anchor anchor;
+            anchor.anchor_time = GET_CURRENT_TIME_IN_MILLISECONDS;
+            anchor.index = time_anchors.size();
+            time_anchors.push_back(anchor);
+            return anchor.index;
+        }
+
+        uint16_t current_anchor() const {
+            return time_anchors.size() > 0 ? time_anchors.back().index : 0;
+        }
+
+        size_t memory_usage() const {
+            size_t total = sizeof(Rf_logger);
+            return total;
+        }
+
+        // for durtion measurement between two anchors
+        void t_log(const char* msg, size_t begin_anchor_index, size_t end_anchor_idex, const char* unit = "ms" , bool print = true){
+            float ratio = 1;  // default to ms 
+            if(strcmp(unit, "s") == 0 || strcmp(unit, "second") == 0) ratio = 1000.0f;
+            else if(strcmp(unit, "us") == 0 || strcmp(unit, "microsecond") == 0) ratio = 0.001f;
+
+            if(time_anchors.size() == 0) return; // no anchors set
+            if(begin_anchor_index >= time_anchors.size() || end_anchor_idex >= time_anchors.size()) return; // invalid index
+            if(end_anchor_idex <= begin_anchor_index) {
+                std::swap(begin_anchor_index, end_anchor_idex);
+            }
+
+            long unsigned begin_time = time_anchors[begin_anchor_index].anchor_time;
+            long unsigned end_time = time_anchors[end_anchor_idex].anchor_time;
+            float elapsed = (end_time - begin_time)/ratio;
+            if(print){
+                if constexpr(RF_DEBUG_LEVEL >= 1) {         
+                    if(msg && strlen(msg) > 0){
+                        Serial.print("⏱️  ");
+                        Serial.print(msg);
+                        Serial.print(": ");
+                    } else {
+                        Serial.print("⏱️  unknown event: ");
+                    }
+                    Serial.print(elapsed);
+                    Serial.println(unit);
+                }
+            }
+            // Log to file with timestamp      
+            if(has_base()){
+                String time_log_file = base_ptr->get_time_log_file(); 
+                File logFile = SPIFFS.open(time_log_file.c_str(), FILE_APPEND);
+                if (logFile) {
+                    if(msg && strlen(msg) > 0){
+                        logFile.printf("%s,\t%.1f,\t%.2f,\t%s\n", msg, begin_time/1000.0f, elapsed, unit);     // time always in s
+                    } else {
+                        if(ratio > 1.1f)
+                            logFile.printf("unknown event,\t%.1f,\t%.2f,\t%s\n", begin_time/1000.0f, elapsed, unit); 
+                        else 
+                            logFile.printf("unknown event,\t%.1f,\t%lu,\t%s\n", begin_time/1000.0f, (long unsigned)elapsed, unit);
+                    }
+                    logFile.close();
+                }
+            }else{
+                if constexpr(RF_DEBUG_LEVEL > 2)
+                Serial.println("❌ Unable to log: base_ptr is null or not ready");
+            }
+            time_anchors[end_anchor_idex].anchor_time = GET_CURRENT_TIME_IN_MILLISECONDS; // reset end anchor to current time
+        }
+    
+        /**
+         * @brief for duration measurement from an anchor to now
+         * @param msg name of the event
+         * @param begin_anchor_index index of the begin anchor
+         * @param unit time unit, "ms" (default), "s", "us" 
+         * @param print whether to print to Serial, will be disabled if RF_DEBUG_LEVEL <= 1
+         * @note : this action will create a new anchor at the current time
+         */
+        void t_log(const char* msg, size_t begin_anchor_index, const char* unit = "ms" , bool print = true){
+            time_anchor end_anchor;
+            end_anchor.anchor_time = GET_CURRENT_TIME_IN_MILLISECONDS;
+            end_anchor.index = time_anchors.size();
+            time_anchors.push_back(end_anchor);
+            t_log(msg, begin_anchor_index, end_anchor.index, unit, print);
+        }
+
+        /**
+         * @brief log time from starting point to now
+         * @param msg name of the event
+         * @param print whether to print to Serial, will be disabled if RF_DEBUG_LEVEL <= 1
+         * @note : this action will NOT create a new anchor
+         */
+        void t_log(const char* msg, bool print = true){
+            long unsigned current_time = GET_CURRENT_TIME_IN_MILLISECONDS - starting_time;
+            if(print){
+                if constexpr(RF_DEBUG_LEVEL > 1) {         
+                    if(msg && strlen(msg) > 0){
+                        Serial.print("⏱️  ");
+                        Serial.print(msg);
+                        Serial.print(": ");
+                    } else {
+                        Serial.print("⏱️  unknown event: ");
+                    }
+                    Serial.print(current_time);       // timeline always in ms
+                    Serial.println("ms");
+                }
+            }
+            // Log to file with timestamp
+
+            if(has_base()){
+                String time_log_file = base_ptr->get_time_log_file();     
+                File logFile = SPIFFS.open(time_log_file.c_str(), FILE_APPEND);
+                if (logFile) {
+                    if(msg && strlen(msg) > 0){
+                        logFile.printf("%s,\t%.1f,\t_,\tms\n", msg, current_time/1000.0f); // time always in s
+                    } else {
+                        logFile.printf("unknown event,\t%.1f,\t_,\tms\n", current_time/1000.0f); // time always in s
+                    }
+                    logFile.close();
+                }else{
+                    if constexpr(RF_DEBUG_LEVEL > 0)
+                    Serial.printf("❌ Failed to open time log file: %s\n", time_log_file.c_str());
+                }
+            }else{
+                if constexpr(RF_DEBUG_LEVEL > 2)
+                Serial.println("❌ Unable to log: base_ptr is null or not ready");
+            }
+        }
+    };
 
 } // namespace mcu

@@ -129,8 +129,8 @@ The override system allows you to control automatic parameter optimization with 
 ##### Status Modes:
 - **`"disabled"`** - Use automatic parameter optimization (recommended)
 - **`"enabled"`** - Override with fixed user value (for min_split, max_depth, unity_threshold, combine_ratio)
-- **`"overwrite"`** - Replace automatic values completely (for train_flag)
-- **`"stacked"`** - Combine user values with automatic detection (for train_flag)
+- **`"overwrite"`** - Replace automatic values completely (for metric_score)
+- **`"stacked"`** - Combine user values with automatic detection (for metric_score)
 
 ##### Override Parameters:
 
@@ -139,7 +139,7 @@ The override system allows you to control automatic parameter optimization with 
 | `min_split` | disabled, enabled | Minimum samples required to split a node |
 | `max_depth` | disabled, enabled | Maximum tree depth |
 | `unity_threshold` | disabled, enabled | Consensus threshold for tree decisions |
-| `train_flag` | disabled, overwrite, stacked | Training optimization flags |
+| `metric_score` | disabled, overwrite, stacked | Training optimization flags |
 
 ##### Training Flags System
 
@@ -155,7 +155,7 @@ Training flags specify which metrics to optimize during model training:
 
 1. **Disabled Mode** (`"status": "disabled"`):
    ```json
-   "train_flag": {
+   "metric_score": {
        "value": "ACCURACY",
        "status": "disabled"
    }
@@ -166,7 +166,7 @@ Training flags specify which metrics to optimize during model training:
 
 2. **Overwrite Mode** (`"status": "overwrite"`):
    ```json
-   "train_flag": {
+   "metric_score": {
        "value": "PRECISION",
        "status": "overwrite"
    }
@@ -177,7 +177,7 @@ Training flags specify which metrics to optimize during model training:
 
 3. **Stacked Mode** (`"status": "stacked"`):
    ```json
-   "train_flag": {
+   "metric_score": {
        "value": "ACCURACY",
        "status": "stacked"
    }
@@ -198,7 +198,7 @@ Training flags specify which metrics to optimize during model training:
     },
     "training_score": {"value": "k-fold_score"},
     "k_folds": {"value": 5},
-    "train_flag": {
+    "metric_score": {
         "value": "F1_SCORE",
         "status": "stacked"
     }
@@ -215,7 +215,7 @@ Training flags specify which metrics to optimize during model training:
         "valid_ratio": 0.15
     },
     "training_score": {"value": "valid_score"},
-    "train_flag": {
+    "metric_score": {
         "value": "ACCURACY",
         "status": "disabled"
     }
@@ -260,7 +260,7 @@ Training flags specify which metrics to optimize during model training:
   - `oob_score` for quick training
   - `valid_score` for large datasets
   - `k-fold_score` for robust evaluation
-- **Tune `train_flag`**: Match optimization target to your use case
+- **Tune `metric_score`**: Match optimization target to your use case
 - **Balanced split ratios**: Use 70/15/15 for validation or 75/25/0 for OOB evaluation
 
 ### Training Speed
@@ -407,7 +407,7 @@ If you're upgrading from the previous version, update your `model_config.json`:
    - Disable `use_bootstrap`
 
 4. **Poor Model Performance:**
-   - Check dataset balance and adjust `train_flag` accordingly
+   - Check dataset balance and adjust `metric_score` accordingly
    - Increase `num_trees` if memory allows
    - Verify data quality and normalization
    - Ensure split ratios are appropriate for your dataset size

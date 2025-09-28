@@ -610,7 +610,7 @@ public:
         }
         
         return mostPredict;
-    }
+    } 
 
     // Enhanced OOB evaluation with better statistics and reliability checks
     pair<float,float> get_training_evaluation_index(Rf_data& validation_data){
@@ -756,14 +756,14 @@ public:
         float valid_result = 0.0f;
         float combined_oob_result = 0.0f;
         float combined_valid_result = 0.0f;
-        uint16_t training_flag = static_cast<uint16_t>(config.training_flag);
+        uint16_t metric_score = static_cast<uint16_t>(config.metric_score);
         uint16_t numFlags = 0;
         
         if(oob_total == 0){
             return make_pair(0.0f, 0.0f);
         }
         
-        if(training_flag & ACCURACY){
+        if(metric_score & ACCURACY){
             oob_result = static_cast<float>(oob_correct) / oob_total;
             valid_result = (valid_total > 0) ? static_cast<float>(valid_correct) / valid_total : 0.0f;
             combined_oob_result += oob_result;
@@ -771,7 +771,7 @@ public:
             numFlags++;
         }
             
-        if(training_flag & PRECISION){
+        if(metric_score & PRECISION){
             float oob_totalPrecision = 0.0f, valid_totalPrecision = 0.0f;
             uint16_t oob_validLabels = 0, valid_validLabels = 0;
             for(uint16_t label = 0; label < config.num_labels; label++){
@@ -795,7 +795,7 @@ public:
             numFlags++;
         }
             
-        if(training_flag & RECALL){
+        if(metric_score & RECALL){
             float oob_totalRecall = 0.0f, valid_totalRecall = 0.0f;
             uint16_t oob_validLabels = 0, valid_validLabels = 0;
             for(uint16_t label = 0; label < config.num_labels; label++){
@@ -820,7 +820,7 @@ public:
             numFlags++;
         }
             
-        if(training_flag & F1_SCORE) {
+        if(metric_score & F1_SCORE) {
             float oob_totalF1 = 0.0f, valid_totalF1 = 0.0f;
             uint16_t oob_validLabels = 0, valid_validLabels = 0;
             for(uint16_t label = 0; label < config.num_labels; label++){
@@ -975,7 +975,7 @@ public:
             }
             
             // Evaluate on cv_test_data using the specified training flag
-            float fold_score = predict(cv_test_data, config.training_flag);
+            float fold_score = predict(cv_test_data, config.metric_score);
             total_cv_score += fold_score;
             valid_folds++;
         }
@@ -1371,7 +1371,7 @@ public:
     }
 
     // get prediction score based on training flags
-    float predict(Rf_data& data, Rf_training_flags flags) {
+    float predict(Rf_data& data, Rf_metric_scores flags) {
         auto metrics = predict(data);
 
         float combined_score = 0.0f;
@@ -1484,7 +1484,7 @@ int main() {
     avgAccuracy /= accuracies.size();
     std::cout << "Avg: " << avgAccuracy << "\n";
 
-    float result_score = forest.predict(forest.test_data, static_cast<Rf_training_flags>(forest.config.training_flag));
+    float result_score = forest.predict(forest.test_data, static_cast<Rf_metric_scores>(forest.config.metric_score));
     forest.config.result_score = result_score;
     forest.saveConfig();
     std::cout << "result score: " << result_score << "\n";

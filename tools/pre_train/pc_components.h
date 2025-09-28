@@ -371,12 +371,12 @@ public:
     }
 };
 
-typedef enum Rf_training_flags : uint16_t{
+typedef enum Rf_metric_scores : uint16_t{
     ACCURACY    = 0x01,          // calculate accuracy of the model
     PRECISION   = 0x02,          // calculate precision of the model
     RECALL      = 0x04,            // calculate recall of the model
     F1_SCORE    = 0x08          // calculate F1 score of the model
-}Rf_training_flags;
+}Rf_metric_scores;
 
 // Helper functions to convert between flag enum and string representation
 std::string flagsToString(uint16_t flags) {
@@ -431,9 +431,9 @@ struct Rf_config{
 
     b_vector<uint16_t> max_depth_range;      // for training
     b_vector<uint16_t> min_split_range;      // for training 
-    b_vector<bool> overwrite{4}; // min_split-> max_depth-> unity_threshold-> training_flag
+    b_vector<bool> overwrite{4}; // min_split-> max_depth-> unity_threshold-> metric_score
 
-    Rf_training_flags training_flag;
+    Rf_metric_scores metric_score;
     std::string data_path;
     
     // model configurations
@@ -711,7 +711,7 @@ public:
             return "";
         };
 
-        // Initialize overwrite vector: min_split, max_depth, unity_threshold, train_flag
+        // Initialize overwrite vector: min_split, max_depth, unity_threshold, metric_score
         overwrite.clear();
         for (int i = 0; i < 4; i++) {
             overwrite.push_back(false);
@@ -747,21 +747,21 @@ public:
             }
         }
 
-        // Check and extract train_flag
-        overwrite[3] = isParameterEnabled("train_flag");
+        // Check and extract metric_score
+        overwrite[3] = isParameterEnabled("metric_score");
         if (overwrite[3]) {
-            std::string value = extractParameterValue("train_flag");
+            std::string value = extractParameterValue("metric_score");
             if (!value.empty()) {
-                bool isStacked = isParameterStacked("train_flag");
+                bool isStacked = isParameterStacked("metric_score");
                 if (isStacked) {
                     // Stacked mode: combine with automatic flags (will be determined later)
                     uint16_t user_flags = stringToFlags(value);
-                    training_flag = static_cast<Rf_training_flags>(user_flags); // Temporarily store user flags
-                    std::cout << "⚙️  train_flag stacked mode enabled: " << flagsToString(user_flags) << " (will be combined with auto-detected flags)\n";
+                    metric_score = static_cast<Rf_metric_scores>(user_flags); // Temporarily store user flags
+                    std::cout << "⚙️  metric_score stacked mode enabled: " << flagsToString(user_flags) << " (will be combined with auto-detected flags)\n";
                 } else {
                     // Overwrite mode: replace automatic flags completely
-                    training_flag = static_cast<Rf_training_flags>(stringToFlags(value));
-                    std::cout << "⚙️  train_flag overwrite mode enabled: " << flagsToString(training_flag) << std::endl;
+                    metric_score = static_cast<Rf_metric_scores>(stringToFlags(value));
+                    std::cout << "⚙️  metric_score overwrite mode enabled: " << flagsToString(metric_score) << std::endl;
                 }
             }
         }
@@ -950,17 +950,17 @@ public:
             if (!overwrite[3]) {
                 // Apply automatic selection only if not overridden
                 if (maxImbalanceRatio > 10.0f) {
-                    training_flag = Rf_training_flags::RECALL;
-                    std::cout << "📉 Imbalanced dataset (ratio: " << maxImbalanceRatio << "). Setting trainFlag to RECALL.\n";
+                    metric_score = Rf_metric_scores::RECALL;
+                    std::cout << "📉 Imbalanced dataset (ratio: " << maxImbalanceRatio << "). Setting metric_score to RECALL.\n";
                 } else if (maxImbalanceRatio > 3.0f) {
-                    training_flag = Rf_training_flags::F1_SCORE;
-                    std::cout << "⚖️ Moderately imbalanced dataset (ratio: " << maxImbalanceRatio << "). Setting trainFlag to F1_SCORE.\n";
+                    metric_score = Rf_metric_scores::F1_SCORE;
+                    std::cout << "⚖️ Moderately imbalanced dataset (ratio: " << maxImbalanceRatio << "). Setting metric_score to F1_SCORE.\n";
                 } else if (maxImbalanceRatio > 1.5f) {
-                    training_flag = Rf_training_flags::PRECISION;
-                    std::cout << "🟨 Slight imbalance (ratio: " << maxImbalanceRatio << "). Setting trainFlag to PRECISION.\n";
+                    metric_score = Rf_metric_scores::PRECISION;
+                    std::cout << "🟨 Slight imbalance (ratio: " << maxImbalanceRatio << "). Setting metric_score to PRECISION.\n";
                 } else {
-                    training_flag = Rf_training_flags::ACCURACY;
-                    std::cout << "✅ Balanced dataset (ratio: " << maxImbalanceRatio << "). Setting trainFlag to ACCURACY.\n";
+                    metric_score = Rf_metric_scores::ACCURACY;
+                    std::cout << "✅ Balanced dataset (ratio: " << maxImbalanceRatio << "). Setting metric_score to ACCURACY.\n";
                 }
             } else {
                 // Check if it's stacked mode or overwrite mode
@@ -974,7 +974,7 @@ public:
                     }
                     check_file.close();
                     
-                    size_t pos = check_content.find("\"train_flag\"");
+                    size_t pos = check_content.find("\"metric_score\"");
                     if (pos != std::string::npos) {
                         size_t status_pos = check_content.find("\"status\":", pos);
                         if (status_pos != std::string::npos && status_pos < check_content.find("}", pos)) {
@@ -990,7 +990,7 @@ public:
                 
                 if (isStacked) {
                     // Stacked mode: combine user flags with auto-detected flags
-                    uint16_t user_flags = static_cast<uint16_t>(training_flag); // User flags from init()
+                    uint16_t user_flags = static_cast<uint16_t>(metric_score); // User flags from init()
                     uint16_t auto_flags = 0;
                     
                     // Determine automatic flags based on dataset
@@ -1010,16 +1010,16 @@ public:
                     
                     // Combine user flags with auto-detected flags
                     uint16_t combined_flags = user_flags | auto_flags;
-                    training_flag = static_cast<Rf_training_flags>(combined_flags);
-                    std::cout << "🔗 Stacked train_flags: " << flagsToString(combined_flags) 
+                    metric_score = static_cast<Rf_metric_scores>(combined_flags);
+                    std::cout << "🔗 Stacked metric_scores: " << flagsToString(combined_flags) 
                               << " (user: " << flagsToString(user_flags) << " + auto: " << flagsToString(auto_flags) << ")\n";
                 } else {
                     // Overwrite mode: user flags completely replace automatic detection
-                    std::cout << "🔧 Using train_flag overwrite: " << flagsToString(training_flag) << " (dataset ratio: " << maxImbalanceRatio << ")\n";
+                    std::cout << "🔧 Using metric_score overwrite: " << flagsToString(metric_score) << " (dataset ratio: " << maxImbalanceRatio << ")\n";
                 }
             }
         }
-
+ 
         std::cout << "  Label distribution:\n";
         float lowestDistribution = 100.0f;
         for (auto& label : labelCounts) {
@@ -1185,7 +1185,7 @@ public:
             config_file << "  \"k_fold\": " << (int)k_fold << ",\n";
             config_file << "  \"unityThreshold\": " << unity_threshold << ",\n";
             config_file << "  \"impurityThreshold\": " << impurity_threshold << ",\n";
-            config_file << "  \"trainFlag\": \"" << flagsToString(training_flag) << "\",\n";
+            config_file << "  \"metric_score\": \"" << flagsToString(metric_score) << "\",\n";
             config_file << "  \"resultScore\": " << result_score << ",\n";
             config_file << "  \"Estimated RAM (bytes)\": " << RAM_usage <<",\n";
             config_file << "  \"timestamp\": \"" << buf << "\",\n";

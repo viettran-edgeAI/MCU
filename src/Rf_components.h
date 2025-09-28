@@ -29,7 +29,7 @@
     0 : silent mode - no messages
     1 : forest messages (start, end, major events) 
     2 : messages at components level + warnings
-    3 : all memory and event timing log messages & detailed info
+    3 : all memory and event timing messages & detailed info
  note: all errors messages (lead to failed process) will be enabled with RF_DEBUG_LEVEL >=1
 */
 
@@ -40,8 +40,6 @@ static constexpr uint16_t MAX_NUM_SAMPLES        = 65535;     // maximum number 
 static constexpr uint16_t MAX_NODES              = 2047;     // Maximum nodes per tree 
 static constexpr size_t   MAX_DATASET_SIZE       = 150000;  // Max dataset file size - 150kB
 constexpr static size_t   MAX_INFER_LOGFILE_SIZE = 2048;   // Max log file size in bytes (1000 inferences)
-
-using sampleID_set = mcu::ID_vector<uint16_t>;       // set of unique sample IDs
 
 
 /*
@@ -59,8 +57,6 @@ using sampleID_set = mcu::ID_vector<uint16_t>;       // set of unique sample IDs
     11. model_name_memory_log.csv   : memory log file (detailed memory usage of forest events)
 */
 
-class RandomForest;
-// Forward declaration for callback 
 namespace mcu {
     /*
     ------------------------------------------------------------------------------------------------------------------
@@ -84,7 +80,7 @@ namespace mcu {
     class Rf_tree_container;    // manages all trees at forest level
     class Rf_pending_data;      // manage pending data waiting for true labels from feedback action
 
-    // enum Rf_training_flags;      // flags for training process/score calculation (accuracy, precision, recall, f1_score)
+    // enum Rf_metric_scores;      // flags for training process/score calculation (accuracy, precision, recall, f1_score)
     // enum Rf_training_score;      // score types for training process (oob, validation, k-fold)
     // ...
 
@@ -93,16 +89,18 @@ namespace mcu {
     -------------------------------------------------- RF_DATA ------------------------------------------------------
     ------------------------------------------------------------------------------------------------------------------
     */
+    using sampleID_set = ID_vector<uint16_t>;       // set of unique sample IDs
+
     struct Rf_sample{
-        mcu::packed_vector<2> features;           // set containing the values ​​of the features corresponding to that sample , 2 bit per value.
+        packed_vector<2> features;           // set containing the values ​​of the features corresponding to that sample , 2 bit per value.
         uint8_t label;                     // label of the sample 
 
         Rf_sample() : features(), label(0) {}
-        Rf_sample(uint8_t label, const mcu::packed_vector<2, mcu::LARGE>& source, size_t start, size_t end){
+        Rf_sample(uint8_t label, const packed_vector<2, LARGE>& source, size_t start, size_t end){
             this->label = label;
             features = packed_vector<2>(source, start, end);
         }
-        Rf_sample(const mcu::packed_vector<2> features, uint8_t label) : features(features), label(label) {}
+        Rf_sample(const packed_vector<2> features, uint8_t label) : features(features), label(label) {}
     };
 
     class Rf_data {
@@ -110,8 +108,8 @@ namespace mcu {
         static constexpr size_t MAX_CHUNKS_SIZE = 8192; // max bytes per chunk (8kB)
 
         // Chunked packed storage - eliminates both heap overhead per sample and large contiguous allocations
-        mcu::vector<mcu::packed_vector<2, mcu::LARGE>> sampleChunks;  // Multiple chunks of packed features
-        mcu::b_vector<uint8_t> allLabels;              // Labels storage (still contiguous for simplicity)
+        vector<packed_vector<2, LARGE>> sampleChunks;  // Multiple chunks of packed features
+        b_vector<uint8_t> allLabels;              // Labels storage (still contiguous for simplicity)
         uint16_t bitsPerSample;                        // Number of bits per sample (numFeatures * 2)
         uint16_t samplesEachChunk;                     // Maximum samples per chunk
         size_t size_;  
@@ -145,7 +143,7 @@ namespace mcu {
             allLabels.clear();
         }
 
-        // init without numFeatures - read header file to get numFeatures and size_
+        // for temp base_data 
         void init(const String& fname) {
             filename = fname;
             isLoaded = false;
@@ -258,17 +256,17 @@ namespace mcu {
         }
 
         // Get chunk index and local index within chunk for a given sample index
-        mcu::pair<size_t, size_t> getChunkLocation(size_t sampleIndex) const {
+        pair<size_t, size_t> getChunkLocation(size_t sampleIndex) const {
             size_t chunkIndex = sampleIndex / samplesEachChunk;
             size_t localIndex = sampleIndex % samplesEachChunk;
-            return mcu::make_pair(chunkIndex, localIndex);
+            return make_pair(chunkIndex, localIndex);
         }
 
         // Ensure we have enough chunks to store the given number of samples
         void ensureChunkCapacity(size_t totalSamples) {
             size_t requiredChunks = (totalSamples + samplesEachChunk - 1) / samplesEachChunk;
             while (sampleChunks.size() < requiredChunks) {
-                mcu::packed_vector<2, mcu::LARGE> newChunk;
+                packed_vector<2, LARGE> newChunk;
                 // Reserve space for elements (each feature is 1 element in packed_vector<2>)
                 size_t elementsPerSample = bitsPerSample / 2;  // numFeatures
                 newChunk.reserve(samplesEachChunk * elementsPerSample);
@@ -498,6 +496,7 @@ namespace mcu {
         int total_chunks() const {
             return size_/samplesEachChunk + (size_ % samplesEachChunk != 0 ? 1 : 0);
         }
+        
         uint16_t total_features() const {
             return bitsPerSample / 2;
         }
@@ -508,6 +507,10 @@ namespace mcu {
 
         size_t size() const {
             return size_;
+        }
+
+        void setFilename(const String& fname) {
+            filename = fname;
         }
 
         String getFilename() const {
@@ -976,19 +979,6 @@ namespace mcu {
          *@brief: copy assignment (but not copy filename to avoid SPIFFS over-writing)
          *@note : Rf_data will be put into release state. loadData() to reload into RAM if needed.
         */
-        // Rf_data& operator=(const Rf_data& other) {
-        //     purgeData(); // Clear existing data safely
-        //     if (this != &other) {
-        //         cloneFile(other.filename, filename);
-        //         bitsPerSample = other.bitsPerSample;
-        //         samplesEachChunk = other.samplesEachChunk;
-        //         size_ = other.size_;
-        //         // Deep copy of labels
-        //         allLabels = other.allLabels; // b_vector has its own copy semantics
-        //     }
-        //     return *this;   
-        // }
-
         Rf_data& operator=(const Rf_data& other) {
             purgeData(); // Clear existing data safely
             if (this != &other) {
@@ -1062,8 +1052,8 @@ namespace mcu {
          * @return : deleted labels
          * @note Directly writes to SPIFFS file to save RAM. File must exist and be properly initialized.
          */
-        mcu::b_vector<uint8_t> addNewData(const mcu::b_vector<Rf_sample>& samples, bool extend = true) {
-            mcu::b_vector<uint8_t> deletedLabels;
+        b_vector<uint8_t> addNewData(const b_vector<Rf_sample>& samples, bool extend = true) {
+            b_vector<uint8_t> deletedLabels;
             if (filename.length() == 0) {
                 if constexpr(RF_DEBUG_LEVEL > 1)
                     Serial.println("❌ No filename specified for addNewData operation");
@@ -1291,7 +1281,7 @@ namespace mcu {
             size_t total = sizeof(Rf_data);
             total += allLabels.capacity() * sizeof(uint8_t);
             for (const auto& chunk : sampleChunks) {
-                total += sizeof(mcu::packed_vector<2, mcu::LARGE>);
+                total += sizeof(packed_vector<2, LARGE>);
                 total += chunk.capacity() * sizeof(uint8_t); // each element is 2 bits, but stored in bytes
             }
             return total;
@@ -1378,7 +1368,7 @@ namespace mcu {
 
     class Rf_tree {
     public:
-        mcu::vector<Tree_node> nodes;  // Vector-based tree storage
+        vector<Tree_node> nodes;  // Vector-based tree storage
         uint8_t index;
         bool isLoaded;
 
@@ -1446,16 +1436,12 @@ namespace mcu {
         }
 
         // Save tree to SPIFFS for ESP32
-        void releaseTree(String model_name,  bool re_use = false) {
+        bool releaseTree(String model_name,  bool re_use = false) {
             if(!re_use){
                 if (index == 255 || nodes.empty()) {
-                    if constexpr(RF_DEBUG_LEVEL > 1)
+                    if constexpr(RF_DEBUG_LEVEL > 0)
                          Serial.println("❌ No valid index specified or tree is empty for saving");
-                    return;
-                }
-
-                if constexpr(RF_DEBUG_LEVEL > 1){
-                    Serial.printf("🔄 Saving tree %d \n", index);
+                    return false;
                 }
 
                 char filename[32];  // filename = "/"+ model_name + "tree_" + index + ".bin"
@@ -1466,7 +1452,7 @@ namespace mcu {
                 if (!file) {
                     if constexpr(RF_DEBUG_LEVEL > 0)
                          Serial.printf("❌ Failed to save tree: %s\n", filename);
-                    return;
+                    return false;
                 }
                 
                 // Write header - magic number for validation
@@ -1508,39 +1494,34 @@ namespace mcu {
                 }    
                 file.close();
             }
-            if constexpr(RF_DEBUG_LEVEL > 1){
-                uint16_t countLeaf = countLeafNodes();
-                Serial.printf("✅ Tree saved: %d (%d nodes, %d leaves, depth %d, %d bytes)\n", 
-                              index, nodes.size(), countLeaf, getTreeDepth(), memory_usage());
+            if constexpr(RF_DEBUG_LEVEL > 2){
+                Serial.println("✅ Tree saved to SPIFFS: " + model_name + "_tree_" + String(index) + ".bin");
             }
 
             nodes.clear(); // Clear nodes to free memory
             nodes.fit(); // Release excess memory
             isLoaded = false; // Mark as unloaded
+            return true;
         }
 
         // Load tree from SPIFFS into RAM for ESP32
-        void loadTree(String model_name = "", bool re_use = false) {
-            if (isLoaded) return;
+        bool loadTree(String model_name = "", bool re_use = false) {
+            if (isLoaded) return false;
             
             if (index == 255) {
                 if constexpr(RF_DEBUG_LEVEL > 0) 
                     Serial.println("❌ No valid index specified for tree loading");
-                return;
+                return false;
             }
             
             char path_to_use[32];
             snprintf(path_to_use, sizeof(path_to_use), "/%s_tree_%d.bin", model_name.c_str(), index);
-
-            if constexpr(RF_DEBUG_LEVEL > 1){
-                Serial.printf("🔄 Loading tree from: %s\n", path_to_use);
-            }
             
             File file = SPIFFS.open(path_to_use, FILE_READ);
             if (!file) {
                 if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.printf("❌ Failed to open tree file: %s\n", path_to_use);
-                return;
+                return false;
             }
             
             // Read and verify magic number
@@ -1549,7 +1530,7 @@ namespace mcu {
                 if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.printf("❌ Invalid tree file format: %s\n", path_to_use);
                 file.close();
-                return;
+                return false;
             }
             
             // Read number of nodes
@@ -1558,14 +1539,14 @@ namespace mcu {
                 if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.printf("❌ Failed to read node count: %s\n", path_to_use);
                 file.close();
-                return;
+                return false;
             }
             
             if (nodeCount == 0 || nodeCount > 2047) { // 11-bit limit for child indices
                 if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.printf("❌ Invalid node count: %d\n", nodeCount);
                 file.close();
-                return;
+                return false;
             }
             
             // Clear existing nodes and reserve space
@@ -1580,7 +1561,7 @@ namespace mcu {
                         Serial.printf("❌ Failed to read node %d from: %s\n", i, path_to_use);
                     nodes.clear();
                     file.close();
-                    return;
+                    return false;
                 }
                 nodes.push_back(node);
             }
@@ -1589,19 +1570,20 @@ namespace mcu {
             
             // Update state
             isLoaded = true;
-            if constexpr(RF_DEBUG_LEVEL > 1){
+            if constexpr(RF_DEBUG_LEVEL > 2){
                 Serial.printf("✅ Tree loaded: %s (%d nodes, %d bytes)\n", 
                         path_to_use, nodeCount, memory_usage());
             }
             if (!re_use) {
-                if constexpr(RF_DEBUG_LEVEL > 1)
+                if constexpr(RF_DEBUG_LEVEL > 2)
                     Serial.printf("🗑️ Removing tree file after load: %s\n", path_to_use);    
                 SPIFFS.remove(path_to_use); // Remove file after loading in single mode
             }
+            return true;
         }
 
         // predict single (normalized)sample - packed features
-        uint8_t predict_features(const mcu::packed_vector<2>& packed_features) const {
+        uint8_t predict_features(const packed_vector<2>& packed_features) const {
             if (nodes.empty() || !isLoaded) return 0;
             
             uint16_t currentIndex = 0;  // Start from root
@@ -2060,13 +2042,12 @@ namespace mcu {
     ------------------------------------------------------------------------------------------------------------------
     */
 
-    typedef enum Rf_training_flags : uint8_t{
-        EARLY_STOP  = 0x00,        // early stop training if accuracy is not improving
-        ACCURACY    = 0x01,          // calculate accuracy of the model
-        PRECISION   = 0x02,          // calculate precision of the model
-        RECALL      = 0x04,            // calculate recall of the model
-        F1_SCORE    = 0x08          // calculate F1 score of the model
-    }Rf_training_flags;
+    typedef enum Rf_metric_scores : uint8_t{
+        ACCURACY    = 0x00,          // calculate accuracy of the model
+        PRECISION   = 0x01,          // calculate precision of the model
+        RECALL      = 0x02,            // calculate recall of the model
+        F1_SCORE    = 0x04          // calculate F1 score of the model
+    }Rf_metric_scores;
 
 
     typedef enum Rf_training_score : uint8_t {
@@ -2098,15 +2079,18 @@ namespace mcu {
         float test_ratio;
         float valid_ratio;
         Rf_training_score training_score;
-        uint8_t train_flag;
+        uint8_t metric_score;
         float result_score;
         uint32_t estimatedRAM;
 
-        mcu::pair<uint8_t, uint8_t> min_split_range;
-        mcu::pair<uint8_t, uint8_t> max_depth_range; 
+        pair<uint8_t, uint8_t> min_split_range;
+        pair<uint8_t, uint8_t> max_depth_range; 
 
         bool extend_base_data;
         bool enable_retrain;
+
+        bool auto_select_metric_score;
+        bool auto_adjust_tree_params;
 
         // Dataset parameters (set after loading data)
         uint16_t num_samples;
@@ -2156,7 +2140,7 @@ namespace mcu {
             const size_t recordSize = sizeof(uint8_t) + packedFeatureBytes; // label + packed features
 
             // Track unique labels and their counts
-            mcu::unordered_map<uint8_t, uint16_t> label_counts;
+            unordered_map<uint8_t, uint16_t> label_counts;
             uint8_t max_label = 0;
 
             // Scan through all samples to collect label statistics
@@ -2222,7 +2206,7 @@ namespace mcu {
         
         // setup config manually (when no config file)
         void setup_config_manual(){
-            // set train_flag based on dataset balance
+            // set metric_score based on dataset balance
             if(samples_per_label.size() > 0){
                 uint16_t minorityCount = num_samples;
                 uint16_t majorityCount = 0;
@@ -2242,21 +2226,21 @@ namespace mcu {
                 }
 
                 if (maxImbalanceRatio > 10.0f) {
-                    train_flag = Rf_training_flags::RECALL;
+                    metric_score = Rf_metric_scores::RECALL;
                     if constexpr(RF_DEBUG_LEVEL > 1)
-                    Serial.printf("⚠️ Highly imbalanced dataset (ratio: %.2f). Setting trainFlag to RECALL.\n", maxImbalanceRatio);
+                    Serial.printf("⚠️ Highly imbalanced dataset (ratio: %.2f). Setting metric_score to RECALL.\n", maxImbalanceRatio);
                 } else if (maxImbalanceRatio > 3.0f) {
-                    train_flag = Rf_training_flags::F1_SCORE;
+                    metric_score = Rf_metric_scores::F1_SCORE;
                     if constexpr(RF_DEBUG_LEVEL > 1)
-                    Serial.printf("⚠️ Moderately imbalanced dataset (ratio: %.2f). Setting trainFlag to F1_SCORE.\n", maxImbalanceRatio);
+                    Serial.printf("⚠️ Moderately imbalanced dataset (ratio: %.2f). Setting metric_score to F1_SCORE.\n", maxImbalanceRatio);
                 } else if (maxImbalanceRatio > 1.5f) {
-                    train_flag = Rf_training_flags::PRECISION;
+                    metric_score = Rf_metric_scores::PRECISION;
                     if constexpr(RF_DEBUG_LEVEL > 1)
-                    Serial.printf("⚠️ Slightly imbalanced dataset (ratio: %.2f). Setting trainFlag to PRECISION.\n", maxImbalanceRatio);
+                    Serial.printf("⚠️ Slightly imbalanced dataset (ratio: %.2f). Setting metric_score to PRECISION.\n", maxImbalanceRatio);
                 } else {
-                    train_flag = Rf_training_flags::ACCURACY;
+                    metric_score = Rf_metric_scores::ACCURACY;
                     if constexpr(RF_DEBUG_LEVEL > 1)
-                    Serial.printf("✅ Balanced dataset (ratio: %.2f). Setting trainFlag to ACCURACY.\n", maxImbalanceRatio);
+                    Serial.printf("✅ Balanced dataset (ratio: %.2f). Setting metric_score to ACCURACY.\n", maxImbalanceRatio);
                 }
             }
             uint16_t avg_samples_per_label = num_samples / max(1, static_cast<int>(num_labels));
@@ -2304,9 +2288,9 @@ namespace mcu {
 
 
             int base_maxDepth = max((int)log2(num_samples * 2.0f), (int)(log2(num_features) * 2.5f));
-            uint8_t max_maxDepth = max(6, base_maxDepth) + 8;
+            uint8_t max_maxDepth = max(6, base_maxDepth);
             int dynamic_min_depth = max(4, (int)(log2(num_features) + 2));
-            uint8_t min_maxDepth = min((int)max_maxDepth - 2, dynamic_min_depth) + 2; // Ensure a valid range.
+            uint8_t min_maxDepth = min((int)max_maxDepth - 2, dynamic_min_depth); // Ensure a valid range.
             if (min_maxDepth >= max_maxDepth) min_maxDepth = max_maxDepth - 2;
             if (min_maxDepth < 4) min_maxDepth = 4;
 
@@ -2351,7 +2335,7 @@ namespace mcu {
             test_ratio = 0.15;
             valid_ratio = 0.15;
             training_score = OOB_SCORE;
-            train_flag = 0x01; // ACCURACY
+            metric_score = 0x01; // ACCURACY
             result_score = 0.0;
             estimatedRAM = 0;
             
@@ -2391,7 +2375,7 @@ namespace mcu {
             uint16_t numSamples = 0;
             uint16_t numFeatures = 0;
             uint8_t numLabels = 0;
-            mcu::unordered_map<uint8_t, uint16_t> labelCounts; // label -> count
+            unordered_map<uint8_t, uint16_t> labelCounts; // label -> count
             uint8_t maxFeatureValue = 3;    // Default for 2-bit quantized data
 
             // Parse parameters from CSV
@@ -2473,14 +2457,7 @@ namespace mcu {
                 Serial.println("❌ Failed to open data_params file for writing.");
                 return;
             }
-            
-            if constexpr(RF_DEBUG_LEVEL > 1)
-                Serial.printf("💾 Saving dataset parameters to: %s\n", path.c_str());
-            
-            // Write header
             file.println("parameter,value");
-            
-            // Write core dataset parameters
             file.println("quantization_coefficient,2");  // Fixed for 2-bit quantization
             file.println("max_feature_value,3");         // Fixed for 2-bit values (0-3)
             file.println("features_per_byte,4");          // Fixed for 2-bit packing (4 features per byte)
@@ -2587,9 +2564,6 @@ namespace mcu {
                 return;
             }
             String filename = base_ptr->get_config_file();
-            if constexpr(RF_DEBUG_LEVEL > 1)
-                Serial.printf("💾 Saving config to SPIFFS: %s\n", filename.c_str());
-
             String existingTimestamp = "";
             String existingAuthor = "Viettran";
             
@@ -2627,7 +2601,7 @@ namespace mcu {
             file.printf("  \"k_fold\": %d,\n", k_fold);
             file.printf("  \"unityThreshold\": %.3f,\n", unity_threshold);
             file.printf("  \"impurityThreshold\": %.1f,\n", impurity_threshold);
-            file.printf("  \"trainFlag\": \"%s\",\n", getFlagString(train_flag).c_str());
+            file.printf("  \"metric_score\": \"%s\",\n", getFlagString(metric_score).c_str());
             file.printf("  \"resultScore\": %.6f,\n", result_score);
             file.printf("  \"Estimated RAM (bytes)\": %d,\n", estimatedRAM);
             
@@ -2680,7 +2654,7 @@ namespace mcu {
             test_ratio = extractFloatValue(jsonStr, "test_ratio");         // ✅ New parameter
             valid_ratio = extractFloatValue(jsonStr, "valid_ratio");       // ✅ Fixed
             training_score = parseTrainingScore(extractStringValue(jsonStr, "trainingScore")); // ✅ New parameter
-            train_flag = parseFlagValue(extractStringValue(jsonStr, "trainFlag")); // ✅ Fixed
+            metric_score = parseFlagValue(extractStringValue(jsonStr, "metric_score")); // ✅ Fixed
             result_score = extractFloatValue(jsonStr, "resultScore");       // ✅ Fixed
             estimatedRAM = extractIntValue(jsonStr, "Estimated RAM (bytes)"); // ✅ Already correct
             
@@ -2707,22 +2681,20 @@ namespace mcu {
 
         // Convert flag string to uint8_t
         uint8_t parseFlagValue(const String& flagStr) {
-            if (flagStr == "ACCURACY") return 0x01;
-            if (flagStr == "PRECISION") return 0x02;
-            if (flagStr == "RECALL") return 0x04;
-            if (flagStr == "F1_SCORE") return 0x08;
-            if (flagStr == "EARLY_STOP") return 0x00;
-            return 0x01; // Default to ACCURACY
+            if (flagStr == "ACCURACY") return 0x00;
+            if (flagStr == "PRECISION") return 0x01;
+            if (flagStr == "RECALL") return 0x02;
+            if (flagStr == "F1_SCORE") return 0x04;
+            return 0x00; // Default to ACCURACY
         }
 
         // Convert uint8_t flag to string
         String getFlagString(uint8_t flag) {
             switch(flag) {
-                case 0x01: return "ACCURACY";
-                case 0x02: return "PRECISION";
-                case 0x04: return "RECALL";
-                case 0x08: return "F1_SCORE";
-                case 0x00: return "EARLY_STOP";
+                case 0x00: return "ACCURACY";
+                case 0x01: return "PRECISION";
+                case 0x02: return "RECALL";
+                case 0x04: return "F1_SCORE";
                 default: return "ACCURACY";
             }
         }
@@ -2862,16 +2834,16 @@ namespace mcu {
     struct is_supported_vector : std::false_type {};
 
     template<>
-    struct is_supported_vector<mcu::vector<float>> : std::true_type {};
+    struct is_supported_vector<vector<float>> : std::true_type {};
 
     template<>
-    struct is_supported_vector<mcu::vector<int>> : std::true_type {};
+    struct is_supported_vector<vector<int>> : std::true_type {};
 
     template<size_t sboSize>
-    struct is_supported_vector<mcu::b_vector<float, sboSize>> : std::true_type {};
+    struct is_supported_vector<b_vector<float, sboSize>> : std::true_type {};
 
     template<size_t sboSize>
-    struct is_supported_vector<mcu::b_vector<int, sboSize>> : std::true_type {};
+    struct is_supported_vector<b_vector<int, sboSize>> : std::true_type {};
 
     class Rf_categorizer {
     private:
@@ -2883,18 +2855,18 @@ namespace mcu {
         Rf_base* base_ptr = nullptr;
 
         // Compact storage arrays
-        mcu::vector<FeatureRef> featureRefs;              // One per feature
-        mcu::vector<uint16_t> sharedPatterns;             // Concatenated pattern edges
-        mcu::vector<uint16_t> allUniqueEdges;             // Concatenated unique edges
-        mcu::vector<uint8_t> allDiscreteValues;           // Concatenated discrete values
-        mcu::b_vector<String, 4> labelMapping; // Optional label reverse mapping
+        vector<FeatureRef> featureRefs;              // One per feature
+        vector<uint16_t> sharedPatterns;             // Concatenated pattern edges
+        vector<uint16_t> allUniqueEdges;             // Concatenated unique edges
+        vector<uint8_t> allDiscreteValues;           // Concatenated discrete values
+        b_vector<String, 4> labelMapping; // Optional label reverse mapping
         
         bool has_base() const {
             return base_ptr != nullptr && base_ptr->ready_to_use();
         }
         // Helper function to split CSV line
-        mcu::b_vector<String, 4> split(const String& line, char delimiter = ',') {
-            mcu::b_vector<String, 4> result;
+        b_vector<String, 4> split(const String& line, char delimiter = ',') {
+            b_vector<String, 4> result;
             int start = 0;
             int end = line.indexOf(delimiter);
             
@@ -3251,13 +3223,13 @@ namespace mcu {
         }
 
         // categorize features array
-        mcu::packed_vector<2> categorizeFeatures(const float* features, size_t featureCount = 0) const {
+        packed_vector<2> categorizeFeatures(const float* features, size_t featureCount = 0) const {
             if (featureCount == 0) {
                 if constexpr (RF_DEBUG_LEVEL > 2)
                     Serial.printf("⚠️ Feature count not provided, assuming %d\n", numFeatures);
                 featureCount = numFeatures;
             }
-            mcu::packed_vector<2> result;
+            packed_vector<2> result;
             result.reserve(numFeatures);
             for (uint16_t i = 0; i < numFeatures; ++i) {
                 result.push_back(categorizeFeature(i, features[i]));
@@ -3267,12 +3239,12 @@ namespace mcu {
 
         // overload for vector input
         template<typename T>
-        mcu::packed_vector<2> categorizeFeatures(const T& features) const {
+        packed_vector<2> categorizeFeatures(const T& features) const {
             static_assert(is_supported_vector<T>::value, "Unsupported vector type for categorizeFeatures");
             if (features.size() != numFeatures) {
                 if constexpr (RF_DEBUG_LEVEL > 2)
                 Serial.printf("❌ Feature count mismatch: expected %d, got %d\n", numFeatures, features.size());
-                return mcu::packed_vector<2>();
+                return packed_vector<2>();
             }
             return categorizeFeatures(features.data(), features.size());
         }
@@ -3366,7 +3338,7 @@ namespace mcu {
     public:
         float coefficients[3];  // bias, min_split_coeff, max_depth_coeff
         bool is_trained;
-        b_vector<node_data> buffer;
+        b_vector<node_data, 5> buffer;
     private:
         // String filename;
         // String node_predictor_log;
@@ -3397,6 +3369,23 @@ namespace mcu {
             float estimate = 100.0f - data.min_split * 12 + data.max_depth * 3;
             return estimate < 10.0f ? 10.0f : estimate; // ensure reasonable minimum
         }
+
+        // Predict number of nodes for given parameters
+        uint16_t estimate(const node_data& data) {
+            if(!is_trained) {
+                if(!loadPredictor()){
+                    return manual_estimate(data); // Use manual estimate if predictor is disabled 
+                }
+            }
+            
+            float prediction = evaluate_formula(data);
+            return static_cast<uint16_t>(prediction + 0.5f); // Round to nearest integer
+        }
+        uint16_t estimate(uint8_t min_split, uint16_t max_depth) {
+            node_data data(min_split, max_depth);
+            return estimate(data);
+        }
+        
 
     public:
         uint8_t accuracy;      // in percentage
@@ -3528,8 +3517,8 @@ namespace mcu {
                     Serial.printf("⚠️  Fixed peak_percent from 0%% to 30%% \n");
                 }
                 if constexpr(RF_DEBUG_LEVEL > 1){
-                Serial.printf("✅ Node_predictor loaded: %s (accuracy: %d%%, peak: %d%%)\n", 
-                            filename.c_str(), accuracy, peak_percent);
+                Serial.printf("✅ Node_predictor loaded: %s \n", 
+                            filename.c_str());
                 Serial.printf("   Coefficients: bias=%.2f, split=%.2f, depth=%.2f\n", 
                             coefficients[0], coefficients[1], coefficients[2]);
                 }
@@ -3591,29 +3580,18 @@ namespace mcu {
             file.close();
             
             if constexpr(RF_DEBUG_LEVEL > 1)
-            Serial.printf("✅ Node_predictor saved: %s (%d bytes, accuracy: %d%%, peak: %d%%)\n", 
-                        filename.c_str(), 
-                        sizeof(magic) + sizeof(is_trained) + sizeof(accuracy) + sizeof(peak_percent) + 
-                        sizeof(num_coefficients) + sizeof(float) * 3, accuracy, peak_percent);
+            Serial.printf("✅ Node_predictor saved: %s \n", filename.c_str());
             return true;
         }
         
-        // Predict number of nodes for given parameters
-        uint16_t estimate(const node_data& data) {
-            if(!is_trained) {
-                if(!loadPredictor()){
-                    return manual_estimate(data); // Use manual estimate if predictor is disabled 
-                }
-            }
-            
-            float prediction = evaluate_formula(data);
-            return static_cast<uint16_t>(prediction + 0.5f); // Round to nearest integer
+        // Add new training samples to buffer
+        void add_new_samples(uint8_t min_split, uint16_t max_depth, uint16_t total_nodes = 0) {
+            if (min_split == 0 || max_depth == 0) return; // invalid sample
+            buffer.push_back(node_data(min_split, max_depth, total_nodes));
+            if constexpr(RF_DEBUG_LEVEL > 2)
+                Serial.printf("➕ Added training sample: split=%d, depth=%d, nodes=%d (buffer size=%d)\n", 
+                            min_split, max_depth, total_nodes, buffer.size());
         }
-        uint16_t estimate(uint8_t min_split, uint16_t max_depth) {
-            node_data data(min_split, max_depth);
-            return estimate(data);
-        }
-        
         // Retrain the predictor using data from rf_tree_log.csv (synchronized with PC version)
         bool re_train(bool save_after_retrain = true) {
             if (!has_base()){
@@ -3630,7 +3608,7 @@ namespace mcu {
                 return false;
             }
             if(buffer.size() > 0){
-                add_new_samples(buffer);
+                add_buffer(buffer);
             }
             buffer.clear();
             buffer.fit();
@@ -3646,7 +3624,7 @@ namespace mcu {
             Serial.println("🔄 Retraining node predictor from CSV data...");
             
 
-            mcu::b_vector<node_data> training_data;
+            b_vector<node_data> training_data;
             training_data.reserve(50); // Reserve space for training samples
             
             String line;
@@ -3692,8 +3670,8 @@ namespace mcu {
             
             // Use PC version's trend analysis approach instead of complex regression
             // Collect all unique min_split and max_depth values
-            mcu::b_vector<uint8_t> unique_min_splits;
-            mcu::b_vector<uint16_t> unique_max_depths;
+            b_vector<uint8_t> unique_min_splits;
+            b_vector<uint16_t> unique_max_depths;
             
             for (const auto& sample : training_data) {
                 // Add unique min_split values
@@ -3872,11 +3850,18 @@ namespace mcu {
             return true;
         }
         
-        
+        uint16_t estimate_nodes(uint8_t min_split, uint16_t max_depth) {
+            return estimate(min_split, max_depth) * 100 / accuracy;
+        }
+
+        uint16_t queue_peak_size(uint8_t min_split, uint16_t max_depth) {
+            return min(120, estimate_nodes(min_split, max_depth) * peak_percent / 100);
+        }
+
         /// @brief  add new samples to the beginning of the node_predictor_log file. 
         // If the file has more than 50 samples (rows, not including header), 
         // remove the samples at the end of the file (limit the file to the 50 latest samples)
-        void add_new_samples(b_vector<node_data>& new_samples) {
+        void add_buffer(b_vector<node_data,5>& new_samples) {
             if (!has_base()){
                 if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.println("❌ Base pointer is null, cannot add new samples.");
@@ -3885,7 +3870,7 @@ namespace mcu {
             String node_predictor_log = base_ptr->get_node_log_file();
             if (new_samples.size() == 0) return;
             // Read all existing lines
-            mcu::b_vector<String> lines;
+            b_vector<String> lines;
             File file = SPIFFS.open(node_predictor_log.c_str(), FILE_READ);
             if (file) {
                 while (file.available()) {
@@ -3901,7 +3886,7 @@ namespace mcu {
                 lines.insert(0, header);
             }
             // Remove header for easier manipulation
-            mcu::b_vector<String> data_lines;
+            b_vector<String> data_lines;
             for (size_t i = 1; i < lines.size(); ++i) {
                 data_lines.push_back(lines[i]);
             }
@@ -4024,11 +4009,11 @@ namespace mcu {
             engine.seed(base_seed, base_seed ^ 0xda3e39cb94b95bdbULL);
         }
 
-        Rf_random(uint64_t seed, bool use_provided_seed) {
-            init(seed, use_provided_seed);
+        Rf_random(uint64_t seed) {
+            init(seed, true);
         }
 
-        void init(uint64_t seed, bool use_provided_seed) {
+        void init(uint64_t seed, bool use_provided_seed = true) {
             if (use_provided_seed) {
                 base_seed = seed;
             } else if (has_global()) {
@@ -4116,12 +4101,12 @@ namespace mcu {
         uint16_t total_predict = 0;
         uint16_t correct_predict = 0;
         uint8_t num_labels;
-        uint8_t training_flag;
+        uint8_t metric_score;
 
         public:
         // Constructor
-        Rf_matrix_score(uint8_t num_labels, uint8_t training_flag) 
-            : num_labels(num_labels), training_flag(training_flag) {
+        Rf_matrix_score(uint8_t num_labels, uint8_t metric_score) 
+            : num_labels(num_labels), metric_score(metric_score) {
             // Ensure vectors have logical length == num_labels and are zeroed
             tp.clear(); fp.clear(); fn.clear();
             tp.reserve(num_labels); fp.reserve(num_labels); fn.reserve(num_labels);
@@ -4130,9 +4115,9 @@ namespace mcu {
             correct_predict = 0;
         }
         
-        void init(uint8_t num_labels, uint8_t training_flag) {
+        void init(uint8_t num_labels, uint8_t metric_score) {
             this->num_labels = num_labels;
-            this->training_flag = training_flag;
+            this->metric_score = metric_score;
             tp.clear(); fp.clear(); fn.clear();
             tp.reserve(num_labels); fp.reserve(num_labels); fn.reserve(num_labels);
             for (uint8_t i = 0; i < num_labels; ++i) { tp.push_back(0); fp.push_back(0); fn.push_back(0); }
@@ -4233,7 +4218,7 @@ namespace mcu {
             uint8_t numFlags = 0;
 
             // Calculate accuracy
-            if(training_flag & 0x01) { // ACCURACY flag
+            if(metric_score & 0x01) { // ACCURACY flag
                 float accuracy = static_cast<float>(correct_predict) / total_predict;
                 if constexpr(RF_DEBUG_LEVEL > 1)
                 Serial.printf("Accuracy: %.3f (%d/%d)\n", accuracy, correct_predict, total_predict);
@@ -4242,7 +4227,7 @@ namespace mcu {
             }
 
             // Calculate precision
-            if(training_flag & 0x02) { // PRECISION flag
+            if(metric_score & 0x02) { // PRECISION flag
                 float total_precision = 0.0f;
                 uint8_t valid_labels = 0;
                 
@@ -4261,7 +4246,7 @@ namespace mcu {
             }
 
             // Calculate recall
-            if(training_flag & 0x04) { // RECALL flag
+            if(metric_score & 0x04) { // RECALL flag
                 float total_recall = 0.0f;
                 uint8_t valid_labels = 0;
                 
@@ -4280,7 +4265,7 @@ namespace mcu {
             }
 
             // Calculate F1-Score
-            if(training_flag & 0x08) { // F1_SCORE flag
+            if(metric_score & 0x08) { // F1_SCORE flag
                 float total_f1 = 0.0f;
                 uint8_t valid_labels = 0;
                 
@@ -4309,7 +4294,7 @@ namespace mcu {
 
         size_t memory_usage() const {
             size_t usage = 0;
-            usage += sizeof(total_predict) + sizeof(correct_predict) + sizeof(num_labels) + sizeof(training_flag);
+            usage += sizeof(total_predict) + sizeof(correct_predict) + sizeof(num_labels) + sizeof(metric_score);
             usage += tp.size() * sizeof(uint16_t);
             usage += fp.size() * sizeof(uint16_t);
             usage += fn.size() * sizeof(uint16_t);
@@ -4335,7 +4320,7 @@ namespace mcu {
             size_t   total_leaves;       // store total leaves of all trees
             b_vector<NodeToBuild> queue_nodes; // Queue for breadth-first tree building
 
-            mcu::unordered_map<uint8_t, uint16_t> predictClass; // Map to count predictions per class during inference
+            unordered_map<uint8_t, uint16_t> predictClass; // Map to count predictions per class during inference
 
             bool is_unified = true;  // Default to unified form (used at the end of training and inference)
 
@@ -4416,16 +4401,6 @@ namespace mcu {
                     if constexpr(RF_DEBUG_LEVEL > 2)
                     Serial.println("🟡 Warning: Adding an unloaded tree to the container.");
                 }
-                
-                if constexpr(RF_DEBUG_LEVEL > 2)
-                Serial.printf("🌲 Adding tree %d to container (current size: %d, target: %d)\n", 
-                            tree.index, trees.size(), config_ptr->num_trees);
-                
-                total_depths += tree.getTreeDepth();
-                total_nodes += tree.countNodes(); 
-                total_leaves += tree.countLeafNodes();
-
-                // Ensure trees vector has enough space for this tree's index
                 if(tree.index != 255 && tree.index < config_ptr->num_trees) {
                     // Resize vector if needed to accommodate this tree's index
                     if(trees.size() <= tree.index) {
@@ -4433,9 +4408,18 @@ namespace mcu {
                     }
                     // Check if slot is already occupied
                     if(trees[tree.index].isLoaded || trees[tree.index].index != 255) {
-                        if constexpr(RF_DEBUG_LEVEL > 0)
+                        if constexpr(RF_DEBUG_LEVEL > 2)
                         Serial.printf("⚠️ Warning: Overwriting tree at index %d!\n", tree.index);
                     }
+                    uint16_t d = tree.getTreeDepth();
+                    uint16_t n = tree.countNodes();
+                    uint16_t l = tree.countLeafNodes();
+                    if constexpr (RF_DEBUG_LEVEL > 0)
+                    Serial.printf("🌲 tree %d : %d nodes, depth %d\n", tree.index, n, d);
+                    total_depths += d;
+                    total_nodes  += n;
+                    total_leaves += l;
+
                     tree.releaseTree(base_ptr->get_model_name()); // Release tree nodes from memory after adding to container
                     trees[tree.index] = std::move(tree);
                 } else {
@@ -4546,10 +4530,10 @@ namespace mcu {
                 }
                 // Memory safety check
                 size_t freeMemory = ESP.getFreeHeap();
-                if(freeMemory < config_ptr->estimatedRAM + 12000) {
+                if(freeMemory < config_ptr->estimatedRAM + 8000) {
                     if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.printf("❌ Insufficient memory to load forest (need %d bytes, have %d)\n", 
-                                config_ptr->estimatedRAM + 12000, freeMemory);
+                                config_ptr->estimatedRAM + 8000, freeMemory);
                     return false;
                 }
                 if (is_unified) {
@@ -4586,6 +4570,7 @@ namespace mcu {
                             loadedTrees, trees.size(), total_nodes);
                 return true;
             }
+
             // Load forest from unified format (single file containing all trees)
             bool loadForestUnified() {
                 String unifiedFilename = base_ptr->get_forest_file();
@@ -4668,16 +4653,6 @@ namespace mcu {
                     for(size_t treeIdx = 0; treeIdx < trees.size(); treeIdx++) {
                         auto& tree = trees[treeIdx];
                         if(tree.index == treeIndex) {
-                            // Memory check before loading this tree
-                            size_t requiredMemory = nodeCount * sizeof(Tree_node);
-                            if(ESP.getFreeHeap() < requiredMemory + 5000) { // 5KB safety buffer per tree
-                                if constexpr(RF_DEBUG_LEVEL > 1)
-                                Serial.printf("❌ Insufficient memory to load tree %d (need %d bytes, have %d)\n", 
-                                            treeIndex, requiredMemory, ESP.getFreeHeap());
-                                file.close();
-                                return false;
-                            }
-                            
                             tree.nodes.clear();
                             tree.nodes.reserve(nodeCount);
                             
@@ -4863,7 +4838,7 @@ namespace mcu {
                         
                         if(!writeSuccess) {
                             if constexpr(RF_DEBUG_LEVEL > 1)
-                            Serial.printf("❌ Failed to save tree %d completely\n", tree.index);
+                            Serial.printf("❌ Failed to save tree %d \n", tree.index);
                             break;
                         }
                         
@@ -4874,6 +4849,7 @@ namespace mcu {
                 
                 // Verify file was written correctly
                 if(savedCount != loadedCount) {
+                    if constexpr(RF_DEBUG_LEVEL > 0)
                     Serial.printf("❌ Save incomplete: %d/%d trees saved\n", savedCount, loadedCount);
                     SPIFFS.remove(unifiedFilename.c_str());
                     return false;
@@ -5061,7 +5037,7 @@ namespace mcu {
             }
             // first scan 
             uint16_t valid_samples_count = 0;
-            mcu::b_vector<Rf_sample> valid_samples;
+            b_vector<Rf_sample> valid_samples;
             for(uint16_t i = 0; i < buffer.size() && i < actual_labels.size(); i++) {
                 if(actual_labels[i] < 255) { // Valid actual label provided
                     valid_samples_count++;
@@ -5356,7 +5332,7 @@ namespace mcu {
         uint32_t lowest_rom; 
         uint32_t freeDisk;
         float log_time;
-        mcu::b_vector<time_anchor> time_anchors;
+        b_vector<time_anchor> time_anchors;
     
     public:
         Rf_logger() : freeHeap(0), largestBlock(0), starting_time(0), fragmentation(0), log_time(0.0f) {

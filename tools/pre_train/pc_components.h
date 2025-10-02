@@ -439,12 +439,12 @@ struct Rf_config{
     // model configurations
     float unity_threshold = 0.5f;   // unity_threshold  for classification, effect to precision and recall - default value
     float impurity_threshold = 0.01f; // threshold for impurity, default is 0.01
-    
-    // Training score method: "oob_score", "valid_score", or "k-fold_score"
     std::string training_score = "oob_score";
-
     bool use_gini = false; // use Gini impurity for training
     bool use_bootstrap = true; // use bootstrap sampling for training
+    bool enable_retrain = true; // enable retraining the model with new data
+    bool extend_base_data = true; // extend the base data with new data when retraining
+    bool enable_auto_config = true; // enable automatic configuration based on dataset
 
     float result_score = 0.0f; // result score of the model
 
@@ -655,6 +655,51 @@ public:
                 
                 std::cout << "📊 Split ratios loaded from JSON: train=" << train_ratio 
                           << ", test=" << test_ratio << ", valid=" << valid_ratio << std::endl;
+            }
+        }
+
+        // extract extend_base_data
+        pos = content.find("\"extend_base_data\"");
+        if (pos != std::string::npos) {
+            pos = content.find("\"value\":", pos);
+            if (pos != std::string::npos) {
+                pos = content.find(":", pos) + 1;
+                size_t end = content.find(",", pos);
+                if (end == std::string::npos) end = content.find("}", pos);
+                std::string value = content.substr(pos, end - pos);
+                value.erase(0, value.find_first_not_of(" \t\r\n"));
+                value.erase(value.find_last_not_of(" \t\r\n") + 1);
+                extend_base_data = (value == "true");
+            }
+        }
+
+        // extract enable_retrain
+        pos = content.find("\"enable_retrain\"");
+        if (pos != std::string::npos) {
+            pos = content.find("\"value\":", pos);
+            if (pos != std::string::npos) {
+                pos = content.find(":", pos) + 1;
+                size_t end = content.find(",", pos);
+                if (end == std::string::npos) end = content.find("}", pos);
+                std::string value = content.substr(pos, end - pos);
+                value.erase(0, value.find_first_not_of(" \t\r\n"));
+                value.erase(value.find_last_not_of(" \t\r\n") + 1);
+                enable_retrain = (value == "true");
+            }
+        }
+
+        // extract enable_auto_config
+        pos = content.find("\"enable_auto_config\"");
+        if (pos != std::string::npos) {
+            pos = content.find("\"value\":", pos);
+            if (pos != std::string::npos) {
+                pos = content.find(":", pos) + 1;
+                size_t end = content.find(",", pos);
+                if (end == std::string::npos) end = content.find("}", pos);
+                std::string value = content.substr(pos, end - pos);
+                value.erase(0, value.find_first_not_of(" \t\r\n"));
+                value.erase(value.find_last_not_of(" \t\r\n") + 1);
+                enable_auto_config = (value == "true");
             }
         }
 
@@ -1152,6 +1197,7 @@ public:
         
 
     }
+    
     // save config to transfer to esp32 
     void saveConfig(const std::string& path) const {
         std::ofstream config_file(path);
@@ -1187,6 +1233,9 @@ public:
             config_file << "  \"impurityThreshold\": " << impurity_threshold << ",\n";
             config_file << "  \"metric_score\": \"" << flagsToString(metric_score) << "\",\n";
             config_file << "  \"resultScore\": " << result_score << ",\n";
+            config_file << "  \"extendBaseData\": " << (extend_base_data ? "true" : "false") << ",\n";
+            config_file << "  \"enableRetrain\": " << (enable_retrain ? "true" : "false") << ",\n";
+            config_file << "  \"enableAutoConfig\": " << (enable_auto_config ? "true" : "false") << ",\n";
             config_file << "  \"Estimated RAM (bytes)\": " << RAM_usage <<",\n";
             config_file << "  \"timestamp\": \"" << buf << "\",\n";
             config_file << "  \"author\": \"Viettran - tranvaviet@gmail.com\"\n"; 

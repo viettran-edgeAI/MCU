@@ -17,6 +17,7 @@ import time
 import os
 import sys
 import struct
+import binascii
 from pathlib import Path
 
 # --- Protocol Constants ---
@@ -35,11 +36,25 @@ RESP_ERROR = b"ERROR"
 # The following 2 parameters must match exactly esp32 side sketch
 # changed them when transfer process failed
 CHUNK_SIZE = 256 # bytes per chunk - further reduced for USB CDC compatibility
-CHUNK_DELAY = 120  # delay between chunks in ms - increased for USB CDC stability
+CHUNK_DELAY = 0.025  # delay between chunks in seconds - V2 uses ACKs, so keep small
 
 # Timeout settings
-SERIAL_TIMEOUT = 10  # seconds - increased for USB CDC
-ACK_TIMEOUT = 30 # seconds - significantly increased for large file transfers with USB CDC
+SERIAL_TIMEOUT = 5  # seconds
+ACK_TIMEOUT = 5 # seconds - V2 protocol with explicit ACK/NACK
+MAX_RETRIES = 5
+
+def _readline_with_timeout(ser, timeout_s=5.0):
+    """Read a line with a soft timeout; returns stripped string (can be empty)."""
+    end_time = time.time() + timeout_s
+    line = b""
+    while time.time() < end_time:
+        part = ser.readline()
+        if part:
+            line = part
+            break
+        time.sleep(0.01)
+    return line.decode(errors='ignore').strip()
+
 
 def get_file_paths(base_name):
     """Generate full file paths from a base name in the result folder."""
@@ -90,12 +105,13 @@ def send_command(ser, command, payload=b""):
     time.sleep(0.01)  # Small delay to ensure command is processed
 
 def transfer_file(ser, file_path, esp32_filename):
-    """Handles the transfer of a single file with a progress bar."""
+    """Handles the transfer of a single file with V2 protocol (CRC + ACK/NACK)."""
     if not os.path.exists(file_path):
         print(f"⚠️  Warning: File not found, skipping: {file_path}")
         return False
 
     file_size = os.path.getsize(file_path)
+    
     # Handle case for empty files
     if file_size == 0:
         print(f"\n🚀 Skipping empty file: {Path(file_path).name}")
@@ -107,70 +123,78 @@ def transfer_file(ser, file_path, esp32_filename):
             print("❌ ESP32 did not acknowledge empty file info.")
             return False
         return True
+
+    # Read the file data
+    with open(file_path, 'rb') as f:
+        file_data = f.read()
+    
+    # Compute full file CRC32
+    file_crc = binascii.crc32(file_data) & 0xFFFFFFFF
         
     print(f"\n🚀 Transferring {Path(file_path).name} -> {esp32_filename} ({file_size} bytes)")
 
-    # 1. Send File Info
+    # 1. Send File Info with V2 metadata (filename, size, CRC, chunk_size)
     filename_bytes = esp32_filename.encode('utf-8')
-    payload = struct.pack('B', len(filename_bytes)) + filename_bytes + struct.pack('<I', file_size)
+    payload = (struct.pack('B', len(filename_bytes)) + filename_bytes + 
+               struct.pack('<III', file_size, file_crc, CHUNK_SIZE))
     send_command(ser, CMD_FILE_INFO, payload)
 
     if not wait_for_response(ser, RESP_ACK):
         print("❌ ESP32 did not acknowledge file info.")
         return False
 
-    # 2. Send File Chunks
-    with open(file_path, 'rb') as f:
-        bytes_sent = 0
-        retry_count = 0
-        max_retries = 5  # Increased retries for USB CDC
-        consecutive_failures = 0  # Track consecutive failures
+    # 2. Send File Chunks with per-chunk CRC and ACK/NACK
+    print("Sending file data with CRC and ACKs...")
+    bytes_sent = 0
+
+    for offset in range(0, file_size, CHUNK_SIZE):
+        chunk = file_data[offset:offset + CHUNK_SIZE]
+        chunk_len = len(chunk)
+        chunk_crc = binascii.crc32(chunk) & 0xFFFFFFFF
+        header = struct.pack('<III', offset, chunk_len, chunk_crc)
+
+        success = False
+        for attempt in range(1, MAX_RETRIES + 1):
+            # Send chunk with header
+            send_command(ser, CMD_FILE_CHUNK, header + chunk)
+
+            # Wait for ACK/NACK
+            line = _readline_with_timeout(ser, timeout_s=5.0)
+            if line.startswith("ACK "):
+                try:
+                    ack_off = int(line.split()[1])
+                except Exception:
+                    ack_off = -1
+                if ack_off == offset:
+                    success = True
+                    break
+            elif line.startswith("NACK "):
+                # Retry
+                if attempt < MAX_RETRIES:
+                    sys.stdout.write('\n')
+                    print(f"⚠️  Retrying chunk at offset {offset} ({attempt}/{MAX_RETRIES})...")
+                continue
+            # Anything else: small delay and retry
+            time.sleep(0.05)
+
+        if not success:
+            sys.stdout.write('\n')
+            print(f"❌ Chunk transfer failed at offset {offset} after {MAX_RETRIES} retries")
+            return False
+
+        bytes_sent += chunk_len
+        progress = (bytes_sent / file_size) * 100
+        bar_length = 40
+        filled_len = int(bar_length * bytes_sent // file_size)
+        bar = '█' * filled_len + '-' * (bar_length - filled_len)
         
-        while True:
-            chunk = f.read(CHUNK_SIZE)
-            if not chunk:
-                break  # End of file
+        # Use carriage return to stay on the same line
+        sys.stdout.write(f'   [{bar}] {progress:.1f}% complete\r')
+        sys.stdout.flush()
+        
+        time.sleep(CHUNK_DELAY)
 
-            send_command(ser, CMD_FILE_CHUNK, chunk)
-            
-            # Longer delay for USB CDC stability
-            time.sleep(CHUNK_DELAY/1000)
-            
-            # Wait for ACK with retry mechanism
-            if not wait_for_response(ser, RESP_ACK, timeout=ACK_TIMEOUT, verbose=False):
-                retry_count += 1
-                consecutive_failures += 1
-                if retry_count > max_retries:
-                    sys.stdout.write('\n') # Newline after progress bar
-                    print(f"❌ Failed to get ACK for chunk after {max_retries} retries.")
-                    return False
-                else:
-                    # Seek back and retry the chunk
-                    f.seek(f.tell() - len(chunk))
-                    sys.stdout.write('\n') # Newline after progress bar
-                    print(f"⚠️  Retrying chunk {retry_count}/{max_retries}...")
-                    
-                    # Progressive backoff for consecutive failures
-                    backoff_delay = min(5.0, 0.5 * consecutive_failures)
-                    time.sleep(backoff_delay)
-                    continue
-            else:
-                retry_count = 0  # Reset retry count on success
-                consecutive_failures = 0  # Reset consecutive failure count
-            
-            bytes_sent += len(chunk)
-            
-            # Draw progress bar
-            progress = (bytes_sent / file_size) * 100
-            bar_length = 40
-            filled_len = int(bar_length * bytes_sent // file_size)
-            bar = '█' * filled_len + '-' * (bar_length - filled_len)
-            
-            # Use carriage return to stay on the same line
-            sys.stdout.write(f'   [{bar}] {progress:.1f}% complete\r')
-            sys.stdout.flush()
-
-    sys.stdout.write('\n') # Newline after progress bar is complete
+    sys.stdout.write('\n')
     print(f"✅ Finished sending file: {Path(file_path).name}")
     return True
 
@@ -208,11 +232,10 @@ def main():
             # Clear any pending data and wait for stable connection
             ser.reset_input_buffer()
             ser.reset_output_buffer()
-            time.sleep(3) # Extended wait for USB CDC connection to establish
+            time.sleep(2)  # Wait for ESP32 to initialize
             
-            # Test connection stability
             print("🔄 Testing connection stability...")
-            time.sleep(2)  # Additional time for USB CDC
+            time.sleep(1)
 
             # 1. Start Session
             print("🤝 Initiating transfer session...")

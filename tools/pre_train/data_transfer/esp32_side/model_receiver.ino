@@ -60,7 +60,10 @@ File currentFile;
 char receivedSessionName[64];
 char receivedFileName[64];
 uint32_t receivedFileSize = 0;
+uint32_t receivedFileCRC = 0;
+uint32_t receivedChunkSize = 0;
 uint32_t bytesWritten = 0;
+uint32_t runningCRC = 0xFFFFFFFF;
 uint16_t filesReceived = 0;
 
 // --- LED Configuration ---
@@ -70,6 +73,8 @@ const uint8_t LED_PIN = 2;  // Built-in LED on most ESP32 boards
 void setLed(bool on);
 void blinkLed(int count, int duration);
 bool read_header();
+uint32_t compute_crc32(const uint8_t* data, size_t len);
+bool safeDeleteFile(const char* filename);
 void handleStartSession();
 void handleCommand();
 void handleFileInfo();
@@ -89,6 +94,42 @@ void blinkLed(int count, int duration) {
         setLed(false); 
         delay(duration);
     }
+}
+
+uint32_t compute_crc32(const uint8_t* data, size_t len) {
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 0; i < len; ++i) {
+        uint8_t b = data[i];
+        crc ^= b;
+        for (int j = 0; j < 8; ++j) {
+            uint32_t mask = -(int)(crc & 1);
+            crc = (crc >> 1) ^ (0xEDB88320 & mask);
+        }
+    }
+    return crc ^ 0xFFFFFFFF;
+}
+
+bool safeDeleteFile(const char* filename) {
+    // Ensure no file handle is open for this file
+    if (currentFile && String(currentFile.name()) == String(filename)) {
+        currentFile.close();
+        currentFile = File();
+    }
+    
+    // Try to delete the file multiple times if needed
+    if (SPIFFS.exists(filename)) {
+        for (int attempt = 0; attempt < 3; attempt++) {
+            if (SPIFFS.remove(filename)) {
+                // Verify it's actually deleted
+                if (!SPIFFS.exists(filename)) {
+                    return true;
+                }
+            }
+            delay(10);
+        }
+        return false; // Failed to delete after multiple attempts
+    }
+    return true; // File doesn't exist, nothing to delete
 }
 
 void printStorageInfo() {
@@ -338,13 +379,25 @@ void handleFileInfo() {
     Serial.readBytes(receivedFileName, filename_len);
     receivedFileName[filename_len] = '\0';
 
-    // Wait for file size (4 bytes)
-    while (Serial.available() < sizeof(receivedFileSize)) {
+    // Wait for file size (4 bytes), file CRC (4 bytes), and chunk size (4 bytes)
+    while (Serial.available() < 12) {
         delay(1);
         yield();
     }
     Serial.readBytes((uint8_t*)&receivedFileSize, sizeof(receivedFileSize));
+    Serial.readBytes((uint8_t*)&receivedFileCRC, sizeof(receivedFileCRC));
+    Serial.readBytes((uint8_t*)&receivedChunkSize, sizeof(receivedChunkSize));
+    
     bytesWritten = 0;
+    runningCRC = 0xFFFFFFFF;
+
+    // Ensure chunk size doesn't exceed our buffer
+    if (receivedChunkSize > (uint32_t)CHUNK_SIZE) {
+        Serial.print(RESP_ERROR);
+        Serial.flush();
+        currentState = State::ERROR_STATE;
+        return;
+    }
 
     // Determine file type for better user feedback
     String fileType = "📄 File";
@@ -362,21 +415,22 @@ void handleFileInfo() {
         fileType = "📄 Binary Data";
     }
 
-
     // Close previous file if open
     if (currentFile) {
         currentFile.close();
+        currentFile = File();
     }
     
-    // Create file path with leading slash for SPIFFS - preserve original filename
+    // Create file path with leading slash for SPIFFS
     String filePath = "/" + String(receivedFileName);
     
-    // Delete existing file if it exists to ensure clean overwrite
-    if (SPIFFS.exists(filePath)) {
-        Serial.printf("🗑️  Deleting existing file: %s\n", receivedFileName);
-        if (!SPIFFS.remove(filePath)) {
-            Serial.printf("⚠️  Warning: Failed to delete existing file: %s\n", receivedFileName);
-        }
+    // Use safe delete function
+    if (!safeDeleteFile(filePath.c_str())) {
+        Serial.printf("❌ Failed to delete existing file: %s\n", receivedFileName);
+        Serial.print(RESP_ERROR);
+        Serial.flush();
+        currentState = State::ERROR_STATE;
+        return;
     }
     
     Serial.printf("📥 Receiving %s: %s (%u bytes)\n", fileType.c_str(), receivedFileName, receivedFileSize);
@@ -396,6 +450,7 @@ void handleFileInfo() {
 }
 
 void handleFileChunk() {
+    // V2 Protocol: expect chunks with offset, length, and CRC
     if (Serial.available() < sizeof(CMD_HEADER)) return;
 
     if (!read_header()) return;
@@ -412,13 +467,13 @@ void handleFileChunk() {
         return;
     }
 
-    uint8_t buffer[CHUNK_SIZE];
-    size_t bytesToRead = min((size_t)CHUNK_SIZE, (size_t)(receivedFileSize - bytesWritten));
+    // Read chunk header: offset (4), chunk_len (4), chunk_crc (4)
+    uint32_t offset = 0, chunk_len = 0, chunk_crc = 0;
     
-    // Wait for complete chunk data
+    // Wait for complete header (12 bytes)
     uint32_t start_time = millis();
-    while (Serial.available() < bytesToRead) {
-        if (millis() - start_time > 5000) {  // 5 second timeout
+    while (Serial.available() < 12) {
+        if (millis() - start_time > 5000) {
             Serial.print(RESP_ERROR);
             Serial.flush();
             currentState = State::ERROR_STATE;
@@ -428,40 +483,105 @@ void handleFileChunk() {
         yield();
     }
     
-    size_t bytesRead = Serial.readBytes(buffer, bytesToRead);
+    Serial.readBytes((uint8_t*)&offset, 4);
+    Serial.readBytes((uint8_t*)&chunk_len, 4);
+    Serial.readBytes((uint8_t*)&chunk_crc, 4);
 
-    if (bytesRead > 0) {
-        size_t written = currentFile.write(buffer, bytesRead);
-        if (written != bytesRead) {
-            Serial.printf("❌ Write error for %s\n", receivedFileName);
-            currentState = State::ERROR_STATE;
-            Serial.print(RESP_ERROR);
+    if (chunk_len > receivedChunkSize || chunk_len == 0) {
+        Serial.print(RESP_ERROR);
+        Serial.flush();
+        currentState = State::ERROR_STATE;
+        return;
+    }
+
+    // Read chunk payload
+    uint8_t buffer[CHUNK_SIZE];
+    start_time = millis();
+    while (Serial.available() < chunk_len) {
+        if (millis() - start_time > 5000) {
+            Serial.print("NACK ");
+            Serial.println(offset);
             Serial.flush();
-            return;
+            return; // Sender will retry
         }
-        
-        bytesWritten += bytesRead;
-        
-        // Periodic flush for stability
-        if (bytesWritten % (CHUNK_SIZE * 4) == 0) {
-            currentFile.flush();
+        delay(1);
+        yield();
+    }
+    
+    size_t bytesRead = Serial.readBytes(buffer, chunk_len);
+    if (bytesRead != chunk_len) {
+        Serial.print("NACK ");
+        Serial.println(offset);
+        Serial.flush();
+        return; // Sender will retry
+    }
+
+    // Compute CRC32 of the received chunk
+    uint32_t calc_crc = compute_crc32(buffer, chunk_len);
+
+    if (calc_crc != chunk_crc) {
+        Serial.print("NACK ");
+        Serial.println(offset);
+        Serial.flush();
+        delay(2);
+        return; // CRC mismatch, sender will retry
+    }
+
+    // CRC matched; write to file
+    size_t written = currentFile.write(buffer, chunk_len);
+    if (written != chunk_len) {
+        Serial.printf("❌ Write error for %s\n", receivedFileName);
+        currentState = State::ERROR_STATE;
+        Serial.print(RESP_ERROR);
+        Serial.flush();
+        return;
+    }
+
+    // Update running CRC for entire file
+    for (uint32_t i = 0; i < chunk_len; ++i) {
+        uint8_t b = buffer[i];
+        runningCRC ^= b;
+        for (int j = 0; j < 8; ++j) {
+            uint32_t mask = -(int)(runningCRC & 1);
+            runningCRC = (runningCRC >> 1) ^ (0xEDB88320 & mask);
         }
+    }
+    
+    bytesWritten += chunk_len;
+    
+    // Periodic flush for stability
+    if (bytesWritten % (CHUNK_SIZE * 4) == 0) {
+        currentFile.flush();
     }
     
     delay(CHUNK_DELAY);
     yield();
 
-    Serial.print(RESP_ACK);
+    Serial.print("ACK ");
+    Serial.println(offset);
     Serial.flush();
 
     if (bytesWritten >= receivedFileSize) {
         currentFile.flush();
         currentFile.close();
-        filesReceived++;
-        Serial.printf("✅ Saved: %s (%u bytes)\n", receivedFileName, receivedFileSize);
-        setLed(false);
-        blinkLed(2, 100);  // Quick success blink
-        currentState = State::WAITING_FOR_COMMAND;
+        
+        // Finalize and verify file CRC
+        runningCRC ^= 0xFFFFFFFF;
+        if (runningCRC == receivedFileCRC && bytesWritten == receivedFileSize) {
+            filesReceived++;
+            Serial.printf("✅ Saved: %s (%u bytes) - CRC verified\n", receivedFileName, receivedFileSize);
+            setLed(false);
+            blinkLed(2, 100);  // Quick success blink
+            currentState = State::WAITING_FOR_COMMAND;
+        } else {
+            // CRC mismatch, remove file
+            String filePath = "/" + String(receivedFileName);
+            SPIFFS.remove(filePath);
+            Serial.printf("❌ CRC mismatch for %s - file removed\n", receivedFileName);
+            currentState = State::ERROR_STATE;
+            Serial.print(RESP_ERROR);
+            Serial.flush();
+        }
     }
 }
 

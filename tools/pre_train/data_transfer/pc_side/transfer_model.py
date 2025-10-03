@@ -18,6 +18,7 @@ import os
 import sys
 import struct
 import glob
+import binascii
 from pathlib import Path
 
 # --- Protocol Constants ---
@@ -33,13 +34,14 @@ RESP_READY = b"READY"
 RESP_OK = b"OK"
 RESP_ERROR = b"ERROR"
 
-# Transfer parameters optimized for ESP32
+# Transfer parameters optimized for ESP32 - V2 Protocol
 CHUNK_SIZE =  256  # bytes per chunk
-CHUNK_DELAY = 50  # delay between chunks in ms
+CHUNK_DELAY = 0.02  # delay between chunks in seconds (V2 uses ACKs)
+MAX_RETRIES = 5     # max retries per chunk
 
 # Timeout settings
-SERIAL_TIMEOUT = 30  # seconds
-ACK_TIMEOUT = 30    # seconds
+SERIAL_TIMEOUT = 5  # seconds
+ACK_TIMEOUT = 5    # seconds
 
 def get_model_files(model_name):
     """Get all model files from the trained_model directory for given model_name."""
@@ -84,6 +86,18 @@ def get_all_model_files(model_name):
     config_files, forest_files, predictor_files, log_files = get_model_files(model_name)
     return config_files + predictor_files + log_files + forest_files
 
+def _readline_with_timeout(ser, timeout_s=5.0):
+    """Read a line with a soft timeout; returns stripped string (can be empty)."""
+    end_time = time.time() + timeout_s
+    line = b""
+    while time.time() < end_time:
+        part = ser.readline()
+        if part:
+            line = part
+            break
+        time.sleep(0.01)
+    return line.decode(errors='ignore').strip()
+
 def wait_for_response(ser, expected_response, timeout=ACK_TIMEOUT, verbose=True):
     """Wait for a specific response from the ESP32."""
     start_time = time.time()
@@ -123,7 +137,7 @@ def send_command(ser, command, payload=b""):
     time.sleep(0.01)
 
 def transfer_file(ser, file_path, show_progress=True, progress_callback=None, quiet_acks=False):
-    """Transfer a single model file to ESP32."""
+    """Transfer a single model file to ESP32 with V2 protocol (CRC + ACK/NACK)."""
     if not os.path.exists(file_path):
         print(f"⚠️  Warning: File not found, skipping: {file_path}")
         return False
@@ -134,9 +148,17 @@ def transfer_file(ser, file_path, show_progress=True, progress_callback=None, qu
     if show_progress:
         print(f"\n🚀 Transferring {filename} ({file_size} bytes)")
 
-    # 1. Send File Info
+    # Read the file data
+    with open(file_path, 'rb') as f:
+        file_data = f.read()
+    
+    # Compute full file CRC32
+    file_crc = binascii.crc32(file_data) & 0xFFFFFFFF
+
+    # 1. Send File Info with V2 metadata (filename, size, CRC, chunk_size)
     filename_bytes = filename.encode('utf-8')
-    payload = struct.pack('B', len(filename_bytes)) + filename_bytes + struct.pack('<I', file_size)
+    payload = (struct.pack('B', len(filename_bytes)) + filename_bytes + 
+               struct.pack('<III', file_size, file_crc, CHUNK_SIZE))
     send_command(ser, CMD_FILE_INFO, payload)
 
     if not wait_for_response(ser, RESP_ACK, verbose=not quiet_acks):
@@ -144,58 +166,61 @@ def transfer_file(ser, file_path, show_progress=True, progress_callback=None, qu
             print("❌ ESP32 did not acknowledge file info.")
         return False
 
-    # 2. Send File Chunks
-    with open(file_path, 'rb') as f:
-        bytes_sent = 0
-        retry_count = 0
-        max_retries = 5
-        consecutive_failures = 0
-        
-        while True:
-            chunk = f.read(CHUNK_SIZE)
-            if not chunk:
-                break
+    # 2. Send File Chunks with per-chunk CRC and ACK/NACK
+    bytes_sent = 0
 
-            send_command(ser, CMD_FILE_CHUNK, chunk)
-            time.sleep(CHUNK_DELAY/1000)
+    for offset in range(0, file_size, CHUNK_SIZE):
+        chunk = file_data[offset:offset + CHUNK_SIZE]
+        chunk_len = len(chunk)
+        chunk_crc = binascii.crc32(chunk) & 0xFFFFFFFF
+        header = struct.pack('<III', offset, chunk_len, chunk_crc)
+
+        success = False
+        for attempt in range(1, MAX_RETRIES + 1):
+            # Send chunk with header
+            send_command(ser, CMD_FILE_CHUNK, header + chunk)
+
+            # Wait for ACK/NACK
+            line = _readline_with_timeout(ser, timeout_s=5.0)
+            if line.startswith("ACK "):
+                try:
+                    ack_off = int(line.split()[1])
+                except Exception:
+                    ack_off = -1
+                if ack_off == offset:
+                    success = True
+                    break
+            elif line.startswith("NACK "):
+                # Retry
+                if attempt < MAX_RETRIES and show_progress:
+                    sys.stdout.write('\n')
+                    print(f"⚠️  Retrying chunk at offset {offset} ({attempt}/{MAX_RETRIES})...")
+                continue
+            # Anything else: small delay and retry
+            time.sleep(0.05)
+
+        if not success:
+            if show_progress:
+                sys.stdout.write('\n')
+                print(f"❌ Chunk transfer failed at offset {offset} after {MAX_RETRIES} retries")
+            return False
+
+        bytes_sent += chunk_len
+        
+        # Call progress callback if provided
+        if progress_callback:
+            progress_callback(bytes_sent, file_size)
+        elif show_progress:
+            # Individual file progress bar
+            progress = (bytes_sent / file_size) * 100
+            bar_length = 40
+            filled_len = int(bar_length * bytes_sent // file_size)
+            bar = '█' * filled_len + '-' * (bar_length - filled_len)
             
-            # Wait for ACK with retry mechanism
-            if not wait_for_response(ser, RESP_ACK, timeout=ACK_TIMEOUT, verbose=False):
-                retry_count += 1
-                consecutive_failures += 1
-                if retry_count > max_retries:
-                    if show_progress:
-                        sys.stdout.write('\n')
-                        print(f"❌ Failed to get ACK for chunk after {max_retries} retries.")
-                    return False
-                else:
-                    # Seek back and retry the chunk
-                    f.seek(f.tell() - len(chunk))
-                    if show_progress:
-                        sys.stdout.write('\n')
-                        print(f"⚠️  Retrying chunk {retry_count}/{max_retries}...")
-                    
-                    backoff_delay = min(5.0, 0.5 * consecutive_failures)
-                    time.sleep(backoff_delay)
-                    continue
-            else:
-                retry_count = 0
-                consecutive_failures = 0
-            
-            bytes_sent += len(chunk)
-            
-            # Call progress callback if provided
-            if progress_callback:
-                progress_callback(bytes_sent, file_size)
-            elif show_progress:
-                # Individual file progress bar
-                progress = (bytes_sent / file_size) * 100
-                bar_length = 40
-                filled_len = int(bar_length * bytes_sent // file_size)
-                bar = '█' * filled_len + '-' * (bar_length - filled_len)
-                
-                sys.stdout.write(f'   [{bar}] {progress:.1f}% complete\r')
-                sys.stdout.flush()
+            sys.stdout.write(f'   [{bar}] {progress:.1f}% complete\r')
+            sys.stdout.flush()
+        
+        time.sleep(CHUNK_DELAY)
 
     if show_progress:
         sys.stdout.write('\n')

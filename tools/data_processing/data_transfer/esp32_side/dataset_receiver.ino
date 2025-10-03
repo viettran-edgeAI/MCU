@@ -10,8 +10,8 @@
 // IMPORTANT: Keep these in sync with the PC sender script (transfer_dataset.py)
 // - BUFFER_CHUNK should match CHUNK_SIZE
 // - BUFFER_DELAY_MS should reflect CHUNK_DELAY (in milliseconds)
-const int BUFFER_CHUNK = 1024;
-const int BUFFER_DELAY_MS = 50;  // 0.05s to match CHUNK_DELAY=0.05
+const int BUFFER_CHUNK = 256;
+const int BUFFER_DELAY_MS = 20;  // 0.05s to match CHUNK_DELAY=0.05
 uint8_t buffer[BUFFER_CHUNK];
 
 void setup() {

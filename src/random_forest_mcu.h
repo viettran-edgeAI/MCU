@@ -105,15 +105,7 @@ namespace mcu{
                 RF_DEBUG(0, "❌ Error initializing base data");
                 return false;
             }
-            base_data.loadData();
-            // printout first 10 sample in train data
-            for(uint8_t i = 0; i < 2; i++){
-                Serial.printf("sample %d : label %d\n", i, base_data.getLabel(i));
-                for(uint8_t j = 0; j < config.num_features; j++){
-                    Serial.printf("  feature %d : %f", j, base_data[i].features[j]);
-                }
-            }
-            base_data.releaseData();
+
             // initialize data components
             dataList.reserve(config.num_trees);
             train_data.init("/train_data.bin", config.num_features);
@@ -161,6 +153,16 @@ namespace mcu{
                 RF_DEBUG(0, "❌ Error loading training data");
                 return false;
             }
+            // printout first 10 samples
+            Serial.printf("Train_data size: %d - features: %d\n", train_data.size(), train_data.num_features());
+            for(uint16_t i=0; i < 20; i++){
+                Serial.printf("Sample %d:  - label: %d | ", i, train_data.getLabel(i));
+                for(uint8_t j=0; j < 20; j++){
+                    Serial.printf("%d ", train_data.getFeature(i,j));
+                }
+                Serial.println();
+            }
+
             logger.m_log("load train_data", print_log);
             for(uint8_t i = 0; i < config.num_trees; i++){
                 Rf_tree tree(i);
@@ -333,12 +335,11 @@ namespace mcu{
             uint16_t totalSamples;
             
             NodeStats(uint8_t numLabels) : majorityLabel(0), totalSamples(0) {
-                labelCounts.reserve(numLabels);
-                labelCounts.fill(0);
+                labelCounts.resize(numLabels, static_cast<uint16_t>(0));
             }
             
             // analyze a slice [begin,end) over a shared indices array
-            void analyzeSamplesRange(const b_vector<uint16_t, 8>& indices, uint16_t begin, uint16_t end,
+            void analyzeSamples(const b_vector<uint16_t, 8>& indices, uint16_t begin, uint16_t end,
                                     uint8_t numLabels, const Rf_data& data) {
                 totalSamples = (begin < end) ? (end - begin) : 0;
                 uint16_t maxCount = 0;
@@ -347,7 +348,7 @@ namespace mcu{
                     if (sampleID < data.size()) {
                         uint8_t label = data.getLabel(sampleID);
                         labels.insert(label);
-                        if (label < numLabels && label < 32) {
+                        if (label < numLabels && label < MAX_LABELS) {
                             labelCounts[label]++;
                             if (labelCounts[label] > maxCount) {
                                 maxCount = labelCounts[label];
@@ -359,14 +360,14 @@ namespace mcu{
             }
         };
 
-        SplitInfo findBestSplitRange(const b_vector<uint16_t, 8>& indices, uint16_t begin, uint16_t end,
+        SplitInfo findBestSplit(const b_vector<uint16_t, 8>& indices, uint16_t begin, uint16_t end,
                                     const unordered_set<uint16_t>& selectedFeatures, bool use_Gini, uint8_t numLabels) {
             SplitInfo bestSplit;
-            uint32_t totalSamples = (begin < end) ? (end - begin) : 0;
+            uint16_t totalSamples = (begin < end) ? (end - begin) : 0;
             if (totalSamples < 2) return bestSplit;
 
             // Base label counts
-            vector<uint16_t> baseLabelCounts(numLabels, 0);
+            b_vector<uint16_t> baseLabelCounts(numLabels, 0);
             for (uint16_t k = begin; k < end; ++k) {
                 uint16_t sid = indices[k];
                 if (sid < train_data.size()) {
@@ -462,11 +463,6 @@ namespace mcu{
                 RF_DEBUG(1, "⚠️ Warning: sub_data is empty. Ignoring.. !");
                 return;
             }
-            // Serial.printf("sub_data size: %d\n", sampleIDs.size());
-            // Serial.printf("Queue nodes cap: %d\n", queue_nodes.capacity());
-            // Serial.printf("config.max_depth: %d\n", config.max_depth);
-            // Serial.printf("config.min_split: %d\n", config.min_split);
-            // Serial.printf("config.num_labels: %d\n", config.num_labels);
         
             // Create root node and initial sample index list once per tree
             Tree_node rootNode;
@@ -479,8 +475,7 @@ namespace mcu{
             
             // Root covers the whole slice
             queue_nodes.push_back(NodeToBuild(0, 0, static_cast<uint16_t>(indices.size()), 0));
-            // Serial.printf("queue node size: %d\n", queue_nodes.size());
-
+            bool prinnted = false;
             // Process nodes breadth-first with minimal allocations
             while (!queue_nodes.empty()) {
                 // Serial.print("here ");
@@ -489,7 +484,7 @@ namespace mcu{
                 
                 // Analyze node samples over the slice
                 NodeStats stats(config.num_labels);
-                stats.analyzeSamplesRange(indices, current.begin, current.end, config.num_labels, train_data);
+                stats.analyzeSamples(indices, current.begin, current.end, config.num_labels, train_data);
 
                 if(current.nodeIndex >= MAX_NODES){
                     RF_DEBUG(2, "⚠️ Warning: Exceeded maximum node limit. Forcing leaf node 🌿.");
@@ -521,7 +516,7 @@ namespace mcu{
                 if (num_selected_features == 0) num_selected_features = 1;
                 unordered_set<uint16_t> selectedFeatures;
                 selectedFeatures.reserve(num_selected_features);
-                uint16_t N = static_cast<uint16_t>(config.num_features);
+                uint16_t N = config.num_features;
                 uint16_t K = num_selected_features > N ? N : num_selected_features;
                 for (uint16_t j = N - K; j < N; ++j) {
                     uint16_t t = static_cast<uint16_t>(random_generator.bounded(j + 1));
@@ -530,9 +525,16 @@ namespace mcu{
                 }
                 
                 // Find best split on the slice
-                SplitInfo bestSplit = findBestSplitRange(indices, current.begin, current.end,
+                SplitInfo bestSplit = findBestSplit(indices, current.begin, current.end,
                                                         selectedFeatures, config.use_gini, config.num_labels);
-                float gain_threshold = config.use_gini ? config.impurity_threshold/2 : config.impurity_threshold;
+                // Align policy with PC: Gini typically yields smaller gains than entropy,
+                // so we relax the threshold by half when using Gini.
+                float gain_threshold = config.use_gini ? (config.impurity_threshold * 0.5f)
+                                                      :  (config.impurity_threshold);
+                if(!prinnted){
+                    Serial.printf("best split gain: %.3f\n", bestSplit.gain);
+                    prinnted = true;
+                }
                 
                 if (bestSplit.gain <= gain_threshold) {
                     tree.nodes[current.nodeIndex].setIsLeaf(true);
@@ -1283,7 +1285,7 @@ namespace mcu{
 
         // get name of model (forest)
         String get_model_name() const {
-            char name[32];
+            char name[CHAR_BUFFER];
             base.get_model_name(name, sizeof(name));
             return String(name);
         }

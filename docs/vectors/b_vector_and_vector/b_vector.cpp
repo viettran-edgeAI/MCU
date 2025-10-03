@@ -15,6 +15,69 @@ namespace mcu {
     private:
         using vector_index_type = size_t;
         
+        // Helper function to construct from another b_vector (reduces code duplication)
+        template<size_t otherSboSize>
+        void construct_from_other(const b_vector<T, otherSboSize>& other) noexcept {
+            if (other.size() <= SBO_SIZE) {
+                // Can fit in our SBO buffer
+                using_heap = false;
+                capacity_ = SBO_SIZE;
+                T* buffer_ptr = reinterpret_cast<T*>(buffer);
+                for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
+                    if (i < size_) {
+                        new(buffer_ptr + i) T(other[i]);
+                    } else {
+                        new(buffer_ptr + i) T();
+                    }
+                }
+            } else {
+                // Need to use heap
+                using_heap = true;
+                capacity_ = size_;
+                heap_array = new T[capacity_];
+                for (vector_index_type i = 0; i < size_; ++i) {
+                    heap_array[i] = other[i];
+                }
+            }
+        }
+        
+        // Helper function to assign from another b_vector (reduces code duplication)
+        template<size_t otherSboSize>
+        void assign_from_other(const b_vector<T, otherSboSize>& other) noexcept {
+            // First, correctly destroy the elements in `this`
+            if (using_heap) {
+                delete[] heap_array;
+            } else {
+                T* p = reinterpret_cast<T*>(buffer);
+                for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
+                    p[i].~T();
+                }
+            }
+
+            size_ = other.size();
+            if (size_ <= SBO_SIZE) {
+                // Use SBO
+                using_heap = false;
+                capacity_ = SBO_SIZE;
+                T* buffer_ptr = reinterpret_cast<T*>(buffer);
+                for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
+                    if (i < size_) {
+                        new(buffer_ptr + i) T(other[i]);
+                    } else {
+                        new(buffer_ptr + i) T();
+                    }
+                }
+            } else {
+                // Use heap
+                using_heap = true;
+                capacity_ = size_;
+                heap_array = new T[capacity_];
+                for (vector_index_type i = 0; i < size_; ++i) {
+                    heap_array[i] = other[i];
+                }
+            }
+        }
+        
         // Small Buffer Optimization - auto-adjust SBO size based on sizeof(T)
         // If sboSize is explicitly provided (non-zero), use it; otherwise auto-calculate
         static constexpr size_t calculateSboSize() {
@@ -24,17 +87,17 @@ namespace mcu {
                 // Auto-calculate based on sizeof(T)
                 constexpr size_t type_size = sizeof(T);
                 if constexpr (type_size == 1) {
-                    return 16;  // 32 bytes for 1-byte types (char, uint8_t, etc.)
+                    return 32;  // 32 bytes for 1-byte types (char, uint8_t, etc.)
                 } else if constexpr (type_size == 2) {
-                    return 8;  // 16 elements for 2-byte types (short, uint16_t, etc.)
+                    return 16;  // 16 elements for 2-byte types (short, uint16_t, etc.)
                 } else if constexpr (type_size == 4) {
-                    return 4;   // 8 elements for 4-byte types (int, float, uint32_t, etc.)
+                    return 8;   // 8 elements for 4-byte types (int, float, uint32_t, etc.)
                 } else if constexpr (type_size == 8) {
                     return 4;   // 4 elements for 8-byte types (double, uint64_t, etc.)
                 } else if constexpr (type_size <= 16) {
-                    return 4;   // 2 elements for types up to 16 bytes
+                    return 2;   // 2 elements for types up to 16 bytes
                 } else {
-                    return 2;   // 1 element for very large types
+                    return 1;   // 1 element for very large types
                 }
             }
         }
@@ -179,6 +242,17 @@ namespace mcu {
             }
         }
 
+        // Unified templated copy constructor for different SBO sizes (handles both const and non-const)
+        template<size_t otherSboSize>
+        b_vector(const b_vector<T, otherSboSize>& other) noexcept : size_(other.size()) {
+            construct_from_other(other);
+        }
+        
+        template<size_t otherSboSize>
+        b_vector(b_vector<T, otherSboSize>& other) noexcept : size_(other.size()) {
+            construct_from_other(other);
+        }
+
         // Move constructor
         b_vector(b_vector&& other) noexcept : size_(other.size_), capacity_(other.capacity_), using_heap(other.using_heap) {
             if (other.using_heap) {
@@ -272,6 +346,56 @@ namespace mcu {
             return *this;
         }
 
+        // Unified templated copy assignment for different SBO sizes (const version)
+        template<size_t otherSboSize>
+        b_vector& operator=(const b_vector<T, otherSboSize>& other) noexcept {
+            if (reinterpret_cast<const void*>(this) == reinterpret_cast<const void*>(&other)) {
+                return *this;
+            }
+            assign_from_other(other);
+            return *this;
+        }
+        
+        // Unified templated copy assignment for different SBO sizes (non-const version)
+        template<size_t otherSboSize>
+        b_vector& operator=(b_vector<T, otherSboSize>& other) noexcept {
+            if (reinterpret_cast<const void*>(this) == reinterpret_cast<const void*>(&other)) {
+                return *this;
+            }
+            assign_from_other(other);
+            return *this;
+        }
+
+        // Templated move constructor for different SBO sizes
+        template<size_t otherSboSize>
+        b_vector(b_vector<T, otherSboSize>&& other) noexcept : size_(other.size()) {
+            if (other.size() <= SBO_SIZE) {
+                // Can fit in our SBO buffer
+                using_heap = false;
+                capacity_ = SBO_SIZE;
+                T* buffer_ptr = reinterpret_cast<T*>(buffer);
+                for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
+                    if (i < size_) {
+                        new(buffer_ptr + i) T(std::move(other[i]));
+                    } else {
+                        new(buffer_ptr + i) T();
+                    }
+                }
+            } else {
+                // Need to use heap - can't move the heap buffer due to different types,
+                // so we copy instead
+                using_heap = true;
+                capacity_ = size_;
+                heap_array = new T[capacity_];
+                for (vector_index_type i = 0; i < size_; ++i) {
+                    heap_array[i] = std::move(other[i]);
+                }
+            }
+            
+            // Clear the other vector
+            other.clear();
+        }
+
         // Move assignment
         b_vector& operator=(b_vector&& other) noexcept {
             if (this != &other) {
@@ -305,6 +429,52 @@ namespace mcu {
                 other.capacity_ = SBO_SIZE;
                 other.using_heap = false;
             }
+            return *this;
+        }
+
+        // Templated move assignment for different SBO sizes
+        template<size_t otherSboSize>
+        b_vector& operator=(b_vector<T, otherSboSize>&& other) noexcept {
+            if (reinterpret_cast<const void*>(this) == reinterpret_cast<const void*>(&other)) {
+                return *this;
+            }
+
+            // First, correctly destroy the elements in `this`
+            if (using_heap) {
+                delete[] heap_array;
+            } else {
+                T* p = reinterpret_cast<T*>(buffer);
+                for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
+                    p[i].~T();
+                }
+            }
+
+            size_ = other.size();
+            if (size_ <= SBO_SIZE) {
+                // Use SBO
+                using_heap = false;
+                capacity_ = SBO_SIZE;
+                T* buffer_ptr = reinterpret_cast<T*>(buffer);
+                for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
+                    if (i < size_) {
+                        new(buffer_ptr + i) T(std::move(other[i]));
+                    } else {
+                        new(buffer_ptr + i) T();
+                    }
+                }
+            } else {
+                // Use heap
+                using_heap = true;
+                capacity_ = size_;
+                heap_array = new T[capacity_];
+                for (vector_index_type i = 0; i < size_; ++i) {
+                    heap_array[i] = std::move(other[i]);
+                }
+            }
+
+            // Clear the other vector
+            other.clear();
+            
             return *this;
         }
 

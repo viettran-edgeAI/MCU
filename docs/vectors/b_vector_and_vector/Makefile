@@ -1,37 +1,29 @@
-# Makefile for Vector Test Suite
+# Makefile for B_Vector Comprehensive Test Suite
 
 CXX = g++
 CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -g
-TARGET = test_vector
-DEMO_TARGET = demo_conversions
-SOURCES = test_vector.cpp
-DEMO_SOURCES = demo_conversions.cpp
+TARGET = b_vector_comprehensive_test
+SOURCES = b_vector_test.cpp
 VECTOR_HEADER = vector.cpp
 BVECTOR_HEADER = b_vector.cpp
 
 # Include paths
 INCLUDES = -I../../../src
 
-.PHONY: all clean test run demo
+.PHONY: all clean test run
 
 all: $(TARGET)
 
 $(TARGET): $(SOURCES) $(VECTOR_HEADER) $(BVECTOR_HEADER)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $(TARGET) $(SOURCES)
 
-$(DEMO_TARGET): $(DEMO_SOURCES) $(VECTOR_HEADER) $(BVECTOR_HEADER)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $(DEMO_TARGET) $(DEMO_SOURCES)
-
 test: $(TARGET)
 	./$(TARGET)
 
 run: test
 
-demo: $(DEMO_TARGET)
-	./$(DEMO_TARGET)
-
 clean:
-	rm -f $(TARGET) $(DEMO_TARGET) *.o
+	rm -f $(TARGET) *.o
 
 # Debug build
 debug: CXXFLAGS += -DDEBUG -g3

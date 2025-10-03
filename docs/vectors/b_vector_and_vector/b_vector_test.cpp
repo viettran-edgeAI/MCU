@@ -1,4 +1,5 @@
 #include "b_vector.cpp"
+#include "vector.cpp"
 #include <iostream>
 #include <string>
 #include <sstream>
@@ -7,6 +8,8 @@
 #include <random>
 #include <algorithm>
 #include <cassert>
+#include <cstring>
+#include <complex>
 
 using namespace mcu;
 
@@ -30,7 +33,9 @@ struct TestResults {
         std::cout << "Passed: " << passed << std::endl;
         std::cout << "Failed: " << failed << std::endl;
         std::cout << "Total:  " << (passed + failed) << std::endl;
-        std::cout << "Success Rate: " << (100.0 * passed / (passed + failed)) << "%" << std::endl;
+        if (passed + failed > 0) {
+            std::cout << "Success Rate: " << (100.0 * passed / (passed + failed)) << "%" << std::endl;
+        }
     }
 };
 
@@ -66,7 +71,22 @@ TestResults results;
         } \
     } while(0)
 
-// Test struct for complex objects
+#define ASSERT_THROWS(code, test_name) \
+    do { \
+        bool threw = false; \
+        try { \
+            code; \
+        } catch (...) { \
+            threw = true; \
+        } \
+        if (threw) { \
+            results.pass(test_name); \
+        } else { \
+            results.fail(test_name, "Expected exception but none was thrown"); \
+        } \
+    } while(0)
+
+// Test structs for different sizes and complexity
 struct TestObject {
     int value;
     std::string name;
@@ -81,6 +101,29 @@ struct TestObject {
     bool operator<(const TestObject& other) const {
         return value < other.value;
     }
+};
+
+struct SmallStruct {
+    char c;
+    bool operator==(const SmallStruct& other) const { return c == other.c; }
+    bool operator<(const SmallStruct& other) const { return c < other.c; }
+};
+
+struct MediumStruct {
+    int a;
+    short b;
+    char c;
+    bool operator==(const MediumStruct& other) const { return a == other.a && b == other.b && c == other.c; }
+    bool operator<(const MediumStruct& other) const { return a < other.a; }
+};
+
+struct LargeStruct {
+    double data[8];
+    int count;
+    bool operator==(const LargeStruct& other) const { 
+        return count == other.count && std::memcmp(data, other.data, sizeof(data)) == 0; 
+    }
+    bool operator<(const LargeStruct& other) const { return count < other.count; }
 };
 
 // Basic functionality tests
@@ -578,11 +621,318 @@ void stress_test() {
     std::cout << "Final vector size after stress test: " << v.size() << std::endl;
 }
 
+// ========================= ADDITIONAL ENHANCED TESTS =========================
+
+void test_different_struct_sizes() {
+    std::cout << "\n=== DIFFERENT STRUCT SIZES TESTS ===" << std::endl;
+    
+    // Test with different struct sizes to verify SBO behavior
+    b_vector<SmallStruct> small_vec;
+    b_vector<MediumStruct> medium_vec;
+    b_vector<LargeStruct> large_vec;
+    
+    // Check adaptive SBO capacities for different sizes
+    std::cout << "SmallStruct SBO capacity: " << small_vec.capacity() << std::endl;
+    std::cout << "MediumStruct SBO capacity: " << medium_vec.capacity() << std::endl;
+    std::cout << "LargeStruct SBO capacity: " << large_vec.capacity() << std::endl;
+    
+    ASSERT_TRUE(small_vec.capacity() >= large_vec.capacity(), "Smaller structs have >= capacity than larger ones");
+    
+    // Test operations with different struct types
+    SmallStruct s1; s1.c = 'A';
+    SmallStruct s2; s2.c = 'B';
+    small_vec.push_back(s1);
+    small_vec.push_back(s2);
+    ASSERT_EQ(2, small_vec.size(), "SmallStruct vector - size");
+    ASSERT_EQ('A', small_vec[0].c, "SmallStruct vector - first element");
+    
+    MediumStruct m1; m1.a = 10; m1.b = 20; m1.c = 'X';
+    medium_vec.push_back(m1);
+    ASSERT_EQ(1, medium_vec.size(), "MediumStruct vector - size");
+    ASSERT_EQ(10, medium_vec[0].a, "MediumStruct vector - element access");
+    
+    LargeStruct l1;
+    l1.count = 5;
+    for (int i = 0; i < 8; ++i) l1.data[i] = i * 1.5;
+    large_vec.push_back(l1);
+    ASSERT_EQ(1, large_vec.size(), "LargeStruct vector - size");
+    ASSERT_EQ(5, large_vec[0].count, "LargeStruct vector - element access");
+}
+
+void test_enhanced_memory_patterns() {
+    std::cout << "\n=== ENHANCED MEMORY PATTERNS TESTS ===" << std::endl;
+    
+    // Test memory usage patterns for different scenarios
+    b_vector<int> sbo_only;
+    for (int i = 0; i < 4; ++i) {
+        sbo_only.push_back(i);
+    }
+    size_t sbo_memory = sbo_only.memory_usage();
+    
+    b_vector<int> heap_vector;
+    for (int i = 0; i < 100; ++i) {
+        heap_vector.push_back(i);
+    }
+    size_t heap_memory = heap_vector.memory_usage();
+    
+    ASSERT_TRUE(heap_memory > sbo_memory, "Heap allocation uses more memory than SBO");
+    
+    // Test transition from SBO to heap
+    b_vector<int> transition_vector;
+    size_t initial_memory = transition_vector.memory_usage();
+    
+    // Fill beyond SBO capacity
+    for (int i = 0; i < 50; ++i) {
+        transition_vector.push_back(i);
+    }
+    size_t final_memory = transition_vector.memory_usage();
+    
+    ASSERT_TRUE(final_memory > initial_memory, "Memory usage increases after SBO -> heap transition");
+    
+    std::cout << "SBO memory: " << sbo_memory << " bytes" << std::endl;
+    std::cout << "Heap memory: " << heap_memory << " bytes" << std::endl;
+    std::cout << "Transition memory change: " << initial_memory << " -> " << final_memory << " bytes" << std::endl;
+}
+
+void test_boundary_conditions() {
+    std::cout << "\n=== BOUNDARY CONDITIONS TESTS ===" << std::endl;
+    
+    // Test exactly at SBO boundary
+    b_vector<int> boundary_vec;
+    size_t sbo_capacity = boundary_vec.capacity();
+    
+    // Fill exactly to SBO capacity
+    for (size_t i = 0; i < sbo_capacity; ++i) {
+        boundary_vec.push_back(static_cast<int>(i));
+    }
+    ASSERT_EQ(sbo_capacity, boundary_vec.size(), "Filled to SBO capacity - size");
+    ASSERT_EQ(sbo_capacity, boundary_vec.capacity(), "Filled to SBO capacity - still in SBO");
+    
+    // Add one more to trigger heap allocation
+    boundary_vec.push_back(999);
+    ASSERT_EQ(sbo_capacity + 1, boundary_vec.size(), "Beyond SBO capacity - size");
+    ASSERT_TRUE(boundary_vec.capacity() > sbo_capacity, "Beyond SBO capacity - heap allocated");
+    
+    // Verify all elements are correct
+    for (size_t i = 0; i < sbo_capacity; ++i) {
+        ASSERT_EQ(static_cast<int>(i), boundary_vec[i], "SBO->heap transition preserves elements");
+    }
+    ASSERT_EQ(999, boundary_vec[sbo_capacity], "New element after transition");
+}
+
+// ========================= IMPLICIT CONVERSION TESTS =========================
+
+void test_sbo_size_conversions() {
+    std::cout << "\n=== SBO SIZE CONVERSION TESTS ===" << std::endl;
+    
+    // Test conversions between different SBO sizes
+    b_vector<int, 2> small_sbo;
+    small_sbo.push_back(1);
+    small_sbo.push_back(2);
+    small_sbo.push_back(3);  // Forces heap allocation
+    
+    // Copy to larger SBO size
+    b_vector<int, 8> large_sbo = small_sbo;
+    ASSERT_EQ(3, large_sbo.size(), "Small to large SBO - size");
+    ASSERT_EQ(1, large_sbo[0], "Small to large SBO - element 0");
+    ASSERT_EQ(2, large_sbo[1], "Small to large SBO - element 1");
+    ASSERT_EQ(3, large_sbo[2], "Small to large SBO - element 2");
+    
+    // Copy to smaller SBO size (data should fit)
+    b_vector<int, 4> medium_sbo = small_sbo;
+    ASSERT_EQ(3, medium_sbo.size(), "Small to medium SBO - size");
+    ASSERT_EQ(1, medium_sbo[0], "Small to medium SBO - element 0");
+    
+    // Assignment between different SBO sizes
+    b_vector<int, 6> another_sbo;
+    another_sbo = small_sbo;
+    ASSERT_EQ(3, another_sbo.size(), "Assignment between SBO sizes - size");
+    
+    // Move semantics between different SBO sizes
+    b_vector<int, 3> temp_sbo;
+    temp_sbo.push_back(10);
+    temp_sbo.push_back(20);
+    
+    b_vector<int, 8> moved_sbo = std::move(temp_sbo);
+    ASSERT_EQ(2, moved_sbo.size(), "Move between SBO sizes - size");
+    ASSERT_EQ(10, moved_sbo[0], "Move between SBO sizes - element 0");
+    ASSERT_EQ(20, moved_sbo[1], "Move between SBO sizes - element 1");
+}
+
+void test_const_nonconst_conversions() {
+    std::cout << "\n=== CONST/NON-CONST CONVERSION TESTS ===" << std::endl;
+    
+    // Test const source conversions
+    const b_vector<int, 4> const_source(MAKE_INT_LIST(1, 2, 3));
+    
+    // Copy from const source to different SBO size
+    b_vector<int, 8> from_const = const_source;
+    ASSERT_EQ(3, from_const.size(), "From const source - size");
+    ASSERT_EQ(1, from_const[0], "From const source - element 0");
+    
+    // Assignment from const source
+    b_vector<int, 6> assign_from_const;
+    assign_from_const = const_source;
+    ASSERT_EQ(3, assign_from_const.size(), "Assign from const - size");
+    
+    // Test non-const source conversions
+    b_vector<int, 4> nonconst_source;
+    nonconst_source.push_back(10);
+    nonconst_source.push_back(20);
+    
+    b_vector<int, 8> from_nonconst = nonconst_source;
+    ASSERT_EQ(2, from_nonconst.size(), "From non-const source - size");
+    ASSERT_EQ(10, from_nonconst[0], "From non-const source - element 0");
+}
+
+// ========================= VECTOR COMPATIBILITY TESTS =========================
+
+void test_vector_b_vector_interop() {
+    std::cout << "\n=== VECTOR/B_VECTOR INTEROPERABILITY TESTS ===" << std::endl;
+    
+    // Test b_vector to vector conversion
+    b_vector<int, 8> bvec;
+    bvec.push_back(1);
+    bvec.push_back(2);
+    bvec.push_back(3);
+    
+    mcu::vector<int> mvec = bvec;  // Implicit conversion
+    ASSERT_EQ(3, mvec.size(), "b_vector to vector - size");
+    ASSERT_EQ(1, mvec[0], "b_vector to vector - element 0");
+    ASSERT_EQ(2, mvec[1], "b_vector to vector - element 1");
+    ASSERT_EQ(3, mvec[2], "b_vector to vector - element 2");
+    
+    // Test vector to b_vector conversion
+    mcu::vector<int> mvec2(MAKE_INT_LIST(10, 20, 30, 40));
+    b_vector<int, 8> bvec2 = mvec2;  // Implicit conversion
+    ASSERT_EQ(4, bvec2.size(), "vector to b_vector - size");
+    ASSERT_EQ(10, bvec2[0], "vector to b_vector - element 0");
+    ASSERT_EQ(40, bvec2[3], "vector to b_vector - element 3");
+    
+    // Test assignment conversions
+    bvec.clear();
+    bvec = mvec2;  // vector to b_vector assignment
+    ASSERT_EQ(4, bvec.size(), "Assignment vector to b_vector - size");
+    
+    mvec.clear();
+    mvec = bvec2;  // b_vector to vector assignment
+    ASSERT_EQ(4, mvec.size(), "Assignment b_vector to vector - size");
+    
+    // Test with larger datasets (heap allocation)
+    mcu::vector<int> large_mvec;
+    for (int i = 0; i < 50; ++i) {
+        large_mvec.push_back(i * 2);
+    }
+    
+    b_vector<int, 8> large_bvec = large_mvec;
+    ASSERT_EQ(50, large_bvec.size(), "Large vector to b_vector - size");
+    ASSERT_EQ(0, large_bvec[0], "Large vector to b_vector - first element");
+    ASSERT_EQ(98, large_bvec[49], "Large vector to b_vector - last element");
+}
+
+// ========================= CODE SIZE AND OPTIMIZATION TESTS =========================
+
+void test_template_instantiation() {
+    std::cout << "\n=== TEMPLATE INSTANTIATION TESTS ===" << std::endl;
+    
+    // Test various SBO sizes to ensure templates compile correctly
+    b_vector<int, 2> vec2;
+    b_vector<int, 4> vec4;
+    b_vector<int, 8> vec8;
+    b_vector<int, 16> vec16;
+    
+    vec2.push_back(1);
+    vec4.push_back(2);
+    vec8.push_back(3);
+    vec16.push_back(4);
+    
+    ASSERT_EQ(1, vec2.size(), "Template instantiation vec2 - size");
+    ASSERT_EQ(1, vec4.size(), "Template instantiation vec4 - size");
+    ASSERT_EQ(1, vec8.size(), "Template instantiation vec8 - size");
+    ASSERT_EQ(1, vec16.size(), "Template instantiation vec16 - size");
+    
+    // Test all conversion combinations
+    b_vector<int, 8> a = vec2;   // 2->8
+    b_vector<int, 4> b = vec8;   // 8->4
+    b_vector<int, 16> c = vec4;  // 4->16
+    b_vector<int, 2> d = vec16;  // 16->2
+    
+    ASSERT_EQ(1, a.size(), "Conversion 2->8 - size");
+    ASSERT_EQ(1, b.size(), "Conversion 8->4 - size");
+    ASSERT_EQ(1, c.size(), "Conversion 4->16 - size");
+    ASSERT_EQ(1, d.size(), "Conversion 16->2 - size");
+    
+    // Test assignments  
+    a = vec4;  // 4->8
+    b = vec2;  // 2->4
+    c = vec8;  // 8->16
+    d = vec4;  // 4->2
+    
+    ASSERT_EQ(1, a.size(), "Assignment 4->8 - size");
+    ASSERT_EQ(1, b.size(), "Assignment 2->4 - size");
+    ASSERT_EQ(1, c.size(), "Assignment 8->16 - size");
+    ASSERT_EQ(1, d.size(), "Assignment 4->2 - size");
+    
+    // Test const versions
+    const auto& const_vec2 = vec2;
+    const auto& const_vec4 = vec4;
+    
+    b_vector<int, 8> e = const_vec2;  // const 2->8
+    b_vector<int, 4> f = const_vec4;  // const 4->4
+    
+    ASSERT_EQ(1, e.size(), "Const copy 2->8 - size");
+    ASSERT_EQ(1, f.size(), "Const copy 4->4 - size");
+    
+    e = const_vec2;  // const assignment 2->8
+    f = const_vec4;  // const assignment 4->4
+    
+    ASSERT_EQ(1, e.size(), "Const assignment 2->8 - size");
+    ASSERT_EQ(1, f.size(), "Const assignment 4->4 - size");
+}
+
+void test_function_parameter_passing() {
+    std::cout << "\n=== FUNCTION PARAMETER PASSING TESTS ===" << std::endl;
+    
+    // Helper functions for testing parameter passing
+    auto process_b_vector_8 = [](const b_vector<int, 8>& vec) -> size_t {
+        return vec.size();
+    };
+    
+    auto process_b_vector_4 = [](const b_vector<int, 4>& vec) -> size_t {
+        return vec.size();
+    };
+    
+    auto process_mcu_vector = [](const mcu::vector<int>& vec) -> size_t {
+        return vec.size();
+    };
+    
+    // Test passing b_vector with different SBO sizes
+    b_vector<int, 2> small_vec;
+    small_vec.push_back(1);
+    small_vec.push_back(2);
+    
+    size_t result1 = process_b_vector_8(small_vec);  // 2->8 conversion
+    size_t result2 = process_b_vector_4(small_vec);  // 2->4 conversion
+    
+    ASSERT_EQ(2, result1, "Function param 2->8 - size");
+    ASSERT_EQ(2, result2, "Function param 2->4 - size");
+    
+    // Test passing to mcu::vector function
+    size_t result3 = process_mcu_vector(small_vec);  // b_vector->vector conversion
+    ASSERT_EQ(2, result3, "Function param b_vector->vector - size");
+    
+    // Test with mcu::vector
+    mcu::vector<int> mvec(MAKE_INT_LIST(10, 20, 30));
+    size_t result4 = process_b_vector_8(mvec);  // vector->b_vector conversion
+    ASSERT_EQ(3, result4, "Function param vector->b_vector - size");
+}
+
 int main() {
-    std::cout << "=== B_VECTOR COMPREHENSIVE TEST SUITE ===" << std::endl;
-    std::cout << "Testing b_vector<T, sboSize> with simplified template parameters\n" << std::endl;
+    std::cout << "=== COMPREHENSIVE B_VECTOR TEST SUITE ===" << std::endl;
+    std::cout << "Testing b_vector<T, sboSize> with all features and conversions\n" << std::endl;
     
     try {
+        // Core functionality tests
         test_basic_operations();
         test_copy_move_operations();
         test_element_access();
@@ -594,6 +944,22 @@ int main() {
         test_complex_objects();
         test_memory_usage();
         test_edge_cases();
+        
+        // Enhanced functionality tests
+        test_different_struct_sizes();
+        test_enhanced_memory_patterns();
+        test_boundary_conditions();
+        
+        // Conversion and compatibility tests
+        test_sbo_size_conversions();
+        test_const_nonconst_conversions();
+        test_vector_b_vector_interop();
+        
+        // Template and optimization tests
+        test_template_instantiation();
+        test_function_parameter_passing();
+        
+        // Stress and performance tests
         stress_test();
         benchmark_performance();
         
@@ -601,6 +967,12 @@ int main() {
         
         if (results.failed == 0) {
             std::cout << "\n🎉 ALL TESTS PASSED! b_vector implementation is working correctly." << std::endl;
+            std::cout << "✅ Basic operations: PASS" << std::endl;
+            std::cout << "✅ Memory management (SBO/heap): PASS" << std::endl;
+            std::cout << "✅ Implicit conversions (SBO sizes): PASS" << std::endl;
+            std::cout << "✅ Vector compatibility: PASS" << std::endl;
+            std::cout << "✅ Template instantiation: PASS" << std::endl;
+            std::cout << "✅ Stress testing: PASS" << std::endl;
             return 0;
         } else {
             std::cout << "\n❌ Some tests failed. Please review the implementation." << std::endl;

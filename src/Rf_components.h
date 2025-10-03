@@ -700,6 +700,7 @@ namespace mcu {
                 return false;
             }
 
+            bool fallback_yet = false;
             size_t processed = 0;
             while (processed < numSamples) {
                 size_t batchSamples;
@@ -745,15 +746,44 @@ namespace mcu {
                             if (elemIndex >= sampleChunks[chunkIndex].size()) {
                                 RF_DEBUG_2(0, "❌ Index out of bounds: elemIndex=", elemIndex, ", size=", sampleChunks[chunkIndex].size());
                             }
-                            // Use set_unsafe since storage is pre-sized and bounds-checked above
                             sampleChunks[chunkIndex].set_unsafe(elemIndex, fv);
                         }
                     }
                 } else {
-                    // failed, return 
-                    RF_DEBUG(1, "❌ Failed to allocate IO buffer");
-                    file.close();
-                    return false;
+                    if (!fallback_yet) {
+                        RF_DEBUG(2, "⚠️ IO buffer allocation failed, falling back to per-sample read");
+                        fallback_yet = true;
+                    }
+                    // Fallback: per-sample small buffer
+                    batchSamples = 1;
+                    uint8_t lbl;
+                    if (file.read(&lbl, sizeof(lbl)) != sizeof(lbl)) {
+                        RF_DEBUG_2(0, "❌ Read label failed at sample: ", processed, ": ", file_path);
+                        if (ioBuf) free(ioBuf);
+                        file.close();
+                        return false;
+                    }
+                    allLabels.push_back(lbl);
+                    uint8_t packed[packedFeatureBytes] = {0};
+                    if (file.read(packed, packedFeatureBytes) != packedFeatureBytes) {
+                        RF_DEBUG_2(0, "❌ Read features failed at sample: ", processed, ": ", file_path);
+                        if (ioBuf) free(ioBuf);
+                        file.close();
+                        return false;
+                    }
+                    auto loc = getChunkLocation(processed);
+                    size_t chunkIndex = loc.first;
+                    size_t localIndex = loc.second;
+                    size_t startElementIndex = localIndex * elementsPerSample;
+                    for (uint16_t j = 0; j < numFeatures; ++j) {
+                        uint16_t byteIndex = j / 4;
+                        uint8_t bitOffset = (j % 4) * 2;
+                        uint8_t fv = (packed[byteIndex] >> bitOffset) & 0x03;
+                        size_t elemIndex = startElementIndex + j;
+                        if (elemIndex < sampleChunks[chunkIndex].size()) {
+                            sampleChunks[chunkIndex].set(elemIndex, fv);
+                        }
+                    }
                 }
                 processed += batchSamples;
             }

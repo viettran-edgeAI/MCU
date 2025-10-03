@@ -3181,6 +3181,12 @@ namespace mcu {
             }
         }
         
+        // Unsafe set without bounds checking - use when storage is pre-sized
+        void set_unsafe(vector_index_type index, uint8_t value) {
+            value &= MAX_VALUE;
+            packed_data.set_unsafe(index, value);
+        }
+        
         uint8_t get(vector_index_type index) const {
             return (index < get_size()) ? packed_data.get_unsafe(index) : 0;
         }

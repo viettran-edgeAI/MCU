@@ -110,7 +110,7 @@ namespace mcu {
     class Rf_pending_data;      // manage pending data waiting for true labels from feedback action
 
     // enum Rf_metric_scores;      // flags for training process/score calculation (accuracy, precision, recall, f1_score)
-    // enum Rf_training_score;      // score types for training process (oob, validation, k-fold)
+    // enum Rf_training_score;     // score types for training process (oob, validation, k-fold)
     // ...
 
     /*
@@ -138,7 +138,7 @@ namespace mcu {
 
         // Chunked packed storage - eliminates both heap overhead per sample and large contiguous allocations
         vector<packed_vector<2, LARGE>> sampleChunks;  // Multiple chunks of packed features
-        b_vector<uint8_t> allLabels;              // Labels storage (still contiguous for simplicity)
+        b_vector<uint8_t> allLabels;                  // Labels storage 
         uint16_t bitsPerSample;                        // Number of bits per sample (numFeatures * 2)
         uint16_t samplesEachChunk;                     // Maximum samples per chunk
         size_t size_;  
@@ -325,7 +325,7 @@ namespace mcu {
         // Helper method to store Rf_sample in chunked packed storage
         bool storeSample(const Rf_sample& sample, size_t sampleIndex) {
             if (!isProperlyInitialized()) {
-                RF_DEBUG(2, "❌ Rf_data not properly initialized. Use constructor with numFeatures or loadData from another Rf_data.");
+                RF_DEBUG(2, "❌ Store sample failed: Rf_data not properly initialized.");
                 return false;
             }
             

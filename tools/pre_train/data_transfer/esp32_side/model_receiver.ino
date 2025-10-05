@@ -2,7 +2,7 @@
  * Pre-trained Model Receiver for ESP32
  * 
  * This sketch receives pre-trained random forest model files from a PC
- * and saves them to SPIFFS with their original filenames.
+ * and saves them to LittleFS with /model_name/filename structure.
  * 
  * Files received:
  * - {model_name}_config.json (model configuration)
@@ -23,7 +23,7 @@
 
 #include "Arduino.h"
 #include "FS.h"
-#include "SPIFFS.h"
+#include "LittleFS.h"
 
 // --- Protocol Constants ---
 // Must match the Python sender script
@@ -58,6 +58,7 @@ State currentState = State::WAITING_FOR_SESSION;
 // --- Global Variables ---
 File currentFile;
 char receivedSessionName[64];
+char receivedModelName[64];  // Extracted from session name
 char receivedFileName[64];
 uint32_t receivedFileSize = 0;
 uint32_t receivedFileCRC = 0;
@@ -117,11 +118,11 @@ bool safeDeleteFile(const char* filename) {
     }
     
     // Try to delete the file multiple times if needed
-    if (SPIFFS.exists(filename)) {
+    if (LittleFS.exists(filename)) {
         for (int attempt = 0; attempt < 3; attempt++) {
-            if (SPIFFS.remove(filename)) {
+            if (LittleFS.remove(filename)) {
                 // Verify it's actually deleted
-                if (!SPIFFS.exists(filename)) {
+                if (!LittleFS.exists(filename)) {
                     return true;
                 }
             }
@@ -133,17 +134,17 @@ bool safeDeleteFile(const char* filename) {
 }
 
 void printStorageInfo() {
-    size_t totalBytes = SPIFFS.totalBytes();
-    size_t usedBytes = SPIFFS.usedBytes();
-    Serial.println("📊 SPIFFS Storage Info:");
+    size_t totalBytes = LittleFS.totalBytes();
+    size_t usedBytes = LittleFS.usedBytes();
+    Serial.println("📊 LittleFS Storage Info:");
     Serial.printf("   Total: %u bytes (%.1f KB)\n", totalBytes, totalBytes/1024.0);
     Serial.printf("   Used:  %u bytes (%.1f KB)\n", usedBytes, usedBytes/1024.0);
     Serial.printf("   Free:  %u bytes (%.1f KB)\n", totalBytes-usedBytes, (totalBytes-usedBytes)/1024.0);
 }
 
 void listReceivedFiles() {
-    Serial.println("\n📁 Model files in SPIFFS:");
-    File root = SPIFFS.open("/");
+    Serial.println("\n📁 Model files in LittleFS:");
+    File root = LittleFS.open("/");
     if (!root) {
         Serial.println("   ❌ Failed to open root directory");
         return;
@@ -232,11 +233,11 @@ void setup() {
     Serial.println("    Ready to receive Random Forest model files");
     Serial.println("=================================================");
 
-    // Initialize SPIFFS
-    Serial.print("💾 Initializing SPIFFS... ");
-    if (!SPIFFS.begin(true)) {
+    // Initialize LittleFS
+    Serial.print("💾 Initializing LittleFS... ");
+    if (!LittleFS.begin(true)) {
         Serial.println("❌ FAILED!");
-        Serial.println("⚠️  SPIFFS initialization failed. Cannot continue.");
+        Serial.println("⚠️  LittleFS initialization failed. Cannot continue.");
         currentState = State::ERROR_STATE;
         return;
     }
@@ -336,7 +337,30 @@ void handleStartSession() {
     Serial.readBytes(receivedSessionName, session_len);
     receivedSessionName[session_len] = '\0';
 
+    // Extract model name from session name (remove "_transfer" suffix)
+    // Session name format: "model_name_transfer"
+    String sessionStr = String(receivedSessionName);
+    int transferSuffixIdx = sessionStr.lastIndexOf("_transfer");
+    if (transferSuffixIdx > 0) {
+        sessionStr = sessionStr.substring(0, transferSuffixIdx);
+    }
+    strncpy(receivedModelName, sessionStr.c_str(), sizeof(receivedModelName) - 1);
+    receivedModelName[sizeof(receivedModelName) - 1] = '\0';
+
     Serial.printf("\n🚀 Starting transfer session: %s\n", receivedSessionName);
+    Serial.printf("📁 Model name: %s\n", receivedModelName);
+    
+    // Create model directory if it doesn't exist
+    char modelDir[80];
+    snprintf(modelDir, sizeof(modelDir), "/%s", receivedModelName);
+    if (!LittleFS.exists(modelDir)) {
+        if (LittleFS.mkdir(modelDir)) {
+            Serial.printf("✅ Created model directory: %s\n", modelDir);
+        } else {
+            Serial.printf("⚠️  Warning: Could not create directory %s\n", modelDir);
+        }
+    }
+    
     filesReceived = 0;
     
     Serial.print(RESP_READY);
@@ -376,8 +400,12 @@ void handleFileInfo() {
         delay(1);
         yield();
     }
-    Serial.readBytes(receivedFileName, filename_len);
-    receivedFileName[filename_len] = '\0';
+    char baseFileName[64];
+    Serial.readBytes(baseFileName, filename_len);
+    baseFileName[filename_len] = '\0';
+
+    // Construct full path with model name: /model_name/filename
+    snprintf(receivedFileName, sizeof(receivedFileName), "/%s/%s", receivedModelName, baseFileName);
 
     // Wait for file size (4 bytes), file CRC (4 bytes), and chunk size (4 bytes)
     while (Serial.available() < 12) {
@@ -421,11 +449,8 @@ void handleFileInfo() {
         currentFile = File();
     }
     
-    // Create file path with leading slash for SPIFFS
-    String filePath = "/" + String(receivedFileName);
-    
     // Use safe delete function
-    if (!safeDeleteFile(filePath.c_str())) {
+    if (!safeDeleteFile(receivedFileName)) {
         Serial.printf("❌ Failed to delete existing file: %s\n", receivedFileName);
         Serial.print(RESP_ERROR);
         Serial.flush();
@@ -433,9 +458,9 @@ void handleFileInfo() {
         return;
     }
     
-    Serial.printf("📥 Receiving %s: %s (%u bytes)\n", fileType.c_str(), receivedFileName, receivedFileSize);
+    Serial.printf("📥 Receiving %s: %s (%u bytes)\n", fileType.c_str(), baseFileName, receivedFileSize);
     
-    currentFile = SPIFFS.open(filePath, FILE_WRITE);
+    currentFile = LittleFS.open(receivedFileName, FILE_WRITE);
     if (!currentFile) {
         currentState = State::ERROR_STATE;
         Serial.print(RESP_ERROR);
@@ -575,8 +600,7 @@ void handleFileChunk() {
             currentState = State::WAITING_FOR_COMMAND;
         } else {
             // CRC mismatch, remove file
-            String filePath = "/" + String(receivedFileName);
-            SPIFFS.remove(filePath);
+            LittleFS.remove(receivedFileName);
             Serial.printf("❌ CRC mismatch for %s - file removed\n", receivedFileName);
             currentState = State::ERROR_STATE;
             Serial.print(RESP_ERROR);

@@ -1,10 +1,10 @@
 /*
  * ESP32 Dataset Parameters Receiver with V2 Protocol
  * Upload this sketch to ESP32, then use transfer_dp_file.py to send files
- * Saves files to SPIFFS with CRC verification
+ * Saves files to LittleFS with model_name/filename structure and CRC verification
  */
 
-#include "SPIFFS.h"
+#include "LittleFS.h"
 
 // Transfer timing and size configuration
 // IMPORTANT: Keep these in sync with the PC sender script
@@ -43,10 +43,10 @@ uint32_t compute_crc32(const uint8_t* data, size_t len) {
 }
 
 bool safeDeleteFile(const char* filename) {
-    if (SPIFFS.exists(filename)) {
+    if (LittleFS.exists(filename)) {
         for (int attempt = 0; attempt < 3; attempt++) {
-            if (SPIFFS.remove(filename)) {
-                if (!SPIFFS.exists(filename)) {
+            if (LittleFS.remove(filename)) {
+                if (!LittleFS.exists(filename)) {
                     return true;
                 }
             }
@@ -63,8 +63,8 @@ void setup() {
     
     Serial.begin(115200);
     
-    // Initialize SPIFFS
-    if (!SPIFFS.begin(true)) {
+    // Initialize LittleFS
+    if (!LittleFS.begin(true)) {
         setLed(true); // Error indication
         return;
     }
@@ -103,6 +103,17 @@ void receiveFileV2() {
     }
     filename[filename_length] = '\0';
 
+    // Extract model name from filename (everything before last underscore)
+    String filenameStr = String(filename);
+    int lastUnderscore = filenameStr.lastIndexOf('_');
+    String modelName = (lastUnderscore > 0) ? filenameStr.substring(0, lastUnderscore) : "default_model";
+    
+    // Create model directory if it doesn't exist
+    String modelDir = "/" + modelName;
+    if (!LittleFS.exists(modelDir)) {
+        LittleFS.mkdir(modelDir);
+    }
+
     // Receive file size, expected file CRC, and chunk size
     uint32_t file_size = 0;
     uint32_t file_crc_expected = 0;
@@ -116,14 +127,14 @@ void receiveFileV2() {
         return;
     }
 
-    String filepath = "/" + String(filename);
+    String filepath = modelDir + "/" + String(filename);
     
     // Safe delete old file
     if (!safeDeleteFile(filepath.c_str())) {
         return;
     }
     
-    File file = SPIFFS.open(filepath, FILE_WRITE);
+    File file = LittleFS.open(filepath, FILE_WRITE);
     if (!file) {
         return;
     }
@@ -138,15 +149,15 @@ void receiveFileV2() {
     while (bytes_received < file_size) {
         // Header: offset (4), chunk_len (4), chunk_crc (4)
         uint32_t offset = 0, clen = 0, ccrc = 0;
-        if (Serial.readBytes((uint8_t*)&offset, 4) != 4) { file.close(); SPIFFS.remove(filepath); return; }
-        if (Serial.readBytes((uint8_t*)&clen, 4) != 4)   { file.close(); SPIFFS.remove(filepath); return; }
-        if (Serial.readBytes((uint8_t*)&ccrc, 4) != 4)   { file.close(); SPIFFS.remove(filepath); return; }
+        if (Serial.readBytes((uint8_t*)&offset, 4) != 4) { file.close(); LittleFS.remove(filepath); return; }
+        if (Serial.readBytes((uint8_t*)&clen, 4) != 4)   { file.close(); LittleFS.remove(filepath); return; }
+        if (Serial.readBytes((uint8_t*)&ccrc, 4) != 4)   { file.close(); LittleFS.remove(filepath); return; }
 
-        if (clen > chunk_size || clen == 0) { file.close(); SPIFFS.remove(filepath); return; }
+        if (clen > chunk_size || clen == 0) { file.close(); LittleFS.remove(filepath); return; }
         
         // Read chunk payload
         size_t got = Serial.readBytes(buffer, clen);
-        if (got != clen) { file.close(); SPIFFS.remove(filepath); return; }
+        if (got != clen) { file.close(); LittleFS.remove(filepath); return; }
 
         // Compute CRC32 of the received chunk
         uint32_t calc = compute_crc32(buffer, clen);
@@ -160,7 +171,7 @@ void receiveFileV2() {
 
         // CRC matched; write to file
         size_t written = file.write(buffer, clen);
-        if (written != clen) { file.close(); SPIFFS.remove(filepath); return; }
+        if (written != clen) { file.close(); LittleFS.remove(filepath); return; }
 
         // Update running CRC for entire file
         for (uint32_t i = 0; i < clen; ++i) {
@@ -200,6 +211,6 @@ void receiveFileV2() {
         blinkLed(2, 100); // Success indication
         Serial.println("TRANSFER_COMPLETE");
     } else {
-        SPIFFS.remove(filepath);
+        LittleFS.remove(filepath);
     }
 }

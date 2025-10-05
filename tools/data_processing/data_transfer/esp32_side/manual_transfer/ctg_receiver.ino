@@ -1,5 +1,6 @@
 #include "Rf_categorizer.h"
 #include "STL_MCU.h"
+#include "LittleFS.h"
 #include "Rf_file_manager.h"
 
 using namespace mcu;
@@ -10,9 +11,9 @@ void setup() {
     Serial.begin(115200);
     delay(1000);
     
-    // Initialize SPIFFS
-    if (!SPIFFS.begin(true)) {
-        Serial.println("SPIFFS initialization failed!");
+    // Initialize LittleFS
+    if (!LittleFS.begin(true)) {
+        Serial.println("LittleFS initialization failed!");
         return;
     }
 

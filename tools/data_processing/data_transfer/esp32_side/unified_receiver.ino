@@ -2,14 +2,15 @@
  * Unified Data Receiver for ESP32
  * 
  * This sketch receives a complete dataset (categorizer, parameters, and binary data)
- * from a PC in a single, coordinated session and saves the files to SPIFFS.
+ * from a PC in a single, coordinated session and saves the files to LittleFS.
+ * Files are saved to /model_name/file_path structure.
  * 
  * It is designed to work with the 'unified_transfer.py' script.
  */
 
 #include "Arduino.h"
 #include "FS.h"
-#include "SPIFFS.h"
+#include "LittleFS.h"
 #include "Rf_file_manager.h"
 
 // --- Protocol Constants ---
@@ -44,7 +45,7 @@ State currentState = State::WAITING_FOR_SESSION;
 
 // --- Global Variables ---
 File currentFile;
-char receivedBaseName[32];
+char receivedBaseName[32];  // This is the model_name used throughout the project
 char receivedFileName[32];
 uint32_t receivedFileSize = 0;
 uint32_t receivedFileCRC = 0;
@@ -100,11 +101,11 @@ bool safeDeleteFile(const char* filename) {
     }
     
     // Try to delete the file multiple times if needed
-    if (SPIFFS.exists(filename)) {
+    if (LittleFS.exists(filename)) {
         for (int attempt = 0; attempt < 3; attempt++) {
-            if (SPIFFS.remove(filename)) {
+            if (LittleFS.remove(filename)) {
                 // Verify it's actually deleted
-                if (!SPIFFS.exists(filename)) {
+                if (!LittleFS.exists(filename)) {
                     return true;
                 }
             }
@@ -116,19 +117,19 @@ bool safeDeleteFile(const char* filename) {
 }
 
 void deleteOldDatasetFiles(const char* basename) {
-    // Delete all three dataset files for this basename
-    char filepath[64];
+    // Delete all three dataset files for this basename (basename is the model_name)
+    char filepath[128];
     
     // Delete categorizer file
-    snprintf(filepath, sizeof(filepath), "/%s_ctg.csv", basename);
+    snprintf(filepath, sizeof(filepath), "/%s/%s_ctg.csv", basename, basename);
     safeDeleteFile(filepath);
     
     // Delete parameters file
-    snprintf(filepath, sizeof(filepath), "/%s_dp.csv", basename);
+    snprintf(filepath, sizeof(filepath), "/%s/%s_dp.csv", basename, basename);
     safeDeleteFile(filepath);
     
     // Delete binary dataset file
-    snprintf(filepath, sizeof(filepath), "/%s_nml.bin", basename);
+    snprintf(filepath, sizeof(filepath), "/%s/%s_nml.bin", basename, basename);
     safeDeleteFile(filepath);
 }
 
@@ -139,9 +140,7 @@ void setup() {
     Serial.begin(115200);
     Serial.setTimeout(SERIAL_TIMEOUT_MS);
 
-    // manageSPIFFSFiles();
-
-    if (!SPIFFS.begin(true)) {
+    if (!LittleFS.begin(true)) {
         currentState = State::ERROR_STATE;
         return;
     }
@@ -209,7 +208,7 @@ void handleStartSession() {
     uint8_t command = Serial.read();
     if (command != CMD_START_SESSION) return;
 
-    // Wait for basename length
+    // Wait for basename length (basename IS the model name)
     while (!Serial.available()) {
         delay(1);
         yield();
@@ -223,6 +222,13 @@ void handleStartSession() {
     }
     Serial.readBytes(receivedBaseName, basename_len);
     receivedBaseName[basename_len] = '\0';
+
+    // Create model directory if it doesn't exist (basename is the model name)
+    char modelDir[80];
+    snprintf(modelDir, sizeof(modelDir), "/%s", receivedBaseName);
+    if (!LittleFS.exists(modelDir)) {
+        LittleFS.mkdir(modelDir);
+    }
 
     // Delete any existing files with this basename before starting new transfer
     deleteOldDatasetFiles(receivedBaseName);
@@ -263,8 +269,12 @@ void handleFileInfo() {
         delay(1);
         yield();
     }
-    Serial.readBytes(receivedFileName, filename_len);
-    receivedFileName[filename_len] = '\0';
+    char baseFileName[64];
+    Serial.readBytes(baseFileName, filename_len);
+    baseFileName[filename_len] = '\0';
+
+    // Construct full path with model name (basename is the model name)
+    snprintf(receivedFileName, sizeof(receivedFileName), "/%s%s", receivedBaseName, baseFileName);
 
     // Wait for file size (4 bytes), file CRC (4 bytes), and chunk size (4 bytes)
     while (Serial.available() < 12) {
@@ -302,7 +312,7 @@ void handleFileInfo() {
     }
     
     // Create new file
-    currentFile = SPIFFS.open(receivedFileName, FILE_WRITE, true); // Force create
+    currentFile = LittleFS.open(receivedFileName, FILE_WRITE, true); // Force create
     if (!currentFile) {
         currentState = State::ERROR_STATE;
         Serial.print(RESP_ERROR);
@@ -440,7 +450,7 @@ void handleFileChunk() {
             currentState = State::WAITING_FOR_COMMAND;
         } else {
             // CRC mismatch, remove file
-            SPIFFS.remove(receivedFileName);
+            LittleFS.remove(receivedFileName);
             currentState = State::ERROR_STATE;
             Serial.print(RESP_ERROR);
             Serial.flush();

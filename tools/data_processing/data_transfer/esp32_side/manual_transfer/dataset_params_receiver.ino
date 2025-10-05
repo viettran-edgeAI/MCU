@@ -5,7 +5,7 @@
 
 
 #include "STL_MCU.h"
-#include "SPIFFS.h"
+#include "LittleFS.h"
 #include "Rf_file_manager.h"
 
 using namespace  mcu;
@@ -18,9 +18,9 @@ void setup() {
     while (!Serial);       // <-- Waits for Serial monitor to connect (important for USB CDC)
     Serial.println("Hello from ESP32!");
 
-    // 1. Mount SPIFFS
-    if (!SPIFFS.begin(true)) {
-      Serial.println("❌ SPIFFS Mount Failed!");
+    // 1. Mount LittleFS
+    if (!LittleFS.begin(true)) {
+      Serial.println("❌ LittleFS Mount Failed!");
       while (true) { delay(1000); }
     }
 

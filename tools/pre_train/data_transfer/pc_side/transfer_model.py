@@ -36,7 +36,7 @@ RESP_ERROR = b"ERROR"
 
 # Transfer parameters optimized for ESP32 - V2 Protocol
 CHUNK_SIZE =  256  # bytes per chunk
-CHUNK_DELAY = 0.02  # delay between chunks in seconds (V2 uses ACKs)
+CHUNK_DELAY = 0.03  # delay between chunks in seconds (V2 uses ACKs)
 MAX_RETRIES = 5     # max retries per chunk
 
 # Timeout settings
@@ -102,10 +102,13 @@ def wait_for_response(ser, expected_response, timeout=ACK_TIMEOUT, verbose=True)
     """Wait for a specific response from the ESP32."""
     start_time = time.time()
     buffer = b""
+    all_received = []  # Track all received data for debugging
+    
     while time.time() - start_time < timeout:
         if ser.in_waiting > 0:
             new_data = ser.read(ser.in_waiting)
             buffer += new_data
+            all_received.append(new_data)
             
             # Check if we have the expected response
             if expected_response in buffer:
@@ -126,7 +129,13 @@ def wait_for_response(ser, expected_response, timeout=ACK_TIMEOUT, verbose=True)
         time.sleep(0.005)
         
     if verbose:
-        print(f"❌ Timeout waiting for '{expected_response.decode()}'. Got: {buffer.decode(errors='ignore')}")
+        # Show what we actually received for debugging
+        all_data = b"".join(all_received).decode(errors='ignore')
+        if all_data:
+            print(f"❌ Timeout waiting for '{expected_response.decode()}'.")
+            print(f"📥 Received from ESP32:\n{all_data}")
+        else:
+            print(f"❌ Timeout waiting for '{expected_response.decode()}'. No response from ESP32.")
     return False
 
 def send_command(ser, command, payload=b""):
@@ -338,6 +347,12 @@ def main():
         ser = serial.Serial(serial_port, 115200, timeout=SERIAL_TIMEOUT)
         time.sleep(2)  # Allow ESP32 to reset
         print("✅ Connected!")
+        
+        # Clear any pending data and check for ESP32 startup messages
+        time.sleep(0.5)
+        if ser.in_waiting > 0:
+            startup_data = ser.read(ser.in_waiting).decode(errors='ignore')
+            print(f"📟 ESP32 startup messages:\n{startup_data}")
     except Exception as e:
         print(f"❌ Failed to connect: {e}")
         return 1
@@ -348,10 +363,18 @@ def main():
         session_name = model_name + "_transfer"
         session_bytes = session_name.encode('utf-8')
         payload = struct.pack('B', len(session_bytes)) + session_bytes
+        
+        print(f"📤 Sending START_SESSION command with session name: {session_name}")
         send_command(ser, CMD_START_SESSION, payload)
-
+        
+        print("⏳ Waiting for ESP32 READY response...")
         if not wait_for_response(ser, RESP_READY):
             print("❌ ESP32 did not respond with READY.")
+            print("\n💡 Troubleshooting tips:")
+            print("   1. Make sure model_receiver.ino is uploaded to the ESP32")
+            print("   2. Press the RESET button on the ESP32 and try again")
+            print("   3. Check that the ESP32 is not running a different program")
+            print("   4. Open the Arduino Serial Monitor to see what the ESP32 is doing")
             return 1
 
         print("✅ ESP32 is ready to receive model files.")

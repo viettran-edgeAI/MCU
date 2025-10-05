@@ -1,6 +1,6 @@
 #include "STL_MCU.h"
 #include "FS.h"
-#include "SPIFFS.h"
+#include "LittleFS.h"
 #include "Rf_file_manager.h"
 
 using namespace  mcu;
@@ -14,9 +14,9 @@ void setup() {
     while (!Serial);       // <-- Waits for Serial monitor to connect (important for USB CDC)
     delay(2000);
 
-    // 1. Mount SPIFFS
-    if (!SPIFFS.begin(true)) {
-      Serial.println("❌ SPIFFS Mount Failed!");
+    // 1. Mount LittleFS
+    if (!LittleFS.begin(true)) {
+      Serial.println("❌ LittleFS Mount Failed!");
       while (true) { delay(1000); }
     }
     // this will delete all lines that do not have the exact columns number equal to NUM_OF_COLUMNS

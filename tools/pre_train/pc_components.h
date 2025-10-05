@@ -421,7 +421,7 @@ struct Rf_config{
     uint16_t num_trees = 20;
     uint16_t num_features;  
     uint16_t num_labels;
-    uint16_t k_fold; 
+    uint16_t k_folds; 
     uint16_t min_split; 
     uint16_t max_depth;
     uint16_t num_samples;  // number of samples in the base data
@@ -495,20 +495,6 @@ public:
             }
         }
         
-        // Extract k_fold
-        pos = content.find("\"k_fold\"");
-        if (pos != std::string::npos) {
-            pos = content.find("\"value\":", pos);
-            if (pos != std::string::npos) {
-                pos = content.find(":", pos) + 1;
-                size_t end = content.find(",", pos);
-                if (end == std::string::npos) end = content.find("}", pos);
-                std::string value = content.substr(pos, end - pos);
-                value.erase(0, value.find_first_not_of(" \t\r\n"));
-                value.erase(value.find_last_not_of(" \t\r\n") + 1);
-                k_fold = static_cast<uint16_t>(std::stoi(value));
-            }
-        }
         
         // Extract criterion (gini or entropy)
         pos = content.find("\"criterion\"");
@@ -558,6 +544,7 @@ public:
             }
         }
 
+        // extraact k_folds
         pos = content.find("\"k_folds\"");
         if (pos != std::string::npos) {
             pos = content.find("\"value\":", pos);
@@ -568,7 +555,7 @@ public:
                 std::string value = content.substr(pos, end - pos);
                 value.erase(0, value.find_first_not_of(" \t\r\n"));
                 value.erase(value.find_last_not_of(" \t\r\n") + 1);
-                k_fold = static_cast<uint16_t>(std::stoi(value));
+                k_folds = static_cast<uint16_t>(std::stoi(value));
             }
         }
 
@@ -836,7 +823,7 @@ public:
         
         std::cout << "✅ Configuration loaded from " << init_path << std::endl;
         std::cout << "   Number of trees: " << (int)num_trees << std::endl;
-        std::cout << "   K-fold: " << (int)k_fold << std::endl;
+        std::cout << "   K-folds: " << (int)k_folds << std::endl;
         std::cout << "   Criterion: " << (use_gini ? "gini" : "entropy") << std::endl;
         std::cout << "   Use bootstrap: " << (use_bootstrap ? "true" : "false") << std::endl;
         std::cout << "   Training score method: " << training_score << std::endl;
@@ -1233,7 +1220,7 @@ public:
             config_file << "  \"boostrapRatio\": " << boostrap_ratio << ",\n";
             config_file << "  \"criterion\": \"" << criterionToString(use_gini) << "\",\n";
             config_file << "  \"trainingScore\": \"" << training_score << "\",\n";
-            config_file << "  \"k_fold\": " << (int)k_fold << ",\n";
+            config_file << "  \"k_folds\": " << (int)k_folds << ",\n";
             config_file << "  \"unityThreshold\": " << unity_threshold << ",\n";
             config_file << "  \"impurityThreshold\": " << impurity_threshold << ",\n";
             config_file << "  \"metric_score\": \"" << flagsToString(metric_score) << "\",\n";

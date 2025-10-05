@@ -866,7 +866,7 @@ public:
 
     // K-fold cross validation evaluation
     float get_cross_validation_score() {
-        uint16_t k_folds = config.k_fold;
+        uint16_t k_folds = config.k_folds;
         if (k_folds < 2) k_folds = 4; // Default to 4-fold if not properly set
         
         // Create vector of all training sample indices for k-fold split
@@ -1010,7 +1010,7 @@ public:
         const int num_runs = use_cv ? 1 : 3; // 1 run for CV, 3 runs for OOB/validation
         
         if (use_cv) {
-            std::cout << "📊 Using " << (int)config.k_fold << "-fold cross validation for evaluation\n";
+            std::cout << "📊 Using " << (int)config.k_folds << "-fold cross validation for evaluation\n";
         } else if (config.training_score == "valid_score") {
             std::cout << "📊 Using validation data for evaluation\n";
         } else {

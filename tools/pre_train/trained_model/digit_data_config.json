@@ -10,15 +10,15 @@
   "boostrapRatio": 0.632,
   "criterion": "entropy",
   "trainingScore": "oob_score",
-  "k_fold": 4,
+  "k_folds": 4,
   "unityThreshold": 0.125,
   "impurityThreshold": 0.1,
   "metric_score": "ACCURACY",
   "resultScore": 0.934659,
   "extendBaseData": true,
   "enableRetrain": true,
-  "enableAutoConfig": true,
+  "enableAutoConfig": false,
   "Estimated RAM (bytes)": 43180,
-  "timestamp": "2025-10-04T08:04:31+0700",
+  "timestamp": "2025-10-06T06:18:18+0700",
   "author": "Viettran - tranvaviet@gmail.com"
 }

@@ -279,7 +279,7 @@ class Rf_tree {
 
 class Rf_data {
 public:
-    b_vector<Rf_sample> allSamples;    // Simple vector storage for all samples
+    b_vector<Rf_sample> allSamples;    // vector storage for all samples
     std::string filename = "";
  
     Rf_data() {}  
@@ -377,6 +377,11 @@ typedef enum Rf_metric_scores : uint16_t{
     RECALL      = 0x04,            // calculate recall of the model
     F1_SCORE    = 0x08          // calculate F1 score of the model
 }Rf_metric_scores;
+
+
+std::string criterionToString(bool use_gini) {
+    return use_gini ? "gini" : "entropy";
+}
 
 // Helper functions to convert between flag enum and string representation
 std::string flagsToString(uint16_t flags) {
@@ -545,7 +550,7 @@ public:
                 pos = content.find("\"", pos) + 1;
                 size_t end = content.find("\"", pos);
                 std::string value = content.substr(pos, end - pos);
-                if (value == "oob_score" || value == "valid_score" || value == "k-fold_score") {
+                if (value == "oob_score" || value == "valid_score" || value == "k_fold_score") {
                     training_score = value;
                 } else {
                     training_score = "oob_score"; // default
@@ -1226,7 +1231,7 @@ public:
             config_file << "  \"maxDepth\": " << (int)max_depth << ",\n";
             config_file << "  \"useBootstrap\": " << (use_bootstrap ? "true" : "false") << ",\n";
             config_file << "  \"boostrapRatio\": " << boostrap_ratio << ",\n";
-            config_file << "  \"useGini\": " << (use_gini ? "true" : "false") << ",\n";
+            config_file << "  \"criterion\": \"" << criterionToString(use_gini) << "\",\n";
             config_file << "  \"trainingScore\": \"" << training_score << "\",\n";
             config_file << "  \"k_fold\": " << (int)k_fold << ",\n";
             config_file << "  \"unityThreshold\": " << unity_threshold << ",\n";

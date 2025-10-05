@@ -28,9 +28,9 @@
         "description": "Splitting criteria for decision trees."
     },
     "training_score": {
-        "value": "k-fold_score",
-        "options": ["oob_score", "valid_score", "k-fold_score"],
-        "description": "Method for evaluating model performance during training. oob_score: Out-of-bag validation, valid_score: Validation set, k-fold_score: K-fold cross validation"
+        "value": "oob_score",
+        "options": ["oob_score", "valid_score", "k_fold_score"],
+        "description": "Method for evaluating model performance during training. oob_score: Out-of-bag validation, valid_score: Validation set, k_fold_score: K-fold cross validation"
     },
     "metric_score": {
         "value": "PRECISION",
@@ -53,13 +53,13 @@
         "description": "Whether to enable retraining of the model with new data."
     },
     "enable_auto_config": {
-        "value": true,
+        "value": false,
         "options": [true, false],
         "description": "Whether to automatically configure model parameters based on dataset characteristics."      
     },
     "k_folds":{
         "value": 4,
-        "description": "Number of folds for cross-validation when using k-fold_score."
+        "description": "Number of folds for cross-validation when using k_fold_score."
     },
     "min_split": {
         "value": 5,

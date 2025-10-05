@@ -1006,7 +1006,7 @@ public:
         float best_score = -1.0f;
 
         // Determine evaluation mode and number of runs
-        bool use_cv = (config.training_score == "k-fold_score");
+        bool use_cv = (config.training_score == "k_fold_score");
         const int num_runs = use_cv ? 1 : 3; // 1 run for CV, 3 runs for OOB/validation
         
         if (use_cv) {

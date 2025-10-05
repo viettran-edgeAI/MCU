@@ -1,18 +1,10 @@
 #pragma once
 
 #include <Arduino.h>
-#include <SPIFFS.h>
+#include <LittleFS.h>
 #include <FS.h>
 
 #define temp_base_data           "/base_data.bin"
-// #define memory_log_file         "/rf_memory_log.csv"
-// #define time_log_file           "/rf_time_log.csv"
-// #define rf_ctg_file             "/rf_categorizer.bin"
-// #define inference_log           "/rf_inference_log.bin"
-// #define rf_config_file          "/rf_esp32_config.json"
-// #define node_predictor_log      "/rf_tree_log.csv"
-// #define node_predictor_file     "/node_predictor.bin"
-
 
 /**
  * @brief Clones any file from source to destination with format-aware handling
@@ -59,10 +51,10 @@ bool cloneFile(const char* src, const char* dest);
 bool cloneFile(const char* src);
 
 /**
- * @brief Renames a file in SPIFFS storage
+ * @brief Renames a file in LittleFS storage
  * 
  * Changes the name of an existing file from oldPath to newPath. Both paths
- * must be valid SPIFFS paths. The operation will fail if the source file
+ * must be valid LittleFS paths. The operation will fail if the source file
  * doesn't exist or if the destination file already exists.
  * 
  * @param oldPath Current file path (must include leading slash, e.g., "/old_data.csv")
@@ -84,27 +76,37 @@ bool renameFile(const String& oldPath, const String& newPath);
 bool renameFile(const char* oldPath, const char* newPath);
 
 /**
- * @brief Interactive SPIFFS file management interface with isolated operation modes
+ * @brief Interactive file manager with directory navigation for LittleFS
  * 
- * Provides a comprehensive command-line interface for managing files in SPIFFS.
- * Each operation runs in its own isolated space with dedicated menus and loops.
- * Users can perform multiple operations within each mode before returning to main menu.
+ * Provides a terminal-based interface for managing files and folders in LittleFS.
+ * Supports directory navigation and hierarchical file organization.
  * 
- * Features:
- * - a: Print file content with repeated file selection
- * - b: Clone files with source selection and destination input
- * - c: Rename files with file selection and new name input
- * - d: Delete individual files or all files ('all' option)
+ * Main Features:
+ * - Lists files and folders in current directory (starts at root /)
+ * - g: Navigate into folders
+ * - ..: Navigate to parent directory
+ * - a: Print/read file contents (CSV, TXT, JSON, LOG, BIN)
+ * - b: Clone files (with auto-naming or custom destination)
+ * - c: Rename files
+ * - d: Delete files and folders (with confirmation)
  * - e: Create new CSV files using interactive data input
  * - Isolated operation spaces that maintain state until 'end'
- * - Real-time file list refresh after modifications
+ * - Real-time file/folder list refresh after modifications
  * - Safe exit mechanisms and confirmation dialogs
+ * 
+ * Directory Navigation:
+ * - Displays folders with 📁 icon and trailing /
+ * - Displays files with 📄 icon and size information
+ * - Use 'g' to enter a folder by number
+ * - Use '..' to go back to parent directory
  * 
  * @note Each operation mode maintains its own loop until user types 'end'.
  *       Type 'exit' in main menu to quit the file manager completely.
  *       Delete mode supports 'all' command to delete all files with confirmation.
+ *       Folders can only be deleted if they are empty.
  */
-void manageSPIFFSFiles();
+void manage_files();
+
 /**
  * @brief Prints the contents of any text file with format-aware summary statistics
  * 
@@ -114,15 +116,15 @@ void manageSPIFFSFiles();
  * 
  * @param filename Path to the file (e.g., "/data.csv", "/config.txt", "/image.jpg")
  * 
- * @note File must exist in SPIFFS. Empty lines are skipped during counting.
+ * @note File must exist in LittleFS. Empty lines are skipped during counting.
  *       Binary files (JPG, BIN, etc.) show only basic file information.
  */
 void printFile(String filename);
 
 /**
- * @brief Deletes all files from SPIFFS storage
+ * @brief Deletes all files from LittleFS storage
  * 
- * Performs a complete cleanup of SPIFFS by scanning and deleting every file.
+ * Performs a complete cleanup of LittleFS by scanning and deleting every file.
  * Provides detailed feedback showing which files were successfully deleted
  * and which failed. Includes safety delays between operations.
  * 
@@ -130,7 +132,10 @@ void printFile(String filename);
  * 
  * @note Prints a summary of deleted vs failed files at completion
  */
-void deleteAllSPIFFSFiles();
+void deleteAllLittleFSFiles();
+
+// Backward compatibility alias
+inline void deleteAllSPIFFSFiles() { deleteAllLittleFSFiles(); }
 
 /**
  * @brief Interactive text data input interface (CSV/TXT/LOG/JSON)

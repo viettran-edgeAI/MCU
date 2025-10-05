@@ -1,7 +1,7 @@
 #include "Rf_file_manager.h"
 
 bool cloneFile(const String& src, const String& dest) {
-    if(SPIFFS.exists(src) == false) {
+    if(LittleFS.exists(src) == false) {
         Serial.print("❌ Source file does not exist: ");
         Serial.println(src);
         return false;
@@ -22,14 +22,14 @@ bool cloneFile(const String& src, const String& dest) {
         Serial.printf("🔄 Auto-generated destination: %s\n", actualDest.c_str());
     }
 
-    File sourceFile = SPIFFS.open(src, FILE_READ);
+    File sourceFile = LittleFS.open(src, FILE_READ);
     if (!sourceFile) {
         Serial.print("❌ Failed to open source file: ");
         Serial.println(src);
         return false;
     }
 
-    File destFile = SPIFFS.open(actualDest, FILE_WRITE);
+    File destFile = LittleFS.open(actualDest, FILE_WRITE);
     if (!destFile) {
         Serial.print("❌ Failed to create destination file: ");
         Serial.println(actualDest);
@@ -84,21 +84,21 @@ bool cloneFile(const String& src) {
 
 bool renameFile(const String& oldPath, const String& newPath) {
     // Check if source file exists
-    if (!SPIFFS.exists(oldPath)) {
+    if (!LittleFS.exists(oldPath)) {
         Serial.print("❌ Source file does not exist: ");
         Serial.println(oldPath);
         return false;
     }
 
     // Check if destination already exists
-    if (SPIFFS.exists(newPath)) {
+    if (LittleFS.exists(newPath)) {
         Serial.print("❌ Destination file already exists: ");
         Serial.println(newPath);
         return false;
     }
 
     // Perform the rename operation
-    if (SPIFFS.rename(oldPath, newPath)) {
+    if (LittleFS.rename(oldPath, newPath)) {
         Serial.print("✅ File renamed from ");
         Serial.print(oldPath);
         Serial.print(" ➝ ");
@@ -119,7 +119,7 @@ bool renameFile(const char* oldPath, const char* newPath) {
 }
 
 void printFile(String filename) {
-    File file = SPIFFS.open(filename.c_str(), FILE_READ);
+    File file = LittleFS.open(filename.c_str(), FILE_READ);
     if (!file) {
         Serial.print("❌ Failed to open ");
         Serial.println(filename);
@@ -178,48 +178,86 @@ void printFile(String filename) {
 }
 
 
-void manageSPIFFSFiles() {
-    if (!SPIFFS.begin(true)) {
-        Serial.println("❌ SPIFFS Mount Failed!");
+void manage_files() {
+    if (!LittleFS.begin(true)) {
+        Serial.println("❌ LittleFS Mount Failed!");
         return;
     }
 
+    String currentDir = "/";  // Start at root
+
     while (true) {
-        Serial.println("\n====== 📂 Files in SPIFFS ======");
-        File root = SPIFFS.open("/");
-        File file = root.openNextFile();
-
-        String fileList[50];  // List of full paths
-        int fileCount = 0;
-
-        Serial.printf("📦 SPIFFS Free Space: %d / %d bytes available\n", 
-                     SPIFFS.totalBytes() - SPIFFS.usedBytes(), SPIFFS.totalBytes());
-
-        while (file && fileCount < 50) {
-            String path = String(file.name());  // Full path, e.g. "/cancer_data.csv"
-            size_t fileSize = file.size();
-            if (!path.startsWith("/")) {
-                path = "/" + path;
-            }
-            fileList[fileCount] = path;
-
-            Serial.printf("%2d: %-20s (%d bytes)\n", fileCount + 1, path.c_str(), fileSize);
-
-            file.close();
-            file = root.openNextFile();
-            fileCount++;
+        Serial.println("\n====== 📂 LittleFS File Manager ======");
+        Serial.printf("📍 Current Directory: %s\n", currentDir.c_str());
+        
+        File dir = LittleFS.open(currentDir);
+        if (!dir || !dir.isDirectory()) {
+            Serial.println("❌ Failed to open directory!");
+            currentDir = "/";  // Reset to root
+            continue;
         }
 
-        if (fileCount == 0) {
-            Serial.println("⚠️ No files found.");
+        String fileList[50];   // List of file paths
+        String folderList[50]; // List of folder paths
+        int fileCount = 0;
+        int folderCount = 0;
+
+        Serial.printf("📦 LittleFS Free Space: %d / %d bytes available\n", 
+                     LittleFS.totalBytes() - LittleFS.usedBytes(), LittleFS.totalBytes());
+
+        // List directories first, then files
+        File entry = dir.openNextFile();
+        while (entry && (fileCount + folderCount) < 50) {
+            String name = String(entry.name());
+            
+            // Ensure path starts with /
+            if (!name.startsWith("/")) {
+                name = "/" + name;
+            }
+            
+            // Get just the name (last component of path)
+            int lastSlash = name.lastIndexOf('/');
+            String displayName = (lastSlash >= 0) ? name.substring(lastSlash + 1) : name;
+            
+            // Skip empty names
+            if (displayName.length() == 0) {
+                entry.close();
+                entry = dir.openNextFile();
+                continue;
+            }
+            
+            if (entry.isDirectory()) {
+                folderList[folderCount] = name;
+                Serial.printf("📁 %2d: %s/\n", folderCount + 1, displayName.c_str());
+                folderCount++;
+            } else {
+                fileList[fileCount] = name;
+                size_t fileSize = entry.size();
+                Serial.printf("📄 %2d: %-30s (%d bytes)\n", fileCount + 1, displayName.c_str(), fileSize);
+                fileCount++;
+            }
+            
+            entry.close();
+            entry = dir.openNextFile();
+        }
+        dir.close();
+
+        if (fileCount == 0 && folderCount == 0) {
+            Serial.println("⚠️ Directory is empty.");
         }
 
         Serial.println("\n📋 Operations:");
+        if (currentDir != "/") {
+            Serial.println("..: ⬆️  Go to parent directory");
+        }
+        Serial.println("g: 📂 Go into folder (1-" + String(folderCount) + ")");
         Serial.println("a: 📄 Print file content");
         Serial.println("b: 📋 Clone file");
         Serial.println("c: ✏️  Rename file");
-        Serial.println("d: 🗑️  Delete file");
+        Serial.println("d: 🗑️  Delete file/folder");
         Serial.println("e: ➕ Add new file");
+        Serial.println("Type operation letter, or 'exit' to quit:");
+
         Serial.println("Type operation letter, or 'exit' to quit:");
 
         String operation = "";
@@ -235,6 +273,60 @@ void manageSPIFFSFiles() {
         if (operation.equals("exit")) {
             Serial.println("🔚 Exiting file manager.");
             break;
+        }
+
+        // Navigate to parent directory
+        if (operation.equals("..")) {
+            if (currentDir != "/") {
+                int lastSlash = currentDir.lastIndexOf('/', currentDir.length() - 2);
+                if (lastSlash > 0) {
+                    currentDir = currentDir.substring(0, lastSlash + 1);
+                } else {
+                    currentDir = "/";
+                }
+                Serial.printf("⬆️ Moving to parent: %s\n", currentDir.c_str());
+            } else {
+                Serial.println("⚠️ Already at root directory.");
+            }
+            continue;
+        }
+
+        // Go into folder
+        if (operation.equals("g")) {
+            if (folderCount == 0) {
+                Serial.println("⚠️ No folders in current directory.");
+                continue;
+            }
+            
+            Serial.printf("Enter folder number (1-%d): ", folderCount);
+            String input = "";
+            while (input.length() == 0) {
+                if (Serial.available()) {
+                    input = Serial.readStringUntil('\n');
+                    input.trim();
+                }
+                delay(10);
+            }
+            
+            int index = input.toInt();
+            if (index >= 1 && index <= folderCount) {
+                currentDir = folderList[index - 1];
+                
+                // Ensure path starts with /
+                if (!currentDir.startsWith("/")) {
+                    currentDir = "/" + currentDir;
+                }
+                
+                // Ensure path ends with /
+                if (!currentDir.endsWith("/")) {
+                    currentDir += "/";
+                }
+                
+                Serial.printf("📂 Entering folder: %s\n", currentDir.c_str());
+            } else {
+                Serial.println("⚠️ Invalid folder number.");
+            }
+            continue;
         }
 
         if (operation.equals("a")) {
@@ -364,37 +456,84 @@ void manageSPIFFSFiles() {
             }
         }
         else if (operation.equals("d")) {
-            // Delete file operation - isolated space with multiple file support
-            Serial.println("\n========== 🗑️ DELETE FILE MODE ==========");
+            // Delete file/folder operation - isolated space with multiple item support
+            Serial.println("\n========== 🗑️ DELETE MODE ==========");
             while (true) {
-                // Refresh file list each time to show current state
-                File refreshRoot = SPIFFS.open("/");
-                File refreshFile = refreshRoot.openNextFile();
-                fileCount = 0; // Reset count
-                
-                while (refreshFile && fileCount < 50) {
-                    String refreshPath = String(refreshFile.name());
-                    if (!refreshPath.startsWith("/")) {
-                        refreshPath = "/" + refreshPath;
-                    }
-                    fileList[fileCount] = refreshPath;
-                    refreshFile.close();
-                    refreshFile = refreshRoot.openNextFile();
-                    fileCount++;
-                }
-                
-                Serial.println("\n📂 Available files:");
-                for (int i = 0; i < fileCount; i++) {
-                    Serial.printf("%2d: %s\n", i + 1, fileList[i].c_str());
-                }
-                
-                if (fileCount == 0) {
-                    Serial.println("⚠️ No files found. Returning to main menu...");
+                // Refresh file and folder list each time to show current state
+                File refreshDir = LittleFS.open(currentDir);
+                if (!refreshDir || !refreshDir.isDirectory()) {
+                    Serial.println("❌ Failed to refresh directory!");
                     break;
                 }
                 
-                Serial.println("\nEnter file number(s) to delete (e.g., '1,3,5' or '1 3 5'),");
-                Serial.println("'all' to delete all files, or 'end' to return:");
+                String refreshFileList[50];
+                String refreshFolderList[50];
+                int refreshFileCount = 0;
+                int refreshFolderCount = 0;
+                
+                File refreshEntry = refreshDir.openNextFile();
+                while (refreshEntry && (refreshFileCount + refreshFolderCount) < 50) {
+                    String name = String(refreshEntry.name());
+                    
+                    // Ensure path starts with /
+                    if (!name.startsWith("/")) {
+                        name = "/" + name;
+                    }
+                    
+                    int lastSlash = name.lastIndexOf('/');
+                    String displayName = (lastSlash >= 0) ? name.substring(lastSlash + 1) : name;
+                    
+                    if (displayName.length() == 0) {
+                        refreshEntry.close();
+                        refreshEntry = refreshDir.openNextFile();
+                        continue;
+                    }
+                    
+                    if (refreshEntry.isDirectory()) {
+                        refreshFolderList[refreshFolderCount] = name;
+                        refreshFolderCount++;
+                    } else {
+                        refreshFileList[refreshFileCount] = name;
+                        refreshFileCount++;
+                    }
+                    
+                    refreshEntry.close();
+                    refreshEntry = refreshDir.openNextFile();
+                }
+                refreshDir.close();
+                
+                Serial.println("\n📂 Available folders:");
+                if (refreshFolderCount == 0) {
+                    Serial.println("  (none)");
+                } else {
+                    for (int i = 0; i < refreshFolderCount; i++) {
+                        int lastSlash = refreshFolderList[i].lastIndexOf('/');
+                        String displayName = (lastSlash >= 0) ? refreshFolderList[i].substring(lastSlash + 1) : refreshFolderList[i];
+                        Serial.printf("  F%d: %s/\n", i + 1, displayName.c_str());
+                    }
+                }
+                
+                Serial.println("\n� Available files:");
+                if (refreshFileCount == 0) {
+                    Serial.println("  (none)");
+                } else {
+                    for (int i = 0; i < refreshFileCount; i++) {
+                        int lastSlash = refreshFileList[i].lastIndexOf('/');
+                        String displayName = (lastSlash >= 0) ? refreshFileList[i].substring(lastSlash + 1) : refreshFileList[i];
+                        Serial.printf("  %d: %s\n", i + 1, displayName.c_str());
+                    }
+                }
+                
+                if (refreshFileCount == 0 && refreshFolderCount == 0) {
+                    Serial.println("⚠️ No files or folders to delete. Returning to main menu...");
+                    break;
+                }
+                
+                Serial.println("\nEnter item to delete:");
+                Serial.println("  - File number (e.g., '3')");
+                Serial.println("  - Folder number with 'F' prefix (e.g., 'F1')");
+                Serial.println("  - 'all' to delete everything");
+                Serial.println("  - 'end' to return:");
                 
                 String input = "";
                 while (input.length() == 0) {
@@ -411,7 +550,7 @@ void manageSPIFFSFiles() {
                 }
                 
                 if (input.equalsIgnoreCase("all")) {
-                    Serial.println("⚠️ WARNING: This will delete ALL files!");
+                    Serial.println("⚠️ WARNING: This will delete ALL files and folders in current directory!");
                     Serial.println("Type 'CONFIRM' to proceed or anything else to cancel:");
                     String confirm = "";
                     while (confirm.length() == 0) {
@@ -422,104 +561,99 @@ void manageSPIFFSFiles() {
                         delay(10);
                     }
                     if (confirm.equals("CONFIRM")) {
-                        Serial.println("🗑️ Deleting all files...");
-                        for (int i = 0; i < fileCount; i++) {
-                            String fileToDelete = fileList[i];
-                            if (!SPIFFS.exists(fileToDelete)) {
-                                Serial.printf("⚠️ File does not exist: %s\n", fileToDelete.c_str());
-                                continue;
-                            }
-                            
-                            if (SPIFFS.remove(fileToDelete)) {
-                                Serial.printf("✅ Deleted: %s\n", fileToDelete.c_str());
+                        Serial.println("🗑️ Deleting all items...");
+                        
+                        // Delete all files first
+                        for (int i = 0; i < refreshFileCount; i++) {
+                            if (LittleFS.remove(refreshFileList[i])) {
+                                Serial.printf("✅ Deleted file: %s\n", refreshFileList[i].c_str());
                             } else {
-                                Serial.printf("❌ Failed to delete: %s\n", fileToDelete.c_str());
+                                Serial.printf("❌ Failed to delete file: %s\n", refreshFileList[i].c_str());
                             }
-                            delay(100); // Small delay for stability
+                            delay(50);
                         }
-                        Serial.printf("🧹 Cleanup complete. %d files deleted.\n", fileCount);
-                        Serial.println("✅ All files deleted! You can continue or type 'end' to exit.");
+                        
+                        // Then delete all folders
+                        for (int i = 0; i < refreshFolderCount; i++) {
+                            if (LittleFS.rmdir(refreshFolderList[i])) {
+                                Serial.printf("✅ Deleted folder: %s\n", refreshFolderList[i].c_str());
+                            } else {
+                                Serial.printf("❌ Failed to delete folder (may not be empty): %s\n", refreshFolderList[i].c_str());
+                            }
+                            delay(50);
+                        }
+                        
+                        Serial.println("✅ Cleanup complete!");
                     } else {
                         Serial.println("❎ Delete all operation canceled.");
                     }
                     continue;
                 }
                 
-                // Parse multiple file numbers
-                int filesToDelete[20]; // Max 20 files for memory efficiency
-                int deleteCount = 0;
+                // Check if it's a folder (starts with 'F' or 'f')
+                bool isFolder = false;
+                int itemIndex = 0;
                 
-                // Replace commas with spaces for uniform parsing
-                input.replace(",", " ");
-                
-                int start = 0;
-                while (start < input.length() && deleteCount < 20) {
-                    int spaceIdx = input.indexOf(' ', start);
-                    if (spaceIdx == -1) spaceIdx = input.length();
-                    
-                    String numStr = input.substring(start, spaceIdx);
-                    numStr.trim();
-                    
-                    if (numStr.length() > 0) {
-                        int fileNum = numStr.toInt();
-                        if (fileNum >= 1 && fileNum <= fileCount) {
-                            filesToDelete[deleteCount] = fileNum;
-                            deleteCount++;
-                        } else if (fileNum > 0) {
-                            Serial.printf("⚠️ Invalid file number: %d\n", fileNum);
-                        }
-                    }
-                    
-                    start = spaceIdx + 1;
-                }
-                
-                if (deleteCount == 0) {
-                    Serial.println("⚠️ No valid file numbers entered.");
-                    continue;
-                }
-                
-                // Show files to be deleted and confirm
-                Serial.printf("🗑️ Files to delete (%d):\n", deleteCount);
-                for (int i = 0; i < deleteCount; i++) {
-                    Serial.printf("  %d: %s\n", filesToDelete[i], fileList[filesToDelete[i] - 1].c_str());
-                }
-                Serial.println("Type 'OK' to confirm deletion or 'NO' to cancel:");
-
-                String confirm = "";
-                while (confirm.length() == 0) {
-                    if (Serial.available()) {
-                        confirm = Serial.readStringUntil('\n');
-                        confirm.trim();
-                    }
-                    delay(10);
-                }
-
-                if (confirm.equalsIgnoreCase("OK")) {
-                    int deleted = 0, failed = 0;
-                    
-                    for (int i = 0; i < deleteCount; i++) {
-                        String fileToDelete = fileList[filesToDelete[i] - 1];
-                        
-                        if (!SPIFFS.exists(fileToDelete)) {
-                            Serial.printf("⚠️ File does not exist: %s\n", fileToDelete.c_str());
-                            failed++;
-                            continue;
-                        }
-
-                        if (SPIFFS.remove(fileToDelete)) {
-                            Serial.printf("✅ Deleted: %s\n", fileToDelete.c_str());
-                            deleted++;
-                        } else {
-                            Serial.printf("❌ Failed to delete: %s\n", fileToDelete.c_str());
-                            failed++;
-                        }
-                        delay(100); // Small delay for stability
-                    }
-                    
-                    Serial.printf("📊 Deletion summary: %d deleted, %d failed\n", deleted, failed);
-                    Serial.println("✅ Operation completed! You can delete more files or type 'end' to exit.");
+                if (input.length() > 0 && (input.charAt(0) == 'F' || input.charAt(0) == 'f')) {
+                    isFolder = true;
+                    itemIndex = input.substring(1).toInt();
                 } else {
-                    Serial.println("❎ Deletion canceled.");
+                    itemIndex = input.toInt();
+                }
+                
+                if (isFolder) {
+                    if (itemIndex >= 1 && itemIndex <= refreshFolderCount) {
+                        String folderPath = refreshFolderList[itemIndex - 1];
+                        Serial.printf("Delete folder '%s'? Type 'OK' to confirm: ", folderPath.c_str());
+                        
+                        String confirm = "";
+                        while (confirm.length() == 0) {
+                            if (Serial.available()) {
+                                confirm = Serial.readStringUntil('\n');
+                                confirm.trim();
+                            }
+                            delay(10);
+                        }
+                        
+                        if (confirm.equalsIgnoreCase("OK")) {
+                            if (LittleFS.rmdir(folderPath)) {
+                                Serial.printf("✅ Deleted folder: %s\n", folderPath.c_str());
+                            } else {
+                                Serial.printf("❌ Failed to delete folder (may not be empty): %s\n", folderPath.c_str());
+                                Serial.println("💡 Tip: Delete all files inside the folder first.");
+                            }
+                        } else {
+                            Serial.println("❎ Deletion canceled.");
+                        }
+                    } else {
+                        Serial.println("⚠️ Invalid folder number.");
+                    }
+                } else {
+                    if (itemIndex >= 1 && itemIndex <= refreshFileCount) {
+                        String filePath = refreshFileList[itemIndex - 1];
+                        Serial.printf("Delete file '%s'? Type 'OK' to confirm: ", filePath.c_str());
+                        
+                        String confirm = "";
+                        while (confirm.length() == 0) {
+                            if (Serial.available()) {
+                                confirm = Serial.readStringUntil('\n');
+                                confirm.trim();
+                            }
+                            delay(10);
+                        }
+                        
+                        if (confirm.equalsIgnoreCase("OK")) {
+                            if (LittleFS.remove(filePath)) {
+                                Serial.printf("✅ Deleted file: %s\n", filePath.c_str());
+                            } else {
+                                Serial.printf("❌ Failed to delete file: %s\n", filePath.c_str());
+                            }
+                        } else {
+                            Serial.println("❎ Deletion canceled.");
+                        }
+                    } else {
+                        Serial.println("⚠️ Invalid file number.");
+                    }
                 }
             }
         }
@@ -539,15 +673,15 @@ void manageSPIFFSFiles() {
     }
 }
 
-void deleteAllSPIFFSFiles() {
-    if (!SPIFFS.begin(true)) {
-        Serial.println("❌ SPIFFS Mount Failed!");
+void deleteAllLittleFSFiles() {
+    if (!LittleFS.begin(true)) {
+        Serial.println("❌ LittleFS Mount Failed!");
         return;
     }
 
-    Serial.println("🚮 Scanning and deleting all files from SPIFFS...");
+    Serial.println("🚮 Scanning and deleting all files from LittleFS...");
 
-    File root = SPIFFS.open("/");
+    File root = LittleFS.open("/");
     File file = root.openNextFile();
     int deleted = 0, failed = 0;
 
@@ -555,7 +689,7 @@ void deleteAllSPIFFSFiles() {
         String path = file.name();
         file.close(); // must close before delete
 
-        if (SPIFFS.remove(path)) {
+        if (LittleFS.remove(path)) {
             Serial.printf("✅ Deleted: %s\n", path.c_str());
             deleted++;
         } else {
@@ -613,7 +747,7 @@ String reception_data(int exact_columns, bool print_file) {
 
     Serial.printf("📁 Will save to: %s\n", fullPath.c_str());
 
-    File file = SPIFFS.open(fullPath, FILE_WRITE);
+    File file = LittleFS.open(fullPath, FILE_WRITE);
     if (!file) {
         Serial.println("❌ Failed to open file for writing");
         return fullPath;
@@ -695,7 +829,7 @@ String reception_data(int exact_columns, bool print_file) {
 }
 
 void cleanMalformedRows(const String& filename, int exact_columns) {
-    File file = SPIFFS.open(filename, FILE_READ);
+    File file = LittleFS.open(filename, FILE_READ);
     if (!file) {
         Serial.print("❌ Failed to open ");
         Serial.println(filename);
@@ -703,7 +837,7 @@ void cleanMalformedRows(const String& filename, int exact_columns) {
     }
 
     String tempName = filename + ".tmp";
-    File temp = SPIFFS.open(tempName, FILE_WRITE);
+    File temp = LittleFS.open(tempName, FILE_WRITE);
     if (!temp) {
         Serial.println("❌ Failed to open temp file for writing");
         file.close();
@@ -734,8 +868,8 @@ void cleanMalformedRows(const String& filename, int exact_columns) {
     file.close();
     temp.close();
 
-    SPIFFS.remove(filename);
-    SPIFFS.rename(tempName, filename);
+    LittleFS.remove(filename);
+    LittleFS.rename(tempName, filename);
 
     Serial.printf("✅ Cleaned %s: %u rows kept, %u rows removed (not exactly %u elements).\n",
                   filename.c_str(), kept, removed, exact_columns);

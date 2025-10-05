@@ -1,8 +1,5 @@
 #pragma once
 
-#define DEV_STAGE         // development stage - enable test_data 
-#define RF_DEBUG_LEVEL 2
-
 #include "Rf_components.h"
 
 namespace mcu{
@@ -67,11 +64,11 @@ namespace mcu{
                 // // if temp_base_data file size > original base_data file size, replace original file
                 // char base_path[CHAR_BUFFER];
                 // base.get_base_data_path(base_path, sizeof(base_path));
-                // File tempFile = SPIFFS.open(temp_base_data, FILE_READ);
+                // File tempFile = LittleFS.open(temp_base_data, FILE_READ);
 
                 // size_t tempSize = tempFile ? tempFile.size() : 0;
                 // tempFile.close();
-                // File baseFile = SPIFFS.open(base_path, FILE_READ);
+                // File baseFile = LittleFS.open(base_path, FILE_READ);
                 // size_t baseSize = baseFile ? baseFile.size() : 0;
                 // baseFile.close();
 
@@ -108,10 +105,14 @@ namespace mcu{
 
             // initialize data components
             dataList.reserve(config.num_trees);
-            train_data.init("/train_data.bin", config.num_features);
-            test_data.init("/test_data.bin", config.num_features);
+            char path[CHAR_BUFFER];
+            base.build_data_file_path(path, "train_data");
+            train_data.init(path, config.num_features);
+            base.build_data_file_path(path, "test_data");
+            test_data.init(path, config.num_features);
             if(config.use_validation()){
-                validation_data.init("/valid_data.bin", config.num_features);
+                base.build_data_file_path(path, "valid_data");
+                validation_data.init(path, config.num_features);
             }
 
             // data splitting
@@ -139,36 +140,25 @@ namespace mcu{
             // Clear any existing forest first
             forest_container.clearForest();
             logger.m_log("start building forest", print_log);
-            RF_DEBUG(0, "🌲 Building forest... ");
 
-            uint16_t estimated_nodes = node_pred.estimate_nodes(config.min_split, config.max_depth);
-            uint16_t peak_nodes = node_pred.queue_peak_size(config.min_split, config.max_depth);
+            uint16_t estimated_nodes = node_pred.estimate_nodes(config);
+            uint16_t peak_nodes = node_pred.queue_peak_size(config);
             auto& queue_nodes = forest_container.getQueueNodes();
             queue_nodes.clear();
             queue_nodes.reserve(peak_nodes); // Conservative estimate
-            Serial.printf("queue_nodes cap: %d - size: %d\n", queue_nodes.capacity(), queue_nodes.size());
-            Serial.printf("Estimate node: %d\n", estimated_nodes);
+            RF_DEBUG(2, "🌳 Estimated nodes per tree: ", estimated_nodes);
 
             if(!train_data.loadData()){
                 RF_DEBUG(0, "❌ Error loading training data");
                 return false;
             }
-            // printout first 10 samples
-            Serial.printf("Train_data size: %d - features: %d\n", train_data.size(), train_data.num_features());
-            for(uint16_t i=0; i < 20; i++){
-                Serial.printf("Sample %d:  - label: %d | ", i, train_data.getLabel(i));
-                for(uint8_t j=0; j < 20; j++){
-                    Serial.printf("%d ", train_data.getFeature(i,j));
-                }
-                Serial.println();
-            }
-
             logger.m_log("load train_data", print_log);
             for(uint8_t i = 0; i < config.num_trees; i++){
                 Rf_tree tree(i);
                 tree.nodes.reserve(estimated_nodes); // Reserve memory for nodes based on prediction
                 queue_nodes.clear();                // Clear queue for each tree
                 buildTree(tree, dataList[i], queue_nodes);
+                tree.isLoaded = true;
                 forest_container.add_tree(std::move(tree));
                 logger.m_log("tree creation", print_log);
             }
@@ -178,6 +168,7 @@ namespace mcu{
             node_pred.add_new_samples(config.min_split, config.max_depth, forest_container.avg_nodes());
 
             RF_DEBUG_2(0, "🌲 Forest built successfully: ", forest_container.get_total_nodes(), " nodes","");
+            RF_DEBUG_2(1, "Min split: ", config.min_split, "- Max depth: ", config.max_depth);
             size_t end = logger.drop_anchor();
             logger.t_log("forest building time", start, end, "s", print_log);
             return true;
@@ -310,8 +301,6 @@ namespace mcu{
                         break;
                     }
                 }
-                //printout sub_data size
-                RF_DEBUG_2(2, "sub_data: ", i, "num samples: ", sub_data.size());
                 dataList.push_back(std::move(sub_data));
                 logger.m_log("clone sub_data", print_log);
             }
@@ -319,7 +308,7 @@ namespace mcu{
             logger.m_log("clones data", print_log);  
             size_t end = logger.drop_anchor();
             logger.t_log("clones data time", start, end, "ms", print_log);
-            RF_DEBUG_2(1, "🎉 Created ", dataList.size(), " datasets for trees","");
+            RF_DEBUG_2(1, "🎉 Created ", dataList.size(), "datasets for trees","");
         }  
         
         typedef struct SplitInfo {
@@ -526,17 +515,9 @@ namespace mcu{
                 
                 // Find best split on the slice
                 SplitInfo bestSplit = findBestSplit(indices, current.begin, current.end,
-                                                        selectedFeatures, config.use_gini, config.num_labels);
-                // Align policy with PC: Gini typically yields smaller gains than entropy,
-                // so we relax the threshold by half when using Gini.
-                float gain_threshold = config.use_gini ? (config.impurity_threshold * 0.5f)
-                                                      :  (config.impurity_threshold);
-                if(!prinnted){
-                    Serial.printf("best split gain: %.3f\n", bestSplit.gain);
-                    prinnted = true;
-                }
+                                                selectedFeatures, config.use_gini, config.num_labels);
                 
-                if (bestSplit.gain <= gain_threshold) {
+                if (bestSplit.gain <= config.impurity_threshold) {
                     tree.nodes[current.nodeIndex].setIsLeaf(true);
                     tree.nodes[current.nodeIndex].setLabel(leafLabel);
                     tree.nodes[current.nodeIndex].setFeatureID(0);
@@ -591,7 +572,6 @@ namespace mcu{
             }
             tree.nodes.fit();
         }
-        
         // Helper function: evaluate the entire forest using OOB (Out-of-Bag) score
         // Iterates over all samples in training data and evaluates using trees that didn't see each sample
         float get_oob_score(){
@@ -837,8 +817,34 @@ namespace mcu{
             return get_oob_score();
         }
 
-        public:
-        // -----------------------------------------------------------------------------------
+    // ---------------------------------- operations -----------------------------------
+    public:
+        // load forest from LittleFS to RAM
+        bool loadForest() {
+            bool success = forest_container.loadForest();
+            if (!success) {
+                if constexpr (RF_DEBUG_LEVEL > 0)
+                Serial.println("❌ Failed to load forest from LittleFS");
+            }else{
+                if constexpr (RF_DEBUG_LEVEL > 1)
+                Serial.println("✅ Forest loaded from LittleFS");
+            }
+            return success;
+        }
+        
+        // release forest from RAM to LittleFS
+        bool releaseForest() {
+            bool success = forest_container.releaseForest();
+            if (!success) {
+                if constexpr (RF_DEBUG_LEVEL > 0)
+                Serial.println("❌ Failed to release forest to LittleFS");
+            }else{
+                if constexpr (RF_DEBUG_LEVEL > 1)
+                Serial.println("✅ Forest released to LittleFS"); 
+            }
+            return success;
+        }
+
         // Memory-Efficient Grid Search Training Function
         void training(){
             size_t start = logger.drop_anchor();
@@ -866,10 +872,12 @@ namespace mcu{
                             config.min_split, config.max_depth, best_score);
             }
             
+            char path[CHAR_BUFFER];
             Rf_data old_base_data;
             if(config.training_score == Rf_training_score::K_FOLD_SCORE){
                 // convert train_data to base_data
-                old_base_data.init("/temp_base_data.bin", config.num_features);
+                base.build_data_file_path(path, "temp_base_data");
+                old_base_data.init(path, config.num_features);
                 old_base_data = base_data; // backup
                 base_data = train_data; 
                 // init validation_data if not yet
@@ -903,14 +911,14 @@ namespace mcu{
                         Serial.printf("New best score: %.3f with min_split=%d, max_depth=%d\n", 
                                     best_score, min_split, max_depth);
                         if(config.training_score != Rf_training_score::K_FOLD_SCORE){
-                            // Save the best forest to SPIFFS
+                            // Save the best forest to LittleFS
                             forest_container.releaseForest(); // Release current trees from RAM
                         }
                     }
                     logger.m_log("epoch", print_log);
-                    if(loop_count++ > 1) break; // For demo, limit to 3 iterations
+                    // if(loop_count++ > 1) break; // For demo, limit to 3 iterations
                 }
-                if(loop_count++ > 1) break; // For demo, limit to 3 iterations
+                // if(loop_count++ > 1) break; // For demo, limit to 3 iterations
             }
             // Set config to best found parameters
             config.min_split = best_min_split;
@@ -1026,50 +1034,7 @@ namespace mcu{
             pending_data.write_to_infer_log();
         }
 
-        void enable_retrain(){
-            config.enable_retrain = true;
-        }
-
-        void disable_retrain(){
-            config.enable_retrain = false;
-        }
-
-        // get number of inference saved in log (which has actual label feedback)
-        size_t get_total_logged_inference() const {
-            char path[CHAR_BUFFER];
-            base.get_infer_log_path(path, sizeof(path));
-            if(!SPIFFS.exists(path)) {
-                RF_DEBUG(0, "❌ Inference log file does not exist: ", path);
-                return 0;
-            }   
-            File file = SPIFFS.open(path, FILE_READ);
-            if(!file) {
-                RF_DEBUG(0, "❌ Failed to open inference log file: ", path);
-                return 0;
-            }
-            
-            // Read header to get prediction count - new format: magic (4) + prediction_count (4)
-            uint8_t magic_bytes[4];
-            uint32_t prediction_count;
-            
-            if(file.read(magic_bytes, 4) != 4 || 
-            file.read((uint8_t*)&prediction_count, 4) != 4) {
-                file.close();
-                return 0; // Failed to read header
-            }
-            
-            // Verify magic number
-            if(magic_bytes[0] != 0x49 || magic_bytes[1] != 0x4E || 
-            magic_bytes[2] != 0x46 || magic_bytes[3] != 0x4C) {
-                file.close();
-                return 0; // Invalid header
-            }
-            
-            file.close();
-            return static_cast<size_t>(prediction_count);
-        } 
-
-
+    // ----------------------------------------setters---------------------------------------
         /**
          * @brief: Calculate inference score based on the last N logged predictions.
          * @param num_inference: Number of recent predictions to consider for score calculation.
@@ -1079,12 +1044,12 @@ namespace mcu{
         float get_last_n_inference_score(size_t num_inference, uint8_t flag) {
             char path[CHAR_BUFFER];
             base.get_infer_log_path(path, sizeof(path));
-            if(!SPIFFS.exists(path)) {
+            if(!LittleFS.exists(path)) {
                 RF_DEBUG(0, "❌ Inference log file does not exist");
                 return 0.0f;
             }
             
-            File file = SPIFFS.open(path, FILE_READ);
+            File file = LittleFS.open(path, FILE_READ);
             if(!file) {
                 Serial.println("❌ Failed to open inference log file");
                 return 0.0f;
@@ -1190,7 +1155,13 @@ namespace mcu{
             return get_practical_inference_score(static_cast<uint8_t>(config.metric_score));
         }
 
-        // -----------------------------------------------------------------------------------
+        void enable_retrain(){
+            config.enable_retrain = true;
+        }
+
+        void disable_retrain(){
+            config.enable_retrain = false;
+        }
 
         // overwrite metric_score
         void set_metric_score(Rf_metric_scores flag) {
@@ -1205,29 +1176,17 @@ namespace mcu{
         // set training_score
         void set_training_score(Rf_training_score score) {
             config.training_score = score;
-            if(score == Rf_training_score::VALID_SCORE) {
-                if(config.num_samples / config.num_labels > 150){
-                    #ifdef DEV_STAGE
-                        config.train_ratio = 0.7f;
-                        config.test_ratio = 0.15f;
-                        config.valid_ratio = 0.15f;
-                    #else
-                        config.train_ratio = 0.8f;
-                        config.test_ratio = 0.0f;
-                        config.valid_ratio = 0.2f;
-                    #endif
-                }else{
-                    #ifdef DEV_STAGE
-                        config.train_ratio = 0.6f;
-                        config.test_ratio = 0.2f;
-                        config.valid_ratio = 0.2f;
-                    #else
-                        config.train_ratio = 0.7f;
-                        config.test_ratio = 0.0f;
-                        config.valid_ratio = 0.3f;
-                    #endif
-                }
-            } 
+            config.validate_ratios();
+        }
+
+        void set_train_ratio(float ratio) {
+            config.train_ratio = ratio;
+            config.validate_ratios();
+        }
+
+        void set_valid_ratio(float ratio) {
+            config.valid_ratio = ratio;
+            config.validate_ratios();
         }
 
         // allow dataset to grow when new data is added, but limited to max_samples/max_dataset_size
@@ -1249,32 +1208,6 @@ namespace mcu{
             random_generator.seed(0ULL);
         }
         
-        // load forest from SPIFFS to RAM
-        bool loadForest() {
-            bool success = forest_container.loadForest();
-            if (!success) {
-                if constexpr (RF_DEBUG_LEVEL > 0)
-                Serial.println("❌ Failed to load forest from SPIFFS");
-            }else{
-                if constexpr (RF_DEBUG_LEVEL > 1)
-                Serial.println("✅ Forest loaded from SPIFFS");
-            }
-            return success;
-        }
-        
-        // release forest from RAM to SPIFFS
-        bool releaseForest() {
-            bool success = forest_container.releaseForest();
-            if (!success) {
-                if constexpr (RF_DEBUG_LEVEL > 0)
-                Serial.println("❌ Failed to release forest to SPIFFS");
-            }else{
-                if constexpr (RF_DEBUG_LEVEL > 1)
-                Serial.println("✅ Forest released to SPIFFS"); 
-            }
-            return success;
-        }
-
         //  rename model.  This action will rename all forest file components.
         void set_model_name(const String& name) {
             base.set_model_name(name.c_str());
@@ -1282,7 +1215,10 @@ namespace mcu{
         void set_model_name(const char* name) {
             base.set_model_name(name);
         }
-
+        void set_num_trees(uint8_t n_trees) {
+            config.num_trees = n_trees;
+        }
+    // ----------------------------------------getters---------------------------------------
         // get name of model (forest)
         String get_model_name() const {
             char name[CHAR_BUFFER];
@@ -1296,7 +1232,7 @@ namespace mcu{
         size_t lowest_ram() const {
             return logger.lowest_ram;
         }
-        size_t lowest_spiffs() const {
+        size_t lowest_littlefs() const {
             return logger.lowest_rom;
         }
 
@@ -1327,6 +1263,41 @@ namespace mcu{
         uint16_t max_depth_tree() const {
             return forest_container.max_depth_tree();
         }
+        
+        // get number of inference saved in log (which has actual label feedback)
+        size_t get_total_logged_inference() const {
+            char path[CHAR_BUFFER];
+            base.get_infer_log_path(path, sizeof(path));
+            if(!LittleFS.exists(path)) {
+                RF_DEBUG(0, "❌ Inference log file does not exist: ", path);
+                return 0;
+            }   
+            File file = LittleFS.open(path, FILE_READ);
+            if(!file) {
+                RF_DEBUG(0, "❌ Failed to open inference log file: ", path);
+                return 0;
+            }
+            
+            // Read header to get prediction count - new format: magic (4) + prediction_count (4)
+            uint8_t magic_bytes[4];
+            uint32_t prediction_count;
+            
+            if(file.read(magic_bytes, 4) != 4 || 
+            file.read((uint8_t*)&prediction_count, 4) != 4) {
+                file.close();
+                return 0; // Failed to read header
+            }
+            
+            // Verify magic number
+            if(magic_bytes[0] != 0x49 || magic_bytes[1] != 0x4E || 
+            magic_bytes[2] != 0x46 || magic_bytes[3] != 0x4C) {
+                file.close();
+                return 0; // Invalid header
+            }
+            
+            file.close();
+            return static_cast<size_t>(prediction_count);
+        } 
 
         // methods for development stage - detailed metrics
     #ifdef DEV_STAGE
@@ -1544,5 +1515,6 @@ namespace mcu{
             forest_container.releaseForest(); // Release all trees after prediction
         }
     #endif
+    
     };
 } // End of namespace mcu

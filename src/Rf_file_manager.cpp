@@ -258,8 +258,6 @@ void manage_files() {
         Serial.println("e: ➕ Add new file");
         Serial.println("Type operation letter, or 'exit' to quit:");
 
-        Serial.println("Type operation letter, or 'exit' to quit:");
-
         String operation = "";
         while (operation.length() == 0) {
             if (Serial.available()) {

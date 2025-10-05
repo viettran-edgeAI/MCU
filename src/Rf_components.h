@@ -3,7 +3,7 @@
 #include "STL_MCU.h"  
 #include "Rf_file_manager.h"
 #include "FS.h"
-#include "SPIFFS.h"
+#include "LittleFS.h"
 #include "esp_system.h"
 
 
@@ -61,7 +61,7 @@
         }while(0)
 #endif
 
-static constexpr uint8_t  CHAR_BUFFER            = 32;            // buffer for file_path (32 is max file_path length in SPIFFS)
+static constexpr uint8_t  CHAR_BUFFER            = 64;            // buffer for file_path(limit to 2 level of file)
 static constexpr uint8_t  MAX_TREES              = 100;          // maximum number of trees in a forest
 static constexpr uint16_t MAX_LABELS             = 255;         // maximum number of unique labels supported 
 static constexpr uint16_t MAX_NUM_FEATURES       = 1023;       // maximum number of features
@@ -142,18 +142,18 @@ namespace mcu {
         uint16_t bitsPerSample;                        // Number of bits per sample (numFeatures * 2)
         uint16_t samplesEachChunk;                     // Maximum samples per chunk
         size_t size_;  
-        char file_path[CHAR_BUFFER] = {0};          // dataset file_path (in SPIFFS)
+        char file_path[CHAR_BUFFER] = {0};          // dataset file_path (in LittleFS)
 
     public:
         bool isLoaded;      
 
         Rf_data() : isLoaded(false), size_(0), bitsPerSample(0), samplesEachChunk(0) {}
         // Constructor with file_path and numFeatures
-        Rf_data(const char* fname, uint16_t numFeatures) {
-            init(fname, numFeatures);
+        Rf_data(const char* path, uint16_t numFeatures) {
+            init(path, numFeatures);
         }
-        Rf_data(const char* fname){
-            init(fname);
+        Rf_data(const char* path){
+            init(path);
         }
 
         // standard init 
@@ -171,19 +171,19 @@ namespace mcu {
         }
 
         // for temp base_data 
-        bool init(const char* fname) {
-            strncpy(this->file_path, fname, CHAR_BUFFER);
+        bool init(const char* path) {
+            strncpy(this->file_path, path, CHAR_BUFFER);
             file_path[CHAR_BUFFER - 1] = '\0';
             isLoaded = false;
             sampleChunks.clear();
             allLabels.clear();
             
             // read header to get size_ and bitsPerSample
-            File file = SPIFFS.open(file_path, FILE_READ);
+            File file = LittleFS.open(file_path, FILE_READ);
             if (!file) {
                 RF_DEBUG(0, "❌ Failed to open dataset file: ", file_path);
-                if(SPIFFS.exists(file_path)) {
-                    SPIFFS.remove(file_path);
+                if(LittleFS.exists(file_path)) {
+                    LittleFS.remove(file_path);
                 }
                 size_ = 0;
                 bitsPerSample = 0;
@@ -209,7 +209,7 @@ namespace mcu {
             return isProperlyInitialized();
         }
 
-        // for temporary Rf_data (without saving to SPIFFS)
+        // for temporary Rf_data (without saving to LittleFS)
         bool init(uint16_t numFeatures) {   
             strncpy(this->file_path, "temp_data", CHAR_BUFFER);
             file_path[CHAR_BUFFER - 1] = '\0';
@@ -384,7 +384,7 @@ namespace mcu {
                 isLoaded = false;
             }
             
-            File file = SPIFFS.open(csvfile_path, FILE_READ);
+            File file = LittleFS.open(csvfile_path, FILE_READ);
             if (!file) {
                 RF_DEBUG(0, "❌ Failed to open CSV file for reading: ", csvfile_path);
                 return false;
@@ -501,7 +501,7 @@ namespace mcu {
             }
             file.close();
             isLoaded = true;
-            SPIFFS.remove(csvfile_path);
+            LittleFS.remove(csvfile_path);
             RF_DEBUG(1, "✅ CSV data loaded and file removed: ", csvfile_path);
             return true;
         }
@@ -523,8 +523,8 @@ namespace mcu {
             return size_;
         }
 
-        void setfile_path(const char* fname) {
-            strncpy(this->file_path, fname, CHAR_BUFFER);
+        void setfile_path(const char* path) {
+            strncpy(this->file_path, path, CHAR_BUFFER);
             this->file_path[CHAR_BUFFER - 1] = '\0';
         }
 
@@ -571,7 +571,7 @@ namespace mcu {
         }
 
         /**
-         * @brief Save data to SPIFFS in binary format and clear from RAM.
+         * @brief Save data to LittleFS in binary format and clear from RAM.
          * @param reuse If true, keeps data in RAM after saving; if false, clears data from RAM.
          * @note: after first time rf_data created, it must be releaseData(false) to save data
          */
@@ -579,12 +579,12 @@ namespace mcu {
             if(!isLoaded) return false;
             
             if(!reuse){
-                RF_DEBUG(1, "💾 Saving data to SPIFFS and clearing from RAM...");
+                RF_DEBUG(1, "💾 Saving data to LittleFS and clearing from RAM...");
                 // Remove any existing file
-                if (SPIFFS.exists(file_path)) {
-                    SPIFFS.remove(file_path);
+                if (LittleFS.exists(file_path)) {
+                    LittleFS.remove(file_path);
                 }
-                File file = SPIFFS.open(file_path, FILE_WRITE);
+                File file = LittleFS.open(file_path, FILE_WRITE);
                 if (!file) {
                     RF_DEBUG(0, "❌ Failed to open binary file for writing: ", file_path);
                     return false;
@@ -644,11 +644,11 @@ namespace mcu {
             if(isLoaded || !isProperlyInitialized()) return false;
             RF_DEBUG(1, "📂 Loading data from: ", file_path);
             
-            File file = SPIFFS.open(file_path, FILE_READ);
+            File file = LittleFS.open(file_path, FILE_READ);
             if (!file) {
                 RF_DEBUG(0, "❌ Failed to open data file: ", file_path);
-                if(SPIFFS.exists(file_path)) {
-                    SPIFFS.remove(file_path);
+                if(LittleFS.exists(file_path)) {
+                    LittleFS.remove(file_path);
                 }
                 return false;
             }
@@ -692,7 +692,7 @@ namespace mcu {
                 if (remaining == 0) break;
             }
 
-            // Batch read to reduce SPIFFS overhead
+            // Batch read to reduce LittleFS overhead
             const size_t MAX_BATCH_BYTES = 2048; // conservative for MCU
             uint8_t* ioBuf = (uint8_t*)malloc(MAX_BATCH_BYTES);
             if (!ioBuf) {
@@ -799,7 +799,7 @@ namespace mcu {
             file.close();
             if(!re_use) {
                 RF_DEBUG(1, "♻️ Single-load mode: removing file after loading: ", file_path);
-                SPIFFS.remove(file_path); // Remove file after loading in single mode
+                LittleFS.remove(file_path); // Remove file after loading in single mode
             }
             RF_DEBUG_2(1, "✅ Data loaded(", sampleChunks.size(), "chunks): ", file_path);
             return true;
@@ -813,13 +813,13 @@ namespace mcu {
          * @note: The state of the source data will be automatically restored, no need to reload.
          */
         bool loadData(Rf_data& source, const sampleID_set& sample_IDs, bool save_ram = true) {
-            // Only the source must exist on SPIFFS; destination can be an in-memory buffer
-            if (!SPIFFS.exists(source.file_path)) {
+            // Only the source must exist on LittleFS; destination can be an in-memory buffer
+            if (!LittleFS.exists(source.file_path)) {
                 RF_DEBUG(0, "❌ Source file does not exist: ", source.file_path);
                 return false;
             }
 
-            File file = SPIFFS.open(source.file_path, FILE_READ);
+            File file = LittleFS.open(source.file_path, FILE_READ);
             if (!file) {
                 RF_DEBUG(0, "❌ Failed to open source file: ", source.file_path);
                 return false;
@@ -952,14 +952,14 @@ namespace mcu {
         }
 
         /**
-         *@brief: copy assignment (but not copy file_path to avoid SPIFFS over-writing)
+         *@brief: copy assignment (but not copy file_path to avoid LittleFS over-writing)
          *@note : Rf_data will be put into release state. loadData() to reload into RAM if needed.
         */
         Rf_data& operator=(const Rf_data& other) {
             purgeData(); // Clear existing data safely
             if (this != &other) {
-                if (SPIFFS.exists(other.file_path)) {
-                    File testFile = SPIFFS.open(other.file_path, FILE_READ);
+                if (LittleFS.exists(other.file_path)) {
+                    File testFile = LittleFS.open(other.file_path, FILE_READ);
                     if (testFile) {
                         uint32_t testNumSamples;
                         uint16_t testNumFeatures;
@@ -991,7 +991,7 @@ namespace mcu {
             return *this;   
         }
 
-        // Clear data at both memory and SPIFFS
+        // Clear data at both memory and LittleFS
         void purgeData() {
             // Clear in-memory structures first
             sampleChunks.clear();
@@ -1003,9 +1003,9 @@ namespace mcu {
             bitsPerSample = 0;
             samplesEachChunk = 0;
 
-            // Then remove the SPIFFS file if one was specified
-            if (SPIFFS.exists(file_path)) {
-                SPIFFS.remove(file_path);
+            // Then remove the LittleFS file if one was specified
+            if (LittleFS.exists(file_path)) {
+                LittleFS.remove(file_path);
                 RF_DEBUG(1, "🗑️ Deleted file: ", file_path);
             }
         }
@@ -1016,7 +1016,7 @@ namespace mcu {
          * @param extend If false, keeps file size same (overwrites old data from start); 
          *               if true, appends new data while respecting size limits
          * @return : deleted labels
-         * @note Directly writes to SPIFFS file to save RAM. File must exist and be properly initialized.
+         * @note Directly writes to LittleFS file to save RAM. File must exist and be properly initialized.
          */
         b_vector<uint8_t> addNewData(const b_vector<Rf_sample>& samples, bool extend = true) {
             b_vector<uint8_t> deletedLabels;
@@ -1025,7 +1025,7 @@ namespace mcu {
                 RF_DEBUG(0, "❌ Rf_data not properly initialized. Cannot add new data.");
                 return deletedLabels;
             }
-            if (!SPIFFS.exists(file_path)) {
+            if (!LittleFS.exists(file_path)) {
                 RF_DEBUG(0, "⚠️ File does not exist for adding new data: ", file_path);
                 return deletedLabels;
             }
@@ -1035,7 +1035,7 @@ namespace mcu {
             }
 
             // Read current file header to get existing info
-            File file = SPIFFS.open(file_path, FILE_READ);
+            File file = LittleFS.open(file_path, FILE_READ);
             if (!file) {
                 RF_DEBUG(0, "❌ Failed to open file for adding new data: ", file_path);
                 return deletedLabels;
@@ -1100,7 +1100,7 @@ namespace mcu {
             RF_DEBUG_2(2, "📊 Dataset info: current=", currentNumSamples, ", new_total=", newNumSamples);
 
             // Open file for writing (r+ mode to update existing file)
-            file = SPIFFS.open(file_path, "r+");
+            file = LittleFS.open(file_path, "r+");
             if (!file) {
                 RF_DEBUG(0, "❌ Failed to open file for writing: ", file_path);
                 return deletedLabels;
@@ -1366,20 +1366,25 @@ namespace mcu {
             return getTreeDepthRecursive(0);
         }
 
-        // Save tree to SPIFFS for ESP32
-        bool releaseTree(bool re_use = false) {
+        // Save tree to LittleFS for ESP32
+        bool releaseTree(const char* path, bool re_use = false) {
             if(!re_use){
                 if (index > MAX_TREES || nodes.empty()) {
                     RF_DEBUG(0, "❌ save tree failed, invalid tree index: ", index);
                     return false;
                 }
-
-                // filepath : /tree_<index>.bin
-                char path[14];
-                snprintf(path, sizeof(path), "/tree_%d.bin", index);
-
-                // Skip exists/remove check - just overwrite directly for performance
-                File file = SPIFFS.open(path, FILE_WRITE);
+                if (path == nullptr || strlen(path) == 0) {
+                    RF_DEBUG(0, "❌ save tree failed, invalid path: ", path);
+                    return false;
+                }
+                if (LittleFS.exists(path)) {
+                    // delete existing file to avoid conflicts
+                    if (!LittleFS.remove(path)) {
+                        RF_DEBUG(0, "❌ Failed to remove existing tree file: ", path);
+                        return false;
+                    }
+                }
+                File file = LittleFS.open(path, FILE_WRITE);
                 if (!file) {
                     RF_DEBUG(0, "❌ Failed to open tree file for writing: ", path);
                     return false;
@@ -1412,7 +1417,7 @@ namespace mcu {
                         free(buffer);
                         
                         if(written != totalSize) {
-                            RF_DEBUG(1, "⚠️ Incomplete tree write to SPIFFS");
+                            RF_DEBUG(1, "⚠️ Incomplete tree write to LittleFS");
                         }
                     } else {
                         // Fallback to individual writes if malloc fails
@@ -1426,23 +1431,27 @@ namespace mcu {
             nodes.clear();
             nodes.fit(); 
             isLoaded = false;
-            RF_DEBUG(2, "✅ Tree saved to SPIFFS: ", index);
+            RF_DEBUG(2, "✅ Tree saved to LittleFS: ", index);
             return true;
         }
 
-        // Load tree from SPIFFS into RAM for ESP32
-        bool loadTree(bool re_use = false) {
+        // Load tree from LittleFS into RAM for ESP32
+        bool loadTree(const char* path, bool re_use = false) {
             if (isLoaded) return true;
             
-            if (index > MAX_TREES) {
+            if (index >= MAX_TREES) {
                 RF_DEBUG(0, "❌ Invalid tree index: ", index);
                 return false;
             }
-            
-            char path[14];
-            snprintf(path, sizeof(path), "/tree_%d.bin", index);
-            
-            File file = SPIFFS.open(path, FILE_READ);
+            if (path == nullptr || strlen(path) == 0) {
+                RF_DEBUG(0, "❌ Invalid path for loading tree: ", path);
+                return false;
+            }
+            if (!LittleFS.exists(path)) {
+                RF_DEBUG(0, "❌ Tree file does not exist: ", path);
+                return false;
+            }
+            File file = LittleFS.open(path, FILE_READ);
             if (!file) {
                 RF_DEBUG(2, "❌ Failed to open tree file: ", path);
                 return false;
@@ -1494,7 +1503,7 @@ namespace mcu {
 
             if (!re_use) { 
                 RF_DEBUG(2, "♻️ Single-load mode: removing tree file after loading; ", path); 
-                SPIFFS.remove(path); // Remove file after loading in single mode
+                LittleFS.remove(path); // Remove file after loading in single mode
             }
             return true;
         }
@@ -1536,14 +1545,12 @@ namespace mcu {
             isLoaded = false;
         }
 
-        void purgeTree(bool rmf = true) {
+        void purgeTree(const char* path, bool rmf = true) {
             nodes.clear();
             nodes.fit(); // Release excess memory
             if(rmf && index < MAX_TREES) {
-                char path[14];
-                snprintf(path, sizeof(path), "/tree_%d.bin", index);
-                if (SPIFFS.exists(path)) {
-                    SPIFFS.remove(path);
+                if (LittleFS.exists(path)) {
+                    LittleFS.remove(path);
                     RF_DEBUG(2, "🗑️ Tree file removed: ", path);
                 } 
             }
@@ -1594,11 +1601,13 @@ namespace mcu {
         char model_name[CHAR_BUFFER] ={0};
         
         // Helper to build file paths: buffer must be at least CHAR_BUFFER size
+        // update: add parent folder : /model_name/model_name_suffix
         inline void build_file_path(char* buffer, const char* suffix, int buffer_size = CHAR_BUFFER) const {
             if (!buffer || buffer_size <= 0) return;
             if (buffer_size > CHAR_BUFFER) buffer_size = CHAR_BUFFER;
-            snprintf(buffer, buffer_size, "/%s%s", model_name, suffix);
+            snprintf(buffer, buffer_size, "/%s/%s%s", model_name, model_name, suffix);
         }
+
     public:
         Rf_base() : flags(static_cast<Rf_base_flags>(0)) {}
         Rf_base(const char* bn) : flags(static_cast<Rf_base_flags>(0)) {
@@ -1610,10 +1619,10 @@ namespace mcu {
             char filepath[CHAR_BUFFER];
             // check : base data exists (binary or csv)
             build_file_path(filepath, "_nml.bin");
-            if (!SPIFFS.exists(filepath)) {
+            if (!LittleFS.exists(filepath)) {
                 // try to find csv file
                 build_file_path(filepath, "_nml.csv");
-                if (SPIFFS.exists(filepath)) {
+                if (LittleFS.exists(filepath)) {
                     RF_DEBUG(1, "🔄 Found csv dataset, need to be converted to binary format before use.");
                     flags |= static_cast<Rf_base_flags>(BASE_DATA_IS_CSV);
                 }else{
@@ -1628,7 +1637,7 @@ namespace mcu {
 
             // check : categorizer file exists
             build_file_path(filepath, "_ctg.csv");
-            if (SPIFFS.exists(filepath)) {
+            if (LittleFS.exists(filepath)) {
                 RF_DEBUG(1, "✅ Found categorizer file: ", filepath);
                 flags |= static_cast<Rf_base_flags>(CTG_FILE_EXIST);
             } else {
@@ -1639,7 +1648,7 @@ namespace mcu {
             
             // check : dp file exists
             build_file_path(filepath, "_dp.csv");
-            if (SPIFFS.exists(filepath)) {
+            if (LittleFS.exists(filepath)) {
                 RF_DEBUG(1, "✅ Found data_params file: ", filepath);
                 flags |= static_cast<Rf_base_flags>(DP_FILE_EXIST);
             } else {
@@ -1649,7 +1658,7 @@ namespace mcu {
 
             // check : config file exists
             build_file_path(filepath, "_config.json");
-            if (SPIFFS.exists(filepath)) {
+            if (LittleFS.exists(filepath)) {
                 RF_DEBUG(1, "✅ Found config file: ", filepath);
                 flags |= static_cast<Rf_base_flags>(CONFIG_FILE_EXIST);
             } else {
@@ -1659,7 +1668,7 @@ namespace mcu {
             
             // check : forest file exists (unified form)
             build_file_path(filepath, "_forest.bin");
-            if (SPIFFS.exists(filepath)) {
+            if (LittleFS.exists(filepath)) {
                 RF_DEBUG(1, "✅ Found unified forest model file: ", filepath);
                 flags |= static_cast<Rf_base_flags>(UNIFIED_FOREST_EXIST);
             } else {
@@ -1668,7 +1677,7 @@ namespace mcu {
 
             // check : node predictor file exists
             build_file_path(filepath, "_node_pred.bin");
-            if (SPIFFS.exists(filepath)) {
+            if (LittleFS.exists(filepath)) {
                 RF_DEBUG(1, "✅ Found node predictor file: ", filepath);
                 flags |= static_cast<Rf_base_flags>(NODE_PRED_FILE_EXIST);
             } else {
@@ -1740,6 +1749,24 @@ namespace mcu {
                 buffer[bufferSize - 1] = '\0';
             }
         }
+        // build Rf_data filepath : /model_name/filename.bin
+        void build_data_file_path(char* buffer, const char* filename, int buffer_size = CHAR_BUFFER) const {
+            if (!buffer || buffer_size <= 0) return;
+            if (buffer_size > CHAR_BUFFER) buffer_size = CHAR_BUFFER;
+            if (filename[0] == '/') filename++;
+            if (strstr(filename, ".bin") != nullptr) {
+                snprintf(buffer, buffer_size, "/%s/%s", model_name, filename);
+            } else {
+                snprintf(buffer, buffer_size, "/%s/%s.bin", model_name, filename);
+            }
+        }
+
+        // build tree file path : /model_name/tree_<index>.bin
+        void build_tree_file_path(char* buffer, uint8_t tree_index, int buffer_size = CHAR_BUFFER) const {
+            if (!buffer || buffer_size <= 0) return;
+            if (buffer_size > CHAR_BUFFER) buffer_size = CHAR_BUFFER;
+            snprintf(buffer, buffer_size, "/%s/tree_%d.bin", model_name, tree_index);
+        }
 
         // File path getters 
         inline void get_base_data_path(char* buffer, int buffer_size = CHAR_BUFFER )  
@@ -1797,9 +1824,9 @@ namespace mcu {
                 auto rename_file = [&](const char* suffix) {
                     snprintf(old_file, CHAR_BUFFER, "/%s%s", old_model_name, suffix);
                     snprintf(new_file, CHAR_BUFFER, "/%s%s", model_name, suffix);
-                    if (SPIFFS.exists(old_file)) {
+                    if (LittleFS.exists(old_file)) {
                         cloneFile(old_file, new_file);
-                        SPIFFS.remove(old_file);
+                        LittleFS.remove(old_file);
                     }
                 };
 
@@ -1818,18 +1845,18 @@ namespace mcu {
                 snprintf(old_file, CHAR_BUFFER, "/%s_forest.bin", old_model_name);
                 snprintf(new_file, CHAR_BUFFER, "/%s_forest.bin", model_name);
                 
-                if (SPIFFS.exists(old_file)) {
+                if (LittleFS.exists(old_file)) {
                     // Handle unified model format
                     cloneFile(old_file, new_file);
-                    SPIFFS.remove(old_file);
+                    LittleFS.remove(old_file);
                 } else {
                     // Handle individual tree files
                     for(uint8_t i = 0; i < MAX_TREES; i++) { // Max 50 trees check
                         snprintf(old_file, CHAR_BUFFER, "/%s_tree_%d.bin", old_model_name, i);
                         snprintf(new_file, CHAR_BUFFER, "/%s_tree_%d.bin", model_name, i);
-                        if (SPIFFS.exists(old_file)) {
+                        if (LittleFS.exists(old_file)) {
                             cloneFile(old_file, new_file);
-                            SPIFFS.remove(old_file);
+                            LittleFS.remove(old_file);
                         }else{
                             break; // Stop when we find a missing tree file
                         }
@@ -1921,12 +1948,15 @@ namespace mcu {
         uint32_t    estimatedRAM;
         Rf_training_score training_score;
 
-        pair<uint8_t, uint8_t> min_split_range;
-        pair<uint8_t, uint8_t> max_depth_range; 
-
         bool extend_base_data;
         bool enable_retrain;
         bool enable_auto_config;   // change config based on dataset parameters (when base_data expands)
+
+        // runtime parameters
+        pair<uint8_t, uint8_t> min_split_range;
+        pair<uint8_t, uint8_t> max_depth_range; 
+        uint8_t num_epochs;
+
 
         // Dataset parameters 
         uint16_t num_samples;
@@ -1956,8 +1986,7 @@ namespace mcu {
             metric_score        = Rf_metric_scores::ACCURACY;
             result_score        = 0.0;
             estimatedRAM        = 0;
-            
-            // Set defaults for new properties (not in initial config file)
+            num_epochs          = 255;
             extend_base_data    = true;
             enable_retrain      = true;
             enable_auto_config  = false;
@@ -1982,7 +2011,7 @@ namespace mcu {
             base_ptr->get_base_data_path(base_file_path);
             RF_DEBUG(1, "📊 Scanning base data: ", base_file_path);
 
-            File file = SPIFFS.open(base_file_path, FILE_READ);
+            File file = LittleFS.open(base_file_path, FILE_READ);
             if (!file) {
                 RF_DEBUG(0, "❌ Failed to open base data file for scanning: ", base_file_path);
                 return false;
@@ -2157,7 +2186,7 @@ namespace mcu {
                 return false; 
             }
             // Read dataset parameters from /dataset_params.csv
-            File file = SPIFFS.open(path, "r");
+            File file = LittleFS.open(path, "r");
             if (!file) {
                 RF_DEBUG(0, "❌ Failed to open data_params file for reading", path);
                 return false;
@@ -2234,7 +2263,7 @@ namespace mcu {
             char path[CHAR_BUFFER];
             base_ptr->get_dp_path(path);
             if (path[0] == '\0') return false;
-            File file = SPIFFS.open(path, "w");
+            File file = LittleFS.open(path, "w");
             if (!file) {
                 RF_DEBUG(0, "❌ Failed to open data_params file for writing", path);
                 return false;
@@ -2260,7 +2289,7 @@ namespace mcu {
         }
 
     public:
-        // Load configuration from JSON file in SPIFFS
+        // Load configuration from JSON file in LittleFS
         bool loadConfig() {
             if (isLoaded) return true;
             if (!has_base()) {
@@ -2295,7 +2324,7 @@ namespace mcu {
             if(base_ptr->config_file_exists()){
                 char file_path[CHAR_BUFFER];
                 base_ptr->get_config_path(file_path);
-                File file = SPIFFS.open(file_path, FILE_READ);
+                File file = LittleFS.open(file_path, FILE_READ);
                 if (file) {
                     jsonString = file.readString();
                     file.close();
@@ -2355,7 +2384,7 @@ namespace mcu {
             return true;
         }
     
-        // Save configuration to JSON file in SPIFFS  
+        // Save configuration to JSON file in LittleFS  
         bool releaseConfig() {
             if (!isLoaded || !has_base()){
                 RF_DEBUG(0, "❌ Save config failed: Config not loaded or base not ready");
@@ -2366,18 +2395,18 @@ namespace mcu {
             String existingTimestamp = "";
             String existingAuthor = "Viettran";
             
-            if (SPIFFS.exists(file_path)) {
-                File readFile = SPIFFS.open(file_path, FILE_READ);
+            if (LittleFS.exists(file_path)) {
+                File readFile = LittleFS.open(file_path, FILE_READ);
                 if (readFile) {
                     String jsonContent = readFile.readString();
                     readFile.close();
                     existingTimestamp = extractStringValue(jsonContent, "timestamp");
                     existingAuthor = extractStringValue(jsonContent, "author");
                 }
-                SPIFFS.remove(file_path);
+                LittleFS.remove(file_path);
             }
 
-            File file = SPIFFS.open(file_path, FILE_WRITE);
+            File file = LittleFS.open(file_path, FILE_WRITE);
             if (!file) {
                 RF_DEBUG(0, "❌ Failed to create config file: ", file_path);
                 return false;
@@ -2821,11 +2850,11 @@ namespace mcu {
             }
             char file_path[CHAR_BUFFER];
             base_ptr->get_ctg_path(file_path);
-            if (!SPIFFS.exists(file_path)) {
+            if (!LittleFS.exists(file_path)) {
                 RF_DEBUG(0, "❌ Categorizer file not found: ", file_path);
                 return false;
             }
-            File file = SPIFFS.open(file_path, "r");
+            File file = LittleFS.open(file_path, "r");
             if (!file) {
                 RF_DEBUG(0, "❌ Failed to open Categorizer file: ", file_path);
                 return false;
@@ -3218,8 +3247,8 @@ namespace mcu {
                 base_ptr->get_node_log_path(node_predictor_log);
             }
             // check if node_log file exists, if not create with header
-            if (node_predictor_log[0] != '\0' && !SPIFFS.exists(node_predictor_log)) {
-                File logFile = SPIFFS.open(node_predictor_log, FILE_WRITE);
+            if (node_predictor_log[0] != '\0' && !LittleFS.exists(node_predictor_log)) {
+                File logFile = LittleFS.open(node_predictor_log, FILE_WRITE);
                 if (logFile) {
                     logFile.println("min_split,max_depth,total_nodes");
                     logFile.close();
@@ -3227,7 +3256,7 @@ namespace mcu {
             }
         }
         
-        // Load trained model from SPIFFS (updated format without version)
+        // Load trained model from LittleFS (updated format without version)
         bool loadPredictor() {
             if (!has_base()){
                 RF_DEBUG(0, "❌ Load Predictor failed: base pointer not ready");
@@ -3237,12 +3266,12 @@ namespace mcu {
             base_ptr->get_node_pred_path(file_path);
             RF_DEBUG(2, "🔍 Loading node predictor from file: ", file_path);
             if(is_trained) return true;
-            if (!SPIFFS.exists(file_path)) {
+            if (!LittleFS.exists(file_path)) {
                 RF_DEBUG(1, "⚠️  No predictor file found, using default predictor.");
                 return false;
             }
             
-            File file = SPIFFS.open(file_path, FILE_READ);
+            File file = LittleFS.open(file_path, FILE_READ);
             if (!file) {
                 RF_DEBUG(0, "❌ Failed to open predictor file: ", file_path);
                 return false;
@@ -3314,7 +3343,7 @@ namespace mcu {
             return file_is_trained;
         }
         
-        // Save trained predictor to SPIFFS
+        // Save trained predictor to LittleFS
         bool releasePredictor() {
             if (!has_base()){
                 RF_DEBUG(0, "❌ Release Predictor failed: base pointer not ready");
@@ -3326,9 +3355,9 @@ namespace mcu {
             }
             char file_path[CHAR_BUFFER];
             base_ptr->get_node_pred_path(file_path);
-            if (SPIFFS.exists(file_path)) SPIFFS.remove(file_path);
+            if (LittleFS.exists(file_path)) LittleFS.remove(file_path);
 
-            File file = SPIFFS.open(file_path, FILE_WRITE);
+            File file = LittleFS.open(file_path, FILE_WRITE);
             if (!file) {
                 RF_DEBUG(0, "❌ Failed to create predictor file: ", file_path);
                 return false;
@@ -3385,7 +3414,7 @@ namespace mcu {
             buffer.clear();
             buffer.fit();
 
-            File file = SPIFFS.open(node_predictor_log, FILE_READ);
+            File file = LittleFS.open(node_predictor_log, FILE_READ);
             if (!file) {
                 RF_DEBUG(1, "❌ Failed to open node_predictor log file: ", node_predictor_log);
                 return false;
@@ -3629,7 +3658,7 @@ namespace mcu {
             if (new_samples.size() == 0) return;
             // Read all existing lines
             b_vector<String> lines;
-            File file = SPIFFS.open(node_predictor_log, FILE_READ);
+            File file = LittleFS.open(node_predictor_log, FILE_READ);
             if (file) {
                 while (file.available()) {
                     String line = file.readStringUntil('\n');
@@ -3659,8 +3688,8 @@ namespace mcu {
                 data_lines.pop_back();
             }
             // Write back to file
-            SPIFFS.remove(node_predictor_log);
-            file = SPIFFS.open(node_predictor_log, FILE_WRITE);
+            LittleFS.remove(node_predictor_log);
+            file = LittleFS.open(node_predictor_log, FILE_WRITE);
             if (file) {
                 file.println(header);
                 for (const auto& row : data_lines) {
@@ -3675,8 +3704,8 @@ namespace mcu {
             if (!has_base()) return false;
             char node_predictor_log[CHAR_BUFFER];
             base_ptr->get_node_log_path(node_predictor_log);
-            if (!SPIFFS.exists(node_predictor_log)) return false;
-            File file = SPIFFS.open(node_predictor_log, FILE_READ);
+            if (!LittleFS.exists(node_predictor_log)) return false;
+            File file = LittleFS.open(node_predictor_log, FILE_READ);
             bool result = file && file.size() > 0;
             // only retrain if log file has more 4 samples (excluding header)
             if (result) {
@@ -4067,8 +4096,9 @@ namespace mcu {
             // String model_name;
             Rf_base* base_ptr = nullptr;
             Rf_config* config_ptr = nullptr;
+            char tree_path_buffer[CHAR_BUFFER] = {0}; // Buffer for tree file paths
 
-            vector<Rf_tree> trees;        // b_vector storing root nodes of trees (now manages SPIFFS file_paths)
+            vector<Rf_tree> trees;        // b_vector storing root nodes of trees (now manages LittleFS file_paths)
             size_t   total_depths;       // store total depth of all trees
             size_t   total_nodes;        // store total nodes of all trees
             size_t   total_leaves;       // store total leaves of all trees
@@ -4099,7 +4129,7 @@ namespace mcu {
             }
 
             ~Rf_tree_container(){
-                // save to SPIFFS in unified form 
+                // save to LittleFS in unified form 
                 releaseForest();
                 trees.clear();
                 base_ptr = nullptr;
@@ -4115,7 +4145,8 @@ namespace mcu {
                     return;
                 }
                 for (size_t i = 0; i < trees.size(); i++) {
-                    trees[i].purgeTree();
+                    base_ptr->build_tree_file_path(tree_path_buffer, trees[i].index);
+                    trees[i].purgeTree(tree_path_buffer); 
                     // Force yield to allow garbage collection
                     yield();        
                     delay(10);
@@ -4128,8 +4159,8 @@ namespace mcu {
                 // Remove old forest file to ensure clean slate
                 char oldForestFile[CHAR_BUFFER];
                 base_ptr->get_forest_path(oldForestFile);
-                if(SPIFFS.exists(oldForestFile)) {
-                    SPIFFS.remove(oldForestFile);
+                if(LittleFS.exists(oldForestFile)) {
+                    LittleFS.remove(oldForestFile);
                     RF_DEBUG(2, "🗑️ Removed old forest file: ", oldForestFile);
                 }
                 is_unified = false; // Now in individual form
@@ -4148,7 +4179,8 @@ namespace mcu {
                     // Check if slot is already occupied
                     if(trees[tree.index].isLoaded || trees[tree.index].index != 255) {
                         RF_DEBUG(2, "⚠️ Warning: Overwriting tree index: ", tree.index);
-                        trees[tree.index].purgeTree();
+                        base_ptr->build_tree_file_path(tree_path_buffer, tree.index);
+                        trees[tree.index].purgeTree(tree_path_buffer); // Remove old tree file if exists
                     }
                     uint16_t d = tree.getTreeDepth();
                     uint16_t n = tree.countNodes();
@@ -4158,7 +4190,8 @@ namespace mcu {
                     total_nodes  += n;
                     total_leaves += l;
 
-                    tree.releaseTree(); // Release tree nodes from memory after adding to container
+                    base_ptr->build_tree_file_path(tree_path_buffer, tree.index);
+                    tree.releaseTree(tree_path_buffer); // Release tree nodes from memory after adding to container
                     trees[tree.index] = std::move(tree);
                 } else {
                     RF_DEBUG(0, "❌ Invalid tree index: ",tree.index);
@@ -4306,13 +4339,13 @@ namespace mcu {
             bool loadForestUnified() {
                 char unifiedfile_path[CHAR_BUFFER];
                 base_ptr->get_forest_path(unifiedfile_path);
-                if(unifiedfile_path[0] == '\0' || !SPIFFS.exists(unifiedfile_path)) {
+                if(unifiedfile_path[0] == '\0' || !LittleFS.exists(unifiedfile_path)) {
                     RF_DEBUG(0, "❌ Unified forest file not found: ", unifiedfile_path);
                     return false;
                 }
                 
                 // Load from unified file (optimized format)
-                File file = SPIFFS.open(unifiedfile_path, FILE_READ);
+                File file = LittleFS.open(unifiedfile_path, FILE_READ);
                 if (!file) {
                     RF_DEBUG(0, "❌ Failed to open unified forest file: ", unifiedfile_path);
                     return false;
@@ -4436,7 +4469,9 @@ namespace mcu {
                 for (auto& tree : trees) {
                     if (!tree.isLoaded) {
                         try {
-                            tree.loadTree();
+                            // Construct tree file path
+                            base_ptr->build_tree_file_path(tree_path_buffer, tree.index);
+                            tree.loadTree(tree_path_buffer);
                             if(tree.isLoaded) successfullyLoaded++;
                         } catch (...) {
                             RF_DEBUG(1, "❌ Exception loading tree: ", tree.index);
@@ -4474,14 +4509,14 @@ namespace mcu {
                     return false;
                 }
                 
-                // Check available SPIFFS space before writing
-                size_t totalFS = SPIFFS.totalBytes();
-                size_t usedFS = SPIFFS.usedBytes();
+                // Check available LittleFS space before writing
+                size_t totalFS = LittleFS.totalBytes();
+                size_t usedFS = LittleFS.usedBytes();
                 size_t freeFS = totalFS - usedFS;
                 size_t estimatedSize = totalNodes * sizeof(uint32_t) + 100; // nodes + headers
                 
                 if(freeFS < estimatedSize) {
-                    RF_DEBUG_2(1, "❌ Insufficient SPIFFS space to release forest (need ~", 
+                    RF_DEBUG_2(1, "❌ Insufficient LittleFS space to release forest (need ~", 
                                 estimatedSize, "bytes, have", freeFS);
                     return false;
                 }
@@ -4495,7 +4530,7 @@ namespace mcu {
                 }
                 
                 unsigned long fileStart = GET_CURRENT_TIME_IN_MILLISECONDS;
-                File file = SPIFFS.open(unifiedfile_path, FILE_WRITE);
+                File file = LittleFS.open(unifiedfile_path, FILE_WRITE);
                 if (!file) {
                     RF_DEBUG(0, "❌ Failed to create unified forest file: ", unifiedfile_path);
                     return false;
@@ -4506,14 +4541,14 @@ namespace mcu {
                 if(file.write((uint8_t*)&magic, sizeof(magic)) != sizeof(magic)) {
                     RF_DEBUG(0, "❌ Failed to write magic number to: ", unifiedfile_path);
                     file.close();
-                    SPIFFS.remove(unifiedfile_path);
+                    LittleFS.remove(unifiedfile_path);
                     return false;
                 }
                 
                 if(file.write((uint8_t*)&loadedCount, sizeof(loadedCount)) != sizeof(loadedCount)) {
                     RF_DEBUG(0, "❌ Failed to write tree count to: ", unifiedfile_path);
                     file.close();
-                    SPIFFS.remove(unifiedfile_path);
+                    LittleFS.remove(unifiedfile_path);
                     return false;
                 }
                 
@@ -4567,7 +4602,7 @@ namespace mcu {
                 // Verify file was written correctly
                 if(savedCount != loadedCount) {
                     RF_DEBUG_2(1, "❌ Save incomplete: ", savedCount, "/", loadedCount);
-                    SPIFFS.remove(unifiedfile_path);
+                    LittleFS.remove(unifiedfile_path);
                     return false;
                 }
                 
@@ -4801,12 +4836,12 @@ namespace mcu {
                 RF_DEBUG(1, "❌ Cannot write to inference log: no base reference for file management");
                 return false;
             }
-            bool file_exists = SPIFFS.exists(infer_log_path);
+            bool file_exists = LittleFS.exists(infer_log_path);
             uint32_t current_prediction_count = 0;
             
             // If file exists, read current prediction count from header
             if(file_exists) {
-                File read_file = SPIFFS.open(infer_log_path, FILE_READ);
+                File read_file = LittleFS.open(infer_log_path, FILE_READ);
                 if(read_file && read_file.size() >= 8) {
                     uint8_t magic_bytes[4];
                     read_file.read(magic_bytes, 4);
@@ -4819,7 +4854,7 @@ namespace mcu {
                 read_file.close();
             }
             
-            File file = SPIFFS.open(infer_log_path, file_exists ? FILE_APPEND : FILE_WRITE);
+            File file = LittleFS.open(infer_log_path, file_exists ? FILE_APPEND : FILE_WRITE);
             if(!file) {
                 RF_DEBUG(1, "❌ Failed to open inference log file: ", infer_log_path);
                 return false;
@@ -4872,7 +4907,7 @@ namespace mcu {
                 file.close();
                 
                 // Update prediction count in header - read entire file and rewrite
-                File read_file = SPIFFS.open(infer_log_path, FILE_READ);
+                File read_file = LittleFS.open(infer_log_path, FILE_READ);
                 if(read_file) {
                     size_t file_size = read_file.size();
                     b_vector<uint8_t> file_data(file_size);
@@ -4884,7 +4919,7 @@ namespace mcu {
                     memcpy(&file_data[4], &updated_count, 4);
                     
                     // Write back the entire file
-                    File write_file = SPIFFS.open(infer_log_path, FILE_WRITE);
+                    File write_file = LittleFS.open(infer_log_path, FILE_WRITE);
                     if(write_file) {
                         write_file.write(file_data.data(), file_data.size());
                         write_file.flush();
@@ -4915,9 +4950,9 @@ namespace mcu {
     private:
         // trim log file if it exceeds max size (MAX_INFER_LOGFILE_SIZE)
         bool trim_log_file(const char* infer_log_path) {
-            if(!SPIFFS.exists(infer_log_path)) return false;
+            if(!LittleFS.exists(infer_log_path)) return false;
             
-            File file = SPIFFS.open(infer_log_path, FILE_READ);
+            File file = LittleFS.open(infer_log_path, FILE_READ);
             if(!file) return false;
             
             size_t file_size = file.size();
@@ -4926,7 +4961,7 @@ namespace mcu {
             if(file_size <= MAX_INFER_LOGFILE_SIZE) return true; // No trimming needed;
             
             // File is too large, trim from the beginning (keep most recent data)
-            file = SPIFFS.open(infer_log_path, FILE_READ);
+            file = LittleFS.open(infer_log_path, FILE_READ);
             if(!file) return false;
             
             // Read and verify header
@@ -4980,7 +5015,7 @@ namespace mcu {
             }
             
             // Rewrite file with header and trimmed data
-            file = SPIFFS.open(infer_log_path, FILE_WRITE);
+            file = LittleFS.open(infer_log_path, FILE_WRITE);
             if(!file) {
                 RF_DEBUG(1, "❌ Failed to reopen log file for writing: ", infer_log_path);
                 return false;
@@ -5052,11 +5087,11 @@ namespace mcu {
             }
 
             if(!keep_old_file){
-                if(SPIFFS.exists(time_log_path)){
-                    SPIFFS.remove(time_log_path); 
+                if(LittleFS.exists(time_log_path)){
+                    LittleFS.remove(time_log_path); 
                 }
                 // write header to time log file
-                File logFile = SPIFFS.open(time_log_path, FILE_WRITE);
+                File logFile = LittleFS.open(time_log_path, FILE_WRITE);
                 if (logFile) {
                     logFile.println("Event,\t\tTime(ms),duration,Unit");
                     logFile.close();
@@ -5065,12 +5100,12 @@ namespace mcu {
             t_log("init tracker"); // Initial log without printing
 
             if(!keep_old_file){                
-                // clear SPIFFS log file if it exists
-                if(SPIFFS.exists(memory_log_path)){
-                    SPIFFS.remove(memory_log_path); 
+                // clear LittleFS log file if it exists
+                if(LittleFS.exists(memory_log_path)){
+                    LittleFS.remove(memory_log_path); 
                 }
                 // write header to log file
-                File logFile = SPIFFS.open(memory_log_path, FILE_WRITE);
+                File logFile = LittleFS.open(memory_log_path, FILE_WRITE);
                 if (logFile) {
                     logFile.println("Time(s),FreeHeap,Largest_Block,FreeDisk");
                     logFile.close();
@@ -5081,7 +5116,7 @@ namespace mcu {
 
         void m_log(const char* msg, bool print = true, bool log = true){
             freeHeap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-            freeDisk = SPIFFS.totalBytes() - SPIFFS.usedBytes();
+            freeDisk = LittleFS.totalBytes() - LittleFS.usedBytes();
 
             if(freeHeap < lowest_ram) lowest_ram = freeHeap;
             if(freeDisk < lowest_rom) lowest_rom = freeDisk;
@@ -5096,7 +5131,7 @@ namespace mcu {
             // Log to file with timestamp
             if(log) {        
                 log_time = (GET_CURRENT_TIME_IN_MILLISECONDS - starting_time)/1000.0f; 
-                File logFile = SPIFFS.open(memory_log_path, FILE_APPEND);
+                File logFile = LittleFS.open(memory_log_path, FILE_APPEND);
                 if (logFile) {
                     logFile.printf("%.2f,\t%u,\t%u,\t%u",
                                     log_time, freeHeap, largestBlock, freeDisk);
@@ -5160,7 +5195,7 @@ namespace mcu {
                 }
             }
             // Log to file with timestamp      ; 
-            File logFile = SPIFFS.open(time_log_path, FILE_APPEND);
+            File logFile = LittleFS.open(time_log_path, FILE_APPEND);
             if (logFile) {
                 if(msg && strlen(msg) > 0){
                     logFile.printf("%s,\t%.1f,\t%.2f,\t%s\n", msg, begin_time/1000.0f, elapsed, unit);     // time always in s
@@ -5216,7 +5251,7 @@ namespace mcu {
                 }
             }
             // Log to file with timestamp
-            File logFile = SPIFFS.open(time_log_path, FILE_APPEND);
+            File logFile = LittleFS.open(time_log_path, FILE_APPEND);
             if (logFile) {
                 if(msg && strlen(msg) > 0){
                     logFile.printf("%s,\t%.1f,\t_,\tms\n", msg, current_time/1000.0f); // time always in s

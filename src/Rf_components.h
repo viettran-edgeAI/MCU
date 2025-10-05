@@ -181,7 +181,7 @@ namespace mcu {
             // read header to get size_ and bitsPerSample
             File file = SPIFFS.open(file_path, FILE_READ);
             if (!file) {
-                RF_DEBUG(0, "❌ Failed to open dataset file", file_path);
+                RF_DEBUG(0, "❌ Failed to open dataset file: ", file_path);
                 if(SPIFFS.exists(file_path)) {
                     SPIFFS.remove(file_path);
                 }
@@ -197,7 +197,7 @@ namespace mcu {
             
             if(file.read((uint8_t*)&numSamples, sizeof(numSamples)) != sizeof(numSamples) ||
             file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
-                RF_DEBUG(0, "❌ Failed to read dataset header", file_path);
+                RF_DEBUG(0, "❌ Failed to read dataset header: ", file_path);
                 file.close();
                 return false;
             }
@@ -272,7 +272,8 @@ namespace mcu {
 
         // Validate that the Rf_data has been properly initialized
         bool isProperlyInitialized() const {
-            return bitsPerSample > 0 && samplesEachChunk > 0 && file_path[0] != '\0';
+            // return bitsPerSample > 0 && samplesEachChunk > 0 && file_path[0] != '\0';
+            return bitsPerSample > 0 && samplesEachChunk > 0;
         }
     private:
         // Calculate maximum samples per chunk based on bitsPerSample
@@ -385,7 +386,7 @@ namespace mcu {
             
             File file = SPIFFS.open(csvfile_path, FILE_READ);
             if (!file) {
-                RF_DEBUG(0, "❌ Failed to open CSV file for reading", csvfile_path);
+                RF_DEBUG(0, "❌ Failed to open CSV file for reading: ", csvfile_path);
                 return false;
             }
 
@@ -394,7 +395,7 @@ namespace mcu {
                 String line = file.readStringUntil('\n');
                 line.trim();
                 if (line.length() == 0) {
-                    RF_DEBUG(0, "❌ CSV file is empty or missing header", csvfile_path);
+                    RF_DEBUG(0, "❌ CSV file is empty or missing header: ", csvfile_path);
                     file.close();
                     return false;
                 }
@@ -501,7 +502,7 @@ namespace mcu {
             file.close();
             isLoaded = true;
             SPIFFS.remove(csvfile_path);
-            RF_DEBUG(1, "✅ CSV data loaded and file removed", csvfile_path);
+            RF_DEBUG(1, "✅ CSV data loaded and file removed: ", csvfile_path);
             return true;
         }
 
@@ -562,10 +563,10 @@ namespace mcu {
         }
 
         bool convertCSVtoBinary(const char* csvfile_path, uint8_t numFeatures = 0) {
-            RF_DEBUG(1, "🔄 Converting CSV to binary format from", csvfile_path);
+            RF_DEBUG(1, "🔄 Converting CSV to binary format from: ", csvfile_path);
             if(!loadCSVData(csvfile_path, numFeatures)) return false;
             if(!releaseData(false)) return false; 
-            RF_DEBUG(1, "✅ CSV converted to binary and saved", file_path);
+            RF_DEBUG(1, "✅ CSV converted to binary and saved: ", file_path);
             return true;
         }
 
@@ -585,7 +586,7 @@ namespace mcu {
                 }
                 File file = SPIFFS.open(file_path, FILE_WRITE);
                 if (!file) {
-                    RF_DEBUG(0, "❌ Failed to open binary file for writing", file_path);
+                    RF_DEBUG(0, "❌ Failed to open binary file for writing: ", file_path);
                     return false;
                 }
                 RF_DEBUG(2, "📂 Saving data to: ", file_path);
@@ -641,11 +642,11 @@ namespace mcu {
         // Load data using sequential indices 
         bool loadData(bool re_use = true) {
             if(isLoaded || !isProperlyInitialized()) return false;
-            RF_DEBUG(1, "📂 Loading data from", file_path);
+            RF_DEBUG(1, "📂 Loading data from: ", file_path);
             
             File file = SPIFFS.open(file_path, FILE_READ);
             if (!file) {
-                RF_DEBUG(0, "❌ Failed to open data file", file_path);
+                RF_DEBUG(0, "❌ Failed to open data file: ", file_path);
                 if(SPIFFS.exists(file_path)) {
                     SPIFFS.remove(file_path);
                 }
@@ -658,13 +659,13 @@ namespace mcu {
             
             if(file.read((uint8_t*)&numSamples, sizeof(numSamples)) != sizeof(numSamples) ||
             file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
-                RF_DEBUG(0, "❌ Failed to read data header", file_path);
+                RF_DEBUG(0, "❌ Failed to read data header: ", file_path);
                 file.close();
                 return false;
             }
 
             if(numFeatures * 2 != bitsPerSample) {
-                RF_DEBUG_2(0, "❌ Feature count mismatch: expected ", bitsPerSample / 2, ", found ", numFeatures);
+                RF_DEBUG_2(0, "❌ Feature count mismatch: expected ", bitsPerSample / 2, ",found ", numFeatures);
                 file.close();
                 return false;
             }
@@ -686,7 +687,7 @@ namespace mcu {
                 size_t chunkSamples = remaining > samplesEachChunk ? samplesEachChunk : remaining;
                 size_t reqElems = chunkSamples * elementsPerSample;
                 sampleChunks[ci].resize(reqElems, 0);  // Explicitly pass 0 as value
-                RF_DEBUG_2(2, "📦 Chunk ", ci, " resized to ", reqElems);
+                RF_DEBUG_2(2, "📦 Chunk ", ci, "resized to ", reqElems);
                 remaining -= chunkSamples;
                 if (remaining == 0) break;
             }
@@ -714,7 +715,7 @@ namespace mcu {
                     while (bytesRead < bytesToRead) {
                         int r = file.read(ioBuf + bytesRead, bytesToRead - bytesRead);
                         if (r <= 0) {
-                            RF_DEBUG(0, "❌ Read batch failed : ", file_path);
+                            RF_DEBUG(0, "❌ Read batch failed: ", file_path);
                             if (ioBuf) free(ioBuf);
                             file.close();
                             return false;
@@ -797,7 +798,7 @@ namespace mcu {
             isLoaded = true;
             file.close();
             if(!re_use) {
-                RF_DEBUG(1, "♻️ Single-load mode: removing SPIFFS file after loading", file_path);
+                RF_DEBUG(1, "♻️ Single-load mode: removing file after loading: ", file_path);
                 SPIFFS.remove(file_path); // Remove file after loading in single mode
             }
             RF_DEBUG_2(1, "✅ Data loaded(", sampleChunks.size(), "chunks): ", file_path);
@@ -812,14 +813,15 @@ namespace mcu {
          * @note: The state of the source data will be automatically restored, no need to reload.
          */
         bool loadData(Rf_data& source, const sampleID_set& sample_IDs, bool save_ram = true) {
-            if (file_path[0] == '\0' || !SPIFFS.exists(source.file_path)) {
-                RF_DEBUG(0, "❌ Source file does not exist", source.file_path);
+            // Only the source must exist on SPIFFS; destination can be an in-memory buffer
+            if (!SPIFFS.exists(source.file_path)) {
+                RF_DEBUG(0, "❌ Source file does not exist: ", source.file_path);
                 return false;
             }
 
             File file = SPIFFS.open(source.file_path, FILE_READ);
             if (!file) {
-                RF_DEBUG(0, "❌ Failed to open source file", source.file_path);
+                RF_DEBUG(0, "❌ Failed to open source file: ", source.file_path);
                 return false;
             }
             bool pre_loaded = source.isLoaded;
@@ -833,7 +835,7 @@ namespace mcu {
             
             if(file.read((uint8_t*)&numSamples, sizeof(numSamples)) != sizeof(numSamples) ||
             file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
-                RF_DEBUG(0, "❌ Failed to read source header", source.file_path);
+                RF_DEBUG(0, "❌ Failed to read source header: ", source.file_path);
                 file.close();
                 return false;
             }
@@ -852,13 +854,13 @@ namespace mcu {
             size_t numRequestedSamples = sample_IDs.size();
             allLabels.reserve(numRequestedSamples);
             
-            RF_DEBUG_2(2, "📦 Loading ", numRequestedSamples, " samples from source: ", source.file_path);
+            RF_DEBUG_2(2, "📦 Loading ", numRequestedSamples, "samples from source: ", source.file_path);
             
             size_t addedSamples = 0;
             // Since sample_IDs are sorted in ascending order, we can read efficiently
             for(uint16_t sampleIdx : sample_IDs) {
                 if(sampleIdx >= numSamples) {
-                    RF_DEBUG_2(2, "⚠️ Sample ID ", sampleIdx, " exceeds source sample count ", numSamples);
+                    RF_DEBUG_2(2, "⚠️ Sample ID ", sampleIdx, "exceeds source sample count ", numSamples);
                     continue;
                 }
                 
@@ -868,7 +870,7 @@ namespace mcu {
                 
                 // Seek to the sample position
                 if (!file.seek(sampleFilePos)) {
-                    RF_DEBUG_2(2, "⚠️ Failed to seek to sample ", sampleIdx, " position ", sampleFilePos);
+                    RF_DEBUG_2(2, "⚠️ Failed to seek to sample ", sampleIdx, "position ", sampleFilePos);
                     continue;
                 }
                 
@@ -915,7 +917,7 @@ namespace mcu {
             if(pre_loaded && save_ram) {
                 source.loadData();
             }
-            RF_DEBUG_2(1, "✅ Loaded ", addedSamples, " samples from source: ", source.file_path);
+            RF_DEBUG_2(1, "✅ Loaded ", addedSamples, "samples from source: ", source.file_path);
             return true;
         }
         
@@ -927,9 +929,9 @@ namespace mcu {
          * @note: this function will call loadData(source, chunkIDs) internally.
          */
         bool loadChunk(Rf_data& source, size_t chunkIndex, bool save_ram = true) {
-            RF_DEBUG_2(2, "📂 Loading chunk ", chunkIndex, " from source: ", source.file_path);
+            RF_DEBUG_2(2, "📂 Loading chunk ", chunkIndex, "from source: ", source.file_path);
             if(chunkIndex >= source.total_chunks()) {
-                RF_DEBUG_2(2, "❌ Chunk index ", chunkIndex, " out of bounds : total chunks=", source.total_chunks());
+                RF_DEBUG_2(2, "❌ Chunk index ", chunkIndex, "out of bounds : total chunks=", source.total_chunks());
                 return false; 
             }
             bool pre_loaded = source.isLoaded;
@@ -968,16 +970,16 @@ namespace mcu {
                         
                         if (headerValid) {
                             if (!cloneFile(other.file_path, file_path)) {
-                                RF_DEBUG(0, "❌ Failed to clone source file", other.file_path);
+                                RF_DEBUG(0, "❌ Failed to clone source file: ", other.file_path);
                             }
                         } else {
-                            RF_DEBUG(0, "❌ Source file has invalid header", other.file_path);
+                            RF_DEBUG(0, "❌ Source file has invalid header: ", other.file_path);
                         }
                     } else {
-                        RF_DEBUG(0, "❌ Cannot open source file", other.file_path);
+                        RF_DEBUG(0, "❌ Cannot open source file: ", other.file_path);
                     }
                 } else {
-                    RF_DEBUG(0, "❌ Source file does not exist", other.file_path);
+                    RF_DEBUG(0, "❌ Source file does not exist: ", other.file_path);
                 }
                 bitsPerSample = other.bitsPerSample;
                 samplesEachChunk = other.samplesEachChunk;
@@ -1004,7 +1006,7 @@ namespace mcu {
             // Then remove the SPIFFS file if one was specified
             if (SPIFFS.exists(file_path)) {
                 SPIFFS.remove(file_path);
-                RF_DEBUG(1, "🗑️ Deleted file", file_path);
+                RF_DEBUG(1, "🗑️ Deleted file: ", file_path);
             }
         }
 
@@ -1024,7 +1026,7 @@ namespace mcu {
                 return deletedLabels;
             }
             if (!SPIFFS.exists(file_path)) {
-                RF_DEBUG(0, "⚠️ File does not exist for adding new data", file_path);
+                RF_DEBUG(0, "⚠️ File does not exist for adding new data: ", file_path);
                 return deletedLabels;
             }
             if (samples.size() == 0) {
@@ -1035,7 +1037,7 @@ namespace mcu {
             // Read current file header to get existing info
             File file = SPIFFS.open(file_path, FILE_READ);
             if (!file) {
-                RF_DEBUG(0, "❌ Failed to open file for adding new data", file_path);
+                RF_DEBUG(0, "❌ Failed to open file for adding new data: ", file_path);
                 return deletedLabels;
             }
 
@@ -1044,7 +1046,7 @@ namespace mcu {
             
             if (file.read((uint8_t*)&currentNumSamples, sizeof(currentNumSamples)) != sizeof(currentNumSamples) ||
                 file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
-                RF_DEBUG(0, "❌ Failed to read file header", file_path);
+                RF_DEBUG(0, "❌ Failed to read file header: ", file_path);
                 file.close();
                 return deletedLabels;
             }
@@ -1094,23 +1096,23 @@ namespace mcu {
                 (newNumSamples - currentNumSamples) : 
                 min((uint32_t)samples.size(), newNumSamples);
 
-            RF_DEBUG_2(1, "📝 Adding ", samplesToWrite, " samples to ", file_path);
+            RF_DEBUG_2(1, "📝 Adding ", samplesToWrite, "samples to ", file_path);
             RF_DEBUG_2(2, "📊 Dataset info: current=", currentNumSamples, ", new_total=", newNumSamples);
 
             // Open file for writing (r+ mode to update existing file)
             file = SPIFFS.open(file_path, "r+");
             if (!file) {
-                RF_DEBUG(0, "❌ Failed to open file for writing", file_path);
+                RF_DEBUG(0, "❌ Failed to open file for writing: ", file_path);
                 return deletedLabels;
             }
 
             // In overwrite mode, read the labels that will be overwritten
             if (!extend && samplesToWrite > 0) {
-                RF_DEBUG(2, "📋 Reading labels that will be overwritten...", samplesToWrite);
+                RF_DEBUG(2, "📋 Reading labels that will be overwritten: ", samplesToWrite);
                 
                 // Seek to the start of data section to read existing labels
                 if (!file.seek(headerSize)) {
-                    RF_DEBUG(0, "Seek to data section for reading labels", file_path);
+                    RF_DEBUG(0, "Seek to data section for reading labels: ", file_path);
                     file.close();
                     return deletedLabels;
                 }
@@ -1197,9 +1199,9 @@ namespace mcu {
                 RF_DEBUG(1, "ℹ️ Data is loaded in memory. Consider reloading for consistency.");
             }
 
-            RF_DEBUG_2(1, "✅ Successfully wrote ", written, " samples to ", file_path);
+            RF_DEBUG_2(1, "✅ Successfully wrote ", written, "samples to: ", file_path);
             if (!extend && deletedLabels.size() > 0) {
-                RF_DEBUG_2(1, "📊 Overwrote ", deletedLabels.size(), " samples with labels: ","");
+                RF_DEBUG_2(1, "📊 Overwrote ", deletedLabels.size(), "samples with labels: ","");
             }
             
             return deletedLabels;
@@ -1379,7 +1381,7 @@ namespace mcu {
                 // Skip exists/remove check - just overwrite directly for performance
                 File file = SPIFFS.open(path, FILE_WRITE);
                 if (!file) {
-                    RF_DEBUG(0, "❌ Failed to open tree file for writing", path);
+                    RF_DEBUG(0, "❌ Failed to open tree file for writing: ", path);
                     return false;
                 }
                 
@@ -1442,14 +1444,14 @@ namespace mcu {
             
             File file = SPIFFS.open(path, FILE_READ);
             if (!file) {
-                RF_DEBUG(2, "❌ Failed to open tree file", path);
+                RF_DEBUG(2, "❌ Failed to open tree file: ", path);
                 return false;
             }
             
             // Read and verify magic number
             uint32_t magic;
             if (file.read((uint8_t*)&magic, sizeof(magic)) != sizeof(magic) || magic != 0x54524545) {
-                RF_DEBUG(0, "❌ Invalid tree file format", path);
+                RF_DEBUG(0, "❌ Invalid tree file format: ", path);
                 file.close();
                 return false;
             }
@@ -1457,7 +1459,7 @@ namespace mcu {
             // Read number of nodes
             uint32_t nodeCount;
             if (file.read((uint8_t*)&nodeCount, sizeof(nodeCount)) != sizeof(nodeCount)) {
-                RF_DEBUG(0, "❌ Failed to read node count", path);
+                RF_DEBUG(0, "❌ Failed to read node count: ", path);
                 file.close();
                 return false;
             }
@@ -1491,7 +1493,7 @@ namespace mcu {
             RF_DEBUG_2(2, "✅ Tree loaded (", nodeCount, "nodes): ", path);
 
             if (!re_use) { 
-                RF_DEBUG(2, "♻️ Single-load mode: removing SPIFFS file after loading", path); 
+                RF_DEBUG(2, "♻️ Single-load mode: removing tree file after loading; ", path); 
                 SPIFFS.remove(path); // Remove file after loading in single mode
             }
             return true;
@@ -1615,7 +1617,7 @@ namespace mcu {
                     RF_DEBUG(1, "🔄 Found csv dataset, need to be converted to binary format before use.");
                     flags |= static_cast<Rf_base_flags>(BASE_DATA_IS_CSV);
                 }else{
-                    RF_DEBUG(0, "❌ No base data file found", filepath);
+                    RF_DEBUG(0, "❌ No base data file found: ", filepath);
                     this->model_name[0] = '\0';
                     return;
                 }
@@ -1630,7 +1632,7 @@ namespace mcu {
                 RF_DEBUG(1, "✅ Found categorizer file: ", filepath);
                 flags |= static_cast<Rf_base_flags>(CTG_FILE_EXIST);
             } else {
-                RF_DEBUG(0, "❌ No categorizer file found", filepath);
+                RF_DEBUG(0, "❌ No categorizer file found: ", filepath);
                 this->model_name[0] = '\0';
                 return;
             }
@@ -1641,7 +1643,7 @@ namespace mcu {
                 RF_DEBUG(1, "✅ Found data_params file: ", filepath);
                 flags |= static_cast<Rf_base_flags>(DP_FILE_EXIST);
             } else {
-                RF_DEBUG(1, "⚠️ No data_params file found", filepath);
+                RF_DEBUG(1, "⚠️ No data_params file found: ", filepath);
                 RF_DEBUG(1, "🔂 Dataset will be scanned, which may take time...🕒");
             }
 
@@ -1651,7 +1653,7 @@ namespace mcu {
                 RF_DEBUG(1, "✅ Found config file: ", filepath);
                 flags |= static_cast<Rf_base_flags>(CONFIG_FILE_EXIST);
             } else {
-                RF_DEBUG(1, "⚠️ No config file found", filepath);
+                RF_DEBUG(1, "⚠️ No config file found: ", filepath);
                 RF_DEBUG(1, "🔂 Switching to manual configuration");
             }
             
@@ -1670,7 +1672,7 @@ namespace mcu {
                 RF_DEBUG(1, "✅ Found node predictor file: ", filepath);
                 flags |= static_cast<Rf_base_flags>(NODE_PRED_FILE_EXIST);
             } else {
-                RF_DEBUG(2, "⚠️ No node predictor file found", filepath);
+                RF_DEBUG(2, "⚠️ No node predictor file found: ", filepath);
                 RF_DEBUG(2, "🔂 Switching to use default node_predictor");
             }
 
@@ -1877,10 +1879,10 @@ namespace mcu {
     */
 
     typedef enum Rf_metric_scores : uint8_t{
-        ACCURACY    = 0x00,          // calculate accuracy of the model
-        PRECISION   = 0x01,          // calculate precision of the model
-        RECALL      = 0x02,            // calculate recall of the model
-        F1_SCORE    = 0x04          // calculate F1 score of the model
+        ACCURACY    = 0x01,          // calculate accuracy of the model
+        PRECISION   = 0x02,          // calculate precision of the model
+        RECALL      = 0x04,          // calculate recall of the model
+        F1_SCORE    = 0x08           // calculate F1 score of the model
     }Rf_metric_scores;
 
 
@@ -1895,6 +1897,7 @@ namespace mcu {
     class Rf_config {
         Rf_base* base_ptr = nullptr;
         bool isLoaded = false; 
+
         bool has_base() const {
             return base_ptr != nullptr && base_ptr->ready_to_use();
         }
@@ -1944,20 +1947,20 @@ namespace mcu {
             boostrap_ratio      = 0.632f; 
             use_gini            = true;
             k_fold              = 4;
-            unity_threshold     = 0.125;
-            impurity_threshold  = 0.1;
+            unity_threshold     = 0.0f;
+            impurity_threshold  = 0.0f;
             train_ratio         = 0.7;
             test_ratio          = 0.15;
             valid_ratio         = 0.15;
             training_score      = OOB_SCORE;
-            metric_score        = 0x00;         // ACCURACY
+            metric_score        = Rf_metric_scores::ACCURACY;
             result_score        = 0.0;
             estimatedRAM        = 0;
             
             // Set defaults for new properties (not in initial config file)
             extend_base_data    = true;
             enable_retrain      = true;
-            enable_auto_config  = true;
+            enable_auto_config  = false;
         }
         
         Rf_config() {
@@ -1981,7 +1984,7 @@ namespace mcu {
 
             File file = SPIFFS.open(base_file_path, FILE_READ);
             if (!file) {
-                RF_DEBUG(0, "❌ Failed to open base data file for scanning", base_file_path);
+                RF_DEBUG(0, "❌ Failed to open base data file for scanning: ", base_file_path);
                 return false;
             }
 
@@ -2064,6 +2067,37 @@ namespace mcu {
             return true;
         }
         
+        // generate optimal ranges for min_split and max_depth based on dataset parameters
+        void generate_ranges(){
+            // Calculate optimal min_split, max_depth and ranges
+            int baseline_minsplit_ratio = 100 * (num_samples / 500 + 1); 
+            if (baseline_minsplit_ratio > 500) baseline_minsplit_ratio = 500; 
+            uint8_t min_minSplit = max(2, (int)(num_samples / baseline_minsplit_ratio) - 2);
+            int dynamic_max_split = min(min_minSplit + 6, (int)(log2(num_samples) / 4 + num_features / 25.0f));
+            uint8_t max_minSplit = min(24, dynamic_max_split) - 2; // Cap at 24 to prevent overly simple trees.
+            if (max_minSplit <= min_minSplit) max_minSplit = min_minSplit + 4; // Ensure a valid range.
+
+
+            int base_maxDepth = max((int)log2(num_samples * 2.0f), (int)(log2(num_features) * 2.5f));
+            uint8_t max_maxDepth = max(6, base_maxDepth);
+            int dynamic_min_depth = max(4, (int)(log2(num_features) + 2));
+            uint8_t min_maxDepth = min((int)max_maxDepth - 2, dynamic_min_depth); // Ensure a valid range.
+            if (min_maxDepth >= max_maxDepth) min_maxDepth = max_maxDepth - 2;
+            if (min_maxDepth < 4) min_maxDepth = 4;
+
+            if(min_split == 0 || max_depth == 0) {
+                min_split = (min_minSplit + max_minSplit) / 2;
+                max_depth = (min_maxDepth + max_maxDepth) / 2;
+                RF_DEBUG_2(1, "Setting minSplit to ", min_split, "and maxDepth to ", max_depth);
+            }
+
+            RF_DEBUG_2(1, "⚙️ Setting minSplit range: ", min_minSplit, "to ", max_minSplit);
+            RF_DEBUG_2(1, "⚙️ Setting maxDepth range: ", min_maxDepth, "to ", max_maxDepth);
+
+            min_split_range = make_pair(min_minSplit, max_minSplit);
+            max_depth_range = make_pair(min_maxDepth, max_maxDepth);
+        }
+
         // setup config manually (when no config file)
         void auto_config(){
             // set metric_score based on dataset balance
@@ -2110,59 +2144,8 @@ namespace mcu {
             }else{
                 training_score = VALID_SCORE;
             }
-
-            // set train/test/valid ratio
-            if (avg_samples_per_label < 150){
-                train_ratio = 0.6f;
-                test_ratio = 0.2f;
-                valid_ratio = 0.2f;
-            }else{
-                train_ratio = 0.7f;
-                test_ratio = 0.15f;
-                valid_ratio = 0.15f;
-            }
-            if (training_score != VALID_SCORE){
-                train_ratio += valid_ratio;
-                valid_ratio = 0.0f;
-            }
-            if (!ENABLE_TEST_DATA){
-                train_ratio += test_ratio;
-                test_ratio = 0.0f;
-            }
-            // ensure ratios sum to 1.0
-            float total_ratio = train_ratio + test_ratio + valid_ratio;
-            if (total_ratio > 1.0f) {
-                train_ratio /= total_ratio;
-                test_ratio /= total_ratio;
-                valid_ratio /= total_ratio;
-            }
-            // Calculate optimal min_split, max_depth and ranges
-            int baseline_minsplit_ratio = 100 * (num_samples / 500 + 1); 
-            if (baseline_minsplit_ratio > 500) baseline_minsplit_ratio = 500; 
-            uint8_t min_minSplit = max(2, (int)(num_samples / baseline_minsplit_ratio) - 2);
-            int dynamic_max_split = min(min_minSplit + 6, (int)(log2(num_samples) / 4 + num_features / 25.0f));
-            uint8_t max_minSplit = min(24, dynamic_max_split) - 2; // Cap at 24 to prevent overly simple trees.
-            if (max_minSplit <= min_minSplit) max_minSplit = min_minSplit + 4; // Ensure a valid range.
-
-
-            int base_maxDepth = max((int)log2(num_samples * 2.0f), (int)(log2(num_features) * 2.5f));
-            uint8_t max_maxDepth = max(6, base_maxDepth);
-            int dynamic_min_depth = max(4, (int)(log2(num_features) + 2));
-            uint8_t min_maxDepth = min((int)max_maxDepth - 2, dynamic_min_depth); // Ensure a valid range.
-            if (min_maxDepth >= max_maxDepth) min_maxDepth = max_maxDepth - 2;
-            if (min_maxDepth < 4) min_maxDepth = 4;
-
-            if(min_split == 0 || max_depth == 0) {
-                min_split = (min_minSplit + max_minSplit) / 2;
-                max_depth = (min_maxDepth + max_maxDepth) / 2;
-                RF_DEBUG_2(1, "Setting minSplit to ", min_split, " and maxDepth to ", max_depth);
-            }
-
-            RF_DEBUG_2(1, "⚙️ Setting minSplit range: ", min_minSplit, " to ", max_minSplit);
-            RF_DEBUG_2(1, "⚙️ Setting maxDepth range: ", min_maxDepth, " to ", max_maxDepth);
-
-            min_split_range = make_pair(min_minSplit, max_minSplit);
-            max_depth_range = make_pair(min_maxDepth, max_maxDepth);
+            validate_ratios();
+            generate_ranges();
         }
         
         // read dataset parameters from /dataset_dp.csv and write to config
@@ -2358,6 +2341,8 @@ namespace mcu {
                 RF_DEBUG(1, "✅ Auto-configuration applied: ");
             } else if(config_ok){
                 parseJSONConfig(jsonString);
+                generate_ranges();
+                validate_ratios();
                 RF_DEBUG(1, "✅ Configuration loaded from file: ");;
             } else {
                 // No config file and auto_config disabled - use defaults but warn user
@@ -2365,7 +2350,7 @@ namespace mcu {
                 RF_DEBUG(1, "⚠️ Using default configuration - this may not be optimal!");
                 return false;
             }
-            print_config();
+            if constexpr (RF_DEBUG_LEVEL >1) print_config();
             isLoaded = true;
             return true;
         }
@@ -2373,7 +2358,7 @@ namespace mcu {
         // Save configuration to JSON file in SPIFFS  
         bool releaseConfig() {
             if (!isLoaded || !has_base()){
-                RF_DEBUG(0, "❌ Config not loaded or base not ready", "save config");
+                RF_DEBUG(0, "❌ Save config failed: Config not loaded or base not ready");
                 return false;
             }
             char file_path[CHAR_BUFFER];
@@ -2409,7 +2394,7 @@ namespace mcu {
             file.printf("  \"maxDepth\": %d,\n", max_depth);
             file.printf("  \"useBootstrap\": %s,\n", use_boostrap ? "true" : "false");
             file.printf("  \"boostrapRatio\": %.3f,\n", boostrap_ratio);
-            file.printf("  \"useGini\": %s,\n", use_gini ? "true" : "false");
+            file.printf("  \"criterion\": \"%s\",\n", use_gini ? "gini" : "entropy");
             file.printf("  \"trainingScore\": \"%s\",\n", getTrainingScoreString(training_score).c_str());
             file.printf("  \"k_fold\": %d,\n", k_fold);
             file.printf("  \"unityThreshold\": %.3f,\n", unity_threshold);
@@ -2456,7 +2441,10 @@ namespace mcu {
             max_depth = extractIntValue(jsonStr, "maxDepth");            
             use_boostrap = extractBoolValue(jsonStr, "useBootstrap");     
             boostrap_ratio = extractFloatValue(jsonStr, "boostrapRatio"); 
-            use_gini = extractBoolValue(jsonStr, "useGini");    
+            
+            String criterion = extractStringValue(jsonStr, "criterion");
+            use_gini = (criterion == "gini");  // true for "gini", false for "entropy"
+            
             k_fold = extractIntValue(jsonStr, "k_fold");                  
             unity_threshold = extractFloatValue(jsonStr, "unityThreshold");
             impurity_threshold = extractFloatValue(jsonStr, "impurityThreshold");
@@ -2465,7 +2453,7 @@ namespace mcu {
             valid_ratio = extractFloatValue(jsonStr, "valid_ratio");     
             training_score = parseTrainingScore(extractStringValue(jsonStr, "trainingScore")); 
             metric_score = parseFlagValue(extractStringValue(jsonStr, "metric_score"));
-            extend_base_data = extractBoolValue(jsonStr, "enableRetrain");
+            extend_base_data = extractBoolValue(jsonStr, "extendBaseData");
             enable_retrain = extractBoolValue(jsonStr, "enableRetrain");
             enable_auto_config = extractBoolValue(jsonStr, "enableAutoConfig");
             result_score = extractFloatValue(jsonStr, "resultScore");      
@@ -2570,21 +2558,16 @@ namespace mcu {
             
             return json.substring(firstQuoteIndex + 1, secondQuoteIndex);
         }
+        
         String getMetricScoreString() const {
             return getFlagString(metric_score);
         }
+        
         public:
         bool use_validation() const {
             return valid_ratio > 0.0f;
         }
 
-        size_t memory_usage() const {
-            size_t total = sizeof(Rf_config);
-            total += 4;   
-            total += samples_per_label.size() * sizeof(uint16_t); 
-            return total;
-        }
-        
         // Method to validate that samples_per_label data is consistent
         bool validateSamplesPerLabel() const {
             if (samples_per_label.size() != num_labels) {
@@ -2596,7 +2579,39 @@ namespace mcu {
             }
             return totalSamples == num_samples;
         }
-
+        
+        // make sure train, test and valid ratios valid and optimal 
+        void validate_ratios(){
+            uint16_t avg_samples_per_label = num_samples / max(1, static_cast<int>(num_labels));
+            // set train/test/valid ratio
+            if(enable_auto_config){
+                if (avg_samples_per_label < 150){
+                    train_ratio = 0.6f;
+                    test_ratio = 0.2f;
+                    valid_ratio = 0.2f;
+                }else{
+                    train_ratio = 0.7f;
+                    test_ratio = 0.15f;
+                    valid_ratio = 0.15f;
+                }
+            }
+            if (training_score != VALID_SCORE){
+                train_ratio += valid_ratio;
+                valid_ratio = 0.0f;
+            }
+            if (!ENABLE_TEST_DATA){
+                train_ratio += test_ratio;
+                test_ratio = 0.0f;
+            }
+            // ensure ratios sum to 1.0
+            float total_ratio = train_ratio + test_ratio + valid_ratio;
+            if (total_ratio > 1.0f) {
+                train_ratio /= total_ratio;
+                test_ratio /= total_ratio;
+                valid_ratio /= total_ratio;
+            }
+        }
+            
         void print_config() const {
             RF_DEBUG(1, "🛠️ Model configuration: ");
             RF_DEBUG(1, "   - Trees: ", num_trees);
@@ -2605,6 +2620,12 @@ namespace mcu {
             RF_DEBUG(1, "   - train_ratio: ", train_ratio);
             RF_DEBUG(1, "   - test_ratio: ", test_ratio);
             RF_DEBUG(1, "   - valid_ratio: ", valid_ratio);
+            RF_DEBUG(1, "   - use_bootstrap: ", use_boostrap ? "true" : "false");
+            RF_DEBUG(1, "   - bootstrap_ratio: ", boostrap_ratio);
+            RF_DEBUG(1, "   - criterion: ", use_gini ? "gini" : "entropy");
+            RF_DEBUG(1, "   - k_fold: ", k_fold);
+            RF_DEBUG(1, "   - unity_threshold: ", unity_threshold);
+            RF_DEBUG(1, "   - impurity_threshold: ", impurity_threshold);
             RF_DEBUG(1, "   - training_score: ", getTrainingScoreString(training_score).c_str());
             RF_DEBUG(1, "   - metric_score: ", getFlagString(metric_score).c_str());
             RF_DEBUG(1, "   - extend_base_data: ", extend_base_data ? "true" : "false");
@@ -2616,12 +2637,21 @@ namespace mcu {
             RF_DEBUG(1, "   - Features: ", num_features);
             RF_DEBUG(1, "   - Labels: ", num_labels);
             RF_DEBUG(1, "   - Samples per label: ");
+
             for (size_t i = 0; i < samples_per_label.size(); i++) {
                 if(samples_per_label[i] > 0) {
                     RF_DEBUG_2(1, "   🏷️ Label ", i, ": ", samples_per_label[i]);
                 }
             }
         }
+        
+        size_t memory_usage() const {
+            size_t total = sizeof(Rf_config);
+            total += 4;   
+            total += samples_per_label.size() * sizeof(uint16_t); 
+            return total;
+        }
+        
     };
     
     /*
@@ -2786,7 +2816,7 @@ namespace mcu {
         bool loadCategorizer() {
             if (isLoaded) return true;
             if (!has_base()) {
-                RF_DEBUG(0, "❌ Base pointer is null or base not ready", "load categorizer");
+                RF_DEBUG(0, "❌ Load Categorizer failed: data pointer not ready");
                 return false;
             }
             char file_path[CHAR_BUFFER];
@@ -2804,7 +2834,7 @@ namespace mcu {
             try {
                 // Read header: Categorizer,numFeatures,groupsPerFeature,numLabels,numSharedPatterns,scaleFactor
                 if (!file.available()) {
-                    RF_DEBUG(0, "❌ Empty Categorizer file", file_path);
+                    RF_DEBUG(0, "❌ Empty Categorizer file: ", file_path);
                     file.close();
                     return false;
                 }
@@ -2814,7 +2844,7 @@ namespace mcu {
                 auto headerParts = split(headerLine, ',');
                 
                 if (headerParts.size() != 6 || headerParts[0] != "CTG2") {
-                    RF_DEBUG(0, "❌ Invalid Categorizer header format", file_path);
+                    RF_DEBUG(0, "❌ Invalid Categorizer header format; ", file_path);
                     file.close();
                     return false;
                 }
@@ -3200,7 +3230,7 @@ namespace mcu {
         // Load trained model from SPIFFS (updated format without version)
         bool loadPredictor() {
             if (!has_base()){
-                RF_DEBUG(0, "❌ Base pointer is null, cannot load predictor.", "load node_predictor");
+                RF_DEBUG(0, "❌ Load Predictor failed: base pointer not ready");
                 return false;
             }
             char file_path[CHAR_BUFFER];
@@ -3221,7 +3251,7 @@ namespace mcu {
             // Read and verify magic number
             uint32_t magic;
             if (file.read((uint8_t*)&magic, sizeof(magic)) != sizeof(magic) || magic != 0x4E4F4445) {
-                RF_DEBUG(0, "❌ Invalid predictor file format", file_path);
+                RF_DEBUG(0, "❌ Invalid predictor file format: ", file_path);
                 file.close();
                 return false;
             }
@@ -3287,7 +3317,7 @@ namespace mcu {
         // Save trained predictor to SPIFFS
         bool releasePredictor() {
             if (!has_base()){
-                RF_DEBUG(0, "❌ Base pointer is null, cannot save predictor.", "save node_predictor");
+                RF_DEBUG(0, "❌ Release Predictor failed: base pointer not ready");
                 return false;
             }
             if (!is_trained) {
@@ -3323,7 +3353,7 @@ namespace mcu {
             file.write((uint8_t*)coefficients, sizeof(float) * 3);
             
             file.close();
-            RF_DEBUG(1, "✅ Node predictor saved : ", file_path);
+            RF_DEBUG(1, "✅ Node predictor saved: ", file_path);
             return true;
         }
         
@@ -3561,8 +3591,32 @@ namespace mcu {
             return estimate < MAX_NODES ? estimate : 512;       // 2kB RAM
         }
 
+        uint16_t estimate_nodes(Rf_config& config) {
+            uint8_t min_split = config.min_split;
+            uint16_t max_depth = config.max_depth;
+            float raw_est = raw_estimate(min_split, max_depth);
+            if(accuracy == 0) accuracy = 0.85f;
+            uint16_t estimate = static_cast<uint16_t>(raw_est * 100 / accuracy);
+            if(config.training_score == K_FOLD_SCORE){
+                estimate = estimate * config.k_fold / (config.k_fold + 1);
+            }
+            return estimate < MAX_NODES ? estimate : 512;       // 2kB RAM
+        }
+
         uint16_t queue_peak_size(uint8_t min_split, uint16_t max_depth) {
             return min(120, estimate_nodes(min_split, max_depth) * peak_percent / 100);
+        }
+
+        uint16_t queue_peak_size(Rf_config& config) {
+            uint16_t est_nodes = estimate_nodes(config);
+            if(config.training_score == K_FOLD_SCORE){
+                est_nodes = est_nodes * config.k_fold / (config.k_fold + 1);
+            }
+            est_nodes = static_cast<uint16_t>(est_nodes * peak_percent / 100);
+            uint16_t max_peak_theory = static_cast<uint16_t>(MAX_NODES * 0.3f);
+            uint16_t min_peak_theory = 30;
+            if (est_nodes > max_peak_theory) return max_peak_theory;
+            if (est_nodes < min_peak_theory) return min_peak_theory;
         }
 
         void add_buffer(b_vector<node_data,5>& new_samples) {
@@ -4076,7 +4130,7 @@ namespace mcu {
                 base_ptr->get_forest_path(oldForestFile);
                 if(SPIFFS.exists(oldForestFile)) {
                     SPIFFS.remove(oldForestFile);
-                    RF_DEBUG(2, "🗑️ Removed old forest file", oldForestFile);
+                    RF_DEBUG(2, "🗑️ Removed old forest file: ", oldForestFile);
                 }
                 is_unified = false; // Now in individual form
                 total_depths = 0;
@@ -4093,13 +4147,13 @@ namespace mcu {
                     }
                     // Check if slot is already occupied
                     if(trees[tree.index].isLoaded || trees[tree.index].index != 255) {
-                        RF_DEBUG(2, "⚠️ Warning: Overwriting tree at index", tree.index);
+                        RF_DEBUG(2, "⚠️ Warning: Overwriting tree index: ", tree.index);
                         trees[tree.index].purgeTree();
                     }
                     uint16_t d = tree.getTreeDepth();
                     uint16_t n = tree.countNodes();
                     uint16_t l = tree.countLeafNodes();
-                    RF_DEBUG_2(1, "🌲 Added tree index: ", tree.index, "nodes: ", n);
+                    RF_DEBUG_2(1, "🌲 Added tree index: ", tree.index, "- nodes: ", n);
                     total_depths += d;
                     total_nodes  += n;
                     total_leaves += l;
@@ -4117,7 +4171,7 @@ namespace mcu {
             void finalizeContainer() {
                 if(config_ptr && trees.size() != config_ptr->num_trees) {
                     trees.resize(config_ptr->num_trees);
-                    RF_DEBUG(2, "🔧 Finalized container size to", config_ptr->num_trees);
+                    RF_DEBUG(2, "🔧 Finalized container size to ", config_ptr->num_trees);
                 }
             }
 
@@ -4244,8 +4298,7 @@ namespace mcu {
                 }
                 
                 is_loaded = true;
-                RF_DEBUG_2(1, "✅ Forest loaded: ", loadedTrees, "/", trees.size());
-                RF_DEBUG(1, "  => Total Nodes: ", total_nodes);
+                RF_DEBUG_2(1, "✅ Forest loaded(", loadedTrees, "trees). Total nodes:", total_nodes);
                 return true;
             }
 
@@ -4254,34 +4307,34 @@ namespace mcu {
                 char unifiedfile_path[CHAR_BUFFER];
                 base_ptr->get_forest_path(unifiedfile_path);
                 if(unifiedfile_path[0] == '\0' || !SPIFFS.exists(unifiedfile_path)) {
-                    RF_DEBUG(0, "❌ Unified forest file not found", unifiedfile_path);
+                    RF_DEBUG(0, "❌ Unified forest file not found: ", unifiedfile_path);
                     return false;
                 }
                 
                 // Load from unified file (optimized format)
                 File file = SPIFFS.open(unifiedfile_path, FILE_READ);
                 if (!file) {
-                    RF_DEBUG(0, "❌ Failed to open unified forest file", unifiedfile_path);
+                    RF_DEBUG(0, "❌ Failed to open unified forest file: ", unifiedfile_path);
                     return false;
                 }
                 
                 // Read forest header with error checking
                 uint32_t magic;
                 if(file.read((uint8_t*)&magic, sizeof(magic)) != sizeof(magic)) {
-                    RF_DEBUG(0, "❌ Failed to read magic number from", unifiedfile_path);
+                    RF_DEBUG(0, "❌ Failed to read magic number from: ", unifiedfile_path);
                     file.close();
                     return false;
                 }
                 
                 if(magic != 0x464F5253) { // "FORS" 
-                    RF_DEBUG(0, "❌ Invalid forest file format (bad magic)", unifiedfile_path);
+                    RF_DEBUG(0, "❌ Invalid forest file format (bad magic): ", unifiedfile_path);
                     file.close();
                     return false;
                 }
                 
                 uint8_t treeCount;
                 if(file.read((uint8_t*)&treeCount, sizeof(treeCount)) != sizeof(treeCount)) {
-                    RF_DEBUG(0, "❌ Failed to read tree count from", unifiedfile_path);
+                    RF_DEBUG(0, "❌ Failed to read tree count from: ", unifiedfile_path);
                     file.close();
                     return false;
                 }
@@ -4385,15 +4438,8 @@ namespace mcu {
                         try {
                             tree.loadTree();
                             if(tree.isLoaded) successfullyLoaded++;
-                            // remove old individual tree file: 
-                            // char path[14];
-                            // snprintf(path, sizeof(path), "/tree_%d.bin", index);
-                            // if (SPIFFS.exists(path)) {
-                            //     SPIFFS.remove(path);
-                            //     RF_DEBUG(2, "🗑️ Tree file removed: ", path);
-                            // } 
                         } catch (...) {
-                            RF_DEBUG(1, "❌ Exception loading tree", tree.index);
+                            RF_DEBUG(1, "❌ Exception loading tree: ", tree.index);
                             tree.isLoaded = false;
                         }
                     }
@@ -4451,21 +4497,21 @@ namespace mcu {
                 unsigned long fileStart = GET_CURRENT_TIME_IN_MILLISECONDS;
                 File file = SPIFFS.open(unifiedfile_path, FILE_WRITE);
                 if (!file) {
-                    RF_DEBUG(0, "❌ Failed to create unified forest file", unifiedfile_path);
+                    RF_DEBUG(0, "❌ Failed to create unified forest file: ", unifiedfile_path);
                     return false;
                 }
                 
                 // Write forest header
                 uint32_t magic = 0x464F5253; // "FORS" in hex (forest)
                 if(file.write((uint8_t*)&magic, sizeof(magic)) != sizeof(magic)) {
-                    RF_DEBUG(0, "❌ Failed to write magic number to", unifiedfile_path);
+                    RF_DEBUG(0, "❌ Failed to write magic number to: ", unifiedfile_path);
                     file.close();
                     SPIFFS.remove(unifiedfile_path);
                     return false;
                 }
                 
                 if(file.write((uint8_t*)&loadedCount, sizeof(loadedCount)) != sizeof(loadedCount)) {
-                    RF_DEBUG(0, "❌ Failed to write tree count to", unifiedfile_path);
+                    RF_DEBUG(0, "❌ Failed to write tree count to: ", unifiedfile_path);
                     file.close();
                     SPIFFS.remove(unifiedfile_path);
                     return false;
@@ -4479,13 +4525,13 @@ namespace mcu {
                     if (tree.isLoaded && tree.index != 255 && !tree.nodes.empty()) {
                         // Write tree header
                         if(file.write((uint8_t*)&tree.index, sizeof(tree.index)) != sizeof(tree.index)) {
-                            RF_DEBUG(1, "❌ Failed to write tree index", tree.index);
+                            RF_DEBUG(1, "❌ Failed to write tree index: ", tree.index);
                             break;
                         }
                         
                         uint32_t nodeCount = tree.nodes.size();
                         if(file.write((uint8_t*)&nodeCount, sizeof(nodeCount)) != sizeof(nodeCount)) {
-                            RF_DEBUG(1, "❌ Failed to write node count for tree", tree.index);
+                            RF_DEBUG(1, "❌ Failed to write node count for tree ", tree.index);
                             break;
                         }
                         
@@ -4494,7 +4540,7 @@ namespace mcu {
                         for (uint32_t i = 0; i < tree.nodes.size(); i++) {
                             const auto& node = tree.nodes[i];
                             if(file.write((uint8_t*)&node.packed_data, sizeof(node.packed_data)) != sizeof(node.packed_data)) {
-                                RF_DEBUG_2(1, "❌ Failed to write node", i, "for tree", tree.index);
+                                RF_DEBUG_2(1, "❌ Failed to write node ", i, "for tree ", tree.index);
                                 writeSuccess = false;
                                 break;
                             }
@@ -4509,7 +4555,7 @@ namespace mcu {
                         }
                         
                         if(!writeSuccess) {
-                            RF_DEBUG(0, "❌ Failed to save tree", tree.index);
+                            RF_DEBUG(0, "❌ Failed to save tree ", tree.index);
                             break;
                         }
                         
@@ -4539,7 +4585,7 @@ namespace mcu {
                 is_loaded = false;
                 is_unified = true; // forest always in unified form after first time release
                 
-                RF_DEBUG_2(1, "✅ Released", clearedCount, "trees to unified format", unifiedfile_path);
+                RF_DEBUG_2(1, "✅ Released ", clearedCount, "trees to unified format: ", unifiedfile_path);
                 return true;
             }
 
@@ -4775,7 +4821,7 @@ namespace mcu {
             
             File file = SPIFFS.open(infer_log_path, file_exists ? FILE_APPEND : FILE_WRITE);
             if(!file) {
-                RF_DEBUG(1, "❌ Failed to open inference log file", infer_log_path);
+                RF_DEBUG(1, "❌ Failed to open inference log file: ", infer_log_path);
                 return false;
             }
             
@@ -5060,7 +5106,7 @@ namespace mcu {
                         logFile.println();
                     }
                     logFile.close();
-                } else RF_DEBUG(1, "❌ Failed to open memory log file for appending", memory_log_path);
+                } else RF_DEBUG(1, "❌ Failed to open memory log file for appending: ", memory_log_path);
             }
         }
 

@@ -2462,20 +2462,20 @@ namespace mcu {
 
         // Convert flag string to uint8_t
         uint8_t parseFlagValue(const String& flagStr) {
-            if (flagStr == "ACCURACY") return 0x00;
-            if (flagStr == "PRECISION") return 0x01;
-            if (flagStr == "RECALL") return 0x02;
-            if (flagStr == "F1_SCORE") return 0x04;
-            return 0x00; // Default to ACCURACY
+            if (flagStr == "ACCURACY") return 0x01;
+            if (flagStr == "PRECISION") return 0x02;
+            if (flagStr == "RECALL") return 0x04;
+            if (flagStr == "F1_SCORE") return 0x08;
+            return 0x01; // Default to ACCURACY
         }
 
         // Convert uint8_t flag to string
         String getFlagString(uint8_t flag) const {
             switch(flag) {
-                case 0x00: return "ACCURACY";
-                case 0x01: return "PRECISION";
-                case 0x02: return "RECALL";
-                case 0x04: return "F1_SCORE";
+                case 0x01: return "ACCURACY";
+                case 0x02: return "PRECISION";
+                case 0x04: return "RECALL";
+                case 0x08: return "F1_SCORE";
                 default: return "ACCURACY";
             }
         }

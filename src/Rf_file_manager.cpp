@@ -1,5 +1,34 @@
 #include "Rf_file_manager.h"
 
+// Helper function to normalize file paths
+// Ensures path starts with '/' and is properly formatted
+String normalizePath(const String& input, const String& currentDir) {
+    String path = input;
+    path.trim();
+    
+    // If empty, return as-is (for auto-generation cases)
+    if (path.length() == 0) {
+        return path;
+    }
+    
+    // If already starts with '/', it's an absolute path
+    if (path.startsWith("/")) {
+        return path;
+    }
+    
+    // Relative path - prepend current directory
+    if (currentDir == "/") {
+        return "/" + path;
+    } else {
+        // Ensure currentDir ends with '/'
+        if (currentDir.endsWith("/")) {
+            return currentDir + path;
+        } else {
+            return currentDir + "/" + path;
+        }
+    }
+}
+
 bool cloneFile(const String& src, const String& dest) {
     if(LittleFS.exists(src) == false) {
         Serial.print("❌ Source file does not exist: ");
@@ -210,14 +239,24 @@ void manage_files() {
         while (entry && (fileCount + folderCount) < 50) {
             String name = String(entry.name());
             
-            // Ensure path starts with /
+            // Construct full path
+            String fullPath;
+            
+            // If entry.name() doesn't start with /, it's relative to currentDir
             if (!name.startsWith("/")) {
-                name = "/" + name;
+                if (currentDir == "/") {
+                    fullPath = "/" + name;
+                } else {
+                    fullPath = currentDir + name;
+                }
+            } else {
+                // Already absolute path
+                fullPath = name;
             }
             
-            // Get just the name (last component of path)
-            int lastSlash = name.lastIndexOf('/');
-            String displayName = (lastSlash >= 0) ? name.substring(lastSlash + 1) : name;
+            // Get just the name (last component of path) for display
+            int lastSlash = fullPath.lastIndexOf('/');
+            String displayName = (lastSlash >= 0) ? fullPath.substring(lastSlash + 1) : fullPath;
             
             // Skip empty names
             if (displayName.length() == 0) {
@@ -227,11 +266,11 @@ void manage_files() {
             }
             
             if (entry.isDirectory()) {
-                folderList[folderCount] = name;
+                folderList[folderCount] = fullPath;
                 Serial.printf("📁 %2d: %s/\n", folderCount + 1, displayName.c_str());
                 folderCount++;
             } else {
-                fileList[fileCount] = name;
+                fileList[fileCount] = fullPath;
                 size_t fileSize = entry.size();
                 Serial.printf("📄 %2d: %-30s (%d bytes)\n", fileCount + 1, displayName.c_str(), fileSize);
                 fileCount++;
@@ -385,16 +424,19 @@ void manage_files() {
                 
                 int index = input.toInt();
                 if (index >= 1 && index <= fileCount) {
-                    Serial.println("Enter destination path (or press Enter for auto-name):");
+                    Serial.println("Enter destination filename or path (or press Enter for auto-name):");
                     String dest = "";
-                    unsigned long timeout = millis() + 10000; // 10 second timeout
-                    while (millis() < timeout) {
+                    while (dest.length() == 0) {
                         if (Serial.available()) {
                             dest = Serial.readStringUntil('\n');
                             dest.trim();
                             break;
                         }
                         delay(10);
+                    }
+                    // Normalize the destination path
+                    if (dest.length() > 0) {
+                        dest = normalizePath(dest, currentDir);
                     }
                     cloneFile(fileList[index - 1], dest);
                     delay(100); // Short delay to avoid flooding the output
@@ -429,7 +471,7 @@ void manage_files() {
                 
                 int index = input.toInt();
                 if (index >= 1 && index <= fileCount) {
-                    Serial.println("Enter new file path:");
+                    Serial.println("Enter new filename or path:");
                     String newPath = "";
                     while (newPath.length() == 0) {
                         if (Serial.available()) {
@@ -439,9 +481,8 @@ void manage_files() {
                         delay(10);
                     }
                     if (newPath.length() > 0) {
-                        if (!newPath.startsWith("/")) {
-                            newPath = "/" + newPath;
-                        }
+                        // Normalize the path
+                        newPath = normalizePath(newPath, currentDir);
                         if (renameFile(fileList[index - 1], newPath)) {
                             Serial.println("✅ File renamed successfully! You can rename more files or type 'end' to exit.");
                             // Update the specific file in the list for immediate reflection
@@ -473,13 +514,23 @@ void manage_files() {
                 while (refreshEntry && (refreshFileCount + refreshFolderCount) < 50) {
                     String name = String(refreshEntry.name());
                     
-                    // Ensure path starts with /
+                    // Construct full path
+                    String fullPath;
+                    
+                    // If entry.name() doesn't start with /, it's relative to currentDir
                     if (!name.startsWith("/")) {
-                        name = "/" + name;
+                        if (currentDir == "/") {
+                            fullPath = "/" + name;
+                        } else {
+                            fullPath = currentDir + name;
+                        }
+                    } else {
+                        // Already absolute path
+                        fullPath = name;
                     }
                     
-                    int lastSlash = name.lastIndexOf('/');
-                    String displayName = (lastSlash >= 0) ? name.substring(lastSlash + 1) : name;
+                    int lastSlash = fullPath.lastIndexOf('/');
+                    String displayName = (lastSlash >= 0) ? fullPath.substring(lastSlash + 1) : fullPath;
                     
                     if (displayName.length() == 0) {
                         refreshEntry.close();
@@ -488,10 +539,10 @@ void manage_files() {
                     }
                     
                     if (refreshEntry.isDirectory()) {
-                        refreshFolderList[refreshFolderCount] = name;
+                        refreshFolderList[refreshFolderCount] = fullPath;
                         refreshFolderCount++;
                     } else {
-                        refreshFileList[refreshFileCount] = name;
+                        refreshFileList[refreshFileCount] = fullPath;
                         refreshFileCount++;
                     }
                     
@@ -527,9 +578,10 @@ void manage_files() {
                     break;
                 }
                 
-                Serial.println("\nEnter item to delete:");
-                Serial.println("  - File number (e.g., '3')");
-                Serial.println("  - Folder number with 'F' prefix (e.g., 'F1')");
+                Serial.println("\nEnter item(s) to delete:");
+                Serial.println("  - Single file: '3'");
+                Serial.println("  - Single folder: 'F1'");
+                Serial.println("  - Multiple items: '1 3 5 F2' or '1,3,5,F2'");
                 Serial.println("  - 'all' to delete everything");
                 Serial.println("  - 'end' to return:");
                 
@@ -588,78 +640,181 @@ void manage_files() {
                     continue;
                 }
                 
-                // Check if it's a folder (starts with 'F' or 'f')
-                bool isFolder = false;
-                int itemIndex = 0;
+                // Parse multiple items (space or comma separated)
+                // Replace commas with spaces for uniform parsing
+                input.replace(",", " ");
                 
-                if (input.length() > 0 && (input.charAt(0) == 'F' || input.charAt(0) == 'f')) {
-                    isFolder = true;
-                    itemIndex = input.substring(1).toInt();
-                } else {
-                    itemIndex = input.toInt();
+                // Process items one token at a time to minimize memory usage
+                int startPos = 0;
+                int itemCount = 0;
+                
+                // First pass: count and validate items
+                String tempInput = input; // Make a copy for first pass
+                int tempStart = 0;
+                while (tempStart < tempInput.length()) {
+                    // Skip whitespace
+                    while (tempStart < tempInput.length() && tempInput.charAt(tempStart) == ' ') {
+                        tempStart++;
+                    }
+                    if (tempStart >= tempInput.length()) break;
+                    
+                    // Find end of token
+                    int tempEnd = tempStart;
+                    while (tempEnd < tempInput.length() && tempInput.charAt(tempEnd) != ' ') {
+                        tempEnd++;
+                    }
+                    
+                    String token = tempInput.substring(tempStart, tempEnd);
+                    token.trim();
+                    
+                    if (token.length() > 0) {
+                        // Validate token
+                        if (token.charAt(0) == 'F' || token.charAt(0) == 'f') {
+                            int folderIdx = token.substring(1).toInt();
+                            if (folderIdx >= 1 && folderIdx <= refreshFolderCount) {
+                                itemCount++;
+                            } else {
+                                Serial.printf("⚠️ Invalid folder number: %s\n", token.c_str());
+                            }
+                        } else {
+                            int fileIdx = token.toInt();
+                            if (fileIdx >= 1 && fileIdx <= refreshFileCount) {
+                                itemCount++;
+                            } else {
+                                Serial.printf("⚠️ Invalid file number: %s\n", token.c_str());
+                            }
+                        }
+                    }
+                    
+                    tempStart = tempEnd + 1;
                 }
                 
-                if (isFolder) {
-                    if (itemIndex >= 1 && itemIndex <= refreshFolderCount) {
-                        String folderPath = refreshFolderList[itemIndex - 1];
-                        Serial.printf("Delete folder '%s'? Type 'OK' to confirm: ", folderPath.c_str());
-                        
-                        String confirm = "";
-                        while (confirm.length() == 0) {
-                            if (Serial.available()) {
-                                confirm = Serial.readStringUntil('\n');
-                                confirm.trim();
-                            }
-                            delay(10);
-                        }
-                        
-                        if (confirm.equalsIgnoreCase("OK")) {
-                            if (LittleFS.rmdir(folderPath)) {
-                                Serial.printf("✅ Deleted folder: %s\n", folderPath.c_str());
-                            } else {
-                                Serial.printf("❌ Failed to delete folder (may not be empty): %s\n", folderPath.c_str());
-                                Serial.println("💡 Tip: Delete all files inside the folder first.");
+                if (itemCount == 0) {
+                    Serial.println("⚠️ No valid items to delete.");
+                    continue;
+                }
+                
+                // Second pass: show items and confirm
+                Serial.printf("\n📋 Items to delete (%d):\n", itemCount);
+                startPos = 0;
+                while (startPos < input.length()) {
+                    // Skip whitespace
+                    while (startPos < input.length() && input.charAt(startPos) == ' ') {
+                        startPos++;
+                    }
+                    if (startPos >= input.length()) break;
+                    
+                    // Find end of token
+                    int endPos = startPos;
+                    while (endPos < input.length() && input.charAt(endPos) != ' ') {
+                        endPos++;
+                    }
+                    
+                    String token = input.substring(startPos, endPos);
+                    token.trim();
+                    
+                    if (token.length() > 0) {
+                        // Check if it's a folder (starts with 'F' or 'f')
+                        if (token.charAt(0) == 'F' || token.charAt(0) == 'f') {
+                            int folderIdx = token.substring(1).toInt();
+                            if (folderIdx >= 1 && folderIdx <= refreshFolderCount) {
+                                int lastSlash = refreshFolderList[folderIdx - 1].lastIndexOf('/');
+                                String displayName = (lastSlash >= 0) ? refreshFolderList[folderIdx - 1].substring(lastSlash + 1) : refreshFolderList[folderIdx - 1];
+                                Serial.printf("  F%d: %s/\n", folderIdx, displayName.c_str());
                             }
                         } else {
-                            Serial.println("❎ Deletion canceled.");
+                            int fileIdx = token.toInt();
+                            if (fileIdx >= 1 && fileIdx <= refreshFileCount) {
+                                int lastSlash = refreshFileList[fileIdx - 1].lastIndexOf('/');
+                                String displayName = (lastSlash >= 0) ? refreshFileList[fileIdx - 1].substring(lastSlash + 1) : refreshFileList[fileIdx - 1];
+                                Serial.printf("  %d: %s\n", fileIdx, displayName.c_str());
+                            }
                         }
-                    } else {
-                        Serial.println("⚠️ Invalid folder number.");
+                    }
+                    
+                    startPos = endPos + 1;
+                }
+                
+                Serial.println("\nType 'OK' to confirm deletion:");
+                String confirm = "";
+                while (confirm.length() == 0) {
+                    if (Serial.available()) {
+                        confirm = Serial.readStringUntil('\n');
+                        confirm.trim();
+                    }
+                    delay(10);
+                }
+                
+                if (confirm.equalsIgnoreCase("OK")) {
+                    Serial.println("🗑️ Deleting items...");
+                    int successCount = 0;
+                    int failCount = 0;
+                    
+                    // Third pass: actually delete items
+                    startPos = 0;
+                    while (startPos < input.length()) {
+                        // Skip whitespace
+                        while (startPos < input.length() && input.charAt(startPos) == ' ') {
+                            startPos++;
+                        }
+                        if (startPos >= input.length()) break;
+                        
+                        // Find end of token
+                        int endPos = startPos;
+                        while (endPos < input.length() && input.charAt(endPos) != ' ') {
+                            endPos++;
+                        }
+                        
+                        String token = input.substring(startPos, endPos);
+                        token.trim();
+                        
+                        if (token.length() > 0) {
+                            // Check if it's a folder (starts with 'F' or 'f')
+                            if (token.charAt(0) == 'F' || token.charAt(0) == 'f') {
+                                int folderIdx = token.substring(1).toInt();
+                                if (folderIdx >= 1 && folderIdx <= refreshFolderCount) {
+                                    if (LittleFS.rmdir(refreshFolderList[folderIdx - 1])) {
+                                        Serial.printf("✅ Deleted folder: %s\n", refreshFolderList[folderIdx - 1].c_str());
+                                        successCount++;
+                                    } else {
+                                        Serial.printf("❌ Failed to delete folder (may not be empty): %s\n", refreshFolderList[folderIdx - 1].c_str());
+                                        failCount++;
+                                    }
+                                }
+                            } else {
+                                int fileIdx = token.toInt();
+                                if (fileIdx >= 1 && fileIdx <= refreshFileCount) {
+                                    if (LittleFS.remove(refreshFileList[fileIdx - 1])) {
+                                        Serial.printf("✅ Deleted file: %s\n", refreshFileList[fileIdx - 1].c_str());
+                                        successCount++;
+                                    } else {
+                                        Serial.printf("❌ Failed to delete file: %s\n", refreshFileList[fileIdx - 1].c_str());
+                                        failCount++;
+                                    }
+                                }
+                            }
+                            delay(50);
+                        }
+                        
+                        startPos = endPos + 1;
+                    }
+                    
+                    Serial.printf("📊 Summary: %d deleted, %d failed\n", successCount, failCount);
+                    if (failCount > 0) {
+                        Serial.println("💡 Tip: Folders must be empty before deletion.");
                     }
                 } else {
-                    if (itemIndex >= 1 && itemIndex <= refreshFileCount) {
-                        String filePath = refreshFileList[itemIndex - 1];
-                        Serial.printf("Delete file '%s'? Type 'OK' to confirm: ", filePath.c_str());
-                        
-                        String confirm = "";
-                        while (confirm.length() == 0) {
-                            if (Serial.available()) {
-                                confirm = Serial.readStringUntil('\n');
-                                confirm.trim();
-                            }
-                            delay(10);
-                        }
-                        
-                        if (confirm.equalsIgnoreCase("OK")) {
-                            if (LittleFS.remove(filePath)) {
-                                Serial.printf("✅ Deleted file: %s\n", filePath.c_str());
-                            } else {
-                                Serial.printf("❌ Failed to delete file: %s\n", filePath.c_str());
-                            }
-                        } else {
-                            Serial.println("❎ Deletion canceled.");
-                        }
-                    } else {
-                        Serial.println("⚠️ Invalid file number.");
-                    }
+                    Serial.println("❎ Deletion canceled.");
                 }
             }
         }
         else if (operation.equals("e")) {
             // Add new file operation - isolated space
             Serial.println("\n========== ➕ ADD NEW FILE MODE ==========");
-            Serial.println("You can create .csv, .txt, .log, .json. Provide full path (e.g., /digit_data.csv).");
-            String newFile = reception_data(0, true);
+            Serial.printf("📍 Current directory: %s\n", currentDir.c_str());
+            Serial.println("You can create .csv, .txt, .log, .json.");
+            Serial.println("Enter filename or full path:");
+            String newFile = reception_data(0, true, currentDir);
             if (newFile.length() > 0) {
                 Serial.printf("✅ File created: %s\n", newFile.c_str());
             }
@@ -702,7 +857,7 @@ void deleteAllLittleFSFiles() {
     Serial.printf("🧹 Cleanup complete. Deleted: %d, Failed: %d\n", deleted, failed);
 }
 
-String reception_data(int exact_columns, bool print_file) {
+String reception_data(int exact_columns, bool print_file, String currentDir) {
     // Clear any residual input
     while (Serial.available()) {
         Serial.read();
@@ -712,11 +867,9 @@ String reception_data(int exact_columns, bool print_file) {
         Serial.read();
     }
 
-    Serial.println("Enter full file path with extension (e.g., /digit_data.csv or digit_data.txt):");
-    Serial.flush();
     String fullPath = "";
 
-    // Read and normalize path
+    // Read filename/path from user
     while (fullPath.length() == 0) {
         if (Serial.available()) {
             fullPath = Serial.readStringUntil('\n');
@@ -725,11 +878,9 @@ String reception_data(int exact_columns, bool print_file) {
         delay(10);
     }
 
-    // Auto-prefix leading '/'
-    if (!fullPath.startsWith("/")) {
-        fullPath = "/" + fullPath;
-        Serial.printf("ℹ️  Auto-prefixed leading '/': %s\n", fullPath.c_str());
-    }
+    // Normalize the path using common function
+    fullPath = normalizePath(fullPath, currentDir);
+    Serial.printf("ℹ️  Resolved to: %s\n", fullPath.c_str());
 
     // Ensure an extension exists; if not, default to .csv for backward compatibility
     int lastDot = fullPath.lastIndexOf('.');

@@ -158,7 +158,15 @@ inline void deleteAllSPIFFSFiles() { deleteAllLittleFSFiles(); }
  * 
  * @note Type "END" on its own line to finish data entry.
  */
-String reception_data(int exact_columns = 0, bool print_file = true);
+/**
+ * @brief Interactive CSV data reception with row/column validation
+ * 
+ * @param exact_columns Expected column count (0 = no validation)
+ * @param print_file Whether to print the file after creation
+ * @param currentDir Current directory context (default="/")
+ * @return String path of the created file
+ */
+String reception_data(int exact_columns = 0, bool print_file = true, String currentDir = "/");
 
 /**
  * @brief Removes malformed rows from CSV files to ensure data consistency

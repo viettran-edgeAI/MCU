@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <vector>
 #include <cmath>
+#include <set>
 #include <sys/stat.h>
 #include <ctime>
 #include <chrono>
@@ -149,6 +150,47 @@ public:
     }
     
     private:
+        struct ConsensusResult {
+            uint16_t predicted_label = 255;
+            uint16_t votes = 0;
+            uint16_t total_votes = 0;
+            float consensus = 0.0f;
+        };
+
+        struct EvaluationSample {
+            uint16_t actual_label = 0;
+            uint16_t predicted_label = 255;
+            uint16_t votes = 0;
+            uint16_t total_votes = 0;
+            float consensus = 0.0f;
+        };
+
+        struct MetricsSummary {
+            float accuracy = 0.0f;
+            float precision = 0.0f;
+            float recall = 0.0f;
+            float f1 = 0.0f;
+            float f0_5 = 0.0f;
+            float f2 = 0.0f;
+            float coverage = 0.0f;
+            uint32_t total_samples = 0;
+            uint32_t predicted_samples = 0;
+        };
+
+        struct ThresholdSearchResult {
+            float threshold = 0.0f;
+            float score = -1.0f;
+            MetricsSummary metrics;
+        };
+
+        ConsensusResult computeConsensus(const Rf_sample& sample, const b_vector<uint16_t>* tree_indices = nullptr);
+        std::vector<EvaluationSample> collectOOBSamples(uint16_t min_votes_required, std::vector<uint16_t>* vote_histogram = nullptr);
+        std::vector<EvaluationSample> collectValidationSamples(const Rf_data& dataset);
+        std::vector<EvaluationSample> collectCrossValidationSamples(float& avg_nodes_out);
+        MetricsSummary computeMetricsForThreshold(const std::vector<EvaluationSample>& samples, float threshold);
+        float computeObjectiveScore(const MetricsSummary& metrics, Rf_metric_scores flags);
+        ThresholdSearchResult findBestThreshold(const std::vector<EvaluationSample>& samples, Rf_metric_scores flags);
+
     // Create a backup copy of the original CSV data to avoid damaging the original
     void createDataBackup(const std::string& source_path, const std::string& backup_filename) {
         std::ifstream source(source_path, std::ios::binary);
@@ -576,415 +618,13 @@ public:
 
 
     uint16_t predClassSample(const Rf_sample& s){
-        int16_t totalPredict = 0;
-        unordered_map<uint16_t, uint16_t> predictClass;
-        
-        // Use streaming prediction 
-        for(auto& tree : root){
-
-            uint16_t predict = tree.predictSample(s); // Uses streaming if not loaded
-            if(predict < config.num_labels){
-                predictClass[predict]++;
-                totalPredict++;
-            }
-        }
-        
-        if(predictClass.size() == 0 || totalPredict == 0) {
+        ConsensusResult consensus = computeConsensus(s);
+        if (consensus.total_votes == 0) {
             return 255;
         }
-        
-        // Find most predicted class
-        int16_t max = -1;
-        uint16_t mostPredict = 255;
-        
-        for(const auto& predict : predictClass){
-            if(predict.second > max){
-                max = predict.second;
-                mostPredict = predict.first;
-            }
-        }
-        // Check certainty threshold
-        float certainty = static_cast<float>(max) / totalPredict;
-        if(certainty < config.unity_threshold) {
-            return 255;
-        }
-        
-        return mostPredict;
-    } 
-
-    // Enhanced OOB evaluation with better statistics and reliability checks
-    pair<float,float> get_training_evaluation_index(Rf_data& validation_data){
-        // Initialize confusion matrices using stack arrays to avoid heap allocation
-        uint16_t oob_tp[config.num_labels] = {0};
-        uint16_t oob_fp[config.num_labels] = {0};
-        uint16_t oob_fn[config.num_labels] = {0};
-
-        uint16_t valid_tp[config.num_labels] = {0};
-        uint16_t valid_fp[config.num_labels] = {0};
-        uint16_t valid_fn[config.num_labels] = {0};
-
-        uint16_t oob_correct = 0, oob_total = 0, oob_skipped = 0;
-        uint16_t valid_correct = 0, valid_total = 0;
-        
-        // Track OOB coverage statistics
-        uint16_t oob_votes_histogram[21] = {0}; // 0-20+ votes
-        uint16_t min_votes_required = std::max(1, (int)(config.num_trees * 0.15f)); // At least 15% of trees
-
-        // OOB evaluation with enhanced reliability
-        uint16_t sampleId = 0;
-        for(const auto& sample : train_data.allSamples){                
-        
-            // Find all trees whose OOB set contains this sampleId
-            b_vector<uint16_t> activeTrees;
-            activeTrees.reserve(config.num_trees);
-            
-            for(uint16_t i = 0; i < config.num_trees; i++){
-                if(!dataList[i].contains(sampleId)){
-                    activeTrees.push_back(i);
-                }
-            }
-            sampleId++;
-            
-            // Enhanced reliability check: require minimum vote count
-            if(activeTrees.size() < min_votes_required){
-                oob_skipped++;
-                continue; // Skip samples with too few OOB trees
-            }
-            
-            // Track vote distribution for analysis
-            uint16_t vote_bucket = std::min(20, (int)activeTrees.size());
-            oob_votes_histogram[vote_bucket]++;
-            
-            // Predict using only the OOB trees for this sample
-            uint16_t actualLabel = sample.label;
-            unordered_map<uint16_t, uint16_t> oobPredictClass;
-            uint16_t oobTotalPredict = 0;
-            
-            for(const uint16_t& treeIdx : activeTrees){
-                uint16_t predict = root[treeIdx].predictSample(sample);
-                if(predict < config.num_labels){
-                    oobPredictClass[predict]++;
-                    oobTotalPredict++;
-                }
-            }
-            
-            if(oobTotalPredict == 0) continue;
-            
-            // Find the most predicted class from OOB trees
-            uint16_t oobPredictedLabel = 255;
-            uint16_t maxVotes = 0;
-            for(const auto& predict : oobPredictClass){
-                if(predict.second > maxVotes){
-                    maxVotes = predict.second;
-                    oobPredictedLabel = predict.first;
-                }
-            }
-            
-            // Adaptive certainty threshold based on available votes
-            float base_threshold = config.unity_threshold;
-            float adaptive_threshold = base_threshold * (1.0f - 0.3f * (float)activeTrees.size() / config.num_trees);
-            adaptive_threshold = std::max(0.3f, adaptive_threshold); // Minimum threshold
-            
-            float certainty = static_cast<float>(maxVotes) / oobTotalPredict;
-            if(certainty < adaptive_threshold) {
-                oob_skipped++;
-                continue; // Skip uncertain predictions
-            }
-            
-            // Update confusion matrix
-            oob_total++;
-            if(oobPredictedLabel == actualLabel){
-                oob_correct++;
-                oob_tp[actualLabel]++;
-            } else {
-                oob_fn[actualLabel]++;
-                if(oobPredictedLabel < config.num_labels){
-                    oob_fp[oobPredictedLabel]++;
-                }
-            }
-        }
-
-        // Validation evaluation (unchanged)
-        sampleId = 0;
-        if(this->config.training_score == "valid_score"){   
-            for(const auto& sample : validation_data.allSamples){
-                uint16_t actualLabel = sample.label;
-                sampleId++;
-
-                unordered_map<uint16_t, uint16_t> validPredictClass;
-                uint16_t validTotalPredict = 0;
-
-                for(uint16_t i = 0; i < config.num_trees; i++){
-                    uint16_t predict = root[i].predictSample(sample);
-                    if(predict < config.num_labels){
-                        validPredictClass[predict]++;
-                        validTotalPredict++;
-                    }
-                }
-
-                if(validTotalPredict == 0) continue;
-
-                uint16_t validPredictedLabel = 255;
-                uint16_t maxVotes = 0;
-                for(const auto& predict : validPredictClass){
-                    if(predict.second > maxVotes){
-                        maxVotes = predict.second;
-                        validPredictedLabel = predict.first;
-                    }
-                }
-
-                float certainty = static_cast<float>(maxVotes) / validTotalPredict;
-                if(certainty < config.unity_threshold) {
-                    continue;
-                }
-
-                valid_total++;
-                if(validPredictedLabel == actualLabel){
-                    valid_correct++;
-                    valid_tp[actualLabel]++;
-                } else {
-                    valid_fn[actualLabel]++;
-                    if(validPredictedLabel < config.num_labels){
-                        valid_fp[validPredictedLabel]++;
-                    }
-                }
-            }
-        }
-
-        // Calculate the requested metric with the same logic as before
-        float oob_result = 0.0f;
-        float valid_result = 0.0f;
-        float combined_oob_result = 0.0f;
-        float combined_valid_result = 0.0f;
-        uint16_t metric_score = static_cast<uint16_t>(config.metric_score);
-        uint16_t numFlags = 0;
-        
-        if(oob_total == 0){
-            return make_pair(0.0f, 0.0f);
-        }
-        
-        if(metric_score & ACCURACY){
-            oob_result = static_cast<float>(oob_correct) / oob_total;
-            valid_result = (valid_total > 0) ? static_cast<float>(valid_correct) / valid_total : 0.0f;
-            combined_oob_result += oob_result;
-            combined_valid_result += valid_result;
-            numFlags++;
-        }
-            
-        if(metric_score & PRECISION){
-            float oob_totalPrecision = 0.0f, valid_totalPrecision = 0.0f;
-            uint16_t oob_validLabels = 0, valid_validLabels = 0;
-            for(uint16_t label = 0; label < config.num_labels; label++){
-                uint16_t otp = oob_tp[label];
-                uint16_t ofp = oob_fp[label];
-                uint16_t vtp = valid_tp[label];
-                uint16_t vfp = valid_fp[label];
-                if(otp + ofp > 0){
-                    oob_totalPrecision += static_cast<float>(otp) / (otp + ofp);
-                    oob_validLabels++;
-                }
-                if(vtp + vfp > 0){
-                    valid_totalPrecision += static_cast<float>(vtp) / (vtp + vfp);
-                    valid_validLabels++;
-                }
-            }
-            oob_result = oob_validLabels > 0 ? oob_totalPrecision / oob_validLabels : 0.0f;
-            valid_result = valid_validLabels > 0 ? valid_totalPrecision / valid_validLabels : 0.0f;
-            combined_oob_result += oob_result;
-            combined_valid_result += valid_result;
-            numFlags++;
-        }
-            
-        if(metric_score & RECALL){
-            float oob_totalRecall = 0.0f, valid_totalRecall = 0.0f;
-            uint16_t oob_validLabels = 0, valid_validLabels = 0;
-            for(uint16_t label = 0; label < config.num_labels; label++){
-                uint16_t otp = oob_tp[label];
-                uint16_t ofn = oob_fn[label];
-                uint16_t vtp = valid_tp[label];
-                uint16_t vfn = valid_fn[label];
-                
-                if(otp + ofn > 0){
-                    oob_totalRecall += static_cast<float>(otp) / (otp + ofn);
-                    oob_validLabels++;
-                }
-                if(vtp + vfn > 0){
-                    valid_totalRecall += static_cast<float>(vtp) / (vtp + vfn);
-                    valid_validLabels++;
-                }
-            }
-            valid_result = valid_validLabels > 0 ? valid_totalRecall / valid_validLabels : 0.0f;
-            oob_result = oob_validLabels > 0 ? oob_totalRecall / oob_validLabels : 0.0f;
-            combined_oob_result += oob_result;
-            combined_valid_result += valid_result;
-            numFlags++;
-        }
-            
-        if(metric_score & F1_SCORE) {
-            float oob_totalF1 = 0.0f, valid_totalF1 = 0.0f;
-            uint16_t oob_validLabels = 0, valid_validLabels = 0;
-            for(uint16_t label = 0; label < config.num_labels; label++){
-                uint16_t otp = oob_tp[label];
-                uint16_t ofp = oob_fp[label];
-                uint16_t ofn = oob_fn[label];
-
-                uint16_t vtp = valid_tp[label];
-                uint16_t vfp = valid_fp[label];
-                uint16_t vfn = valid_fn[label];
-
-                if(otp + ofp > 0 && otp + ofn > 0){
-                    float precision = static_cast<float>(otp) / (otp + ofp);
-                    float recall = static_cast<float>(otp) / (otp + ofn);
-                    if(precision + recall > 0){
-                        float f1 = 2.0f * precision * recall / (precision + recall);
-                        oob_totalF1 += f1;
-                        oob_validLabels++;
-                    }
-                }
-                if(vtp + vfp > 0 && vtp + vfn > 0){
-                    float precision = static_cast<float>(vtp) / (vtp + vfp);
-                    float recall = static_cast<float>(vtp) / (vtp + vfn);
-                    if(precision + recall > 0){
-                        float f1 = 2.0f * precision * recall / (precision + recall);
-                        valid_totalF1 += f1;
-                        valid_validLabels++;
-                    }
-                }
-            }
-            oob_result = oob_validLabels > 0 ? oob_totalF1 / oob_validLabels : 0.0f;
-            valid_result = valid_validLabels > 0 ? valid_totalF1 / valid_validLabels : 0.0f;
-            combined_oob_result += oob_result;
-            combined_valid_result += valid_result;
-            numFlags++;
-        }
-
-        return make_pair(
-            (numFlags > 0) ? combined_oob_result / numFlags : 0.0f, 
-            (numFlags > 0) ? combined_valid_result / numFlags : 0.0f
-        );
+        return consensus.predicted_label;
     }
 
-    // K-fold cross validation evaluation
-    float get_cross_validation_score() {
-        uint16_t k_folds = config.k_folds;
-        if (k_folds < 2) k_folds = 4; // Default to 4-fold if not properly set
-        
-        // Create vector of all training sample indices for k-fold split
-        b_vector<uint16_t> allTrainIndices;
-        allTrainIndices.reserve(train_data.allSamples.size());
-        for (uint16_t i = 0; i < train_data.allSamples.size(); i++) {
-            allTrainIndices.push_back(i);
-        }
-        
-        // Shuffle the sample indices for random k-fold split using our custom RNG
-        for (uint16_t i = allTrainIndices.size() - 1; i > 0; i--) {
-            uint16_t j = static_cast<uint16_t>(rng.bounded(i + 1));
-            uint16_t temp = allTrainIndices[i];
-            allTrainIndices[i] = allTrainIndices[j];
-            allTrainIndices[j] = temp;
-        }
-        
-        uint16_t fold_size = allTrainIndices.size() / k_folds;
-        float total_cv_score = 0.0f;
-        uint16_t valid_folds = 0;
-        
-        // Store original dataList to restore after CV
-        auto original_dataList = dataList;
-        
-        // Perform k-fold cross validation
-        for (uint16_t fold = 0; fold < k_folds; fold++) {
-            // Create train and test index sets for this fold
-            b_vector<uint16_t> cv_train_indices, cv_test_indices;
-            
-            uint16_t test_start = fold * fold_size;
-            uint16_t test_end = (fold == k_folds - 1) ? allTrainIndices.size() : (fold + 1) * fold_size;
-            
-            // Split indices into train and test for this fold
-            for (uint16_t i = 0; i < allTrainIndices.size(); i++) {
-                uint16_t sampleIndex = allTrainIndices[i];
-                if (sampleIndex < train_data.allSamples.size()) {
-                    if (i >= test_start && i < test_end) {
-                        cv_test_indices.push_back(sampleIndex);
-                    } else {
-                        cv_train_indices.push_back(sampleIndex);
-                    }
-                }
-            }
-            
-            if (cv_train_indices.empty() || cv_test_indices.empty()) {
-                continue; // Skip this fold if empty
-            }
-            
-            // Rebuild dataList for this CV fold using cv_train_indices
-            dataList.clear();
-            dataList.reserve(config.num_trees);
-            
-            uint16_t cv_train_size = cv_train_indices.size();
-            uint16_t bootstrap_sample_size = config.use_bootstrap ? 
-                static_cast<uint16_t>(cv_train_size * config.boostrap_ratio) : cv_train_size;
-            
-            // Create bootstrap samples from cv_train_indices for each tree
-            for (uint16_t tree_idx = 0; tree_idx < config.num_trees; tree_idx++) {
-                ID_vector<uint16_t,2> cv_tree_dataset;
-                cv_tree_dataset.reserve(bootstrap_sample_size);
-                
-                auto tree_rng = rng.deriveRNG(fold * 1000 + tree_idx);
-                
-                if (config.use_bootstrap) {
-                    // Bootstrap sampling: allow duplicates
-                    for (uint16_t j = 0; j < bootstrap_sample_size; j++) {
-                        uint16_t idx_in_cv_train = static_cast<uint16_t>(tree_rng.bounded(cv_train_size));
-                        uint16_t actual_sample_idx = cv_train_indices[idx_in_cv_train];
-                        cv_tree_dataset.push_back(actual_sample_idx);
-                    }
-                } else {
-                    // Random sampling without replacement
-                    vector<uint16_t> indices_copy = cv_train_indices;
-                    
-                    for (uint16_t t = 0; t < bootstrap_sample_size; t++) {
-                        uint16_t j = static_cast<uint16_t>(t + tree_rng.bounded(cv_train_size - t));
-                        uint16_t tmp = indices_copy[t];
-                        indices_copy[t] = indices_copy[j];
-                        indices_copy[j] = tmp;
-                        cv_tree_dataset.push_back(indices_copy[t]);
-                    }
-                }
-                
-                dataList.push_back(std::move(cv_tree_dataset));
-            }
-            
-            // Ensure root vector has correct size before rebuilding
-            if (root.size() != config.num_trees) {
-                root.clear();
-                root.reserve(config.num_trees);
-                for(uint16_t i = 0; i < config.num_trees; i++){
-                    root.push_back(Rf_tree(""));
-                }
-            }
-            
-            // Build forest for this fold
-            MakeForest();
-            
-            // Create test data object for evaluation using cv_test_indices
-            Rf_data cv_test_data;
-            cv_test_data.allSamples.reserve(cv_test_indices.size());
-            for (uint16_t idx : cv_test_indices) {
-                if (idx < train_data.allSamples.size()) {
-                    cv_test_data.allSamples.push_back(train_data.allSamples[idx]);
-                }
-            }
-            
-            // Evaluate on cv_test_data using the specified training flag
-            float fold_score = predict(cv_test_data, config.metric_score);
-            total_cv_score += fold_score;
-            valid_folds++;
-        }
-        
-        // Restore original dataList
-        dataList = original_dataList;    
-        return (valid_folds > 0) ? (total_cv_score / valid_folds) : 0.0f;
-    }
-        
   public:
     // -----------------------------------------------------------------------------------
     // Grid Search Training with Multiple Runs
@@ -995,20 +635,15 @@ public:
         std::remove(node_log_path.c_str());
         std::ofstream file(node_log_path);
         if (!file.is_open()) {
-            std::cerr << "❌ Failed to create node_predictor log file\n";          
+            std::cerr << "❌ Failed to create node_predictor log file\n";
             return;
         }
-        file << "min_split,max_depth,total_nodes\n";
+        file << "min_split,max_depth,total_nodes,best_threshold\n";
         file.close();
 
-        uint16_t best_min_split = config.min_split;
-        uint16_t best_max_depth = config.max_depth;
-        float best_score = -1.0f;
-
-        // Determine evaluation mode and number of runs
         bool use_cv = (config.training_score == "k_fold_score");
-        const int num_runs = use_cv ? 1 : 3; // 1 run for CV, 3 runs for OOB/validation
-        
+        const int num_runs = use_cv ? 1 : 3;
+
         if (use_cv) {
             std::cout << "📊 Using " << (int)config.k_folds << "-fold cross validation for evaluation\n";
         } else if (config.training_score == "valid_score") {
@@ -1017,10 +652,9 @@ public:
             std::cout << "📊 Using OOB for evaluation\n";
         }
 
-        // Create temporary directory for saving best forests during iterations
         std::string temp_folder = "temp_best_forest";
         std::string final_folder = result_folder;
-        
+
         #ifdef _WIN32
             _mkdir(temp_folder.c_str());
             _mkdir(final_folder.c_str());
@@ -1029,119 +663,178 @@ public:
             mkdir(final_folder.c_str(), 0755);
         #endif
 
-        // Calculate total iterations for progress bar
-        uint32_t total_iterations = config.min_split_range.size() * config.max_depth_range.size() * num_runs;
+        uint32_t candidate_count = config.min_split_range.size() * config.max_depth_range.size();
+        if (candidate_count == 0) candidate_count = 1;
+        uint32_t total_iterations = candidate_count * (use_cv ? 1 : num_runs);
+        if (total_iterations == 0) total_iterations = 1;
         uint32_t current_iteration = 0;
 
-        int avg_nodes;
+        auto updateProgress = [&](float score, uint16_t min_split, uint16_t max_depth) {
+            float progress = total_iterations ? static_cast<float>(current_iteration) / total_iterations : 1.0f;
+            int bar_width = 50;
+            int pos = static_cast<int>(bar_width * progress);
+            std::cout << "\r[";
+            for (int j = 0; j < bar_width; ++j) {
+                if (j < pos) std::cout << "█";
+                else if (j == pos) std::cout << "▓";
+                else std::cout << "░";
+            }
+            std::cout << "] " << std::fixed << std::setprecision(1) << (progress * 100.0f) << "% ";
+            std::cout << "(" << current_iteration << "/" << total_iterations << ") ";
+            std::cout << "Score≈" << std::setprecision(3) << score;
+            std::cout << " | split=" << min_split << ", depth=" << max_depth;
+            std::cout.flush();
+        };
 
-        // Grid search over min_split and max_depth ranges
-        for ( uint16_t current_min_split : config.min_split_range) {
-            for ( uint16_t current_max_depth : config.max_depth_range) {
+        uint16_t best_min_split = config.min_split;
+        uint16_t best_max_depth = config.max_depth;
+        float best_score = -1.0f;
+        MetricsSummary best_metrics;
+        bool best_found = false;
+
+        for (uint16_t current_min_split : config.min_split_range) {
+            for (uint16_t current_max_depth : config.max_depth_range) {
                 config.min_split = current_min_split;
                 config.max_depth = current_max_depth;
 
-                float total_run_score = 0.0f;
-                float best_run_score = -1.0f;
-                
-                // Track best forest for this parameter combination
+                float avg_nodes = 0.0f;
                 bool best_forest_saved = false;
-                avg_nodes = 0;
+                std::vector<EvaluationSample> aggregated_samples;
+                aggregated_samples.reserve(train_data.allSamples.size());
+                ThresholdSearchResult aggregated_result;
+                aggregated_result.score = -1.0f;
+                aggregated_result.threshold = 0.5f;
 
-                for (int i = 0; i < num_runs; ++i) {
-                    float combined_score = 0.0f;
-                    
-                    if (use_cv) {
-                        // Cross validation mode
-                        combined_score = get_cross_validation_score();
-                        
-                        // For CV mode, we need to rebuild with current parameters to save
-                        ClonesData();
-                        MakeForest();
-                    } else {
-                        // OOB or validation mode
-                        ClonesData();
-                        MakeForest();
+                if (use_cv) {
+                    float cv_avg_nodes = 0.0f;
+                    aggregated_samples = collectCrossValidationSamples(cv_avg_nodes);
+                    avg_nodes = cv_avg_nodes;
 
-                        pair<float, float> scores = get_training_evaluation_index(validation_data);
-                        float oob_score = scores.first;
-                        float validation_score = scores.second;
+                    ClonesData();
+                    MakeForest();
 
-                        // Use the selected scoring method
-                        if(config.training_score == "valid_score") {
-                            combined_score = validation_score;
-                        } else {
-                            combined_score = oob_score; // Default to oob_score
-                        }
-                    }
-
-                    // Calculate total_nodes for this parameter combination (sum of all nodes in all trees)
                     int total_nodes = 0;
-                    for (uint16_t i = 0; i < config.num_trees; i++) {
-                        total_nodes += root[i].countNodes();
+                    for (uint16_t t = 0; t < config.num_trees; ++t) {
+                        total_nodes += root[t].countNodes();
                     }
-                    avg_nodes += total_nodes / config.num_trees;
+                    if (config.num_trees > 0) {
+                        avg_nodes = static_cast<float>(total_nodes) / config.num_trees;
+                    }
 
-                    // Save the best forest of the 3 runs for this parameter combination
-                    if (combined_score > best_run_score) {
-                        best_run_score = combined_score;
-                        // Save current forest to temporary folder (silently)
-                        saveForest(temp_folder, true);
-                        best_forest_saved = true;
-                    }
-                    
-                    total_run_score += combined_score;
-                    
-                    // Update progress bar
+                    aggregated_result = findBestThreshold(aggregated_samples, config.metric_score);
+
+                    saveForest(temp_folder, true);
+                    best_forest_saved = true;
+
                     current_iteration++;
-                    float progress = (float)current_iteration / total_iterations;
-                    int bar_width = 50;
-                    int pos = bar_width * progress;
-                    
-                    std::cout << "\r[";
-                    for (int j = 0; j < bar_width; ++j) {
-                        if (j < pos) std::cout << "█";
-                        else if (j == pos) std::cout << "▓";
-                        else std::cout << "░";
+                    updateProgress(aggregated_result.score, current_min_split, current_max_depth);
+                } else {
+                    float total_run_score = 0.0f;
+                    float best_run_score = -1.0f;
+
+                    for (int run = 0; run < num_runs; ++run) {
+                        ClonesData();
+                        MakeForest();
+
+                        std::vector<EvaluationSample> run_samples;
+                        if (config.training_score == "valid_score") {
+                            run_samples = collectValidationSamples(validation_data);
+                        } else {
+                            uint16_t min_votes_required = std::max<uint16_t>(1, static_cast<uint16_t>(std::ceil(config.num_trees * 0.15f)));
+                            run_samples = collectOOBSamples(min_votes_required);
+                        }
+
+                        aggregated_samples.insert(aggregated_samples.end(), run_samples.begin(), run_samples.end());
+
+                        ThresholdSearchResult run_result = findBestThreshold(run_samples, config.metric_score);
+                        if (run_result.score >= 0.0f) {
+                            total_run_score += run_result.score;
+                        }
+
+                        int total_nodes = 0;
+                        for (uint16_t t = 0; t < config.num_trees; ++t) {
+                            total_nodes += root[t].countNodes();
+                        }
+                        if (config.num_trees > 0) {
+                            avg_nodes += static_cast<float>(total_nodes) / config.num_trees;
+                        }
+
+                        if (run_result.score > best_run_score) {
+                            best_run_score = run_result.score;
+                            saveForest(temp_folder, true);
+                            best_forest_saved = true;
+                        }
+
+                        current_iteration++;
+                        updateProgress(run_result.score, current_min_split, current_max_depth);
                     }
-                    std::cout << "] " << std::fixed << std::setprecision(1) << (progress * 100.0) << "% ";
-                    std::cout << "(" << current_iteration << "/" << total_iterations << ") ";
-                    std::cout << "Score: " << std::setprecision(3) << combined_score;
-                    std::cout.flush();
+
+                    if (num_runs > 0) {
+                        avg_nodes /= num_runs;
+                    }
+
+                    aggregated_result = findBestThreshold(aggregated_samples, config.metric_score);
                 }
-                avg_nodes /= num_runs;
-                // Append min_split, max_depth, total_nodes to node_predictor log file
-                if(avg_nodes > 0) {
+
+                if (avg_nodes > 0.0f) {
                     std::ofstream log_file(node_log_path, std::ios::app);
                     if (log_file.is_open()) {
-                        log_file << (int)config.min_split << "," 
-                                 << (int)config.max_depth << "," 
-                                 << avg_nodes << "\n";
-                        log_file.close();
+                        log_file << static_cast<int>(config.min_split) << ","
+                                 << static_cast<int>(config.max_depth) << ","
+                                 << static_cast<int>(std::round(avg_nodes)) << ","
+                                 << std::fixed << std::setprecision(3) << aggregated_result.threshold << "\n";
                     }
                 }
-                
 
-                float avg_score = total_run_score / num_runs;
-
-                // If this parameter combination gives better average score, copy to final folder
-                if (avg_score > best_score && best_forest_saved) {
-                    best_score = avg_score;
+                if (aggregated_result.score > best_score && best_forest_saved) {
+                    best_score = aggregated_result.score;
                     best_min_split = config.min_split;
                     best_max_depth = config.max_depth;
-                    
-                    // Copy best forest from temp folder to final folder
+                    best_metrics = aggregated_result.metrics;
+                    best_found = true;
                     copyDirectory(temp_folder, final_folder);
                 }
             }
         }
 
-        std::cout << "\n✅ Training Complete! Best: min_split=" << (int)best_min_split 
-                  << ", max_depth=" << (int)best_max_depth << ", score=" << best_score << "\n";
+        std::cout << std::endl;
+        if (best_found) {
+            std::cout << "✅ Training Complete! Best: min_split=" << (int)best_min_split
+                      << ", max_depth=" << (int)best_max_depth
+                      << ", score=" << std::setprecision(3) << best_score << "\n";
+            std::cout << "   Precision=" << std::setprecision(3) << best_metrics.precision
+                      << ", Recall=" << best_metrics.recall
+                      << ", Coverage=" << best_metrics.coverage << "\n";
+        } else {
+            std::cout << "⚠️  No valid candidate found during training; retaining existing parameters.\n";
+        }
 
-        // Update config with best parameters found
         config.min_split = best_min_split;
-        config.max_depth = best_max_depth;        // Clean up temporary folder
+        config.max_depth = best_max_depth;
+
+        ClonesData();
+        MakeForest();
+
+        uint16_t min_votes_required = std::max<uint16_t>(1, static_cast<uint16_t>(std::ceil(config.num_trees * 0.15f)));
+        std::vector<EvaluationSample> final_samples;
+        if (config.training_score == "valid_score") {
+            final_samples = collectValidationSamples(validation_data);
+        } else {
+            final_samples = collectOOBSamples(min_votes_required);
+        }
+
+        ThresholdSearchResult final_result = findBestThreshold(final_samples, config.metric_score);
+        if (final_result.score >= 0.0f) {
+            config.result_score = final_result.score;
+        } else {
+            config.result_score = 0.0f;
+        }
+
+        std::cout << "🎯 Final model score: " << std::fixed << std::setprecision(3) << config.result_score
+                  << " (coverage=" << final_result.metrics.coverage << ")\n";
+
+        saveForest(result_folder);
+
         std::cout << "🧹 Cleaning up temporary files...\n";
         #ifdef _WIN32
             system(("rmdir /s /q " + temp_folder).c_str());
@@ -1411,6 +1104,398 @@ public:
         return predClassSample(sample);
     }
 };
+
+RandomForest::ConsensusResult RandomForest::computeConsensus(const Rf_sample& sample, const b_vector<uint16_t>* tree_indices) {
+    ConsensusResult result;
+    if (root.empty()) {
+        return result;
+    }
+
+    std::vector<uint16_t> vote_counts(config.num_labels, 0);
+
+    auto tally_tree = [&](uint16_t tree_index) {
+        if (tree_index >= root.size()) {
+            return;
+        }
+        uint16_t predict = root[tree_index].predictSample(sample);
+        if (predict < config.num_labels) {
+            vote_counts[predict]++;
+            result.total_votes++;
+        }
+    };
+
+    if (tree_indices) {
+        for (uint16_t idx : *tree_indices) {
+            tally_tree(idx);
+        }
+    } else {
+        for (uint16_t idx = 0; idx < root.size() && idx < config.num_trees; ++idx) {
+            tally_tree(idx);
+        }
+    }
+
+    if (result.total_votes == 0) {
+        return result;
+    }
+
+    for (uint16_t label = 0; label < config.num_labels; ++label) {
+        if (vote_counts[label] > result.votes) {
+            result.votes = vote_counts[label];
+            result.predicted_label = label;
+        }
+    }
+
+    result.consensus = static_cast<float>(result.votes) / static_cast<float>(result.total_votes);
+    return result;
+}
+
+std::vector<RandomForest::EvaluationSample> RandomForest::collectOOBSamples(uint16_t min_votes_required, std::vector<uint16_t>* vote_histogram) {
+    std::vector<EvaluationSample> samples;
+    samples.reserve(train_data.allSamples.size());
+
+    if (vote_histogram) {
+        vote_histogram->assign(21, 0);
+    }
+
+    uint16_t sampleId = 0;
+    for (const auto& sample : train_data.allSamples) {
+        b_vector<uint16_t> activeTrees;
+        activeTrees.reserve(config.num_trees);
+        for (uint16_t i = 0; i < config.num_trees; ++i) {
+            if (!dataList[i].contains(sampleId)) {
+                activeTrees.push_back(i);
+            }
+        }
+        sampleId++;
+
+        if (vote_histogram) {
+            uint16_t bucket = std::min<uint16_t>(20, activeTrees.size());
+            (*vote_histogram)[bucket]++;
+        }
+
+        if (activeTrees.empty() || activeTrees.size() < min_votes_required) {
+            continue;
+        }
+
+        ConsensusResult consensus = computeConsensus(sample, &activeTrees);
+        if (consensus.total_votes == 0) {
+            continue;
+        }
+
+        EvaluationSample eval{};
+        eval.actual_label = sample.label;
+        eval.predicted_label = consensus.predicted_label;
+        eval.votes = consensus.votes;
+        eval.total_votes = consensus.total_votes;
+        eval.consensus = consensus.consensus;
+        samples.push_back(eval);
+    }
+
+    return samples;
+}
+
+std::vector<RandomForest::EvaluationSample> RandomForest::collectValidationSamples(const Rf_data& dataset) {
+    std::vector<EvaluationSample> samples;
+    samples.reserve(dataset.allSamples.size());
+
+    for (const auto& sample : dataset.allSamples) {
+        ConsensusResult consensus = computeConsensus(sample);
+        if (consensus.total_votes == 0) {
+            continue;
+        }
+        EvaluationSample eval{};
+        eval.actual_label = sample.label;
+        eval.predicted_label = consensus.predicted_label;
+        eval.votes = consensus.votes;
+        eval.total_votes = consensus.total_votes;
+        eval.consensus = consensus.consensus;
+        samples.push_back(eval);
+    }
+
+    return samples;
+}
+
+std::vector<RandomForest::EvaluationSample> RandomForest::collectCrossValidationSamples(float& avg_nodes_out) {
+    std::vector<EvaluationSample> aggregated;
+    aggregated.reserve(train_data.allSamples.size());
+    avg_nodes_out = 0.0f;
+
+    uint16_t k_folds = config.k_folds;
+    if (k_folds < 2) {
+        k_folds = 4;
+    }
+
+    b_vector<uint16_t> allTrainIndices;
+    allTrainIndices.reserve(train_data.allSamples.size());
+    for (uint16_t i = 0; i < train_data.allSamples.size(); ++i) {
+        allTrainIndices.push_back(i);
+    }
+
+    for (uint16_t i = allTrainIndices.size(); i > 1; --i) {
+        uint16_t j = static_cast<uint16_t>(rng.bounded(i));
+        std::swap(allTrainIndices[i - 1], allTrainIndices[j]);
+    }
+
+    uint16_t fold_size = (k_folds > 0) ? static_cast<uint16_t>(allTrainIndices.size() / k_folds) : 0;
+    if (fold_size == 0) {
+        fold_size = allTrainIndices.size();
+    }
+
+    auto original_dataList = dataList;
+    uint16_t valid_folds = 0;
+
+    for (uint16_t fold = 0; fold < k_folds; ++fold) {
+        b_vector<uint16_t> cv_train_indices;
+        b_vector<uint16_t> cv_test_indices;
+
+        uint16_t test_start = static_cast<uint16_t>(fold * fold_size);
+        uint16_t test_end = (fold == k_folds - 1) ? static_cast<uint16_t>(allTrainIndices.size())
+                                                 : static_cast<uint16_t>((fold + 1) * fold_size);
+
+        for (uint16_t i = 0; i < allTrainIndices.size(); ++i) {
+            uint16_t sampleIndex = allTrainIndices[i];
+            if (i >= test_start && i < test_end) {
+                cv_test_indices.push_back(sampleIndex);
+            } else {
+                cv_train_indices.push_back(sampleIndex);
+            }
+        }
+
+        if (cv_train_indices.empty() || cv_test_indices.empty()) {
+            continue;
+        }
+
+        dataList.clear();
+        dataList.reserve(config.num_trees);
+
+        uint16_t cv_train_size = cv_train_indices.size();
+        uint16_t bootstrap_sample_size = cv_train_size;
+        if (config.use_bootstrap) {
+            float desired = cv_train_size * config.boostrap_ratio;
+            bootstrap_sample_size = static_cast<uint16_t>(std::max<float>(1.0f, std::round(desired)));
+        }
+
+        for (uint16_t tree_idx = 0; tree_idx < config.num_trees; ++tree_idx) {
+            ID_vector<uint16_t,2> cv_tree_dataset;
+            cv_tree_dataset.reserve(bootstrap_sample_size);
+
+            auto tree_rng = rng.deriveRNG(fold * 1000 + tree_idx);
+
+            if (config.use_bootstrap) {
+                for (uint16_t j = 0; j < bootstrap_sample_size; ++j) {
+                    uint16_t idx_in_cv_train = static_cast<uint16_t>(tree_rng.bounded(cv_train_size));
+                    cv_tree_dataset.push_back(cv_train_indices[idx_in_cv_train]);
+                }
+            } else {
+                std::vector<uint16_t> indices_copy(cv_train_indices.begin(), cv_train_indices.end());
+                for (uint16_t t = 0; t < bootstrap_sample_size; ++t) {
+                    uint16_t j = static_cast<uint16_t>(t + tree_rng.bounded(cv_train_size - t));
+                    std::swap(indices_copy[t], indices_copy[j]);
+                    cv_tree_dataset.push_back(indices_copy[t]);
+                }
+            }
+
+            dataList.push_back(std::move(cv_tree_dataset));
+        }
+
+        MakeForest();
+
+        int total_nodes = 0;
+        for (uint16_t i = 0; i < config.num_trees; ++i) {
+            total_nodes += root[i].countNodes();
+        }
+        if (config.num_trees > 0) {
+            avg_nodes_out += static_cast<float>(total_nodes) / config.num_trees;
+        }
+
+        for (uint16_t idx : cv_test_indices) {
+            if (idx >= train_data.allSamples.size()) {
+                continue;
+            }
+            const auto& sample = train_data.allSamples[idx];
+            ConsensusResult consensus = computeConsensus(sample);
+            if (consensus.total_votes == 0) {
+                continue;
+            }
+            EvaluationSample eval{};
+            eval.actual_label = sample.label;
+            eval.predicted_label = consensus.predicted_label;
+            eval.votes = consensus.votes;
+            eval.total_votes = consensus.total_votes;
+            eval.consensus = consensus.consensus;
+            aggregated.push_back(eval);
+        }
+
+        valid_folds++;
+    }
+
+    if (valid_folds > 0) {
+        avg_nodes_out /= valid_folds;
+    } else {
+        avg_nodes_out = 0.0f;
+    }
+
+    dataList = original_dataList;
+    return aggregated;
+}
+
+RandomForest::MetricsSummary RandomForest::computeMetricsForThreshold(const std::vector<EvaluationSample>& samples, float threshold) {
+    MetricsSummary metrics;
+    if (samples.empty()) {
+        return metrics;
+    }
+
+    std::vector<uint32_t> tp(config.num_labels, 0);
+    std::vector<uint32_t> fp(config.num_labels, 0);
+    std::vector<uint32_t> fn(config.num_labels, 0);
+
+    uint32_t correct = 0;
+
+    for (const auto& sample : samples) {
+        if (sample.total_votes == 0) {
+            continue;
+        }
+        metrics.total_samples++;
+
+        bool accepted = sample.consensus >= threshold;
+        if (!accepted) {
+            if (sample.actual_label < config.num_labels) {
+                fn[sample.actual_label]++;
+            }
+            continue;
+        }
+
+        metrics.predicted_samples++;
+
+        if (sample.predicted_label == sample.actual_label && sample.predicted_label < config.num_labels) {
+            tp[sample.actual_label]++;
+            correct++;
+        } else {
+            if (sample.predicted_label < config.num_labels) {
+                fp[sample.predicted_label]++;
+            }
+            if (sample.actual_label < config.num_labels) {
+                fn[sample.actual_label]++;
+            }
+        }
+    }
+
+    uint64_t total_tp = 0;
+    uint64_t total_fp = 0;
+    uint64_t total_fn = 0;
+    for (uint16_t label = 0; label < config.num_labels; ++label) {
+        total_tp += tp[label];
+        total_fp += fp[label];
+        total_fn += fn[label];
+    }
+
+    metrics.coverage = metrics.total_samples ? static_cast<float>(metrics.predicted_samples) / metrics.total_samples : 0.0f;
+    metrics.accuracy = metrics.total_samples ? static_cast<float>(correct) / metrics.total_samples : 0.0f;
+
+    float precision = (total_tp + total_fp) ? static_cast<float>(total_tp) / static_cast<float>(total_tp + total_fp) : 0.0f;
+    float recall = (total_tp + total_fn) ? static_cast<float>(total_tp) / static_cast<float>(total_tp + total_fn) : 0.0f;
+    metrics.precision = precision;
+    metrics.recall = recall;
+
+    if (precision + recall > 0.0f) {
+        metrics.f1 = 2.0f * precision * recall / (precision + recall);
+    } else {
+        metrics.f1 = 0.0f;
+    }
+
+    auto fbeta = [](float p, float r, float beta) {
+        float beta_sq = beta * beta;
+        float denom = (beta_sq * p) + r;
+        if (denom <= 0.0f) {
+            return 0.0f;
+        }
+        return (1.0f + beta_sq) * p * r / denom;
+    };
+
+    metrics.f0_5 = fbeta(precision, recall, 0.5f);
+    metrics.f2 = fbeta(precision, recall, 2.0f);
+
+    return metrics;
+}
+
+float RandomForest::computeObjectiveScore(const MetricsSummary& metrics, Rf_metric_scores flags) {
+    uint16_t flag_value = static_cast<uint16_t>(flags);
+
+    if (flag_value == PRECISION) {
+        return metrics.f0_5;
+    }
+    if (flag_value == RECALL) {
+        return metrics.f2;
+    }
+    if ((flag_value & PRECISION) && (flag_value & RECALL) && !(flag_value & F1_SCORE)) {
+        return metrics.f1;
+    }
+
+    float total = 0.0f;
+    int count = 0;
+    if (flag_value & ACCURACY) {
+        total += metrics.accuracy;
+        count++;
+    }
+    if (flag_value & PRECISION) {
+        total += metrics.precision;
+        count++;
+    }
+    if (flag_value & RECALL) {
+        total += metrics.recall;
+        count++;
+    }
+    if (flag_value & F1_SCORE) {
+        total += metrics.f1;
+        count++;
+    }
+
+    if (count == 0) {
+        return metrics.accuracy;
+    }
+    return total / count;
+}
+
+RandomForest::ThresholdSearchResult RandomForest::findBestThreshold(const std::vector<EvaluationSample>& samples, Rf_metric_scores flags) {
+    ThresholdSearchResult result;
+    result.threshold = 0.5f;
+    result.score = -1.0f;
+
+    if (samples.empty()) {
+        return result;
+    }
+
+    std::set<float> candidate_thresholds;
+    candidate_thresholds.insert(0.0f);
+    candidate_thresholds.insert(1.0f);
+
+    for (const auto& sample : samples) {
+        if (sample.total_votes == 0) {
+            continue;
+        }
+        candidate_thresholds.insert(sample.consensus);
+    }
+
+    for (float threshold : candidate_thresholds) {
+        MetricsSummary metrics = computeMetricsForThreshold(samples, threshold);
+        float score = computeObjectiveScore(metrics, flags);
+
+        if (score > result.score + 1e-6f ||
+            (std::fabs(score - result.score) <= 1e-6f && metrics.coverage > result.metrics.coverage + 1e-6f) ||
+            (std::fabs(score - result.score) <= 1e-6f && std::fabs(metrics.coverage - result.metrics.coverage) <= 1e-6f && threshold < result.threshold)) {
+            result.threshold = threshold;
+            result.score = score;
+            result.metrics = metrics;
+        }
+    }
+
+    if (result.score < 0.0f) {
+        result.metrics = computeMetricsForThreshold(samples, result.threshold);
+        result.score = computeObjectiveScore(result.metrics, flags);
+    }
+
+    return result;
+}
 
 
 int main() {

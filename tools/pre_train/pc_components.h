@@ -436,13 +436,12 @@ struct Rf_config{
 
     b_vector<uint16_t> max_depth_range;      // for training
     b_vector<uint16_t> min_split_range;      // for training 
-    b_vector<bool> overwrite{4}; // min_split-> max_depth-> unity_threshold-> metric_score
+    b_vector<bool> overwrite{2}; // min_split-> max_depth
 
     Rf_metric_scores metric_score;
     std::string data_path;
     
     // model configurations
-    float unity_threshold = 0.5f;   // unity_threshold  for classification, effect to precision and recall - default value
     float impurity_threshold = 0.01f; // threshold for impurity, default is 0.01
     std::string training_score = "oob_score";
     bool use_gini = false; // use Gini impurity for training
@@ -458,7 +457,7 @@ public:
     Rf_config() {};
 
     Rf_config (std::string init_path = config_path){
-        for (size_t i = 0; i < 4; i++) {
+        for (size_t i = 0; i < 2; i++) {
             overwrite[i] = false; // default to not overwriting any parameters
         }
 
@@ -748,9 +747,9 @@ public:
             return "";
         };
 
-        // Initialize overwrite vector: min_split, max_depth, unity_threshold, metric_score
+        // Initialize overwrite vector: min_split, max_depth
         overwrite.clear();
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < 2; i++) {
             overwrite.push_back(false);
         }
 
@@ -771,50 +770,6 @@ public:
             if (!value.empty()) {
                 max_depth = static_cast<uint16_t>(std::stoi(value));
                 std::cout << "⚙️  max_depth override enabled: " << (int)max_depth << std::endl;
-            }
-        }
-
-        // Check and extract unity_threshold
-        overwrite[2] = isParameterEnabled("unity_threshold");
-        if (overwrite[2]) {
-            std::string value = extractParameterValue("unity_threshold");
-            if (!value.empty()) {
-                unity_threshold = std::stof(value);
-                std::cout << "⚙️  unity_threshold override enabled: " << unity_threshold << std::endl;
-            }
-        }
-
-        // Check and extract metric_score
-        overwrite[3] = isParameterEnabled("metric_score");
-        if (overwrite[3]) {
-            std::string value = extractParameterValue("metric_score");
-            if (!value.empty()) {
-                bool isStacked = isParameterStacked("metric_score");
-                if (isStacked) {
-                    // Stacked mode: combine with automatic flags (will be determined later)
-                    uint16_t user_flags = stringToFlags(value);
-                    metric_score = static_cast<Rf_metric_scores>(user_flags); // Temporarily store user flags
-                    std::cout << "⚙️  metric_score stacked mode enabled: " << flagsToString(user_flags) << " (will be combined with auto-detected flags)\n";
-                } else {
-                    // Overwrite mode: replace automatic flags completely
-                    metric_score = static_cast<Rf_metric_scores>(stringToFlags(value));
-                    std::cout << "⚙️  metric_score overwrite mode enabled: " << flagsToString(metric_score) << std::endl;
-                }
-            }
-        }
-
-        // Extract impurity_threshold if present
-        pos = content.find("\"impurity_threshold\"");
-        if (pos != std::string::npos) {
-            pos = content.find("\"value\":", pos);
-            if (pos != std::string::npos) {
-                pos = content.find(":", pos) + 1;
-                size_t end = content.find(",", pos);
-                if (end == std::string::npos) end = content.find("}", pos);
-                std::string value = content.substr(pos, end - pos);
-                value.erase(0, value.find_first_not_of(" \t\r\n"));
-                value.erase(value.find_last_not_of(" \t\r\n") + 1);
-                impurity_threshold = std::stof(value);
             }
         }
 
@@ -900,22 +855,35 @@ public:
         std::cout << "  Total features: " << maxFeatures << "\n";
         std::cout << "  Unique labels: " << labelCounts.size() << "\n";
 
-        // Automatic ratio configuration based on dataset size
+        // Automatic ratio configuration based on dataset size and training method
         float samples_per_label = (float)numSamples / labelCounts.size();
-        if (samples_per_label > 150) {
-            if(training_score == "valid_score") {
-                // Large dataset: use 0.7, 0.15, 0.15
+        
+        if (training_score == "oob_score" || training_score == "k_fold_score") {
+            // OOB and K-fold don't need validation data
+            if (samples_per_label > 150) {
+                train_ratio = 0.8f;
+                test_ratio = 0.2f;
+                valid_ratio = 0.0f;
+                std::cout << "📏 Large dataset (samples/label: " << samples_per_label << " > 150). Using ratios: 0.8/0.2/0.0\n";
+            } else {
+                train_ratio = 0.8f;
+                test_ratio = 0.2f;
+                valid_ratio = 0.0f;
+                std::cout << "📏 Small dataset (samples/label: " << samples_per_label << " ≤ 150). Using ratios: 0.8/0.2/0.0\n";
+            }
+        } else if (training_score == "valid_score") {
+            // Validation score needs validation data
+            if (samples_per_label > 150) {
                 train_ratio = 0.7f;
                 test_ratio = 0.15f;
                 valid_ratio = 0.15f;
-                std::cout << "📏 Large dataset (samples/label: " << samples_per_label << " > 50). Using ratios: 0.7/0.15/0.15\n";
+                std::cout << "📏 Large dataset (samples/label: " << samples_per_label << " > 150). Using ratios: 0.7/0.15/0.15\n";
+            } else {
+                train_ratio = 0.6f;
+                test_ratio = 0.2f;
+                valid_ratio = 0.2f;
+                std::cout << "📏 Small dataset (samples/label: " << samples_per_label << " ≤ 150). Using ratios: 0.6/0.2/0.2\n";
             }
-        } else {
-            // Small dataset: use 0.6, 0.2, 0.2
-            train_ratio = 0.6f;
-            test_ratio = 0.2f;
-            valid_ratio = 0.2f;
-            std::cout << "📏 Small dataset (samples/label: " << samples_per_label << " ≤ 150). Using ratios: 0.6/0.2/0.2\n";
         }
 
         // Validate training_score and split_ratio consistency
@@ -983,77 +951,19 @@ public:
                 maxImbalanceRatio = (float)majorityCount / minorityCount;
             }
 
-            // Set training flags based on class imbalance
-            if (!overwrite[3]) {
-                // Apply automatic selection only if not overridden
-                if (maxImbalanceRatio > 10.0f) {
-                    metric_score = Rf_metric_scores::RECALL;
-                    std::cout << "📉 Imbalanced dataset (ratio: " << maxImbalanceRatio << "). Setting metric_score to RECALL.\n";
-                } else if (maxImbalanceRatio > 3.0f) {
-                    metric_score = Rf_metric_scores::F1_SCORE;
-                    std::cout << "⚖️ Moderately imbalanced dataset (ratio: " << maxImbalanceRatio << "). Setting metric_score to F1_SCORE.\n";
-                } else if (maxImbalanceRatio > 1.5f) {
-                    metric_score = Rf_metric_scores::PRECISION;
-                    std::cout << "🟨 Slight imbalance (ratio: " << maxImbalanceRatio << "). Setting metric_score to PRECISION.\n";
-                } else {
-                    metric_score = Rf_metric_scores::ACCURACY;
-                    std::cout << "✅ Balanced dataset (ratio: " << maxImbalanceRatio << "). Setting metric_score to ACCURACY.\n";
-                }
+            // Automatically set training flags based on class imbalance
+            if (maxImbalanceRatio > 10.0f) {
+                metric_score = Rf_metric_scores::RECALL;
+                std::cout << "📉 Imbalanced dataset (ratio: " << maxImbalanceRatio << "). Setting metric_score to RECALL.\n";
+            } else if (maxImbalanceRatio > 3.0f) {
+                metric_score = Rf_metric_scores::F1_SCORE;
+                std::cout << "⚖️ Moderately imbalanced dataset (ratio: " << maxImbalanceRatio << "). Setting metric_score to F1_SCORE.\n";
+            } else if (maxImbalanceRatio > 1.5f) {
+                metric_score = Rf_metric_scores::PRECISION;
+                std::cout << "🟨 Slight imbalance (ratio: " << maxImbalanceRatio << "). Setting metric_score to PRECISION.\n";
             } else {
-                // Check if it's stacked mode or overwrite mode
-                bool isStacked = false;
-                // Re-check the config file for stacked mode (we need this info here)
-                std::ifstream check_file("model_json");
-                if (check_file.is_open()) {
-                    std::string check_content, check_line;
-                    while (std::getline(check_file, check_line)) {
-                        check_content += check_line;
-                    }
-                    check_file.close();
-                    
-                    size_t pos = check_content.find("\"metric_score\"");
-                    if (pos != std::string::npos) {
-                        size_t status_pos = check_content.find("\"status\":", pos);
-                        if (status_pos != std::string::npos && status_pos < check_content.find("}", pos)) {
-                            size_t start = check_content.find("\"", status_pos + 9) + 1;
-                            size_t end = check_content.find("\"", start);
-                            if (start != std::string::npos && end != std::string::npos) {
-                                std::string status = check_content.substr(start, end - start);
-                                isStacked = (status == "stacked");
-                            }
-                        }
-                    }
-                }
-                
-                if (isStacked) {
-                    // Stacked mode: combine user flags with auto-detected flags
-                    uint16_t user_flags = static_cast<uint16_t>(metric_score); // User flags from init()
-                    uint16_t auto_flags = 0;
-                    
-                    // Determine automatic flags based on dataset
-                    if (maxImbalanceRatio > 10.0f) {
-                        auto_flags = RECALL;
-                        std::cout << "📉 Imbalanced dataset (ratio: " << maxImbalanceRatio << "). Auto-detected flag: RECALL.\n";
-                    } else if (maxImbalanceRatio > 3.0f) {
-                        auto_flags = F1_SCORE;
-                        std::cout << "⚖️ Moderately imbalanced dataset (ratio: " << maxImbalanceRatio << "). Auto-detected flag: F1_SCORE.\n";
-                    } else if (maxImbalanceRatio > 1.5f) {
-                        auto_flags = PRECISION;
-                        std::cout << "🟨 Slight imbalance (ratio: " << maxImbalanceRatio << "). Auto-detected flag: PRECISION.\n";
-                    } else {
-                        auto_flags = ACCURACY;
-                        std::cout << "✅ Balanced dataset (ratio: " << maxImbalanceRatio << "). Auto-detected flag: ACCURACY.\n";
-                    }
-                    
-                    // Combine user flags with auto-detected flags
-                    uint16_t combined_flags = user_flags | auto_flags;
-                    metric_score = static_cast<Rf_metric_scores>(combined_flags);
-                    std::cout << "🔗 Stacked metric_scores: " << flagsToString(combined_flags) 
-                              << " (user: " << flagsToString(user_flags) << " + auto: " << flagsToString(auto_flags) << ")\n";
-                } else {
-                    // Overwrite mode: user flags completely replace automatic detection
-                    std::cout << "🔧 Using metric_score overwrite: " << flagsToString(metric_score) << " (dataset ratio: " << maxImbalanceRatio << ")\n";
-                }
+                metric_score = Rf_metric_scores::ACCURACY;
+                std::cout << "✅ Balanced dataset (ratio: " << maxImbalanceRatio << "). Setting metric_score to ACCURACY.\n";
             }
         }
  
@@ -1177,16 +1087,33 @@ public:
             if (i + 1 < max_depth_range.size()) std::cout << ", ";
         }
         std::cout << "\n";
-        
-        // Check for unity_threshold override
-        if (!overwrite[2]) {
-            // Apply automatic calculation only if not overridden
-            unity_threshold  = 1.25f / static_cast<float>(num_labels);
-            if(num_features == 2) unity_threshold = 0.6f;
-        } else {
-            std::cout << "🔧 Using unity_threshold override: " << unity_threshold << std::endl;
+
+        // generate impurity_threshold
+        int K = std::max(2, static_cast<int>(num_labels));
+        float expected_min_pct = 100.0f / static_cast<float>(K);
+        float deficit = std::max(0.0f, expected_min_pct - lowestDistribution);
+        float imbalance = expected_min_pct > 0.0f ? std::min(1.0f, deficit / expected_min_pct) : 0.0f; // 0..1
+
+        // Sample factor: with more data, we can demand slightly larger impurity gains to split
+        // compute using double to avoid mixed-type std::min/std::max template deduction issues, then cast
+        double sample_factor_d = std::min(2.0, 0.75 + std::log2(std::max(2.0, static_cast<double>(num_samples))) / 12.0);
+        float sample_factor = static_cast<float>(sample_factor_d);
+        // Imbalance factor: reduce threshold for imbalanced data to allow splitting on rare classes
+        float imbalance_factor = 1.0f - 0.5f * imbalance; // 0.5..1.0
+        // Feature factor: with many features, weak splits are common; require slightly higher gain
+        float feature_factor = 0.9f + 0.1f * std::min(1.0f, static_cast<float>(std::log2(std::max(2, static_cast<int>(num_features)))) / 8.0f);
+
+        if (use_gini) {
+            float max_gini = 1.0f - 1.0f / static_cast<float>(K);
+            float base = 0.003f * max_gini; // very small base for Gini
+            float thr = base * sample_factor * imbalance_factor * feature_factor;
+            impurity_threshold = std::max(0.0005f, std::min(0.02f, thr));
+        } else { // entropy
+            float max_entropy = std::log2(static_cast<float>(K));
+            float base = 0.02f * (max_entropy > 0.0f ? max_entropy : 1.0f); // larger than gini
+            float thr = base * sample_factor * imbalance_factor * feature_factor;
+            impurity_threshold = std::max(0.005f, std::min(0.2f, thr));
         }
-        
 
     }
     
@@ -1221,7 +1148,6 @@ public:
             config_file << "  \"criterion\": \"" << criterionToString(use_gini) << "\",\n";
             config_file << "  \"trainingScore\": \"" << training_score << "\",\n";
             config_file << "  \"k_folds\": " << (int)k_folds << ",\n";
-            config_file << "  \"unityThreshold\": " << unity_threshold << ",\n";
             config_file << "  \"impurityThreshold\": " << impurity_threshold << ",\n";
             config_file << "  \"metric_score\": \"" << flagsToString(metric_score) << "\",\n";
             config_file << "  \"resultScore\": " << result_score << ",\n";

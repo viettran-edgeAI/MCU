@@ -128,7 +128,7 @@ The override system allows you to control automatic parameter optimization with 
 
 ##### Status Modes:
 - **`"disabled"`** - Use automatic parameter optimization (recommended)
-- **`"enabled"`** - Override with fixed user value (for min_split, max_depth, unity_threshold, combine_ratio)
+- **`"enabled"`** - Override with fixed user value (for min_split, max_depth)
 - **`"overwrite"`** - Replace automatic values completely (for metric_score)
 - **`"stacked"`** - Combine user values with automatic detection (for metric_score)
 
@@ -138,7 +138,6 @@ The override system allows you to control automatic parameter optimization with 
 |-----------|----------------|-------------|
 | `min_split` | disabled, enabled | Minimum samples required to split a node |
 | `max_depth` | disabled, enabled | Maximum tree depth |
-| `unity_threshold` | disabled, enabled | Consensus threshold for tree decisions |
 | `metric_score` | disabled, overwrite, stacked | Training optimization flags |
 
 ##### Training Flags System

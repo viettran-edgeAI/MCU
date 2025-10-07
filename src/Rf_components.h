@@ -3,6 +3,8 @@
 #include "STL_MCU.h"  
 #include "Rf_file_manager.h"
 #include "esp_system.h"
+#include <cstdlib>
+#include <cstring>
 
 
 #define GET_CURRENT_TIME_IN_MICROSECONDS() esp_timer_get_time() // current time in microseconds
@@ -1506,34 +1508,40 @@ namespace mcu {
             return true;
         }
 
-        // predict single (normalized)sample - packed features
-        uint8_t predict_features(const packed_vector<2>& packed_features) const {
-            if (nodes.empty() || !isLoaded) return 0;
-            
+        // predict single (normalized)sample - packed features - hot path optimized
+        __attribute__((always_inline)) inline uint8_t predict_features(const packed_vector<2>& packed_features) const {
+            // Fast path: assume tree is loaded and valid
             uint16_t currentIndex = 0;  // Start from root
+            const Tree_node* node_data = nodes.data();
+            const uint16_t node_count = nodes.size();
             
-            while (currentIndex < nodes.size() && !nodes[currentIndex].getIsLeaf()) {
-                uint16_t featureID = nodes[currentIndex].getFeatureID();
-                // Bounds check for feature access
-                if (featureID >= packed_features.size()) {
-                    RF_DEBUG(2, "❌ Feature ID out of bounds during prediction");
-                    return 0; // Invalid feature access
+            // Unroll first iteration (root is never leaf in practice)
+            uint32_t packed = node_data[0].packed_data;
+            uint16_t featureID = packed & 0x3FF;
+            uint8_t threshold = (packed >> 18) & 0x03;
+            uint8_t featureValue = packed_features[featureID];
+            currentIndex = (featureValue <= threshold) ? ((packed >> 21) & 0x7FF) : (((packed >> 21) & 0x7FF) + 1);
+            
+            // Main traversal loop - inline everything
+            while (__builtin_expect(currentIndex < node_count, 1)) {
+                packed = node_data[currentIndex].packed_data;
+                
+                // Check if leaf (bit 20)
+                if (__builtin_expect((packed >> 20) & 0x01, 0)) {
+                    // It's a leaf - return label (bits 10-17)
+                    return (packed >> 10) & 0xFF;
                 }
                 
-                uint8_t featureValue = packed_features[featureID];
+                // Internal node - extract and traverse
+                featureID = packed & 0x3FF;  // bits 0-9
+                threshold = (packed >> 18) & 0x03;  // bits 18-19
+                featureValue = packed_features[featureID];
                 
-                if (featureValue <= nodes[currentIndex].getThreshold()) {
-                    // Go to left child
-                    currentIndex = nodes[currentIndex].getLeftChildIndex();
-                } else {
-                    // Go to right child
-                    currentIndex = nodes[currentIndex].getRightChildIndex();
-                }
-                if (currentIndex >= nodes.size()) {
-                    return 0; // Invalid child index
-                }
+                // Navigate: left child = bits 21-31, right = left + 1
+                const uint16_t leftChild = (packed >> 21) & 0x7FF;
+                currentIndex = (featureValue <= threshold) ? leftChild : (leftChild + 1);
             }
-            return (currentIndex < nodes.size()) ? nodes[currentIndex].getLabel() : 0;
+            return 0; // Should not reach here in valid tree
         }
 
         void clearTree(bool freeMemory = false) {
@@ -2728,89 +2736,185 @@ namespace mcu {
         Rf_base* base_ptr = nullptr;
 
         // Compact storage arrays
-        vector<FeatureRef> featureRefs;              // One per feature
-        vector<uint16_t> sharedPatterns;             // Concatenated pattern edges
-        vector<uint16_t> allUniqueEdges;             // Concatenated unique edges
-        vector<uint8_t> allDiscreteValues;           // Concatenated discrete values
-        b_vector<String, 4> labelMapping; // Optional label reverse mapping
-        
+        b_vector<FeatureRef, 16> featureRefs;              // One per feature
+        b_vector<uint16_t> sharedPatterns;             // Concatenated pattern edges
+        b_vector<uint16_t, 32> allUniqueEdges;             // Concatenated unique edges
+        b_vector<uint8_t> allDiscreteValues;           // Concatenated discrete values
+        b_vector<uint16_t> labelOffsets;               // Offsets into labelStorage for each normalized label
+        b_vector<uint16_t> labelLengths;               // Cached label lengths for faster copy
+        b_vector<char, 256> labelStorage;                   // Contiguous storage for label strings (null terminated)
+            
         bool has_base() const {
             return base_ptr != nullptr && base_ptr->ready_to_use();
         }
-        // Helper function to split CSV line
-        b_vector<String, 4> split(const String& line, char delimiter = ',') {
-            b_vector<String, 4> result;
-            int start = 0;
-            int end = line.indexOf(delimiter);
-            
-            while (end != -1) {
-                result.push_back(line.substring(start, end));
-                start = end + 1;
-                end = line.indexOf(delimiter, start);
+        static constexpr size_t MAX_LINE_BUFFER = 1024;
+
+        // Utility helpers for parsing text data without allocating Strings
+        static void trim(char* str) {
+            if (!str) {
+                return;
             }
-            result.push_back(line.substring(start));
-            
-            return result;
+            size_t len = strlen(str);
+            while (len > 0 && (str[len - 1] == '\r' || str[len - 1] == '\n' || str[len - 1] == ' ' || str[len - 1] == '\t')) {
+                str[--len] = '\0';
+            }
+
+            size_t start = 0;
+            while (str[start] == ' ' || str[start] == '\t' || str[start] == '\r') {
+                start++;
+            }
+            if (start > 0) {
+                memmove(str, str + start, strlen(str + start) + 1);
+            }
         }
 
-        // Optimized feature categorization
-        uint8_t categorizeFeature(uint16_t featureIdx, float value) const {
-            if (!isLoaded || featureIdx >= numFeatures) {
-                RF_DEBUG(2, "❌ Categorizer not loaded or invalid feature index: ", featureIdx);
-                return 0;
+        static bool readLine(File& file, char* buffer, size_t bufferSize, size_t& outLength) {
+            if (bufferSize == 0) {
+                return false;
             }
-            
+
+            size_t readCount = file.readBytesUntil('\n', buffer, bufferSize - 1);
+            outLength = readCount;
+
+            if (outLength == 0 && !file.available()) {
+                buffer[0] = '\0';
+                return false; // EOF
+            }
+
+            buffer[outLength] = '\0';
+
+            // Detect truncated line
+            if (outLength >= bufferSize - 1 && file.available()) {
+                // If next char isn't newline, line exceeded buffer
+                int next = file.peek();
+                if (next != '\n' && next != '\r') {
+                    RF_DEBUG(0, "❌ Categorizer line exceeds buffer size");
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        static size_t tokenize(char* line, char delimiter, char** tokens, size_t maxTokens) {
+            size_t count = 0;
+            char* current = line;
+            while (current && *current != '\0' && count < maxTokens) {
+                tokens[count++] = current;
+                char* next = strchr(current, delimiter);
+                if (!next) {
+                    break;
+                }
+                *next = '\0';
+                current = next + 1;
+            }
+            return count;
+        }
+
+        static bool readTrimmedLine(File& file, char* buffer, size_t bufferSize, size_t& outLength) {
+            while (true) {
+                if (!readLine(file, buffer, bufferSize, outLength)) {
+                    buffer[0] = '\0';
+                    return false;
+                }
+                trim(buffer);
+                if (buffer[0] == '\0') {
+                    if (!file.available()) {
+                        return false;
+                    }
+                    continue;
+                }
+                return true;
+            }
+        }
+
+        bool storeLabel(uint8_t id, const char* label) {
+            if (id >= numLabels || label == nullptr) {
+                return false;
+            }
+
+            size_t len = strlen(label);
+            if (labelOffsets.size() < numLabels) {
+                labelOffsets.resize(numLabels, UINT16_MAX);
+            }
+            if (labelLengths.size() < numLabels) {
+                labelLengths.resize(numLabels, 0);
+            }
+
+            if (len > 0xFFFF) {
+                len = 0xFFFF;
+            }
+
+            if (labelStorage.size() + len + 1 > 0xFFFF) {
+                RF_DEBUG(0, "❌ Label storage overflow");
+                return false;
+            }
+
+            uint16_t offset = static_cast<uint16_t>(labelStorage.size());
+            labelOffsets[id] = offset;
+            labelLengths[id] = static_cast<uint16_t>(len);
+            for (size_t i = 0; i < len; ++i) {
+                labelStorage.push_back(label[i]);
+            }
+            labelStorage.push_back('\0');
+            return true;
+        }
+
+        // Optimized feature categorization - hot path, force inline
+        __attribute__((always_inline)) inline uint8_t categorizeFeature(uint16_t featureIdx, float value) const {
+            // Fast path: assume valid input during prediction (bounds checked during loading)
             const FeatureRef& ref = featureRefs[featureIdx];
-            uint32_t scaledValue = static_cast<uint32_t>(value * scaleFactor + 0.5f);
+            const uint8_t type = ref.getType();
             
-            switch (ref.getType()) {
-                case FT_DF:
-                    // Full discrete range: clamp to 0..groupsPerFeature-1
-                    return static_cast<uint8_t>(std::min(static_cast<int>(value), static_cast<int>(groupsPerFeature - 1)));
-                    
-                case FT_DC: {
-                    // Discrete custom values: linear search
-                    uint8_t count = ref.getAux();
-                    uint8_t offset = ref.getOffset();
-                    uint8_t targetValue = static_cast<uint8_t>(value);
-                    
-                    for (uint8_t i = 0; i < count; ++i) {
-                        if (allDiscreteValues[offset + i] == targetValue) {
-                            return i;
-                        }
-                    }
-                    return 0; // Default if not found
-                }
-                
-                case FT_CS: {
-                    // Continuous shared pattern
-                    uint8_t patternId = ref.getAux();
-                    uint16_t baseOffset = patternId * (groupsPerFeature - 1);
-                    
-                    for (uint8_t bin = 0; bin < (groupsPerFeature - 1); ++bin) {
-                        if (scaledValue < sharedPatterns[baseOffset + bin]) {
-                            return bin;
-                        }
-                    }
-                    return groupsPerFeature - 1; // Last bin
-                }
-                
-                case FT_CU: {
-                    // Continuous unique edges
-                    uint8_t edgeCount = ref.getAux();
-                    uint8_t offset = ref.getOffset();
-                    uint16_t baseOffset = offset * (groupsPerFeature - 1);
-                    
-                    for (uint8_t bin = 0; bin < edgeCount; ++bin) {
-                        if (scaledValue < allUniqueEdges[baseOffset + bin]) {
-                            return bin;
-                        }
-                    }
-                    return edgeCount; // Last bin
-                }
+            // FT_DF is most common, check first
+            if (__builtin_expect(type == FT_DF, 1)) {
+                // Full discrete range: clamp to 0..groupsPerFeature-1
+                int intValue = static_cast<int>(value);
+                return static_cast<uint8_t>((intValue < 0) ? 0 : ((intValue >= groupsPerFeature) ? (groupsPerFeature - 1) : intValue));
             }
             
-            return 0; // Fallback
+            // Precompute scaled value for continuous features
+            const uint32_t scaledValue = static_cast<uint32_t>(value * scaleFactor + 0.5f);
+            
+            if (type == FT_CS) {
+                // Continuous shared pattern
+                const uint16_t baseOffset = ref.getAux() * (groupsPerFeature - 1);
+                const uint8_t limit = groupsPerFeature - 1;
+                const uint16_t* patterns = &sharedPatterns[baseOffset];
+                
+                for (uint8_t bin = 0; bin < limit; ++bin) {
+                    if (scaledValue < patterns[bin]) {
+                        return bin;
+                    }
+                }
+                return limit;
+            }
+            
+            if (type == FT_CU) {
+                // Continuous unique edges
+                const uint8_t edgeCount = ref.getAux();
+                const uint16_t baseOffset = ref.getOffset() * (groupsPerFeature - 1);
+                const uint16_t* edges = &allUniqueEdges[baseOffset];
+                
+                for (uint8_t bin = 0; bin < edgeCount; ++bin) {
+                    if (scaledValue < edges[bin]) {
+                        return bin;
+                    }
+                }
+                return edgeCount;
+            }
+            
+            // FT_DC: Discrete custom values
+            const uint8_t count = ref.getAux();
+            const uint8_t offset = ref.getOffset();
+            const uint8_t targetValue = static_cast<uint8_t>(value);
+            const uint8_t* discreteVals = &allDiscreteValues[offset];
+            
+            for (uint8_t i = 0; i < count; ++i) {
+                if (discreteVals[i] == targetValue) {
+                    return i;
+                }
+            }
+            return 0;
         }
          
     public:
@@ -2826,7 +2930,9 @@ namespace mcu {
             sharedPatterns.clear();
             allUniqueEdges.clear();
             allDiscreteValues.clear();
-            labelMapping.clear();
+            labelOffsets.clear();
+            labelLengths.clear();
+            labelStorage.clear();
         }
 
 
@@ -2835,225 +2941,267 @@ namespace mcu {
             isLoaded = false;
         }
         
-        // Load categorizer data from CTG v2 format
+        // Load categorizer data from CTG v2 format without dynamic String allocations
         bool loadCategorizer() {
-            if (isLoaded) return true;
+            if (isLoaded) {
+                return true;
+            }
             if (!has_base()) {
                 RF_DEBUG(0, "❌ Load Categorizer failed: data pointer not ready");
                 return false;
             }
+
             char file_path[RF_PATH_BUFFER];
             base_ptr->get_ctg_path(file_path);
             if (!LittleFS.exists(file_path)) {
                 RF_DEBUG(0, "❌ Categorizer file not found: ", file_path);
                 return false;
             }
+
             File file = LittleFS.open(file_path, "r");
             if (!file) {
                 RF_DEBUG(0, "❌ Failed to open Categorizer file: ", file_path);
                 return false;
             }
-            
-            try {
-                // Read header: Categorizer,numFeatures,groupsPerFeature,numLabels,numSharedPatterns,scaleFactor
-                if (!file.available()) {
-                    RF_DEBUG(0, "❌ Empty Categorizer file: ", file_path);
-                    file.close();
-                    return false;
-                }
-                
-                String headerLine = file.readStringUntil('\n');
-                headerLine.trim();
-                auto headerParts = split(headerLine, ',');
-                
-                if (headerParts.size() != 6 || headerParts[0] != "CTG2") {
-                    RF_DEBUG(0, "❌ Invalid Categorizer header format; ", file_path);
-                    file.close();
-                    return false;
-                }
-                
-                numFeatures = headerParts[1].toInt();
-                groupsPerFeature = headerParts[2].toInt();
-                numLabels = headerParts[3].toInt();
-                uint16_t numSharedPatterns = headerParts[4].toInt();
-                scaleFactor = headerParts[5].toInt();
-                
-                // Clear existing data
+
+            auto resetData = [&]() {
+                numFeatures = 0;
+                groupsPerFeature = 0;
+                numLabels = 0;
+                scaleFactor = 50000;
+                isLoaded = false;
                 featureRefs.clear();
                 sharedPatterns.clear();
                 allUniqueEdges.clear();
                 allDiscreteValues.clear();
-                labelMapping.clear();
-                
-                // Reserve memory
+                labelOffsets.clear();
+                labelLengths.clear();
+                labelStorage.clear();
+            };
+
+            resetData();
+
+            char line[MAX_LINE_BUFFER];
+            size_t lineLength = 0;
+            bool success = true;
+            uint16_t numSharedPatterns = 0;
+
+            do {
+                if (!readTrimmedLine(file, line, MAX_LINE_BUFFER, lineLength)) {
+                    RF_DEBUG(0, "❌ Empty Categorizer file: ", file_path);
+                    success = false;
+                    break;
+                }
+
+                char* tokens[64];
+                size_t tokenCount = tokenize(line, ',', tokens, 64);
+                if (tokenCount != 6) {
+                    RF_DEBUG(0, "❌ Invalid Categorizer header token count");
+                    success = false;
+                    break;
+                }
+                for (size_t i = 0; i < tokenCount; ++i) {
+                    trim(tokens[i]);
+                }
+
+                if (strcmp(tokens[0], "CTG2") != 0) {
+                    RF_DEBUG(0, "❌ Unsupported Categorizer format identifier");
+                    success = false;
+                    break;
+                }
+
+                numFeatures = static_cast<uint16_t>(strtoul(tokens[1], nullptr, 10));
+                groupsPerFeature = static_cast<uint8_t>(strtoul(tokens[2], nullptr, 10));
+                numLabels = static_cast<uint8_t>(strtoul(tokens[3], nullptr, 10));
+                numSharedPatterns = static_cast<uint16_t>(strtoul(tokens[4], nullptr, 10));
+                scaleFactor = static_cast<uint32_t>(strtoul(tokens[5], nullptr, 10));
+
+                if (groupsPerFeature == 0) {
+                    RF_DEBUG(0, "❌ Invalid groupsPerFeature value in categorizer header");
+                    success = false;
+                    break;
+                }
+
                 featureRefs.reserve(numFeatures);
-                sharedPatterns.reserve(numSharedPatterns * (groupsPerFeature - 1));
-                
-                labelMapping.reserve(numLabels);
-                // Initialize label mapping with empty strings
-                for (uint8_t i = 0; i < numLabels; i++) {
-                    labelMapping.push_back("");
+                if (groupsPerFeature > 1) {
+                    sharedPatterns.reserve(static_cast<size_t>(numSharedPatterns) * (groupsPerFeature - 1));
+                    allUniqueEdges.reserve(static_cast<size_t>(numFeatures) * (groupsPerFeature - 1));
                 }
-                
+                allDiscreteValues.reserve(static_cast<size_t>(numFeatures) * groupsPerFeature);
+                labelOffsets.resize(numLabels, UINT16_MAX);
+                labelLengths.resize(numLabels, 0);
+                labelStorage.reserve(numLabels * 8);
+
                 // Read label mappings: L,normalizedId,originalLabel
-                while (file.available()) {
-                    String line = file.readStringUntil('\n');
-                    line.trim();
-                    if (line.startsWith("L,")) {
-                        auto parts = split(line, ',');
-                        if (parts.size() >= 3) {
-                            uint8_t id = parts[1].toInt();
-                            String originalLabel = parts[2];
-                            if (id < numLabels) {
-                                labelMapping[id] = originalLabel;
-                            }
-                        }
-                    } else {
-                        // Rewind to read this line again as it's not a label
-                        file.seek(file.position() - line.length() - 1);
+                while (true) {
+                    size_t lineStart = file.position();
+                    if (!readTrimmedLine(file, line, MAX_LINE_BUFFER, lineLength)) {
+                        break;
+                    }
+
+                    if (strncmp(line, "L,", 2) != 0) {
+                        file.seek(lineStart);
+                        break;
+                    }
+
+                    char* idText = line + 2;
+                    char* comma = strchr(idText, ',');
+                    if (!comma) {
+                        RF_DEBUG(0, "❌ Invalid label line format");
+                        success = false;
+                        break;
+                    }
+                    *comma = '\0';
+                    trim(idText);
+
+                    char* labelText = comma + 1;
+                    trim(labelText);
+
+                    uint8_t labelId = static_cast<uint8_t>(strtoul(idText, nullptr, 10));
+                    if (!storeLabel(labelId, labelText)) {
+                        RF_DEBUG(0, "❌ Failed to store label mapping");
+                        success = false;
                         break;
                     }
                 }
-                // Skip label lines
-                while (file.available()) {
-                    String line = file.readStringUntil('\n');
-                    line.trim();
-                    if (!line.startsWith("L,")) {
-                        file.seek(file.position() - line.length() - 1);
-                        break;
-                    }
+                if (!success) {
+                    break;
                 }
-                
+
                 // Read shared patterns: P,patternId,edgeCount,e1,e2,...
-                for (uint16_t i = 0; i < numSharedPatterns; i++) {
-                    if (!file.available()) {
-                        RF_DEBUG(0, "❌ Unexpected end of file reading patterns");
-                        file.close();
-                        return false;
+                char* patternTokens[64];
+                for (uint16_t i = 0; i < numSharedPatterns; ++i) {
+                    if (!readTrimmedLine(file, line, MAX_LINE_BUFFER, lineLength)) {
+                        RF_DEBUG(0, "❌ Unexpected end of file while reading shared patterns");
+                        success = false;
+                        break;
                     }
-                    
-                    String patternLine = file.readStringUntil('\n');
-                    patternLine.trim();
-                    auto parts = split(patternLine, ',');
-                    
-                    if (parts.size() < 3 || parts[0] != "P") {
+                    size_t count = tokenize(line, ',', patternTokens, 64);
+                    if (count < 3) {
                         RF_DEBUG(0, "❌ Invalid pattern line format");
-                        file.close();
-                        return false;
+                        success = false;
+                        break;
                     }
-                    
-                    uint16_t patternId = parts[1].toInt();
-                    uint16_t edgeCount = parts[2].toInt();
-                    
-                    if (parts.size() != (3 + edgeCount)) {
-                        RF_DEBUG_2(0, "❌ Pattern edge count mismatch - Expected: " ,3 + edgeCount ,", Found: ", parts.size());
-                        file.close();
-                        return false;
+                    for (size_t j = 0; j < count; ++j) {
+                        trim(patternTokens[j]);
                     }
-                    
-                    // Store edges in shared pattern array
-                    for (uint16_t j = 0; j < edgeCount; j++) {
-                        sharedPatterns.push_back(parts[3 + j].toInt());
+                    if (strcmp(patternTokens[0], "P") != 0) {
+                        RF_DEBUG(0, "❌ Pattern line missing 'P' prefix");
+                        success = false;
+                        break;
+                    }
+
+                    (void)strtoul(patternTokens[1], nullptr, 10); // Pattern ID reserved for future validation
+                    uint16_t edgeCount = static_cast<uint16_t>(strtoul(patternTokens[2], nullptr, 10));
+                    if (count != static_cast<size_t>(3 + edgeCount)) {
+                        RF_DEBUG_2(0, "❌ Pattern edge count mismatch - Expected: ", 3 + edgeCount, ", Found: ", count);
+                        success = false;
+                        break;
+                    }
+
+                    for (uint16_t j = 0; j < edgeCount; ++j) {
+                        sharedPatterns.push_back(static_cast<uint16_t>(strtoul(patternTokens[3 + j], nullptr, 10)));
                     }
                 }
-                
+                if (!success) {
+                    break;
+                }
+
                 // Read feature definitions
-                for (uint16_t i = 0; i < numFeatures; i++) {
-                    if (!file.available()) {
-                        RF_DEBUG(0, "❌ Unexpected end of file reading features");
-                        file.close();
-                        return false;
+                char* featureTokens[64];
+                for (uint16_t i = 0; i < numFeatures; ++i) {
+                    if (!readTrimmedLine(file, line, MAX_LINE_BUFFER, lineLength)) {
+                        RF_DEBUG(0, "❌ Unexpected end of file while reading features");
+                        success = false;
+                        break;
                     }
-                    
-                    String featureLine = file.readStringUntil('\n');
-                    featureLine.trim();
-                    auto parts = split(featureLine, ',');
-                    
-                    if (parts.size() < 1) {
-                        RF_DEBUG(0, "❌ Invalid feature line format");
-                        file.close();
-                        return false;
+
+                    size_t count = tokenize(line, ',', featureTokens, 64);
+                    if (count == 0) {
+                        RF_DEBUG(0, "❌ Empty feature line encountered");
+                        success = false;
+                        break;
                     }
-                    
-                    if (parts[0] == "DF") {
-                        // Discrete full range
+                    for (size_t j = 0; j < count; ++j) {
+                        trim(featureTokens[j]);
+                    }
+
+                    if (strcmp(featureTokens[0], "DF") == 0) {
                         featureRefs.push_back(FeatureRef(FT_DF, 0, 0));
-                    } 
-                    else if (parts[0] == "DC") {
-                        // Discrete custom values
-                        if (parts.size() < 2) {
+                    } else if (strcmp(featureTokens[0], "DC") == 0) {
+                        if (count < 2) {
                             RF_DEBUG(0, "❌ Invalid DC line format");
-                            file.close();
-                            return false;
+                            success = false;
+                            break;
                         }
-                        
-                        uint8_t count = parts[1].toInt();
-                        if (parts.size() != (2 + count)) {
-                            RF_DEBUG_2(0, "❌ DC value count mismatch - Expected: ", 2 + count, ", Found: ", parts.size());
-                            file.close();
-                            return false;
+                        uint8_t customCount = static_cast<uint8_t>(strtoul(featureTokens[1], nullptr, 10));
+                        if (count != static_cast<size_t>(2 + customCount)) {
+                            RF_DEBUG_2(0, "❌ DC value count mismatch - Expected: ", 2 + customCount, ", Found: ", count);
+                            success = false;
+                            break;
                         }
-                        
-                        uint8_t offset = allDiscreteValues.size();
-                        for (uint8_t j = 0; j < count; j++) {
-                            allDiscreteValues.push_back(parts[2 + j].toInt());
+                        uint8_t offset = static_cast<uint8_t>(allDiscreteValues.size());
+                        for (uint8_t j = 0; j < customCount; ++j) {
+                            allDiscreteValues.push_back(static_cast<uint8_t>(strtoul(featureTokens[2 + j], nullptr, 10)));
                         }
-                        
-                        featureRefs.push_back(FeatureRef(FT_DC, count, offset));
-                    }
-                    else if (parts[0] == "CS") {
-                        // Continuous shared pattern
-                        if (parts.size() != 2) {
+                        featureRefs.push_back(FeatureRef(FT_DC, customCount, offset));
+                    } else if (strcmp(featureTokens[0], "CS") == 0) {
+                        if (count != 2) {
                             RF_DEBUG(0, "❌ Invalid CS line format");
-                            file.close();
-                            return false;
+                            success = false;
+                            break;
                         }
-                        
-                        uint16_t patternId = parts[1].toInt();
+                        uint16_t patternId = static_cast<uint16_t>(strtoul(featureTokens[1], nullptr, 10));
                         featureRefs.push_back(FeatureRef(FT_CS, patternId, 0));
-                    }
-                    else if (parts[0] == "CU") {
-                        // Continuous unique edges
-                        if (parts.size() < 2) {
+                    } else if (strcmp(featureTokens[0], "CU") == 0) {
+                        if (count < 2) {
                             RF_DEBUG(0, "❌ Invalid CU line format");
-                            file.close();
-                            return false;
+                            success = false;
+                            break;
                         }
-                        
-                        uint8_t edgeCount = parts[1].toInt();
-                        if (parts.size() != (2 + edgeCount)) {
-                            RF_DEBUG_2(0, "❌ CU edge count mismatch - Expected: ", 2 + edgeCount, ", Found: ", parts.size());
-                            file.close();
-                            return false;
+                        uint8_t edgeCount = static_cast<uint8_t>(strtoul(featureTokens[1], nullptr, 10));
+                        if (count != static_cast<size_t>(2 + edgeCount)) {
+                            RF_DEBUG_2(0, "❌ CU edge count mismatch - Expected: ", 2 + edgeCount, ", Found: ", count);
+                            success = false;
+                            break;
                         }
-                        
-                        uint8_t offset = allUniqueEdges.size() / (groupsPerFeature - 1);
-                        for (uint8_t j = 0; j < edgeCount; j++) {
-                            allUniqueEdges.push_back(parts[2 + j].toInt());
+                        if (groupsPerFeature <= 1) {
+                            RF_DEBUG(0, "❌ Invalid groupsPerFeature for CU definition");
+                            success = false;
+                            break;
                         }
-                        
+                        uint16_t divisor = static_cast<uint16_t>(groupsPerFeature - 1);
+                        if (divisor == 0) {
+                            RF_DEBUG(0, "❌ Division by zero in CU offset calculation");
+                            success = false;
+                            break;
+                        }
+                        uint8_t offset = static_cast<uint8_t>(allUniqueEdges.size() / divisor);
+                        for (uint8_t j = 0; j < edgeCount; ++j) {
+                            allUniqueEdges.push_back(static_cast<uint16_t>(strtoul(featureTokens[2 + j], nullptr, 10)));
+                        }
                         featureRefs.push_back(FeatureRef(FT_CU, edgeCount, offset));
-                    }
-                    else {
-                        RF_DEBUG(0, "❌ Unknown feature type: ", parts[0]);
-                        file.close();
-                        return false;
+                    } else {
+                        RF_DEBUG(0, "❌ Unknown feature type encountered");
+                        success = false;
+                        break;
                     }
                 }
-                
-                file.close();
-                isLoaded = true;
-                RF_DEBUG(1, "✅ Categorizer loaded successfully! : ", file_path);
-                RF_DEBUG_2(2, "📊 Features: ", numFeatures, ", Groups: ", groupsPerFeature);
-                RF_DEBUG_2(2, "   Labels: ", numLabels, ", Patterns: ", numSharedPatterns);
-                RF_DEBUG(2, "   Scale Factor: ", scaleFactor);
-                return true;
-                
-            } catch (...) {
-                RF_DEBUG(0, "❌ Error parsing Categorizer file: ", file_path);
-                file.close();
+            } while (false);
+
+            file.close();
+
+            if (!success) {
+                resetData();
                 return false;
             }
+
+            isLoaded = true;
+            RF_DEBUG(1, "✅ Categorizer loaded successfully! : ", file_path);
+            RF_DEBUG_2(2, "📊 Features: ", numFeatures, ", Groups: ", groupsPerFeature);
+            RF_DEBUG_2(2, "   Labels: ", numLabels, ", Patterns: ", numSharedPatterns);
+            RF_DEBUG(2, "   Scale Factor: ", scaleFactor);
+            return true;
         }
         
         
@@ -3068,21 +3216,24 @@ namespace mcu {
             sharedPatterns.clear();
             allUniqueEdges.clear();
             allDiscreteValues.clear();
-            labelMapping.clear();
+            labelOffsets.clear();
+            labelLengths.clear();
+            labelStorage.clear();
             isLoaded = false;
             RF_DEBUG(2, "🧹 Categorizer data released from memory");
         }
 
-        // categorize features array
-        packed_vector<2> categorizeFeatures(const float* features, size_t featureCount = 0) const {
+        // categorize features array - optimized to pre-allocate exact size
+        __attribute__((always_inline)) inline packed_vector<2> categorizeFeatures(const float* features, size_t featureCount = 0) const {
             if (featureCount == 0) {
-                RF_DEBUG(2, "⚠️ Feature count not provided, assuming: ", numFeatures);
                 featureCount = numFeatures;
             }
-            packed_vector<2> result;
-            result.reserve(numFeatures);
+            // Pre-allocate to exact size to avoid reallocation
+            packed_vector<2> result(numFeatures, 0);
+            
+            // Direct write to avoid push_back overhead
             for (uint16_t i = 0; i < numFeatures; ++i) {
-                result.push_back(categorizeFeature(i, features[i]));
+                result.set(i, categorizeFeature(i, features[i]));
             }
             return result;
         }
@@ -3111,27 +3262,89 @@ namespace mcu {
             usage += sharedPatterns.size() * sizeof(uint16_t);
             usage += allUniqueEdges.size() * sizeof(uint16_t);
             usage += allDiscreteValues.size() * sizeof(uint8_t);
-            
-            // Label mappings
-            for (const auto& label : labelMapping) {
-                usage += label.length() + sizeof(String);
-            }
+            usage += labelOffsets.size() * sizeof(uint16_t);
+            usage += labelLengths.size() * sizeof(uint16_t);
+            usage += labelStorage.size() * sizeof(char);
             
             return usage;
         }
 
-        String getOriginalLabel(uint8_t normalizedLabel) const {
-            if (normalizedLabel < labelMapping.size() && normalizedLabel != 255) {
-                return labelMapping[normalizedLabel];
+        const char* getOriginalLabelPtr(uint8_t normalizedLabel) const {
+            if (normalizedLabel >= labelOffsets.size()) {
+                return nullptr;
             }
-            return "ERROR";
+            uint16_t offset = labelOffsets[normalizedLabel];
+            if (offset == UINT16_MAX || offset >= labelStorage.size()) {
+                return nullptr;
+            }
+            return &labelStorage[offset];
         }
+
+        bool getOriginalLabelView(uint8_t normalizedLabel, const char** outData, uint16_t* outLength = nullptr) const {
+            if (!outData) {
+                return false;
+            }
+            const char* data = getOriginalLabelPtr(normalizedLabel);
+            if (!data) {
+                *outData = nullptr;
+                if (outLength) {
+                    *outLength = 0;
+                }
+                return false;
+            }
+            *outData = data;
+            if (outLength) {
+                uint16_t cached = (normalizedLabel < labelLengths.size()) ? labelLengths[normalizedLabel] : 0;
+                if (cached == 0) {
+                    cached = static_cast<uint16_t>(strlen(data));
+                }
+                *outLength = cached;
+            }
+            return true;
+        }
+
+        bool getOriginalLabel(uint8_t normalizedLabel, char* buffer, size_t bufferSize) const {
+            if (!buffer || bufferSize == 0) {
+                return false;
+            }
+            const char* labelPtr = getOriginalLabelPtr(normalizedLabel);
+            if (!labelPtr) {
+                buffer[0] = '\0';
+                return false;
+            }
+            uint16_t length = (normalizedLabel < labelLengths.size()) ? labelLengths[normalizedLabel] : 0;
+            if (length == 0) {
+                buffer[0] = '\0';
+                return true;
+            }
+            if (length >= bufferSize) {
+                memcpy(buffer, labelPtr, bufferSize - 1);
+                buffer[bufferSize - 1] = '\0';
+                return false;
+            }
+            memcpy(buffer, labelPtr, length);
+            buffer[length] = '\0';
+            return true;
+        }
+
         // mapping from original label to normalized label 
-        uint8_t getNormalizedLabel(const String& originalLabel) const {
-            if (originalLabel == "ERROR" || originalLabel.length() == 0) return 255;
-            if (labelMapping.size() == 0) return 255;
-            for (uint8_t i = 0; i < labelMapping.size(); i++) {
-                if (labelMapping[i] == originalLabel) {
+        uint8_t getNormalizedLabel(const char* originalLabel) const {
+            if (!originalLabel || originalLabel[0] == '\0') {
+                return 255;
+            }
+            for (uint8_t i = 0; i < labelOffsets.size(); ++i) {
+                uint16_t offset = labelOffsets[i];
+                if (offset == UINT16_MAX || offset >= labelStorage.size()) {
+                    continue;
+                }
+                uint16_t length = (i < labelLengths.size()) ? labelLengths[i] : 0;
+                if (length == 0) {
+                    if (originalLabel[0] == '\0') {
+                        return i;
+                    }
+                    continue;
+                }
+                if (strncmp(originalLabel, &labelStorage[offset], length) == 0 && originalLabel[length] == '\0') {
                     return i;
                 }
             }
@@ -4198,35 +4411,35 @@ namespace mcu {
             }
 
             uint8_t predict_features(const packed_vector<2>& features) {
-                if(trees.empty() || !is_loaded) {
+                if(__builtin_expect(trees.empty() || !is_loaded, 0)) {
                     RF_DEBUG(2, "❌ Forest not loaded or empty, cannot predict.");
                     return 255; // Unknown class
                 }
-                int16_t totalPredict = 0;
-                predictClass.clear();
                 
-                // Use streaming prediction 
-                for(auto& tree : trees){
-                    uint8_t predict = tree.predict_features(features); 
-                    if(predict < config_ptr->num_labels){
-                        predictClass[predict]++;
-                        totalPredict++;
-                    }
-                }
-                if(totalPredict == 0) {
-                    return 255; 
-                }
-
-                int16_t max = -1;
-                uint8_t mostPredict = 255;
-                for(const auto& predict : predictClass){
-                    if(predict.second > max){
-                        max = predict.second;
-                        mostPredict = predict.first;
+                // Use fixed array for vote counting - much faster than unordered_map
+                const uint8_t numLabels = config_ptr->num_labels;
+                uint8_t votes[RF_MAX_LABELS] = {0};  // Stack allocation, zero-initialized
+                
+                // Collect votes from all trees
+                const uint16_t numTrees = trees.size();
+                for(uint16_t t = 0; t < numTrees; ++t) {
+                    uint8_t predict = trees[t].predict_features(features);
+                    if(__builtin_expect(predict < numLabels, 1)) {
+                        votes[predict]++;
                     }
                 }
                 
-                return mostPredict;
+                // Find majority vote - single pass
+                uint8_t maxVotes = 0;
+                uint8_t mostPredict = 0;
+                for(uint8_t label = 0; label < numLabels; ++label) {
+                    if(votes[label] > maxVotes) {
+                        maxVotes = votes[label];
+                        mostPredict = label;
+                    }
+                }
+                
+                return (maxVotes > 0) ? mostPredict : 255;
             }
 
             class iterator {

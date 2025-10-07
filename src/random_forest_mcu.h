@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Rf_components.h"
+#include <cstdio>
 
 namespace mcu{
     
@@ -913,32 +914,67 @@ namespace mcu{
             // clean_forest();
         }
 
-        // Public API: predict() takes raw float data and returns actual label (String)
+        // Public API: predict() fills the provided label buffer with the predicted label and optionally returns the label index
         template<typename T>
-        String predict(const T& features) {
-            // Static assert to ensure T is the right type
+        bool predict(const T& features, char* labelBuffer, size_t bufferSize, uint8_t* outLabel = nullptr) {
             static_assert(mcu::is_supported_vector<T>::value, "Unsupported type. Use mcu::vector or mcu::b_vector.");
-            return predict(features.data(), features.size());
+            return predict(features.data(), features.size(), labelBuffer, bufferSize, outLabel);
         }
 
-        // Public API: predict() takes raw float pointer and returns actual label (String)
-        String predict(const float* features, size_t length = 0){
-            if(length != config.num_features){
-                if constexpr(RF_DEBUG_LEVEL > 1)
-                Serial.println("❌ Feature length mismatch!");
-                return "ERROR";
+        bool predict(const float* features, size_t length, char* labelBuffer, size_t bufferSize, uint8_t* outLabel = nullptr) {
+            const bool copyLabel = (labelBuffer != nullptr && bufferSize > 0);
+
+            if (__builtin_expect(length != config.num_features, 0)) {
+                if constexpr (RF_DEBUG_LEVEL > 1) {
+                    Serial.println("❌ Feature length mismatch!");
+                }
+                if (copyLabel) {
+                    labelBuffer[0] = '\0';
+                }
+                return false;
             }
 
+            // Inline categorization to avoid packed_vector copy overhead
             packed_vector<2> c_features = categorizer.categorizeFeatures(features, length);
             uint8_t i_label = forest_container.predict_features(c_features);
-            if(config.enable_retrain){
-                // Add sample to pending data for potential retraining
+
+            // Fast path: store label index first (most common operation)
+            if (outLabel) {
+                *outLabel = i_label;
+            }
+
+            // Deferred: only handle retraining if enabled (less common)
+            if (__builtin_expect(config.enable_retrain, 0)) {
                 Rf_sample sample;
-                sample.features = c_features;
-                sample.label = i_label; // Store predicted label
+                sample.features = std::move(c_features);
+                sample.label = i_label;
                 pending_data.add_pending_sample(sample, base_data);
             }
-            return categorizer.getOriginalLabel(i_label);
+
+            // Fast path: if no label buffer requested, return early
+            if (!copyLabel) {
+                return true;
+            }
+
+            // Label string lookup and copy
+            const char* labelPtr = nullptr;
+            uint16_t labelLen = 0;
+            if (__builtin_expect(!categorizer.getOriginalLabelView(i_label, &labelPtr, &labelLen), 0)) {
+                labelBuffer[0] = '\0';
+                return false;
+            }
+
+            // Optimized string copy
+            if (labelLen >= bufferSize) {
+                memcpy(labelBuffer, labelPtr, bufferSize - 1);
+                labelBuffer[bufferSize - 1] = '\0';
+                return false;
+            }
+            if (labelLen > 0) {
+                memcpy(labelBuffer, labelPtr, labelLen);
+            }
+            labelBuffer[labelLen] = '\0';
+            return true;
         }
 
         /**
@@ -951,31 +987,43 @@ namespace mcu{
             pending_data.set_max_wait_time(timeout);
         }
 
-        // Add actual label into stack of pending data.
-        // accepts String, const char*, char[], int, float
-        void add_actual_label(const String& label){
+        void add_actual_label(const char* label){
+            if (!label) {
+                return;
+            }
             uint8_t i_label = categorizer.getNormalizedLabel(label);
             if(i_label < config.num_labels){
                 pending_data.add_actual_label(i_label);
             } else {
-                if constexpr(RF_DEBUG_LEVEL > 1)
-                Serial.printf("❌ Unknown label: %s\n", label.c_str());
+                if constexpr(RF_DEBUG_LEVEL > 1) {
+                    Serial.printf("❌ Unknown label: %s\n", label);
+                }
             }
         }
 
         // Add actual label into stack of pending data.
-        // accepts String, const char*, char[], int, float
         template<typename T>
         void add_actual_label(const T& label) {
             using U = std::decay_t<T>;
-            static_assert(
+            if constexpr (
                 std::is_same_v<U, const char*> ||
-                std::is_same_v<U, char*> ||
-                (std::is_array_v<U> && std::is_same_v<std::remove_extent_t<U>, const char>) ||
-                std::is_arithmetic_v<U>,
-                "add_actual_label: T must be one of: String, const char*, or a numeric type"
-            );
-            add_actual_label(String(label));
+                std::is_same_v<U, char*>
+            ) {
+                add_actual_label(static_cast<const char*>(label));
+            } else if constexpr (std::is_array_v<T> && std::is_same_v<std::remove_extent_t<T>, char>) {
+                add_actual_label(&label[0]);
+            } else if constexpr (std::is_integral_v<U>) {
+                char buffer[32];
+                long long value = static_cast<long long>(label);
+                snprintf(buffer, sizeof(buffer), "%lld", value);
+                add_actual_label(buffer);
+            } else if constexpr (std::is_floating_point_v<U>) {
+                char buffer[32];
+                snprintf(buffer, sizeof(buffer), "%.6f", static_cast<double>(label));
+                add_actual_label(buffer);
+            } else {
+                static_assert(std::is_same_v<U, void>, "add_actual_label: unsupported label type");
+            }
         }
 
         /**
@@ -1091,9 +1139,6 @@ namespace mcu{
             random_generator.seed(0ULL);
         }
         //  rename model.  This action will rename all forest file components.
-        void set_model_name(const String& name) {
-            base.set_model_name(name.c_str());
-        }
         void set_model_name(const char* name) {
             base.set_model_name(name);
         }
@@ -1221,14 +1266,12 @@ namespace mcu{
             return get_practical_inference_score(static_cast<uint8_t>(config.metric_score));
         }
 
-        // get name of model (forest)
-        String get_model_name() const {
-            char name[RF_PATH_BUFFER];
-            base.get_model_name(name, sizeof(name));
-            return String(name);
-        }
         void get_model_name(char* name, size_t length) const {
             base.get_model_name(name, length);
+        }
+
+        bool get_label_view(uint8_t normalizedLabel, const char** outLabel, uint16_t* outLength = nullptr) const {
+            return categorizer.getOriginalLabelView(normalizedLabel, outLabel, outLength);
         }
 
         size_t lowest_ram() const {

@@ -2,8 +2,6 @@
 
 #include "STL_MCU.h"  
 #include "Rf_file_manager.h"
-#include "FS.h"
-#include "LittleFS.h"
 #include "esp_system.h"
 
 
@@ -61,12 +59,12 @@
         }while(0)
 #endif
 
-static constexpr uint8_t  CHAR_BUFFER            = 64;            // buffer for file_path(limit to 2 level of file)
-static constexpr uint8_t  MAX_TREES              = 100;          // maximum number of trees in a forest
-static constexpr uint16_t MAX_LABELS             = 255;         // maximum number of unique labels supported 
-static constexpr uint16_t MAX_NUM_FEATURES       = 1023;       // maximum number of features
-static constexpr uint16_t MAX_NUM_SAMPLES        = 65535;     // maximum number of samples in a dataset
-static constexpr uint16_t MAX_NODES              = 2047;     // Maximum nodes per tree 
+static constexpr uint8_t  RF_PATH_BUFFER         = 64;            // buffer for file_path(limit to 2 level of file)
+static constexpr uint8_t  RF_MAX_TREES           = 100;          // maximum number of trees in a forest
+static constexpr uint16_t RF_MAX_LABELS          = 255;         // maximum number of unique labels supported 
+static constexpr uint16_t RF_MAX_FEATURES        = 1023;       // maximum number of features
+static constexpr uint16_t RF_MAX_SAMPLES         = 65535;     // maximum number of samples in a dataset
+static constexpr uint16_t RF_MAX_NODES           = 2047;     // Maximum nodes per tree 
 static constexpr size_t   MAX_DATASET_SIZE       = 150000;  // Max dataset file size - 150kB
 static constexpr size_t   MAX_INFER_LOGFILE_SIZE = 2048;   // Max log file size in bytes (1000 inferences)
 
@@ -142,7 +140,7 @@ namespace mcu {
         uint16_t bitsPerSample;                        // Number of bits per sample (numFeatures * 2)
         uint16_t samplesEachChunk;                     // Maximum samples per chunk
         size_t size_;  
-        char file_path[CHAR_BUFFER] = {0};          // dataset file_path (in LittleFS)
+        char file_path[RF_PATH_BUFFER] = {0};          // dataset file_path (in LittleFS)
 
     public:
         bool isLoaded;      
@@ -158,8 +156,8 @@ namespace mcu {
 
         // standard init 
         bool init(const char* file_path, uint16_t numFeatures) {
-            strncpy(this->file_path, file_path, CHAR_BUFFER);
-            this->file_path[CHAR_BUFFER - 1] = '\0';
+            strncpy(this->file_path, file_path, RF_PATH_BUFFER);
+            this->file_path[RF_PATH_BUFFER - 1] = '\0';
             bitsPerSample = numFeatures * 2;
             updateSamplesEachChunk();
             RF_DEBUG_2(1, "ℹ️ Rf_data initialized (", samplesEachChunk, "samples/chunk): ", file_path);
@@ -172,8 +170,8 @@ namespace mcu {
 
         // for temp base_data 
         bool init(const char* path) {
-            strncpy(this->file_path, path, CHAR_BUFFER);
-            file_path[CHAR_BUFFER - 1] = '\0';
+            strncpy(this->file_path, path, RF_PATH_BUFFER);
+            file_path[RF_PATH_BUFFER - 1] = '\0';
             isLoaded = false;
             sampleChunks.clear();
             allLabels.clear();
@@ -211,8 +209,8 @@ namespace mcu {
 
         // for temporary Rf_data (without saving to LittleFS)
         bool init(uint16_t numFeatures) {   
-            strncpy(this->file_path, "temp_data", CHAR_BUFFER);
-            file_path[CHAR_BUFFER - 1] = '\0';
+            strncpy(this->file_path, "temp_data", RF_PATH_BUFFER);
+            file_path[RF_PATH_BUFFER - 1] = '\0';
             bitsPerSample = numFeatures * 2;
             updateSamplesEachChunk();
             RF_DEBUG(1, "ℹ️ Temporary Rf_data initialized: ", file_path);
@@ -480,7 +478,7 @@ namespace mcu {
                 storeSample(s, validSamples);
                 validSamples++;
                 
-                if (validSamples >= MAX_NUM_SAMPLES) {
+                if (validSamples >= RF_MAX_SAMPLES) {
                     RF_DEBUG(1, "⚠️ Reached maximum sample limit");
                     break;
                 }
@@ -524,8 +522,8 @@ namespace mcu {
         }
 
         void setfile_path(const char* path) {
-            strncpy(this->file_path, path, CHAR_BUFFER);
-            this->file_path[CHAR_BUFFER - 1] = '\0';
+            strncpy(this->file_path, path, RF_PATH_BUFFER);
+            this->file_path[RF_PATH_BUFFER - 1] = '\0';
         }
 
         // Fast accessors for training-time hot paths (avoid reconstructing Rf_sample)
@@ -1071,10 +1069,10 @@ namespace mcu {
                 newNumSamples = currentNumSamples + samples.size();
                 
                 // Check limits
-                if (newNumSamples > MAX_NUM_SAMPLES) {
-                    size_t maxAddable = MAX_NUM_SAMPLES - currentNumSamples;
+                if (newNumSamples > RF_MAX_SAMPLES) {
+                    size_t maxAddable = RF_MAX_SAMPLES - currentNumSamples;
                     RF_DEBUG(2, "⚠️ Reaching maximum sample limit, limiting to ", maxAddable);
-                    newNumSamples = MAX_NUM_SAMPLES;
+                    newNumSamples = RF_MAX_SAMPLES;
                 }
                 
                 size_t newFileSize = headerSize + (newNumSamples * sampleDataSize);
@@ -1369,7 +1367,7 @@ namespace mcu {
         // Save tree to LittleFS for ESP32
         bool releaseTree(const char* path, bool re_use = false) {
             if(!re_use){
-                if (index > MAX_TREES || nodes.empty()) {
+                if (index > RF_MAX_TREES || nodes.empty()) {
                     RF_DEBUG(0, "❌ save tree failed, invalid tree index: ", index);
                     return false;
                 }
@@ -1439,7 +1437,7 @@ namespace mcu {
         bool loadTree(const char* path, bool re_use = false) {
             if (isLoaded) return true;
             
-            if (index >= MAX_TREES) {
+            if (index >= RF_MAX_TREES) {
                 RF_DEBUG(0, "❌ Invalid tree index: ", index);
                 return false;
             }
@@ -1548,7 +1546,7 @@ namespace mcu {
         void purgeTree(const char* path, bool rmf = true) {
             nodes.clear();
             nodes.fit(); // Release excess memory
-            if(rmf && index < MAX_TREES) {
+            if(rmf && index < RF_MAX_TREES) {
                 if (LittleFS.exists(path)) {
                     LittleFS.remove(path);
                     RF_DEBUG(2, "🗑️ Tree file removed: ", path);
@@ -1598,13 +1596,13 @@ namespace mcu {
     class Rf_base {
     private:
         uint16_t flags = 0; // flags indicating the status of member files
-        char model_name[CHAR_BUFFER] ={0};
+        char model_name[RF_PATH_BUFFER] ={0};
         
-        // Helper to build file paths: buffer must be at least CHAR_BUFFER size
+        // Helper to build file paths: buffer must be at least RF_PATH_BUFFER size
         // update: add parent folder : /model_name/model_name_suffix
-        inline void build_file_path(char* buffer, const char* suffix, int buffer_size = CHAR_BUFFER) const {
+        inline void build_file_path(char* buffer, const char* suffix, int buffer_size = RF_PATH_BUFFER) const {
             if (!buffer || buffer_size <= 0) return;
-            if (buffer_size > CHAR_BUFFER) buffer_size = CHAR_BUFFER;
+            if (buffer_size > RF_PATH_BUFFER) buffer_size = RF_PATH_BUFFER;
             snprintf(buffer, buffer_size, "/%s/%s%s", model_name, model_name, suffix);
         }
 
@@ -1616,7 +1614,7 @@ namespace mcu {
 
     private:
         void scan_current_resource() {
-            char filepath[CHAR_BUFFER];
+            char filepath[RF_PATH_BUFFER];
             // check : base data exists (binary or csv)
             build_file_path(filepath, "_nml.bin");
             if (!LittleFS.exists(filepath)) {
@@ -1710,8 +1708,8 @@ namespace mcu {
                 RF_DEBUG(0, "❌ Model name is empty. The process is aborted.");
                 return;
             }
-            strncpy(this->model_name, name, CHAR_BUFFER - 1);
-            this->model_name[CHAR_BUFFER - 1] = '\0';
+            strncpy(this->model_name, name, RF_PATH_BUFFER - 1);
+            this->model_name[RF_PATH_BUFFER - 1] = '\0';
             scan_current_resource();
         }
 
@@ -1729,8 +1727,8 @@ namespace mcu {
         Rf_base& operator=(const Rf_base& other) {
             if (this != &other) {
                 this->flags = other.flags;
-                strncpy(this->model_name, other.model_name, CHAR_BUFFER - 1);
-                this->model_name[CHAR_BUFFER - 1] = '\0';
+                strncpy(this->model_name, other.model_name, RF_PATH_BUFFER - 1);
+                this->model_name[RF_PATH_BUFFER - 1] = '\0';
             }
             return *this;
         }
@@ -1738,8 +1736,8 @@ namespace mcu {
         // copy constructor
         Rf_base(const Rf_base& other) {
             this->flags = other.flags;
-            strncpy(this->model_name, other.model_name, CHAR_BUFFER - 1);
-            this->model_name[CHAR_BUFFER - 1] = '\0';
+            strncpy(this->model_name, other.model_name, RF_PATH_BUFFER - 1);
+            this->model_name[RF_PATH_BUFFER - 1] = '\0';
         }
 
         // Get model name 
@@ -1750,9 +1748,9 @@ namespace mcu {
             }
         }
         // build Rf_data filepath : /model_name/filename.bin
-        void build_data_file_path(char* buffer, const char* filename, int buffer_size = CHAR_BUFFER) const {
+        void build_data_file_path(char* buffer, const char* filename, int buffer_size = RF_PATH_BUFFER) const {
             if (!buffer || buffer_size <= 0) return;
-            if (buffer_size > CHAR_BUFFER) buffer_size = CHAR_BUFFER;
+            if (buffer_size > RF_PATH_BUFFER) buffer_size = RF_PATH_BUFFER;
             if (filename[0] == '/') filename++;
             if (strstr(filename, ".bin") != nullptr) {
                 snprintf(buffer, buffer_size, "/%s/%s", model_name, filename);
@@ -1762,41 +1760,41 @@ namespace mcu {
         }
 
         // build tree file path : /model_name/tree_<index>.bin
-        void build_tree_file_path(char* buffer, uint8_t tree_index, int buffer_size = CHAR_BUFFER) const {
+        void build_tree_file_path(char* buffer, uint8_t tree_index, int buffer_size = RF_PATH_BUFFER) const {
             if (!buffer || buffer_size <= 0) return;
-            if (buffer_size > CHAR_BUFFER) buffer_size = CHAR_BUFFER;
+            if (buffer_size > RF_PATH_BUFFER) buffer_size = RF_PATH_BUFFER;
             snprintf(buffer, buffer_size, "/%s/tree_%d.bin", model_name, tree_index);
         }
 
         // File path getters 
-        inline void get_base_data_path(char* buffer, int buffer_size = CHAR_BUFFER )  
+        inline void get_base_data_path(char* buffer, int buffer_size = RF_PATH_BUFFER )  
                         const  { build_file_path(buffer, "_nml.bin", buffer_size); }
 
-        inline void get_dp_path(char* buffer, int buffer_size = CHAR_BUFFER ) 
+        inline void get_dp_path(char* buffer, int buffer_size = RF_PATH_BUFFER ) 
                         const { build_file_path(buffer, "_dp.csv", buffer_size); }
 
-        inline void get_ctg_path(char* buffer, int buffer_size = CHAR_BUFFER ) 
+        inline void get_ctg_path(char* buffer, int buffer_size = RF_PATH_BUFFER ) 
                         const { build_file_path(buffer, "_ctg.csv", buffer_size); }
 
-        inline void get_infer_log_path(char* buffer, int buffer_size = CHAR_BUFFER ) 
+        inline void get_infer_log_path(char* buffer, int buffer_size = RF_PATH_BUFFER ) 
                         const { build_file_path(buffer, "_infer_log.bin", buffer_size); }
 
-        inline void get_config_path(char* buffer, int buffer_size = CHAR_BUFFER ) 
+        inline void get_config_path(char* buffer, int buffer_size = RF_PATH_BUFFER ) 
                         const { build_file_path(buffer, "_config.json", buffer_size); }
 
-        inline void get_node_pred_path(char* buffer, int buffer_size = CHAR_BUFFER ) 
+        inline void get_node_pred_path(char* buffer, int buffer_size = RF_PATH_BUFFER ) 
                         const { build_file_path(buffer, "_node_pred.bin", buffer_size); }
 
-        inline void get_node_log_path(char* buffer, int buffer_size = CHAR_BUFFER ) 
+        inline void get_node_log_path(char* buffer, int buffer_size = RF_PATH_BUFFER ) 
                         const { build_file_path(buffer, "_node_log.csv", buffer_size); }
 
-        inline void get_forest_path(char* buffer, int buffer_size = CHAR_BUFFER ) 
+        inline void get_forest_path(char* buffer, int buffer_size = RF_PATH_BUFFER ) 
                         const { build_file_path(buffer, "_forest.bin", buffer_size); }
 
-        inline void get_time_log_path(char* buffer, int buffer_size = CHAR_BUFFER ) 
+        inline void get_time_log_path(char* buffer, int buffer_size = RF_PATH_BUFFER ) 
                         const { build_file_path(buffer, "_time_log.csv", buffer_size); }
 
-        inline void get_memory_log_path(char* buffer, int buffer_size = CHAR_BUFFER ) 
+        inline void get_memory_log_path(char* buffer, int buffer_size = RF_PATH_BUFFER ) 
                         const { build_file_path(buffer, "_memory_log.csv", buffer_size); }
 
         // status checkers
@@ -1811,19 +1809,19 @@ namespace mcu {
 
         // setters
         void set_model_name(const char* bn) {
-            char old_model_name[CHAR_BUFFER];
-            strncpy(old_model_name, model_name, CHAR_BUFFER - 1);
-            old_model_name[CHAR_BUFFER - 1] = '\0';
+            char old_model_name[RF_PATH_BUFFER];
+            strncpy(old_model_name, model_name, RF_PATH_BUFFER - 1);
+            old_model_name[RF_PATH_BUFFER - 1] = '\0';
             
             if (bn && strlen(bn) > 0) {
-                strncpy(model_name, bn, CHAR_BUFFER - 1);
-                model_name[CHAR_BUFFER - 1] = '\0';
+                strncpy(model_name, bn, RF_PATH_BUFFER - 1);
+                model_name[RF_PATH_BUFFER - 1] = '\0';
 
                 // find and rename all existing related files
-                char old_file[CHAR_BUFFER], new_file[CHAR_BUFFER];
+                char old_file[RF_PATH_BUFFER], new_file[RF_PATH_BUFFER];
                 auto rename_file = [&](const char* suffix) {
-                    snprintf(old_file, CHAR_BUFFER, "/%s%s", old_model_name, suffix);
-                    snprintf(new_file, CHAR_BUFFER, "/%s%s", model_name, suffix);
+                    snprintf(old_file, RF_PATH_BUFFER, "/%s%s", old_model_name, suffix);
+                    snprintf(new_file, RF_PATH_BUFFER, "/%s%s", model_name, suffix);
                     if (LittleFS.exists(old_file)) {
                         cloneFile(old_file, new_file);
                         LittleFS.remove(old_file);
@@ -1842,8 +1840,8 @@ namespace mcu {
                 rename_file("_time_log.csv");  // time log file
 
                 // tree files - handle both individual and unified formats
-                snprintf(old_file, CHAR_BUFFER, "/%s_forest.bin", old_model_name);
-                snprintf(new_file, CHAR_BUFFER, "/%s_forest.bin", model_name);
+                snprintf(old_file, RF_PATH_BUFFER, "/%s_forest.bin", old_model_name);
+                snprintf(new_file, RF_PATH_BUFFER, "/%s_forest.bin", model_name);
                 
                 if (LittleFS.exists(old_file)) {
                     // Handle unified model format
@@ -1851,9 +1849,9 @@ namespace mcu {
                     LittleFS.remove(old_file);
                 } else {
                     // Handle individual tree files
-                    for(uint8_t i = 0; i < MAX_TREES; i++) { // Max 50 trees check
-                        snprintf(old_file, CHAR_BUFFER, "/%s_tree_%d.bin", old_model_name, i);
-                        snprintf(new_file, CHAR_BUFFER, "/%s_tree_%d.bin", model_name, i);
+                    for(uint8_t i = 0; i < RF_MAX_TREES; i++) { // Max 50 trees check
+                        snprintf(old_file, RF_PATH_BUFFER, "/%s_tree_%d.bin", old_model_name, i);
+                        snprintf(new_file, RF_PATH_BUFFER, "/%s_tree_%d.bin", model_name, i);
                         if (LittleFS.exists(old_file)) {
                             cloneFile(old_file, new_file);
                             LittleFS.remove(old_file);
@@ -1936,9 +1934,8 @@ namespace mcu {
         uint8_t     max_depth;
         bool        use_boostrap;
         bool        use_gini;
-        uint8_t     k_fold;
+        uint8_t     k_folds;
         float       boostrap_ratio; 
-        float       unity_threshold;
         float       impurity_threshold;
         float       train_ratio;
         float       test_ratio;
@@ -1955,13 +1952,12 @@ namespace mcu {
         // runtime parameters
         pair<uint8_t, uint8_t> min_split_range;
         pair<uint8_t, uint8_t> max_depth_range; 
-        uint8_t num_epochs;
-
 
         // Dataset parameters 
         uint16_t num_samples;
         uint16_t num_features;
         uint8_t  num_labels; 
+        float lowest_distribution; 
         b_vector<uint16_t> samples_per_label; // index = label, value = count
 
         void init(Rf_base* base) {
@@ -1975,9 +1971,8 @@ namespace mcu {
             max_depth           = 13;
             use_boostrap        = true;
             boostrap_ratio      = 0.632f; 
-            use_gini            = true;
-            k_fold              = 4;
-            unity_threshold     = 0.0f;
+            use_gini            = false;
+            k_folds             = 4;
             impurity_threshold  = 0.0f;
             train_ratio         = 0.7;
             test_ratio          = 0.15;
@@ -1986,7 +1981,6 @@ namespace mcu {
             metric_score        = Rf_metric_scores::ACCURACY;
             result_score        = 0.0;
             estimatedRAM        = 0;
-            num_epochs          = 255;
             extend_base_data    = true;
             enable_retrain      = true;
             enable_auto_config  = false;
@@ -2007,7 +2001,7 @@ namespace mcu {
     private:
         //  scan base_data file to get dataset parameters (when no dp file found)
         bool scan_base_data(){
-            char base_file_path[CHAR_BUFFER];
+            char base_file_path[RF_PATH_BUFFER];
             base_ptr->get_base_data_path(base_file_path);
             RF_DEBUG(1, "📊 Scanning base data: ", base_file_path);
 
@@ -2127,6 +2121,46 @@ namespace mcu {
             max_depth_range = make_pair(min_maxDepth, max_maxDepth);
         }
 
+        void generate_impurity_threshold(){
+            // find lowest distribution
+            if (samples_per_label.size() == 0) {
+                impurity_threshold = 0.0f;
+                return;
+            }
+            for(auto & count : samples_per_label) {
+                if (count > 0) {
+                    float pct = 100.0f * static_cast<float>(count) / static_cast<float>(num_samples);
+                    if (pct < lowest_distribution) {
+                        lowest_distribution = pct;
+                    }
+                }
+            }
+
+            int K = max(2, static_cast<int>(num_labels));
+            float expected_min_pct = 100.0f / static_cast<float>(K);
+            float deficit = max(0.0f, expected_min_pct - lowest_distribution);
+            float imbalance = expected_min_pct > 0.0f ? min(1.0f, deficit / expected_min_pct) : 0.0f; // 0..1
+
+            double sample_factor_d = min(2.0, 0.75 + log2(max(2.0, static_cast<double>(num_samples))) / 12.0);
+            float sample_factor = static_cast<float>(sample_factor_d);
+            // Imbalance factor: reduce threshold for imbalanced data to allow splitting on rare classes
+            float imbalance_factor = 1.0f - 0.5f * imbalance; // 0.5..1.0
+            // Feature factor: with many features, weak splits are common; require slightly higher gain
+            float feature_factor = 0.9f + 0.1f * min(1.0f, static_cast<float>(log2(max(2, static_cast<int>(num_features)))) / 8.0f);
+
+            if (use_gini) {
+                float max_gini = 1.0f - 1.0f / static_cast<float>(K);
+                float base = 0.003f * max_gini; // very small base for Gini
+                float thr = base * sample_factor * imbalance_factor * feature_factor;
+                impurity_threshold = max(0.0005f, min(0.02f, thr));
+            } else { // entropy
+                float max_entropy = log2(static_cast<float>(K));
+                float base = 0.02f * (max_entropy > 0.0f ? max_entropy : 1.0f); // larger than gini
+                float thr = base * sample_factor * imbalance_factor * feature_factor;
+                impurity_threshold = max(0.005f, min(0.2f, thr));
+            }
+            RF_DEBUG(1, "⚙️ Setting impurity_threshold to ", impurity_threshold);
+        }
         // setup config manually (when no config file)
         void auto_config(){
             // set metric_score based on dataset balance
@@ -2175,11 +2209,12 @@ namespace mcu {
             }
             validate_ratios();
             generate_ranges();
+            generate_impurity_threshold(); // no prior distribution info
         }
         
         // read dataset parameters from /dataset_dp.csv and write to config
         bool loadDpFile() {
-            char path[CHAR_BUFFER];
+            char path[RF_PATH_BUFFER];
             base_ptr->get_dp_path(path);
             if (strlen(path) < 1) { 
                 RF_DEBUG(0, "❌ load dp file failed: ", "dp path is empty");
@@ -2260,7 +2295,7 @@ namespace mcu {
         
         // write back to dataset_params file
         bool releaseDpFile() {
-            char path[CHAR_BUFFER];
+            char path[RF_PATH_BUFFER];
             base_ptr->get_dp_path(path);
             if (path[0] == '\0') return false;
             File file = LittleFS.open(path, "w");
@@ -2319,24 +2354,20 @@ namespace mcu {
             }
             
             // config session
-            bool config_ok = false;
             String jsonString = "";
             if(base_ptr->config_file_exists()){
-                char file_path[CHAR_BUFFER];
+                char file_path[RF_PATH_BUFFER];
                 base_ptr->get_config_path(file_path);
                 File file = LittleFS.open(file_path, FILE_READ);
                 if (file) {
                     jsonString = file.readString();
                     file.close();
-                    config_ok = true;
-                    
-                    // Extract enable_auto_config first to determine loading strategy
-                    String enableAutoConfigStr = extractStringValue(jsonString, "enableAutoConfig");
-                    if (enableAutoConfigStr.length() > 0) {
-                        enable_auto_config = extractBoolValue(jsonString, "enableAutoConfig");
-                    }
+                    parseJSONConfig(jsonString);
+                    validate_ratios();
+                    generate_ranges();
                 } else {
                     RF_DEBUG(1, "⚠️ Failed to open config file: ", file_path);
+                    enable_auto_config = true; // Fallback to auto-config
                 }
             }else{
                 RF_DEBUG(1, "⚠️ No config file found, proceeding with auto-configuration");
@@ -2345,40 +2376,9 @@ namespace mcu {
             
             // Now decide loading strategy based on enable_auto_config
             if(enable_auto_config){
-                // Generate configuration based on current dataset parameters
                 RF_DEBUG(1, "🔧 Auto-config enabled: generating settings from dataset parameters");
                 auto_config();
-                
-                // Load user preferences from config file (don't override auto-generated settings)
-                if(config_ok){
-                    num_trees = extractIntValue(jsonString, "numTrees");
-                    random_seed = extractIntValue(jsonString, "randomSeed");
-                    
-                    // Load user preferences for data management
-                    String extendStr = extractStringValue(jsonString, "extendBaseData");
-                    if (extendStr.length() > 0) {
-                        extend_base_data = extractBoolValue(jsonString, "extendBaseData");
-                    }
-                    
-                    String retrainStr = extractStringValue(jsonString, "enableRetrain");
-                    if (retrainStr.length() > 0) {
-                        enable_retrain = extractBoolValue(jsonString, "enableRetrain");
-                    }
-                    
-                    RF_DEBUG(1, "✅ User preferences loaded from config file");
-                }
-                RF_DEBUG(1, "✅ Auto-configuration applied: ");
-            } else if(config_ok){
-                parseJSONConfig(jsonString);
-                generate_ranges();
-                validate_ratios();
-                RF_DEBUG(1, "✅ Configuration loaded from file: ");;
-            } else {
-                // No config file and auto_config disabled - use defaults but warn user
-                RF_DEBUG(1, "⚠️ No config file found and auto_config is disabled");
-                RF_DEBUG(1, "⚠️ Using default configuration - this may not be optimal!");
-                return false;
-            }
+            } 
             if constexpr (RF_DEBUG_LEVEL >1) print_config();
             isLoaded = true;
             return true;
@@ -2390,7 +2390,7 @@ namespace mcu {
                 RF_DEBUG(0, "❌ Save config failed: Config not loaded or base not ready");
                 return false;
             }
-            char file_path[CHAR_BUFFER];
+            char file_path[RF_PATH_BUFFER];
             base_ptr->get_config_path(file_path);
             String existingTimestamp = "";
             String existingAuthor = "Viettran";
@@ -2412,7 +2412,6 @@ namespace mcu {
                 return false;
             }
 
-            // Write JSON format preserving timestamp and author
             file.println("{");
             file.printf("  \"numTrees\": %d,\n", num_trees);
             file.printf("  \"randomSeed\": %d,\n", random_seed);
@@ -2425,8 +2424,7 @@ namespace mcu {
             file.printf("  \"boostrapRatio\": %.3f,\n", boostrap_ratio);
             file.printf("  \"criterion\": \"%s\",\n", use_gini ? "gini" : "entropy");
             file.printf("  \"trainingScore\": \"%s\",\n", getTrainingScoreString(training_score).c_str());
-            file.printf("  \"k_fold\": %d,\n", k_fold);
-            file.printf("  \"unityThreshold\": %.3f,\n", unity_threshold);
+            file.printf("  \"k_folds\": %d,\n", k_folds);
             file.printf("  \"impurityThreshold\": %.1f,\n", impurity_threshold);
             file.printf("  \"metric_score\": \"%s\",\n", getFlagString(metric_score).c_str());
             file.printf("  \"extendBaseData\": %s,\n", extend_base_data ? "true" : "false");
@@ -2434,15 +2432,13 @@ namespace mcu {
             file.printf("  \"enableAutoConfig\": %s,\n", enable_auto_config ? "true" : "false");
             file.printf("  \"resultScore\": %.6f,\n", result_score);
             file.printf("  \"Estimated RAM (bytes)\": %d,\n", estimatedRAM);
-            
-            // Preserve existing timestamp and author
+
             if (existingTimestamp.length() > 0) {
                 file.printf("  \"timestamp\": \"%s\",\n", existingTimestamp.c_str());
             }
             if (existingAuthor.length() > 0) {
                 file.printf("  \"author\": \"%s\"\n", existingAuthor.c_str());
             } else {
-                // Remove trailing comma if no author
                 file.seek(file.position() - 2); // Go back to remove ",\n"
                 file.println("");
             }
@@ -2474,8 +2470,7 @@ namespace mcu {
             String criterion = extractStringValue(jsonStr, "criterion");
             use_gini = (criterion == "gini");  // true for "gini", false for "entropy"
             
-            k_fold = extractIntValue(jsonStr, "k_fold");                  
-            unity_threshold = extractFloatValue(jsonStr, "unityThreshold");
+            k_folds = extractIntValue(jsonStr, "k_folds");                  
             impurity_threshold = extractFloatValue(jsonStr, "impurityThreshold");
             train_ratio = extractFloatValue(jsonStr, "train_ratio");      
             test_ratio = extractFloatValue(jsonStr, "test_ratio");        
@@ -2652,8 +2647,7 @@ namespace mcu {
             RF_DEBUG(1, "   - use_bootstrap: ", use_boostrap ? "true" : "false");
             RF_DEBUG(1, "   - bootstrap_ratio: ", boostrap_ratio);
             RF_DEBUG(1, "   - criterion: ", use_gini ? "gini" : "entropy");
-            RF_DEBUG(1, "   - k_fold: ", k_fold);
-            RF_DEBUG(1, "   - unity_threshold: ", unity_threshold);
+            RF_DEBUG(1, "   - k_folds: ", k_folds);
             RF_DEBUG(1, "   - impurity_threshold: ", impurity_threshold);
             RF_DEBUG(1, "   - training_score: ", getTrainingScoreString(training_score).c_str());
             RF_DEBUG(1, "   - metric_score: ", getFlagString(metric_score).c_str());
@@ -2848,7 +2842,7 @@ namespace mcu {
                 RF_DEBUG(0, "❌ Load Categorizer failed: data pointer not ready");
                 return false;
             }
-            char file_path[CHAR_BUFFER];
+            char file_path[RF_PATH_BUFFER];
             base_ptr->get_ctg_path(file_path);
             if (!LittleFS.exists(file_path)) {
                 RF_DEBUG(0, "❌ Categorizer file not found: ", file_path);
@@ -3127,7 +3121,7 @@ namespace mcu {
         }
 
         String getOriginalLabel(uint8_t normalizedLabel) const {
-            if (normalizedLabel < labelMapping.size()) {
+            if (normalizedLabel < labelMapping.size() && normalizedLabel != 255) {
                 return labelMapping[normalizedLabel];
             }
             return "ERROR";
@@ -3242,7 +3236,7 @@ namespace mcu {
                 coefficients[i] = 0.0f;
             }
             // get logfile path from file_path : "/model_name_node_pred.bin" -> "/model_name_node_log.csv"
-            char node_predictor_log[CHAR_BUFFER] = {0};
+            char node_predictor_log[RF_PATH_BUFFER] = {0};
             if (base_ptr) {
                 base_ptr->get_node_log_path(node_predictor_log);
             }
@@ -3262,7 +3256,7 @@ namespace mcu {
                 RF_DEBUG(0, "❌ Load Predictor failed: base pointer not ready");
                 return false;
             }
-            char file_path[CHAR_BUFFER];
+            char file_path[RF_PATH_BUFFER];
             base_ptr->get_node_pred_path(file_path);
             RF_DEBUG(2, "🔍 Loading node predictor from file: ", file_path);
             if(is_trained) return true;
@@ -3296,15 +3290,10 @@ namespace mcu {
             // Read accuracy and peak_percent
             if (file.read((uint8_t*)&accuracy, sizeof(accuracy)) != sizeof(accuracy)) {
                 RF_DEBUG(2, "⚠️ Failed to read accuracy, using manual estimate node.");
-                // file.close();
-                // return false;
-
             }
             
             if (file.read((uint8_t*)&peak_percent, sizeof(peak_percent)) != sizeof(peak_percent)) {
                 RF_DEBUG(2, "⚠️ Failed to read peak_percent, using manual estimate node.");
-                // file.close();
-                // return false;
             }
             
             // Read number of coefficients
@@ -3353,7 +3342,7 @@ namespace mcu {
                 RF_DEBUG(1, "❌ Predictor is not trained, cannot save.");
                 return false;
             }
-            char file_path[CHAR_BUFFER];
+            char file_path[RF_PATH_BUFFER];
             base_ptr->get_node_pred_path(file_path);
             if (LittleFS.exists(file_path)) LittleFS.remove(file_path);
 
@@ -3401,7 +3390,7 @@ namespace mcu {
                 RF_DEBUG(0, "❌ Base pointer is null, cannot retrain predictor.");
                 return false;
             }
-            char node_predictor_log[CHAR_BUFFER];
+            char node_predictor_log[RF_PATH_BUFFER];
             base_ptr->get_node_log_path(node_predictor_log);
             RF_DEBUG(2, "🔂 Starting retraining of node predictor...");
             if(!can_retrain()) {
@@ -3617,7 +3606,7 @@ namespace mcu {
             float raw_est = raw_estimate(min_split, max_depth);
             if(accuracy == 0) accuracy = 0.85f;
             uint16_t estimate = static_cast<uint16_t>(raw_est * 100 / accuracy);
-            return estimate < MAX_NODES ? estimate : 512;       // 2kB RAM
+            return estimate < RF_MAX_NODES ? estimate : 512;       // 2kB RAM
         }
 
         uint16_t estimate_nodes(Rf_config& config) {
@@ -3627,9 +3616,9 @@ namespace mcu {
             if(accuracy == 0) accuracy = 0.85f;
             uint16_t estimate = static_cast<uint16_t>(raw_est * 100 / accuracy);
             if(config.training_score == K_FOLD_SCORE){
-                estimate = estimate * config.k_fold / (config.k_fold + 1);
+                estimate = estimate * config.k_folds / (config.k_folds + 1);
             }
-            return estimate < MAX_NODES ? estimate : 512;       // 2kB RAM
+            return estimate < RF_MAX_NODES ? estimate : 512;       // 2kB RAM
         }
 
         uint16_t queue_peak_size(uint8_t min_split, uint16_t max_depth) {
@@ -3639,10 +3628,10 @@ namespace mcu {
         uint16_t queue_peak_size(Rf_config& config) {
             uint16_t est_nodes = estimate_nodes(config);
             if(config.training_score == K_FOLD_SCORE){
-                est_nodes = est_nodes * config.k_fold / (config.k_fold + 1);
+                est_nodes = est_nodes * config.k_folds / (config.k_folds + 1);
             }
             est_nodes = static_cast<uint16_t>(est_nodes * peak_percent / 100);
-            uint16_t max_peak_theory = static_cast<uint16_t>(MAX_NODES * 0.3f);
+            uint16_t max_peak_theory = static_cast<uint16_t>(RF_MAX_NODES * 0.3f);
             uint16_t min_peak_theory = 30;
             if (est_nodes > max_peak_theory) return max_peak_theory;
             if (est_nodes < min_peak_theory) return min_peak_theory;
@@ -3653,7 +3642,7 @@ namespace mcu {
                 RF_DEBUG(0, "❌Failed to add_buffer : base pointer is null");
                 return;
             }
-            char node_predictor_log[CHAR_BUFFER];
+            char node_predictor_log[RF_PATH_BUFFER];
             base_ptr->get_node_log_path(node_predictor_log);
             if (new_samples.size() == 0) return;
             // Read all existing lines
@@ -3702,7 +3691,7 @@ namespace mcu {
         // Check if training log is available and size of the file is greater than 0
         bool can_retrain() const {
             if (!has_base()) return false;
-            char node_predictor_log[CHAR_BUFFER];
+            char node_predictor_log[RF_PATH_BUFFER];
             base_ptr->get_node_log_path(node_predictor_log);
             if (!LittleFS.exists(node_predictor_log)) return false;
             File file = LittleFS.open(node_predictor_log, FILE_READ);
@@ -4096,7 +4085,7 @@ namespace mcu {
             // String model_name;
             Rf_base* base_ptr = nullptr;
             Rf_config* config_ptr = nullptr;
-            char tree_path_buffer[CHAR_BUFFER] = {0}; // Buffer for tree file paths
+            char tree_path_buffer[RF_PATH_BUFFER] = {0}; // Buffer for tree file paths
 
             vector<Rf_tree> trees;        // b_vector storing root nodes of trees (now manages LittleFS file_paths)
             size_t   total_depths;       // store total depth of all trees
@@ -4157,7 +4146,7 @@ namespace mcu {
                 trees.reserve(config_ptr->num_trees);
                 is_loaded = false;
                 // Remove old forest file to ensure clean slate
-                char oldForestFile[CHAR_BUFFER];
+                char oldForestFile[RF_PATH_BUFFER];
                 base_ptr->get_forest_path(oldForestFile);
                 if(LittleFS.exists(oldForestFile)) {
                     LittleFS.remove(oldForestFile);
@@ -4237,11 +4226,6 @@ namespace mcu {
                     }
                 }
                 
-                // Check certainty threshold
-                float certainty = static_cast<float>(max) / totalPredict;
-                if(certainty < config_ptr->unity_threshold) {
-                    return 255; 
-                }
                 return mostPredict;
             }
 
@@ -4337,7 +4321,7 @@ namespace mcu {
 
             // Load forest from unified format (single file containing all trees)
             bool loadForestUnified() {
-                char unifiedfile_path[CHAR_BUFFER];
+                char unifiedfile_path[RF_PATH_BUFFER];
                 base_ptr->get_forest_path(unifiedfile_path);
                 if(unifiedfile_path[0] == '\0' || !LittleFS.exists(unifiedfile_path)) {
                     RF_DEBUG(0, "❌ Unified forest file not found: ", unifiedfile_path);
@@ -4462,8 +4446,8 @@ namespace mcu {
             bool loadForestIndividual() {
                 RF_DEBUG(1, "📁 Loading from individual tree files...");
                 
-                char model_name[CHAR_BUFFER];
-                base_ptr->get_model_name(model_name, CHAR_BUFFER);
+                char model_name[RF_PATH_BUFFER];
+                base_ptr->get_model_name(model_name, RF_PATH_BUFFER);
                 
                 uint8_t successfullyLoaded = 0;
                 for (auto& tree : trees) {
@@ -4522,7 +4506,7 @@ namespace mcu {
                 }
                 
                 // Single file approach - write all trees to unified forest file
-                char unifiedfile_path[CHAR_BUFFER];
+                char unifiedfile_path[RF_PATH_BUFFER];
                 base_ptr->get_forest_path(unifiedfile_path);
                 if(unifiedfile_path[0] == '\0') {
                     RF_DEBUG(0, "❌ Cannot release forest: no base reference for file management");
@@ -4696,7 +4680,7 @@ namespace mcu {
     */
 
     class Rf_pending_data{
-        b_vector<Rf_sample> buffer; // buffer for pending samples
+        b_vector<Rf_sample> pending_samples; // buffer for pending samples
         b_vector<uint8_t> actual_labels; // true labels of the samples, default 255 (unknown/error label)
 
         uint16_t max_pending_samples; // max number of pending samples in buffer
@@ -4721,14 +4705,14 @@ namespace mcu {
         ~Rf_pending_data() {
             base_ptr = nullptr;
             config_ptr = nullptr;
-            buffer.clear();
+            pending_samples.clear();
             actual_labels.clear();
         }
 
         void init(Rf_base* base, Rf_config* config){
             base_ptr = base;
             config_ptr = config;
-            buffer.clear();
+            pending_samples.clear();
             actual_labels.clear();
             set_max_pending_samples(100);
             max_wait_time = 2147483647; // ~24 days
@@ -4736,13 +4720,13 @@ namespace mcu {
 
         // add pending sample to buffer, including the label predicted by the model
         void add_pending_sample(const Rf_sample& sample, Rf_data& base_data){
-            buffer.push_back(sample);
-            if(buffer.size() > max_pending_samples){
+            pending_samples.push_back(sample);
+            if(pending_samples.size() > max_pending_samples){
                 // Auto-flush if parameters are provided
                 if(ptr_ready()){
                     flush_pending_data(base_data);
                 } else {
-                    buffer.clear();
+                    pending_samples.clear();
                     actual_labels.clear();
                 }
             }
@@ -4757,7 +4741,7 @@ namespace mcu {
             while(ignore_index-- > 0) actual_labels.push_back(255); // push error label for ignored samples
 
             // all pending samples have been labeled, ignore this label
-            if(actual_labels.size() >= buffer.size()) return;
+            if(actual_labels.size() >= pending_samples.size()) return;
 
             actual_labels.push_back(true_label);
             last_time_received_actual_label = GET_CURRENT_TIME_IN_MILLISECONDS;
@@ -4773,7 +4757,7 @@ namespace mcu {
 
         // write valid samples (with 0 < actual_label < 255) to base_data file
         bool write_to_base_data(Rf_data& base_data){
-            if(buffer.empty()) {
+            if(pending_samples.empty()) {
                 RF_DEBUG(1, "⚠️ No pending samples to write to base data");
                 return false;
             }
@@ -4784,10 +4768,10 @@ namespace mcu {
             // first scan 
             uint16_t valid_samples_count = 0;
             b_vector<Rf_sample> valid_samples;
-            for(uint16_t i = 0; i < buffer.size() && i < actual_labels.size(); i++) {
+            for(uint16_t i = 0; i < pending_samples.size() && i < actual_labels.size(); i++) {
                 if(actual_labels[i] < 255) { // Valid actual label provided
                     valid_samples_count++;
-                    Rf_sample sample(buffer[i].features, actual_labels[i]);
+                    Rf_sample sample(pending_samples[i].features, actual_labels[i]);
                     valid_samples.push_back(sample);
                 }
             }
@@ -4801,11 +4785,11 @@ namespace mcu {
             // update config 
             if(config_ptr->extend_base_data) {
                 config_ptr->num_samples += valid_samples_count;
-                if(config_ptr->num_samples > MAX_NUM_SAMPLES) 
-                    config_ptr->num_samples = MAX_NUM_SAMPLES;
+                if(config_ptr->num_samples > RF_MAX_SAMPLES) 
+                    config_ptr->num_samples = RF_MAX_SAMPLES;
             }
 
-            for(uint16_t i = 0; i < buffer.size() && i < actual_labels.size(); i++) {
+            for(uint16_t i = 0; i < pending_samples.size() && i < actual_labels.size(); i++) {
                 if(actual_labels[i] < 255) { // Valid actual label provided
                     config_ptr->samples_per_label[actual_labels[i]]++;
                 }
@@ -4816,21 +4800,20 @@ namespace mcu {
                     config_ptr->samples_per_label[lbl]--;
                 }
             }
-            char data_path[CHAR_BUFFER];
+            char data_path[RF_PATH_BUFFER];
             base_ptr->get_base_data_path(data_path);
             RF_DEBUG_2(1, "✅ Added", valid_samples_count, "new samples to base data", data_path);
             return true;
         }
 
         // Write prediction which given actual label (0 < actual_label < 255) to the inference log file
-        // New format: magic (4 bytes) + prediction_count (4 bytes) + pairs of (predicted_label, actual_label) as uint8_t each
         bool write_to_infer_log(){
-            if(buffer.empty()) return false;
+            if(pending_samples.empty()) return false;
             if(!ptr_ready()){
                 RF_DEBUG(1, "❌ Cannot write to inference log: data pointers not ready");
                 return false;
             };
-            char infer_log_path[CHAR_BUFFER];
+            char infer_log_path[RF_PATH_BUFFER];
             base_ptr->get_infer_log_path(infer_log_path);
             if(infer_log_path[0] == '\0') {
                 RF_DEBUG(1, "❌ Cannot write to inference log: no base reference for file management");
@@ -4883,9 +4866,9 @@ namespace mcu {
             b_vector<uint8_t> prediction_pairs;
             uint32_t new_predictions = 0;
             
-            for(uint16_t i = 0; i < buffer.size() && i < actual_labels.size(); i++) {
+            for(uint16_t i = 0; i < pending_samples.size() && i < actual_labels.size(); i++) {
                 if(actual_labels[i] < 255) { // Valid actual label provided
-                    uint8_t predicted_label = buffer[i].label;
+                    uint8_t predicted_label = pending_samples[i].label;
                     uint8_t actual_label = actual_labels[i];
                     
                     // Write predicted_label followed by actual_label
@@ -4937,13 +4920,13 @@ namespace mcu {
 
         // Public method to flush pending data when buffer is full or on demand
         void flush_pending_data(Rf_data& base_data) {
-            if(buffer.empty()) return;
+            if(pending_samples.empty()) return;
             
             write_to_base_data(base_data);
             write_to_infer_log();
             
             // Clear buffers after processing
-            buffer.clear();
+            pending_samples.clear();
             actual_labels.clear();
         }
 
@@ -5047,8 +5030,8 @@ namespace mcu {
     };
 
     class Rf_logger {
-        char time_log_path[CHAR_BUFFER] = {'\0'};
-        char memory_log_path[CHAR_BUFFER] = {'\0'};
+        char time_log_path[RF_PATH_BUFFER] = {'\0'};
+        char memory_log_path[RF_PATH_BUFFER] = {'\0'};
         b_vector<time_anchor> time_anchors;
     public:
         uint32_t freeHeap;

@@ -60,22 +60,22 @@ namespace mcu{
             if(!clean_yet){
                 RF_DEBUG(0, "🧹 Cleaning files... ");
 
-                // //clone temp data back to base data after add new samples
-                // // if temp_base_data file size > original base_data file size, replace original file
-                // char base_path[CHAR_BUFFER];
-                // base.get_base_data_path(base_path, sizeof(base_path));
-                // File tempFile = LittleFS.open(temp_base_data, FILE_READ);
+                //clone temp data back to base data after add new samples
+                // if temp_base_data file size > original base_data file size, replace original file
+                char base_path[RF_PATH_BUFFER];
+                base.get_base_data_path(base_path, sizeof(base_path));
+                File tempFile = LittleFS.open(temp_base_data, FILE_READ);
 
-                // size_t tempSize = tempFile ? tempFile.size() : 0;
-                // tempFile.close();
-                // File baseFile = LittleFS.open(base_path, FILE_READ);
-                // size_t baseSize = baseFile ? baseFile.size() : 0;
-                // baseFile.close();
+                size_t tempSize = tempFile ? tempFile.size() : 0;
+                tempFile.close();
+                File baseFile = LittleFS.open(base_path, FILE_READ);
+                size_t baseSize = baseFile ? baseFile.size() : 0;
+                baseFile.close();
 
-                // if(tempSize > baseSize && config.enable_retrain){
-                //     remove(base_path);
-                //     cloneFile(temp_base_data, base_path);
-                // }
+                if(tempSize > baseSize && config.enable_retrain){
+                    remove(base_path);
+                    cloneFile(temp_base_data, base_path);
+                }
 
                 // clear all Rf_data
                 base_data.purgeData();
@@ -95,7 +95,7 @@ namespace mcu{
                 return false;
             }
             // clone base_data to temp_base_data to avoid modifying original data
-            char base_path[CHAR_BUFFER];
+            char base_path[RF_PATH_BUFFER];
             base.get_base_data_path(base_path, sizeof(base_path));
             cloneFile(base_path, temp_base_data);
             if(!base_data.init(temp_base_data)){
@@ -105,11 +105,14 @@ namespace mcu{
 
             // initialize data components
             dataList.reserve(config.num_trees);
-            char path[CHAR_BUFFER];
+            char path[RF_PATH_BUFFER];
+
             base.build_data_file_path(path, "train_data");
             train_data.init(path, config.num_features);
+
             base.build_data_file_path(path, "test_data");
             test_data.init(path, config.num_features);
+
             if(config.use_validation()){
                 base.build_data_file_path(path, "valid_data");
                 validation_data.init(path, config.num_features);
@@ -126,8 +129,9 @@ namespace mcu{
             splitData(base_data, dest);
             dest.clear(); 
             ClonesData();
+
             // build forest
-            if(!MakeForest()){
+            if(!build_forest()){
                 RF_DEBUG(0, "❌ Error building forest");
                 return false;
             }
@@ -135,7 +139,7 @@ namespace mcu{
         }
 
     private:
-        bool MakeForest(){
+        bool build_forest(){
             size_t start = logger.drop_anchor();
             // Clear any existing forest first
             forest_container.clearForest();
@@ -337,7 +341,7 @@ namespace mcu{
                     if (sampleID < data.size()) {
                         uint8_t label = data.getLabel(sampleID);
                         labels.insert(label);
-                        if (label < numLabels && label < MAX_LABELS) {
+                        if (label < numLabels && label < RF_MAX_LABELS) {
                             labelCounts[label]++;
                             if (labelCounts[label] > maxCount) {
                                 maxCount = labelCounts[label];
@@ -467,7 +471,6 @@ namespace mcu{
             bool prinnted = false;
             // Process nodes breadth-first with minimal allocations
             while (!queue_nodes.empty()) {
-                // Serial.print("here ");
                 NodeToBuild current = std::move(queue_nodes.front());
                 queue_nodes.erase(0);
                 
@@ -475,7 +478,7 @@ namespace mcu{
                 NodeStats stats(config.num_labels);
                 stats.analyzeSamples(indices, current.begin, current.end, config.num_labels, train_data);
 
-                if(current.nodeIndex >= MAX_NODES){
+                if(current.nodeIndex >= RF_MAX_NODES){
                     RF_DEBUG(2, "⚠️ Warning: Exceeded maximum node limit. Forcing leaf node 🌿.");
                     uint8_t leafLabel = stats.majorityLabel;
                     tree.nodes[current.nodeIndex].setIsLeaf(true);
@@ -572,6 +575,7 @@ namespace mcu{
             }
             tree.nodes.fit();
         }
+        
         // Helper function: evaluate the entire forest using OOB (Out-of-Bag) score
         // Iterates over all samples in training data and evaluates using trees that didn't see each sample
         float get_oob_score(){
@@ -656,12 +660,6 @@ namespace mcu{
                         }
                     }
 
-                    // Check certainty threshold
-                    float certainty = static_cast<float>(maxVotes) / oobTotalPredict;
-                    if(certainty < config.unity_threshold) {
-                        continue;
-                    }
-
                     // Update OOB metrics using matrix scorer
                     oob_scorer.update_prediction(actualLabel, oobPredictedLabel);
                 }
@@ -722,12 +720,6 @@ namespace mcu{
                     }
                 }
 
-                // Check certainty threshold
-                float certainty = static_cast<float>(maxVotes) / validTotalPredict;
-                if(certainty < config.unity_threshold) {
-                    continue;
-                }
-
                 // Update validation metrics using matrix scorer
                 valid_scorer.update_prediction(actualLabel, validPredictedLabel);
             }
@@ -742,28 +734,25 @@ namespace mcu{
         // Performs k-fold cross validation on train_data
         // train_data -> base_data, fold_train_data ~ train_data, fold_valid_data ~ validation_data
         float get_cross_validation_score(){
-            if constexpr (RF_DEBUG_LEVEL > 1)
-            Serial.println("Get k-fold cross validation score... ");
+            RF_DEBUG(1, "Get k-fold cross validation score... ");
 
-            if(config.k_fold < 2 || config.k_fold > 10){
-                if constexpr (RF_DEBUG_LEVEL > 0)
-                Serial.println("❌ Invalid k_fold value! Must be between 2 and 10.");
+            if(config.k_folds < 2 || config.k_folds > 10){
+                RF_DEBUG(0, "❌ Invalid k_folds value! Must be between 2 and 10.");
                 return 0.0f;
             }
 
             uint16_t totalSamples = base_data.size();
-            if(totalSamples < config.k_fold * config.num_labels * 2){
-                if constexpr (RF_DEBUG_LEVEL > 0)
-                Serial.println("❌ Not enough samples for k-fold cross validation!");
+            if(totalSamples < config.k_folds * config.num_labels * 2){
+                RF_DEBUG(0, "❌ Not enough samples for k-fold cross validation!");
                 return 0.0f;
             }
             Rf_matrix_score scorer(config.num_labels, config.metric_score);
 
-            uint16_t foldSize = totalSamples / config.k_fold;
+            uint16_t foldSize = totalSamples / config.k_folds;
             float k_fold_score = 0.0f;
             logger.m_log("Perform k-fold", print_log);
             // Perform k-fold cross validation
-            for(uint8_t fold = 0; fold < config.k_fold; fold++){
+            for(uint8_t fold = 0; fold < config.k_folds; fold++){
                 scorer.reset();
                 // Create sample ID sets for current fold
                 sampleID_set fold_valid_sampleIDs(fold * foldSize, fold * foldSize + foldSize);
@@ -779,7 +768,7 @@ namespace mcu{
                 train_data.releaseData(false); 
                 
                 ClonesData();
-                MakeForest();
+                build_forest();
             
                 validation_data.loadData();
                 forest_container.loadForest();
@@ -800,7 +789,7 @@ namespace mcu{
                 
                 k_fold_score += scorer.calculate_score();
             }
-            k_fold_score /= config.k_fold;
+            k_fold_score /= config.k_folds;
 
             // Calculate and return k-fold score
             return k_fold_score;
@@ -822,13 +811,10 @@ namespace mcu{
         // load forest from LittleFS to RAM
         bool loadForest() {
             bool success = forest_container.loadForest();
-            if (!success) {
-                if constexpr (RF_DEBUG_LEVEL > 0)
-                Serial.println("❌ Failed to load forest from LittleFS");
-            }else{
-                if constexpr (RF_DEBUG_LEVEL > 1)
-                Serial.println("✅ Forest loaded from LittleFS");
-            }
+            if(success)
+                RF_DEBUG_2(1, "✅ Forest loaded: ",config.num_trees, "trees. Total nodes: ", forest_container.get_total_nodes());
+            else
+                RF_DEBUG(0, "❌ Failed to load forest from LittleFS");
             return success;
         }
         
@@ -836,43 +822,29 @@ namespace mcu{
         bool releaseForest() {
             bool success = forest_container.releaseForest();
             if (!success) {
-                if constexpr (RF_DEBUG_LEVEL > 0)
-                Serial.println("❌ Failed to release forest to LittleFS");
+                RF_DEBUG(0, "❌ Failed to release forest to LittleFS");
             }else{
-                if constexpr (RF_DEBUG_LEVEL > 1)
-                Serial.println("✅ Forest released to LittleFS"); 
+                RF_DEBUG_2(1, "✅ Forest released to LittleFS: ",config.num_trees, "trees. Total nodes: ", forest_container.get_total_nodes());
             }
             return success;
         }
 
         // Memory-Efficient Grid Search Training Function
-        void training(){
+        void training(int epochs = 99999) {
             size_t start = logger.drop_anchor();
-            if constexpr (RF_DEBUG_LEVEL > 0)  Serial.println("🌲 Starting training...");
+            RF_DEBUG(0, "🌲 Starting training...");
             uint8_t min_ms = config.min_split_range.first;
             uint8_t max_ms = config.min_split_range.second;
             uint8_t min_md = config.max_depth_range.first;
             uint8_t max_md = config.max_depth_range.second;
             int total_combinations = ((max_ms - min_ms) / 2 + 1) * ((max_md - min_md) / 2 + 1);
-            if constexpr (RF_DEBUG_LEVEL > 1)
-                Serial.printf("Total combinations: %d\n", total_combinations);
-
-            int loop_count = 0;
+            RF_DEBUG_2(1, "🔍 Hyperparameter tuning over ", total_combinations, "combinations","");
             int best_min_split = config.min_split;
             int best_max_depth = config.max_depth;
 
             float best_score = get_training_evaluation_index();
-            if constexpr (RF_DEBUG_LEVEL > 1){
-                Serial.printf("training score : %s\n", 
-                            (config.training_score == Rf_training_score::OOB_SCORE) ? "OOB" : 
-                            (config.training_score == Rf_training_score::VALID_SCORE) ? "VALID" : 
-                            (config.training_score == Rf_training_score::K_FOLD_SCORE) ? "K-FOLD" : "UNKNOWN");
-
-                Serial.printf("Initial score with min_split=%d, max_depth=%d: %.3f\n", 
-                            config.min_split, config.max_depth, best_score);
-            }
             
-            char path[CHAR_BUFFER];
+            char path[RF_PATH_BUFFER];
             Rf_data old_base_data;
             if(config.training_score == Rf_training_score::K_FOLD_SCORE){
                 // convert train_data to base_data
@@ -895,30 +867,28 @@ namespace mcu{
                         // convert train_data to base_data
                         score = get_cross_validation_score();
                     }else{
-                        MakeForest();
+                        build_forest();
                         score = get_training_evaluation_index();
                     }
-                    if constexpr (RF_DEBUG_LEVEL > 1)
-                    Serial.printf("Score with min_split=%d, max_depth=%d: %.3f\n", 
-                                min_split, max_depth, score);
+                    RF_DEBUG_2(1, "Min_split: ", min_split, ", Max_depth: ", max_depth);
+                    RF_DEBUG_2(1, " => Score: ", score, "| Best: ", best_score);
                     if(score > best_score){
+                        RF_DEBUG(1, "🎉 New best score found!");
                         best_score = score;
                         best_min_split = min_split;
                         best_max_depth = max_depth;
                         config.result_score = best_score;
                         //save best forest
-                        if constexpr (RF_DEBUG_LEVEL > 0)
-                        Serial.printf("New best score: %.3f with min_split=%d, max_depth=%d\n", 
-                                    best_score, min_split, max_depth);
                         if(config.training_score != Rf_training_score::K_FOLD_SCORE){
                             // Save the best forest to LittleFS
                             forest_container.releaseForest(); // Release current trees from RAM
                         }
                     }
                     logger.m_log("epoch", print_log);
-                    // if(loop_count++ > 1) break; // For demo, limit to 3 iterations
+                    epochs--;
+                    if(epochs <= 0) break;
                 }
-                // if(loop_count++ > 1) break; // For demo, limit to 3 iterations
+                if(epochs <= 0) break;
             }
             // Set config to best found parameters
             config.min_split = best_min_split;
@@ -930,7 +900,7 @@ namespace mcu{
                 base_data = old_base_data;  // restore base_data
                 old_base_data.purgeData();
                 ClonesData();
-                MakeForest();
+                build_forest();
                 forest_container.releaseForest();
             }
             if constexpr (RF_DEBUG_LEVEL > 1)
@@ -1035,6 +1005,102 @@ namespace mcu{
         }
 
     // ----------------------------------------setters---------------------------------------
+
+        void enable_retrain(){
+            config.enable_retrain = true;
+        }
+
+        void disable_retrain(){
+            config.enable_retrain = false;
+        }
+
+       // allow dataset to grow when new data is added, but limited to max_samples/max_dataset_size
+        void enable_extend_base_data(){
+            config.extend_base_data = true;
+        }
+
+        // keep dataset size fixed when new data is added (oldest data will be removed)
+        void disable_extend_base_data(){
+            config.extend_base_data = false;
+        }
+
+        void enable_auto_config(){
+            config.enable_auto_config = true;
+        }
+        void disable_auto_config(){
+            config.enable_auto_config = false;
+        }
+
+        // set impurity_threshold
+        void set_impurity_threshold(float threshold) {
+            config.impurity_threshold = threshold;
+        }
+
+        // set criterion
+        void set_criterion(const char* criterion) {
+            if (strcmp(criterion, "gini") == 0) {
+                if(!config.use_gini){
+                    config.use_gini = true;
+                    config.impurity_threshold /= 4.0f; // adjust threshold for Gini
+                }
+            } else if (strcmp(criterion, "entropy") == 0) {
+                if(config.use_gini){
+                    config.use_gini = false;
+                    config.impurity_threshold *= 4.0f; // adjust threshold for Entropy
+                    if (config.impurity_threshold > 0.25f) {
+                        config.impurity_threshold = 0.25f; // max for entropy
+                    }
+                }
+            } else {
+                RF_DEBUG(0, "❌ Invalid criterion! Use 'gini' or 'entropy'.");
+            }
+        }
+
+        // overwrite metric_score
+        void set_metric_score(Rf_metric_scores flag) {
+            config.metric_score = flag;
+        }
+
+        //  combined metric_score with user input
+        void add_metric_score(Rf_metric_scores flag) {
+            config.metric_score |= flag;
+        }
+
+        // set training_score
+        void set_training_score(Rf_training_score score) {
+            config.training_score = score;
+            config.validate_ratios();
+        }
+
+        void set_train_ratio(float ratio) {
+            config.train_ratio = ratio;
+            config.validate_ratios();
+        }
+
+        void set_valid_ratio(float ratio) {
+            config.valid_ratio = ratio;
+            config.validate_ratios();
+        }
+
+        // set random seed , default is 37
+        void set_random_seed(uint32_t seed) {
+            random_generator.seed(seed);
+        }
+
+        void use_default_seed() {
+            random_generator.seed(0ULL);
+        }
+        //  rename model.  This action will rename all forest file components.
+        void set_model_name(const String& name) {
+            base.set_model_name(name.c_str());
+        }
+        void set_model_name(const char* name) {
+            base.set_model_name(name);
+        }
+        void set_num_trees(uint8_t n_trees) {
+            config.num_trees = n_trees;
+        }
+    // ----------------------------------------getters---------------------------------------
         /**
          * @brief: Calculate inference score based on the last N logged predictions.
          * @param num_inference: Number of recent predictions to consider for score calculation.
@@ -1042,7 +1108,7 @@ namespace mcu{
          * @note : if num_inference exceeds total logged predictions, all logged predictions will be used.
          */
         float get_last_n_inference_score(size_t num_inference, uint8_t flag) {
-            char path[CHAR_BUFFER];
+            char path[RF_PATH_BUFFER];
             base.get_infer_log_path(path, sizeof(path));
             if(!LittleFS.exists(path)) {
                 RF_DEBUG(0, "❌ Inference log file does not exist");
@@ -1155,73 +1221,9 @@ namespace mcu{
             return get_practical_inference_score(static_cast<uint8_t>(config.metric_score));
         }
 
-        void enable_retrain(){
-            config.enable_retrain = true;
-        }
-
-        void disable_retrain(){
-            config.enable_retrain = false;
-        }
-
-        // overwrite metric_score
-        void set_metric_score(Rf_metric_scores flag) {
-            config.metric_score = flag;
-        }
-
-        //  combined metric_score with user input
-        void add_metric_score(Rf_metric_scores flag) {
-            config.metric_score |= flag;
-        }
-
-        // set training_score
-        void set_training_score(Rf_training_score score) {
-            config.training_score = score;
-            config.validate_ratios();
-        }
-
-        void set_train_ratio(float ratio) {
-            config.train_ratio = ratio;
-            config.validate_ratios();
-        }
-
-        void set_valid_ratio(float ratio) {
-            config.valid_ratio = ratio;
-            config.validate_ratios();
-        }
-
-        // allow dataset to grow when new data is added, but limited to max_samples/max_dataset_size
-        void enable_extend_base_data(){
-            config.extend_base_data = true;
-        }
-
-        // keep dataset size fixed when new data is added (oldest data will be removed)
-        void disable_extend_base_data(){
-            config.extend_base_data = false;
-        }
-
-        // set random seed , default is 37
-        void set_random_seed(uint32_t seed) {
-            random_generator.seed(seed);
-        }
-
-        void use_default_seed() {
-            random_generator.seed(0ULL);
-        }
-        
-        //  rename model.  This action will rename all forest file components.
-        void set_model_name(const String& name) {
-            base.set_model_name(name.c_str());
-        }
-        void set_model_name(const char* name) {
-            base.set_model_name(name);
-        }
-        void set_num_trees(uint8_t n_trees) {
-            config.num_trees = n_trees;
-        }
-    // ----------------------------------------getters---------------------------------------
         // get name of model (forest)
         String get_model_name() const {
-            char name[CHAR_BUFFER];
+            char name[RF_PATH_BUFFER];
             base.get_model_name(name, sizeof(name));
             return String(name);
         }
@@ -1266,7 +1268,7 @@ namespace mcu{
         
         // get number of inference saved in log (which has actual label feedback)
         size_t get_total_logged_inference() const {
-            char path[CHAR_BUFFER];
+            char path[RF_PATH_BUFFER];
             base.get_infer_log_path(path, sizeof(path));
             if(!LittleFS.exists(path)) {
                 RF_DEBUG(0, "❌ Inference log file does not exist: ", path);
@@ -1395,7 +1397,7 @@ namespace mcu{
             }
             avgAccuracy /= accuracies.size();
 
-            char path[CHAR_BUFFER];
+            char path[RF_PATH_BUFFER];
             base.get_infer_log_path(path, sizeof(path));
             Serial.printf("\n📊 FINAL SUMMARY:\n");
             Serial.printf("Dataset: %s\n", path);

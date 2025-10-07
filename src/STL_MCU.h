@@ -2739,7 +2739,7 @@ namespace mcu {
         }
 
         // Fast bit manipulation without bounds checking
-        inline void set_unsafe(size_t index, uint8_t value) {
+        __attribute__((always_inline)) inline void set_unsafe(size_t index, uint8_t value) {
             if(data == nullptr) return; // Safety check
             
             value &= (1 << BitsPerElement) - 1;
@@ -2762,7 +2762,7 @@ namespace mcu {
             }
         }
 
-        inline uint8_t get_unsafe(size_t index) const {
+        __attribute__((always_inline)) inline uint8_t get_unsafe(size_t index) const {
             if(data == nullptr) return 0; // Safety check
             
             size_t bitPos = index * BitsPerElement;
@@ -3162,7 +3162,7 @@ namespace mcu {
             set_size(current_size);
         }
         
-        uint8_t operator[](vector_index_type index) const {
+        __attribute__((always_inline)) inline uint8_t operator[](vector_index_type index) const {
             return packed_data.get_unsafe(index);
         }
         
@@ -3174,15 +3174,13 @@ namespace mcu {
             return packed_data.get_unsafe(index);
         }
         
-        void set(vector_index_type index, uint8_t value) {
-            if (index < get_size()) {
-                value &= MAX_VALUE;
-                packed_data.set_unsafe(index, value);
-            }
+        __attribute__((always_inline)) inline void set(vector_index_type index, uint8_t value) {
+            value &= MAX_VALUE;
+            packed_data.set_unsafe(index, value);
         }
         
         // Unsafe set without bounds checking - use when storage is pre-sized
-        void set_unsafe(vector_index_type index, uint8_t value) {
+        __attribute__((always_inline)) inline void set_unsafe(vector_index_type index, uint8_t value) {
             value &= MAX_VALUE;
             packed_data.set_unsafe(index, value);
         }

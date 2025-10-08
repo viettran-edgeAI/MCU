@@ -1853,6 +1853,8 @@ namespace mcu {
             }
         }
         void sort() noexcept {
+            static_assert(std::is_arithmetic<T>::value || less_comparable<T>::value,
+                          "Type T must be numeric or support operator< (returning convertible-to-bool) for sorting.");
             // Safety check: null data pointer
             T* ptr = data_ptr();
             if (ptr == nullptr) return;
@@ -2373,6 +2375,8 @@ namespace mcu {
         }
 
         void sort() noexcept {
+            static_assert(std::is_arithmetic<T>::value || less_comparable<T>::value,
+                          "Type T must be numeric or support operator< (returning convertible-to-bool) for sorting.");
             // Safety check: null array pointer
             if (array == nullptr) return;
             

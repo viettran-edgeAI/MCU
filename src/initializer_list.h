@@ -100,4 +100,12 @@ namespace mcu {
     struct is_same_t<T, T> {
         static constexpr bool value = true;
     };
+
+    template<typename U, typename = void>
+    struct less_comparable : std::false_type {};
+
+    template<typename U>
+    struct less_comparable<U, std::void_t<decltype(std::declval<U>() < std::declval<U>())>>
+        : std::integral_constant<bool,
+            std::is_convertible<decltype(std::declval<U>() < std::declval<U>()), bool>::value> {};
 }

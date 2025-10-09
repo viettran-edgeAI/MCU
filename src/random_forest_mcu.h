@@ -6,21 +6,22 @@
 namespace mcu{
     
     class RandomForest{
-        Rf_data base_data;
-        Rf_data train_data;
-        Rf_data test_data;
-        Rf_data validation_data;
+        Rf_data base_data;      //
+        Rf_data train_data;     //
+        Rf_data test_data;      //
+        Rf_data validation_data;    //
 
         Rf_base base;
         Rf_config config;
         Rf_logger logger;
-        Rf_random random_generator;
-        Rf_categorizer categorizer; 
-        Rf_node_predictor  node_pred;
+        Rf_random random_generator;     // 
+        Rf_categorizer categorizer;     //
+        Rf_node_predictor  node_pred;   //
         Rf_pending_data pending_data; 
         Rf_tree_container forest_container; 
 
-        vector<ID_vector<uint16_t,2>> dataList; 
+        vector<ID_vector<uint16_t,2>> dataList;     // 
+
         bool clean_yet = false;
         bool print_log = false;
 
@@ -36,16 +37,16 @@ namespace mcu{
 
             logger.init(&base);
             config.init(&base);
-            node_pred.init(&base);
+            // node_pred.init(&base);
             categorizer.init(&base);
             pending_data.init(&base, &config);
             forest_container.init(&base, &config);               
 
             // load resources
             config.loadConfig();
-            node_pred.loadPredictor();
+            // node_pred.loadPredictor();
             categorizer.loadCategorizer(); 
-            random_generator.init(config.random_seed);
+            // random_generator.init(config.random_seed);
 
             if constexpr (RF_DEBUG_LEVEL > 2) print_log = true;
         }
@@ -144,7 +145,7 @@ namespace mcu{
             size_t start = logger.drop_anchor();
             // Clear any existing forest first
             forest_container.clearForest();
-            logger.m_log("start building forest", print_log);
+            logger.m_log("start building forest");
 
             uint16_t estimated_nodes = node_pred.estimate_nodes(config);
             uint16_t peak_nodes = node_pred.queue_peak_size(config);
@@ -157,7 +158,7 @@ namespace mcu{
                 RF_DEBUG(0, "❌ Error loading training data");
                 return false;
             }
-            logger.m_log("load train_data", print_log);
+            logger.m_log("load train_data");
             for(uint8_t i = 0; i < config.num_trees; i++){
                 Rf_tree tree(i);
                 tree.nodes.reserve(estimated_nodes); // Reserve memory for nodes based on prediction
@@ -165,14 +166,14 @@ namespace mcu{
                 buildTree(tree, dataList[i], queue_nodes);
                 tree.isLoaded = true;
                 forest_container.add_tree(std::move(tree));
-                logger.m_log("tree creation", print_log);
+                logger.m_log("tree creation");
             }
             train_data.releaseData(); 
             forest_container.is_loaded = false;
             // forest_container.set_to_individual_form();
             node_pred.add_new_samples(config.min_split, config.max_depth, forest_container.avg_nodes());
 
-            RF_DEBUG_2(0, "🌲 Forest built successfully: ", forest_container.get_total_nodes(), " nodes","");
+            RF_DEBUG_2(0, "🌲 Forest built successfully: ", forest_container.get_total_nodes(), "nodes","");
             RF_DEBUG_2(1, "Min split: ", config.min_split, "- Max depth: ", config.max_depth);
             size_t end = logger.drop_anchor();
             logger.t_log("forest building time", start, end, "s", print_log);
@@ -181,7 +182,7 @@ namespace mcu{
         
         // ----------------------------------------------------------------------------------
         // Split data into training and testing sets. Dest data must be init() before called by this function
-        bool splitData(Rf_data& source, vector<pair<float, Rf_data*>>& dest) {
+        bool splitData(Rf_data& source, vector<pair<float, Rf_data*>>& dest, Rf_ra) {
             size_t start = logger.drop_anchor();
             RF_DEBUG(0, "🔀 splitting data...");
             if(dest.empty() || source.size() == 0) {
@@ -219,7 +220,7 @@ namespace mcu{
                 dest[i].second->releaseData(false); 
             }
             size_t end = logger.drop_anchor();
-            logger.m_log("split data", print_log);
+            logger.m_log("split data");
             logger.t_log("split time", start, end, "s", print_log);
             return true;
         }
@@ -307,10 +308,10 @@ namespace mcu{
                     }
                 }
                 dataList.push_back(std::move(sub_data));
-                logger.m_log("clone sub_data", print_log);
+                logger.m_log("clone sub_data");
             }
 
-            logger.m_log("clones data", print_log);  
+            logger.m_log("clones data");  
             size_t end = logger.drop_anchor();
             logger.t_log("clones data time", start, end, "ms", print_log);
             RF_DEBUG_2(1, "🎉 Created ", dataList.size(), "datasets for trees","");
@@ -607,7 +608,7 @@ namespace mcu{
                 RF_DEBUG(0,"❌ Failed to load forest for OOB evaluation!");
                 return 0.0f;
             }
-            logger.m_log("get OOB score", print_log);
+            logger.m_log("get OOB score");
 
             // Process training samples in chunks for OOB evaluation
             for(size_t chunk_index = 0; chunk_index < train_data.total_chunks(); chunk_index++){
@@ -724,7 +725,7 @@ namespace mcu{
                 // Update validation metrics using matrix scorer
                 valid_scorer.update_prediction(actualLabel, validPredictedLabel);
             }
-            logger.m_log("get validation score", print_log);
+            logger.m_log("get validation score");
             forest_container.releaseForest();
             validation_data.releaseData(true);
 
@@ -751,7 +752,7 @@ namespace mcu{
 
             uint16_t foldSize = totalSamples / config.k_folds;
             float k_fold_score = 0.0f;
-            logger.m_log("Perform k-fold", print_log);
+            logger.m_log("Perform k-fold");
             // Perform k-fold cross validation
             for(uint8_t fold = 0; fold < config.k_folds; fold++){
                 scorer.reset();
@@ -765,7 +766,7 @@ namespace mcu{
                 // create train_data and valid data for current fold 
                 validation_data.loadData(base_data, fold_valid_sampleIDs, true);
                 validation_data.releaseData(false);
-                train_data.loadData(base_data, fold_train_sampleIDs, true);      logger.m_log("train_data k-fold", false, true);
+                train_data.loadData(base_data, fold_train_sampleIDs, true);      logger.m_log("load train_data");
                 train_data.releaseData(false); 
                 
                 ClonesData();
@@ -773,7 +774,7 @@ namespace mcu{
             
                 validation_data.loadData();
                 forest_container.loadForest();
-                logger.m_log("fold evaluation", print_log);
+                logger.m_log("fold evaluation");
                 // Process all samples
                 for(uint16_t i = 0; i < validation_data.size(); i++){
                     const Rf_sample& sample = validation_data[i];
@@ -809,7 +810,7 @@ namespace mcu{
 
     // ---------------------------------- operations -----------------------------------
     public:
-        // load forest from LittleFS to RAM
+        // load forest into RAM
         bool loadForest() {
             bool success = forest_container.loadForest();
             if(success)
@@ -872,7 +873,8 @@ namespace mcu{
                         score = get_training_evaluation_index();
                     }
                     RF_DEBUG_2(1, "Min_split: ", min_split, ", Max_depth: ", max_depth);
-                    RF_DEBUG_2(1, " => Score: ", score, "| Best: ", best_score);
+                    RF_DEBUG(1, " => Score: ", score);
+                    RF_DEBUG(1, "best_score: ", best_score);
                     if(score > best_score){
                         RF_DEBUG(1, "🎉 New best score found!");
                         best_score = score;
@@ -885,7 +887,7 @@ namespace mcu{
                             forest_container.releaseForest(); // Release current trees from RAM
                         }
                     }
-                    logger.m_log("epoch", print_log);
+                    logger.m_log("epoch");
                     epochs--;
                     if(epochs <= 0) break;
                 }
@@ -894,6 +896,8 @@ namespace mcu{
             // Set config to best found parameters
             config.min_split = best_min_split;
             config.max_depth = best_max_depth;
+            if constexpr (!ENABLE_TEST_DATA)
+            config.result_score = best_score;
 
             // restore datas and rebuild model with best params if using K-FOLD
             if(config.training_score == Rf_training_score::K_FOLD_SCORE){
@@ -904,11 +908,10 @@ namespace mcu{
                 build_forest();
                 forest_container.releaseForest();
             }
-            if constexpr (RF_DEBUG_LEVEL > 1)
-            Serial.printf("Best parameters: min_split=%d, max_depth=%d with score=%.3f\n", 
-                        best_min_split, best_max_depth, best_score);
-            if constexpr (RF_DEBUG_LEVEL > 0)
-            Serial.println("🌲 Training complete.");
+            RF_DEBUG(0,"🌲 Training complete.");
+            RF_DEBUG_2(0, "Best parameters: min_split=", best_min_split, ", max_depth=", best_max_depth);
+            RF_DEBUG(0, "Best score: ", best_score);
+
             size_t end = logger.drop_anchor();
             logger.t_log("total training time", start, end, "s", print_log);
             // clean_forest();
@@ -925,9 +928,7 @@ namespace mcu{
             const bool copyLabel = (labelBuffer != nullptr && bufferSize > 0);
 
             if (__builtin_expect(length != config.num_features, 0)) {
-                if constexpr (RF_DEBUG_LEVEL > 1) {
-                    Serial.println("❌ Feature length mismatch!");
-                }
+                RF_DEBUG(0, "❌ Feature length mismatch!","");
                 if (copyLabel) {
                     labelBuffer[0] = '\0';
                 }
@@ -995,9 +996,7 @@ namespace mcu{
             if(i_label < config.num_labels){
                 pending_data.add_actual_label(i_label);
             } else {
-                if constexpr(RF_DEBUG_LEVEL > 1) {
-                    Serial.printf("❌ Unknown label: %s\n", label);
-                }
+                RF_DEBUG(1, "❌ Unknown label: ", label);
             }
         }
 
@@ -1156,47 +1155,38 @@ namespace mcu{
             char path[RF_PATH_BUFFER];
             base.get_infer_log_path(path, sizeof(path));
             if(!LittleFS.exists(path)) {
-                RF_DEBUG(0, "❌ Inference log file does not exist");
+                RF_DEBUG(0, "❌ Inference log file does not exist: ", path);
                 return 0.0f;
             }
-            
             File file = LittleFS.open(path, FILE_READ);
-            if(!file) {
-                Serial.println("❌ Failed to open inference log file");
+            if(!file || !file.available()) {
+                RF_DEBUG(0, "❌ Failed to open inference log file or file is empty: ", path );
                 return 0.0f;
             }
-            
             // Read and verify header - new format: magic (4) + prediction_count (4)
             uint8_t magic_bytes[4];
             uint32_t prediction_count;
             
             if(file.read(magic_bytes, 4) != 4) {
-                if constexpr (RF_DEBUG_LEVEL >= 0)
-                Serial.println("❌ Failed to read magic number from inference log");
+                RF_DEBUG(0, "❌ Failed to read magic number from inference log: ", path);
                 file.close();
                 return 0.0f;
             }
             
             if(file.read((uint8_t*)&prediction_count, 4) != 4) {
-                if constexpr (RF_DEBUG_LEVEL >= 0)
-                Serial.println("❌ Failed to read prediction count from inference log");
+                RF_DEBUG(0, "❌ Failed to read prediction count from inference log: ", path);
                 file.close();
                 return 0.0f;
             }
-            
-            // Check magic number "INFL" = [0x49, 0x4E, 0x46, 0x4C]
             if(magic_bytes[0] != 0x49 || magic_bytes[1] != 0x4E || 
             magic_bytes[2] != 0x46 || magic_bytes[3] != 0x4C) {
-                if constexpr (RF_DEBUG_LEVEL >= 0)
-                Serial.printf("❌ Invalid inference log file header - magic: [0x%02X, 0x%02X, 0x%02X, 0x%02X] (expected: [0x49, 0x4E, 0x46, 0x4C])\n", 
-                            magic_bytes[0], magic_bytes[1], magic_bytes[2], magic_bytes[3]);
+                RF_DEBUG(0, "❌ Invalid magic number: ", path);
                 file.close();
                 return 0.0f;
             }
             
             if(prediction_count == 0) {
-                if constexpr (RF_DEBUG_LEVEL >= 0)
-                Serial.println("⚠️ No predictions recorded in inference log");
+                RF_DEBUG(0, "⚠️ No predictions recorded in inference log.");
                 file.close();
                 return 0.0f;
             }
@@ -1209,25 +1199,18 @@ namespace mcu{
                 uint8_t predicted_label, actual_label;
                 
                 if(file.read(&predicted_label, 1) != 1) {
-                    if constexpr (RF_DEBUG_LEVEL >= 0)
-                    Serial.printf("❌ Failed to read predicted label at prediction %u\n", i);
+                    RF_DEBUG(1, "❌ Failed to read predicted label at prediction: ", i);
                     break;
                 }
                 
                 if(file.read(&actual_label, 1) != 1) {
-                    if constexpr (RF_DEBUG_LEVEL >= 0)
-                    Serial.printf("❌ Failed to read actual label at prediction %u\n", i);
+                    RF_DEBUG(1, "❌ Failed to read actual label at prediction: ", i);
                     break;
                 }
                 
                 // Validate labels are within expected range
                 if(predicted_label < config.num_labels && actual_label < config.num_labels) {
                     scorer.update_prediction(actual_label, predicted_label);
-                } else {
-                    if constexpr (RF_DEBUG_LEVEL == 3) {
-                        Serial.printf("⚠️ Invalid labels at prediction %u: predicted=%u, actual=%u (max=%u)\n", 
-                                    i, predicted_label, actual_label, config.num_labels);
-                    }
                 }
             }
             
@@ -1252,8 +1235,7 @@ namespace mcu{
         float get_practical_inference_score(uint8_t flag) {
             size_t total_logged = get_total_logged_inference();
             if(total_logged == 0) {
-                if constexpr (RF_DEBUG_LEVEL > 0)
-                Serial.println("⚠️ No logged inferences found for practical score calculation");
+                RF_DEBUG(0, "⚠️ No logged inferences found for practical score calculation", "");
                 return 0.0f;
             }
             return get_last_n_inference_score(total_logged, flag);
@@ -1389,48 +1371,47 @@ namespace mcu{
         // print metrix score on test set
         void training_report(){
             if(config.test_ratio == 0.0f || test_data.size() == 0){
-                Serial.println("❌ No test set available for evaluation!");
+                RF_DEBUG(0, "❌ No test set available for evaluation!", "");
                 return;
             }
             auto result = predict(test_data);
-            // Calculate Precision
-            Serial.println("Precision in test set:");
+            RF_DEBUG(0, "Precision in test set:");
             b_vector<pair<uint8_t, float>> precision = result[0];
-            for (const auto& p : precision) {
-            Serial.printf("Label: %d - %.3f\n", p.first, p.second);
+            for (const auto& p : precision) {;
+                RF_DEBUG_2(0, "Label: ", p.first, "- ", p.second);
             }
             float avgPrecision = 0.0f;
             for (const auto& p : precision) {
             avgPrecision += p.second;
             }
             avgPrecision /= precision.size();
-            Serial.printf("Avg: %.3f\n", avgPrecision);
+            RF_DEBUG(0, "Avg: ", avgPrecision);
 
             // Calculate Recall
-            Serial.println("Recall in test set:");
+            RF_DEBUG(0, "Recall in test set:");
             b_vector<pair<uint8_t, float>> recall = result[1];
             for (const auto& r : recall) {
-            Serial.printf("Label: %d - %.3f\n", r.first, r.second);
+                RF_DEBUG_2(0, "Label: ", r.first, "- ", r.second);
             }
             float avgRecall = 0.0f;
             for (const auto& r : recall) {
             avgRecall += r.second;
             }
             avgRecall /= recall.size();
-            Serial.printf("Avg: %.3f\n", avgRecall);
+            RF_DEBUG(0, "Avg: ", avgRecall);
 
-            // Calculate F1 Score
-            Serial.println("F1 Score in test set:");
+            // Calculate F1 Score;
+            RF_DEBUG(0, "F1 Score in test set:");
             b_vector<pair<uint8_t, float>> f1_scores = result[2];
             for (const auto& f1 : f1_scores) {
-            Serial.printf("Label: %d - %.3f\n", f1.first, f1.second);
+                RF_DEBUG_2(0, "Label: ", f1.first, "- ", f1.second);
             }
             float avgF1 = 0.0f;
             for (const auto& f1 : f1_scores) {
             avgF1 += f1.second;
             }
             avgF1 /= f1_scores.size();
-            Serial.printf("Avg: %.3f\n", avgF1);
+            RF_DEBUG(0, "Avg: ", avgF1);
 
             // Calculate Overall Accuracy
             b_vector<pair<uint8_t, float>> accuracies = result[3];
@@ -1440,14 +1421,40 @@ namespace mcu{
             }
             avgAccuracy /= accuracies.size();
 
+            // result score
+            uint8_t total_scores = 0;
+            float total_result_score = 0.0f;
+            if(config.metric_score & Rf_metric_scores::PRECISION){
+                total_result_score += avgPrecision;
+                total_scores++;
+            }
+            if(config.metric_score & Rf_metric_scores::RECALL){
+                total_result_score += avgRecall;
+                total_scores++;
+            }
+            if(config.metric_score & Rf_metric_scores::F1_SCORE){
+                total_result_score += avgF1;
+                total_scores++;
+            }
+            if(config.metric_score & Rf_metric_scores::ACCURACY){
+                total_result_score += avgAccuracy;
+                total_scores++;
+            }
+            if(total_scores > 0){
+                config.result_score = total_result_score / total_scores;
+            } else {
+                config.result_score = avgAccuracy; // fallback to accuracy
+            }
+
             char path[RF_PATH_BUFFER];
             base.get_infer_log_path(path, sizeof(path));
-            Serial.printf("\n📊 FINAL SUMMARY:\n");
-            Serial.printf("Dataset: %s\n", path);
-            Serial.printf("Average Precision: %.3f\n", avgPrecision);
-            Serial.printf("Average Recall: %.3f\n", avgRecall);
-            Serial.printf("Average F1-Score: %.3f\n", avgF1);
-            Serial.printf("Accuracy: %.3f\n", avgAccuracy);
+            RF_DEBUG(0, "📊 FINAL SUMMARY:", "");
+            RF_DEBUG(0, "Dataset: ", path);
+            RF_DEBUG(0, "Average Precision: ", avgPrecision);
+            RF_DEBUG(0, "Average Recall: ", avgRecall);
+            RF_DEBUG(0, "Average F1-Score: ", avgF1);
+            RF_DEBUG(0, "Accuracy: ", avgAccuracy);
+            RF_DEBUG(0, "Result Score: ", config.result_score);
         }
 
         float precision(Rf_data& data) {
@@ -1550,7 +1557,7 @@ namespace mcu{
         void visual_result() {
             forest_container.loadForest(); // Ensure all trees are loaded before prediction
             test_data.loadData(); // Load test set data if not already loaded
-            Serial.println("SampleID, Predicted, Actual");
+            RF_DEBUG(0, "SampleID, Predicted, Actual");
             for (uint16_t i = 0; i < test_data.size(); i++) {
                 const Rf_sample& sample = test_data[i];
                 uint8_t pred = forest_container.predict_features(sample.features);

@@ -7,7 +7,7 @@
 #include <cstring>
 
 
-#define GET_CURRENT_TIME_IN_MICROSECONDS() esp_timer_get_time() // current time in microseconds
+#define GET_CURRENT_TIME_IN_MICROSECONDS() micros() // current time in microseconds
 #define GET_CURRENT_TIME_IN_MILLISECONDS millis()// current time in milliseconds
 #define GET_CURRENT_TIME() millis()
 
@@ -78,7 +78,7 @@ static constexpr size_t   MAX_INFER_LOGFILE_SIZE = 2048;   // Max log file size 
     3. model_name_ctg.csv       : categorizer (feature quantizer and label mapping)
     4. model_name_dp.csv        : information about dataset (num_features, num_labels...)
     5. model_name_forest.bin    : model file (all trees) in unified format
-    6. model_name_tree_*.bin    : model files (tree files) in individual format. (Given from pc/used during training)
+    6. model_name_tree_*.bin    : model files (tree files) in individual format. (Given from pc/use during training)
     7. model_name_node_pred.bin : node predictor file 
     8. model_name_node_log.csv  : node splitting log file during training (for retraining node predictor)
     9. model_name_infer_log.bin : inference log file (predictions, actual labels, metrics over time)
@@ -687,7 +687,6 @@ namespace mcu {
                 size_t chunkSamples = remaining > samplesEachChunk ? samplesEachChunk : remaining;
                 size_t reqElems = chunkSamples * elementsPerSample;
                 sampleChunks[ci].resize(reqElems, 0);  // Explicitly pass 0 as value
-                RF_DEBUG_2(2, "📦 Chunk ", ci, "resized to ", reqElems);
                 remaining -= chunkSamples;
                 if (remaining == 0) break;
             }
@@ -917,7 +916,7 @@ namespace mcu {
             if(pre_loaded && save_ram) {
                 source.loadData();
             }
-            RF_DEBUG_2(1, "✅ Loaded ", addedSamples, "samples from source: ", source.file_path);
+            RF_DEBUG_2(2, "✅ Loaded ", addedSamples, "samples from source: ", source.file_path);
             return true;
         }
         
@@ -1603,7 +1602,7 @@ namespace mcu {
     // Base file management class for Random Forest project status
     class Rf_base {
     private:
-        uint16_t flags = 0; // flags indicating the status of member files
+        mutable uint16_t flags = 0; // flags indicating the status of member files
         char model_name[RF_PATH_BUFFER] ={0};
         
         // Helper to build file paths: buffer must be at least RF_PATH_BUFFER size
@@ -1873,7 +1872,7 @@ namespace mcu {
             }
         }
 
-        bool set_config_status(bool exists) {
+        bool set_config_status(bool exists) const {
             if (exists) {
                 flags |= static_cast<Rf_base_flags>(CONFIG_FILE_EXIST);
             } else {
@@ -1882,7 +1881,7 @@ namespace mcu {
             return config_file_exists();
         }
 
-        bool set_dp_status(bool exists) {
+        bool set_dp_status(bool exists) const {
             if (exists) {
                 flags |= static_cast<Rf_base_flags>(DP_FILE_EXIST);
             } else {
@@ -1891,7 +1890,7 @@ namespace mcu {
             return dp_file_exists();
         }
 
-        bool set_node_pred_status(bool exists) {
+        bool set_node_pred_status(bool exists) const {
             if (exists) {
                 flags |= static_cast<Rf_base_flags>(NODE_PRED_FILE_EXIST);
             } else {
@@ -1928,7 +1927,7 @@ namespace mcu {
     // Configuration class : model configuration and dataset parameters
     // handle 2 files: model_name_config.json (config file) and model_name_dp.csv (dp file)
     class Rf_config {
-        Rf_base* base_ptr = nullptr;
+        const Rf_base* base_ptr = nullptr;
         bool isLoaded = false; 
 
         bool has_base() const {
@@ -1982,9 +1981,9 @@ namespace mcu {
             use_gini            = false;
             k_folds             = 4;
             impurity_threshold  = 0.0f;
-            train_ratio         = 0.7;
-            test_ratio          = 0.15;
-            valid_ratio         = 0.15;
+            train_ratio         = 0.8f;
+            test_ratio          = 0.0f;
+            valid_ratio         = 0.0f;
             training_score      = OOB_SCORE;
             metric_score        = Rf_metric_scores::ACCURACY;
             result_score        = 0.0;
@@ -2135,15 +2134,6 @@ namespace mcu {
                 impurity_threshold = 0.0f;
                 return;
             }
-            for(auto & count : samples_per_label) {
-                if (count > 0) {
-                    float pct = 100.0f * static_cast<float>(count) / static_cast<float>(num_samples);
-                    if (pct < lowest_distribution) {
-                        lowest_distribution = pct;
-                    }
-                }
-            }
-
             int K = max(2, static_cast<int>(num_labels));
             float expected_min_pct = 100.0f / static_cast<float>(K);
             float deficit = max(0.0f, expected_min_pct - lowest_distribution);
@@ -2185,10 +2175,7 @@ namespace mcu {
                     }
                 }
 
-                float maxImbalanceRatio = 0.0f;
-                if (minorityCount > 0) {
-                    maxImbalanceRatio = (float)majorityCount / minorityCount;
-                }
+                float maxImbalanceRatio = 1/lowest_distribution * 100.0f; 
 
                 if (maxImbalanceRatio > 10.0f) {
                     metric_score = Rf_metric_scores::RECALL;
@@ -2228,7 +2215,6 @@ namespace mcu {
                 RF_DEBUG(0, "❌ load dp file failed: ", "dp path is empty");
                 return false; 
             }
-            // Read dataset parameters from /dataset_params.csv
             File file = LittleFS.open(path, "r");
             if (!file) {
                 RF_DEBUG(0, "❌ Failed to open data_params file for reading", path);
@@ -2360,6 +2346,15 @@ namespace mcu {
                 RF_DEBUG(1, "❌ Cannot load dataset parameters for configuration");
                 return false;
             }
+            // caculate lowest distribution 
+            for(auto & count : samples_per_label) {
+                if (count > 0) {
+                    float pct = 100.0f * static_cast<float>(count) / static_cast<float>(num_samples);
+                    if (pct < lowest_distribution) {
+                        lowest_distribution = pct;
+                    }
+                }
+            }
             
             // config session
             String jsonString = "";
@@ -2433,12 +2428,12 @@ namespace mcu {
             file.printf("  \"criterion\": \"%s\",\n", use_gini ? "gini" : "entropy");
             file.printf("  \"trainingScore\": \"%s\",\n", getTrainingScoreString(training_score).c_str());
             file.printf("  \"k_folds\": %d,\n", k_folds);
-            file.printf("  \"impurityThreshold\": %.1f,\n", impurity_threshold);
+            file.printf("  \"impurityThreshold\": %.4f,\n", impurity_threshold);
             file.printf("  \"metric_score\": \"%s\",\n", getFlagString(metric_score).c_str());
             file.printf("  \"extendBaseData\": %s,\n", extend_base_data ? "true" : "false");
             file.printf("  \"enableRetrain\": %s,\n", enable_retrain ? "true" : "false");
             file.printf("  \"enableAutoConfig\": %s,\n", enable_auto_config ? "true" : "false");
-            file.printf("  \"resultScore\": %.6f,\n", result_score);
+            file.printf("  \"resultScore\": %.4f,\n", result_score);
             file.printf("  \"Estimated RAM (bytes)\": %d,\n", estimatedRAM);
 
             if (existingTimestamp.length() > 0) {
@@ -2614,10 +2609,15 @@ namespace mcu {
         
         // make sure train, test and valid ratios valid and optimal 
         void validate_ratios(){
-            uint16_t avg_samples_per_label = num_samples / max(1, static_cast<int>(num_labels));
-            // set train/test/valid ratio
+            // uint16_t avg_samples_per_label = num_samples / max(1, static_cast<int>(num_labels));
+            uint16_t rarest_class = RF_MAX_SAMPLES;
+            for(auto & count : samples_per_label){
+                if (count < rarest_class)[
+                    rarest_class = count;
+                ]
+            }
             if(enable_auto_config){
-                if (avg_samples_per_label < 150){
+                if(rarest_class < 150){
                     train_ratio = 0.6f;
                     test_ratio = 0.2f;
                     valid_ratio = 0.2f;
@@ -2647,6 +2647,7 @@ namespace mcu {
         void print_config() const {
             RF_DEBUG(1, "🛠️ Model configuration: ");
             RF_DEBUG(1, "   - Trees: ", num_trees);
+            RF_DEBUG(1, "   - Random seed: ", random_seed);
             RF_DEBUG(1, "   - max_depth: ", max_depth);
             RF_DEBUG(1, "   - min_split: ", min_split);
             RF_DEBUG(1, "   - train_ratio: ", train_ratio);
@@ -2733,7 +2734,7 @@ namespace mcu {
         uint8_t numLabels = 0;
         uint32_t scaleFactor = 50000;
         bool isLoaded = false;
-        Rf_base* base_ptr = nullptr;
+        const Rf_base* base_ptr = nullptr;
 
         // Compact storage arrays
         b_vector<FeatureRef, 16> featureRefs;              // One per feature
@@ -3375,7 +3376,7 @@ namespace mcu {
         bool is_trained;
         b_vector<node_data, 5> buffer;
     private:
-        Rf_base* base_ptr = nullptr;
+        const Rf_base* base_ptr = nullptr;
         
         bool has_base() const {
             return base_ptr != nullptr && base_ptr->ready_to_use();
@@ -4296,8 +4297,8 @@ namespace mcu {
     class Rf_tree_container{
         private:
             // String model_name;
-            Rf_base* base_ptr = nullptr;
-            Rf_config* config_ptr = nullptr;
+            const Rf_base* base_ptr = nullptr;
+            const Rf_config* config_ptr = nullptr;
             char tree_path_buffer[RF_PATH_BUFFER] = {0}; // Buffer for tree file paths
 
             vector<Rf_tree> trees;        // b_vector storing root nodes of trees (now manages LittleFS file_paths)
@@ -4325,7 +4326,13 @@ namespace mcu {
             void init(Rf_base* base, Rf_config* config){
                 base_ptr = base;
                 config_ptr = config;
+                trees.clear();
                 trees.reserve(config_ptr->num_trees);
+                for(uint8_t i=0; i < config_ptr->num_trees; i++){
+                    Rf_tree empty_tree;
+                    empty_tree.index = i; 
+                    trees.push_back(std::move(empty_tree));
+                }
                 predictClass.reserve(config_ptr->num_trees);
                 is_loaded = false; // Initially in individual form
             }
@@ -4354,7 +4361,6 @@ namespace mcu {
                     delay(10);
                 }
                 trees.clear();
-                trees.fit(); // Ensure vector is completely cleared
                 // Reserve space for the expected number of trees but don't pre-size
                 trees.reserve(config_ptr->num_trees);
                 is_loaded = false;
@@ -4387,7 +4393,7 @@ namespace mcu {
                     uint16_t d = tree.getTreeDepth();
                     uint16_t n = tree.countNodes();
                     uint16_t l = tree.countLeafNodes();
-                    RF_DEBUG_2(1, "🌲 Added tree index: ", tree.index, "- nodes: ", n);
+                    RF_DEBUG_2(2, "🌲 Added tree index: ", tree.index, "- nodes: ", n);
                     total_depths += d;
                     total_nodes  += n;
                     total_leaves += l;
@@ -4569,7 +4575,8 @@ namespace mcu {
                     return false;
                 }
                 if(treeCount != config_ptr->num_trees) {
-                    RF_DEBUG_2(0, "❌ Tree count mismatch in unified file: ", treeCount, "expected: ", config_ptr->num_trees);
+                    RF_DEBUG_2(1, "⚠️ Tree count mismatch in unified file: ", treeCount, "expected: ", config_ptr->num_trees);
+                    // config_ptr->num_trees = treeCount; // Adjust expected count
                     file.close();
                     return false;
                 }
@@ -4606,7 +4613,7 @@ namespace mcu {
                     
                     // Find the corresponding tree in trees vector
                     bool treeFound = false;
-                    for(size_t treeIdx = 0; treeIdx < trees.size(); treeIdx++) {
+                    for(size_t treeIdx = 0; treeIdx < trees.capacity(); treeIdx++) {
                         auto& tree = trees[treeIdx];
                         if(tree.index == treeIndex) {
                             tree.nodes.clear();
@@ -4903,7 +4910,7 @@ namespace mcu {
         long unsigned last_time_received_actual_label;   
         bool first_label_received = false; // flag to indicate if the first actual label has been received 
 
-        Rf_base* base_ptr = nullptr; // pointer to base data, used for auto-flush
+        const Rf_base* base_ptr = nullptr; // pointer to base data, used for auto-flush
         Rf_config* config_ptr = nullptr; // pointer to config, used for auto-flush
 
         inline bool ptr_ready() const {
@@ -5310,7 +5317,7 @@ namespace mcu {
             m_log("init tracker", false, true); // Initial log without printing
         }
 
-        void m_log(const char* msg, bool print = true, bool log = true){
+        void m_log(const char* msg, bool log = true){
             freeHeap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
             freeDisk = LittleFS.totalBytes() - LittleFS.usedBytes();
 
@@ -5319,10 +5326,10 @@ namespace mcu {
 
             largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
             fragmentation = 100 - (largestBlock * 100 / freeHeap);
-            if(print){       
-                if(msg && strlen(msg) > 0) RF_DEBUG(1, "📋 ", msg);
-                RF_DEBUG_2(1, "🧠 Free Heap(bytes): ", freeHeap, ", Free Disk(bytes): ", freeDisk);
-            }
+            // if(print){       
+            //     if(msg && strlen(msg) > 0) RF_DEBUG(1, "📋 ", msg);
+            //     RF_DEBUG_2(1, "🧠 Free Heap(bytes): ", freeHeap, ", Free Disk(bytes): ", freeDisk);
+            // }
 
             // Log to file with timestamp
             if(log) {        
@@ -5343,8 +5350,9 @@ namespace mcu {
 
         // fast log : just for measure and update : lowest ram and fragmentation
         void m_log(){
-            m_log("", false, false);
+            m_log("", false);
         }
+        
         uint16_t drop_anchor(){
             time_anchor anchor;
             anchor.anchor_time = GET_CURRENT_TIME_IN_MILLISECONDS;
@@ -5458,6 +5466,48 @@ namespace mcu {
             }else{
                 RF_DEBUG(1, "❌ Failed to open time log file: ", time_log_path);
             }
+        }
+        
+        // print out memory_log file to Serial
+        void print_m_log(){
+            if(memory_log_path[0] == '\0'){
+                RF_DEBUG(1, "❌ Cannot print memory log: log file path not set correctly");
+                return;
+            }
+            if(!LittleFS.exists(memory_log_path)){
+                RF_DEBUG(1, "❌ Cannot print memory log: log file does not exist");
+                return;
+            }
+            File file = LittleFS.open(memory_log_path, FILE_READ);
+            if(!file){
+                RF_DEBUG(1, "❌ Cannot open memory log file for reading: ", memory_log_path);
+                return;
+            }
+            while(file.available()){
+                Serial.println(file.readStringUntil('\n'));
+            }
+            file.close();
+        }
+
+        // print out time_log file to Serial
+        void print_t_log(){
+            if(time_log_path[0] == '\0'){
+                RF_DEBUG(1, "❌ Cannot print time log: log file path not set correctly");
+                return;
+            }
+            if(!LittleFS.exists(time_log_path)){
+                RF_DEBUG(1, "❌ Cannot print time log: log file does not exist");
+                return;
+            }
+            File file = LittleFS.open(time_log_path, FILE_READ);
+            if(!file){
+                RF_DEBUG(1, "❌ Cannot open time log file for reading: ", time_log_path);
+                return;
+            }
+            while(file.available()){
+                Serial.println(file.readStringUntil('\n'));
+            }
+            file.close();
         }
     };
 

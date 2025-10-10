@@ -226,8 +226,11 @@ void manage_files() {
             continue;
         }
 
-        String fileList[50];   // List of file paths
-        String folderList[50]; // List of folder paths
+    // NOTE: Use static storage to avoid large stack frames on ESP32 loopTask
+        // Each String is a small object; 100 of them can consume several KB on stack.
+        // Keeping them static prevents stack overflows seen with default 8KB loop stack.
+        static String fileList[50];   // List of file paths
+        static String folderList[50]; // List of folder paths
         int fileCount = 0;
         int folderCount = 0;
 
@@ -505,8 +508,9 @@ void manage_files() {
                     break;
                 }
                 
-                String refreshFileList[50];
-                String refreshFolderList[50];
+                // Also make refresh lists static to avoid inner-scope stack spikes
+                static String refreshFileList[50];
+                static String refreshFolderList[50];
                 int refreshFileCount = 0;
                 int refreshFolderCount = 0;
                 

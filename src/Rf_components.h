@@ -17,6 +17,15 @@
     #define ENABLE_TEST_DATA 0
 #endif
 
+#ifndef RF_ENABLE_TRAINING
+    #define RF_ENABLE_TRAINING 1
+#endif
+
+#ifdef DISABLE_TRAINING
+    #undef RF_ENABLE_TRAINING
+    #define RF_ENABLE_TRAINING 0
+#endif
+
 #ifndef RF_DEBUG_LEVEL
     #define RF_DEBUG_LEVEL 1
 #else
@@ -2612,9 +2621,9 @@ namespace mcu {
             // uint16_t avg_samples_per_label = num_samples / max(1, static_cast<int>(num_labels));
             uint16_t rarest_class = RF_MAX_SAMPLES;
             for(auto & count : samples_per_label){
-                if (count < rarest_class)[
+                if (count < rarest_class){
                     rarest_class = count;
-                ]
+                }
             }
             if(enable_auto_config){
                 if(rarest_class < 150){
@@ -5314,7 +5323,7 @@ namespace mcu {
                     logFile.close();
                 } 
             }
-            m_log("init tracker", false, true); // Initial log without printing
+            m_log("init tracker", true); // Initial log without printing
         }
 
         void m_log(const char* msg, bool log = true){

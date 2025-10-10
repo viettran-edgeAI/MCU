@@ -4,26 +4,99 @@
 #include <cstdio>
 
 namespace mcu{
+
+#if RF_ENABLE_TRAINING
+    struct TrainingContext {
+        Rf_data base_data;
+        Rf_data train_data;
+        Rf_data test_data;
+        Rf_data validation_data;
+        Rf_random random_generator;
+        Rf_node_predictor node_pred;
+        vector<ID_vector<uint16_t,2>> dataList;
+        bool data_prepared;
+
+        TrainingContext() : data_prepared(false) {}
+    };
+#endif
     
     class RandomForest{
-        Rf_data base_data;      //
-        Rf_data train_data;     //
-        Rf_data test_data;      //
-        Rf_data validation_data;    //
+#if RF_ENABLE_TRAINING
+        TrainingContext* training_ctx = nullptr;
+#endif
 
         Rf_base base;
         Rf_config config;
         Rf_logger logger;
-        Rf_random random_generator;     // 
-        Rf_categorizer categorizer;     //
-        Rf_node_predictor  node_pred;   //
-        Rf_pending_data pending_data; 
-        Rf_tree_container forest_container; 
+        Rf_categorizer categorizer;
+        Rf_tree_container forest_container;
 
-        vector<ID_vector<uint16_t,2>> dataList;     // 
-
-        bool clean_yet = false;
         bool print_log = false;
+
+        Rf_pending_data* pending_data = nullptr;
+        Rf_data* base_data_stub = nullptr;
+
+#if RF_ENABLE_TRAINING
+        inline TrainingContext* ensure_training_context(){
+            if(!training_ctx){
+                release_base_data_stub();
+                training_ctx = new TrainingContext();
+                training_ctx->node_pred.init(&base);
+                training_ctx->random_generator.seed(config.random_seed);
+            }
+            return training_ctx;
+        }
+
+        inline void destroy_training_context(){
+            if(training_ctx){
+                delete training_ctx;
+                training_ctx = nullptr;
+            }
+        }
+#endif
+
+        inline Rf_pending_data* ensure_pending_data(){
+            if(!pending_data){
+                pending_data = new Rf_pending_data();
+                pending_data->init(&base, &config);
+            }
+            return pending_data;
+        }
+
+        inline void release_pending_data(){
+            if(pending_data){
+                delete pending_data;
+                pending_data = nullptr;
+            }
+        }
+
+        inline Rf_data* ensure_base_data_stub(){
+#if RF_ENABLE_TRAINING
+            if(training_ctx){
+                if(training_ctx->base_data.isProperlyInitialized()){
+                    return &training_ctx->base_data;
+                }
+            }
+#endif
+            if(!base_data_stub){
+                base_data_stub = new Rf_data();
+                char base_path[RF_PATH_BUFFER];
+                base.get_base_data_path(base_path, sizeof(base_path));
+                if(config.num_features > 0){
+                    base_data_stub->init(base_path, config.num_features);
+                } else {
+                    base_data_stub->setfile_path(base_path);
+                }
+            }
+            return base_data_stub;
+        }
+
+        inline void release_base_data_stub(){
+            if(base_data_stub){
+                delete base_data_stub;
+                base_data_stub = nullptr;
+            }
+        }
 
     public:
         RandomForest(){};
@@ -32,6 +105,16 @@ namespace mcu{
         }
 
         void init(const char* model_name){
+        #if defined(ESP32) && (RF_DEBUG_LEVEL > 0)
+            // Check stack size to prevent overflow on ESP32-C3
+            UBaseType_t stackRemaining = uxTaskGetStackHighWaterMark(NULL);
+            size_t stackBytes = stackRemaining * sizeof(StackType_t);
+            if(stackBytes < 2048) {
+                Serial.printf("⚠️ WARNING: Low stack space (%u bytes). May cause crash!\n", stackBytes);
+                Serial.println("   Solution: Increase CONFIG_ARDUINO_LOOP_STACK_SIZE to 16384");
+                Serial.println("   See docs/ESP32_Stack_Fix.md for details");
+            }
+        #endif
             // initial components
             base.init(model_name);      // base must be init first
 
@@ -39,7 +122,6 @@ namespace mcu{
             config.init(&base);
             // node_pred.init(&base);
             categorizer.init(&base);
-            pending_data.init(&base, &config);
             forest_container.init(&base, &config);               
 
             // load resources
@@ -48,113 +130,141 @@ namespace mcu{
             categorizer.loadCategorizer(); 
             // random_generator.init(config.random_seed);
 
+            if(config.enable_retrain){
+                ensure_pending_data();
+                ensure_base_data_stub();
+            }
+
             if constexpr (RF_DEBUG_LEVEL > 2) print_log = true;
         }
         
         // Enhanced destructor
         ~RandomForest(){
-            clean_forest();
+            end_training_session();
             forest_container.releaseForest();
+            release_base_data_stub();
+            release_pending_data();
+        }
+
+        bool begin_training_session(){
+#if RF_ENABLE_TRAINING
+            auto ctx = ensure_training_context();
+            ctx->data_prepared = false;
+            return true;
+#else
+            return false;
+#endif
+        }
+
+        void end_training_session(){
+#if RF_ENABLE_TRAINING
+            cleanup_training_data();
+            destroy_training_context();
+#endif
+            release_base_data_stub();
         }
 
         
-        void clean_forest(){
-            if(!clean_yet){
-                RF_DEBUG(0, "🧹 Cleaning files... ");
-
-                //clone temp data back to base data after add new samples
-                // if temp_base_data file size > original base_data file size, replace original file
-                char base_path[RF_PATH_BUFFER];
-                base.get_base_data_path(base_path, sizeof(base_path));
-                File tempFile = LittleFS.open(temp_base_data, FILE_READ);
-
-                size_t tempSize = tempFile ? tempFile.size() : 0;
-                tempFile.close();
-                File baseFile = LittleFS.open(base_path, FILE_READ);
-                size_t baseSize = baseFile ? baseFile.size() : 0;
-                baseFile.close();
-
-                if(tempSize > baseSize && config.enable_retrain){
-                    remove(base_path);
-                    cloneFile(temp_base_data, base_path);
-                }
-
-                // clear all Rf_data
-                base_data.purgeData();
-                train_data.purgeData();
-                test_data.purgeData();
-                validation_data.purgeData();
-                // re_train node predictor after each training session
-                node_pred.re_train(); 
-                clean_yet = true;
+        void cleanup_training_data(){
+#if RF_ENABLE_TRAINING
+            if(!training_ctx){
+                return;
             }
+
+            RF_DEBUG(0, "🧹 Cleaning up training session... ");
+
+            //clone temp data back to base data after add new samples
+            // if temp_base_data file size > original base_data file size, replace original file
+            char base_path[RF_PATH_BUFFER];
+            base.get_base_data_path(base_path, sizeof(base_path));
+            File tempFile = LittleFS.open(temp_base_data, FILE_READ);
+
+            size_t tempSize = tempFile ? tempFile.size() : 0;
+            tempFile.close();
+            File baseFile = LittleFS.open(base_path, FILE_READ);
+            size_t baseSize = baseFile ? baseFile.size() : 0;
+            baseFile.close();
+
+            if(tempSize > baseSize && config.enable_retrain){
+                remove(base_path);
+                cloneFile(temp_base_data, base_path);
+            }
+
+            // Purge all Rf_data to free resources
+            training_ctx->base_data.purgeData();
+            training_ctx->train_data.purgeData();
+            training_ctx->test_data.purgeData();
+            if(config.use_validation())
+            training_ctx->validation_data.purgeData();
+            training_ctx->dataList.clear();
+            // re_train node predictor after training session
+            training_ctx->node_pred.re_train(); 
+#endif
         }
 
         bool build_model(){
+#if RF_ENABLE_TRAINING
             RF_DEBUG(0, "🌲 Building model... ");
             if(!base.able_to_training()){
                 RF_DEBUG(0, "❌ Model not set for training");
                 return false;
             }
-            // clone base_data to temp_base_data to avoid modifying original data
-            char base_path[RF_PATH_BUFFER];
-            base.get_base_data_path(base_path, sizeof(base_path));
-            cloneFile(base_path, temp_base_data);
-            if(!base_data.init(temp_base_data)){
-                RF_DEBUG(0, "❌ Error initializing base data");
+
+            if(!begin_training_session()){
+                RF_DEBUG(0, "❌ Unable to allocate training context");
                 return false;
             }
 
-            // initialize data components
-            dataList.reserve(config.num_trees);
-            char path[RF_PATH_BUFFER];
+            bool success = true;
+            auto* ctx = training_ctx;
 
-            base.build_data_file_path(path, "train_data");
-            train_data.init(path, config.num_features);
+            do {
+                if(!ctx){
+                    success = false;
+                    break;
+                }
 
-            base.build_data_file_path(path, "test_data");
-            test_data.init(path, config.num_features);
+                if(!prepare_training_data()){
+                    success = false;
+                    break;
+                }
 
-            if(config.use_validation()){
-                base.build_data_file_path(path, "valid_data");
-                validation_data.init(path, config.num_features);
-            }
+                // build forest
+                if(!build_forest()){
+                    RF_DEBUG(0, "❌ Error building forest");
+                    success = false;
+                }
+            } while(false);
 
-            // data splitting
-            vector<pair<float, Rf_data*>> dest;
-            dest.reserve(3);
-            dest.push_back(make_pair(config.train_ratio, &train_data));
-            dest.push_back(make_pair(config.test_ratio, &test_data));
-            if(config.use_validation()){
-                dest.push_back(make_pair(config.valid_ratio, &validation_data));
-            }
-            splitData(base_data, dest);
-            dest.clear(); 
-            ClonesData();
-
-            // build forest
-            if(!build_forest()){
-                RF_DEBUG(0, "❌ Error building forest");
-                return false;
-            }
-            return true;
+            end_training_session();
+            return success;
+#else
+            RF_DEBUG(0, "❌ Training disabled (RF_ENABLE_TRAINING = 0)");
+            return false;
+#endif
         }
 
     private:
+#if RF_ENABLE_TRAINING
         bool build_forest(){
+            auto* ctx = training_ctx;
+            if(!ctx){
+                return false;
+            }
+
             size_t start = logger.drop_anchor();
             // Clear any existing forest first
             forest_container.clearForest();
             logger.m_log("start building forest");
 
-            uint16_t estimated_nodes = node_pred.estimate_nodes(config);
-            uint16_t peak_nodes = node_pred.queue_peak_size(config);
+            uint16_t estimated_nodes = ctx->node_pred.estimate_nodes(config);
+            uint16_t peak_nodes = ctx->node_pred.queue_peak_size(config);
             auto& queue_nodes = forest_container.getQueueNodes();
             queue_nodes.clear();
             queue_nodes.reserve(peak_nodes); // Conservative estimate
             RF_DEBUG(2, "🌳 Estimated nodes per tree: ", estimated_nodes);
 
-            if(!train_data.loadData()){
+            if(!ctx->train_data.loadData()){
                 RF_DEBUG(0, "❌ Error loading training data");
                 return false;
             }
@@ -163,15 +273,15 @@ namespace mcu{
                 Rf_tree tree(i);
                 tree.nodes.reserve(estimated_nodes); // Reserve memory for nodes based on prediction
                 queue_nodes.clear();                // Clear queue for each tree
-                buildTree(tree, dataList[i], queue_nodes);
+                buildTree(tree, ctx->dataList[i], queue_nodes);
                 tree.isLoaded = true;
                 forest_container.add_tree(std::move(tree));
                 logger.m_log("tree creation");
             }
-            train_data.releaseData(); 
+            ctx->train_data.releaseData(); 
             forest_container.is_loaded = false;
             // forest_container.set_to_individual_form();
-            node_pred.add_new_samples(config.min_split, config.max_depth, forest_container.avg_nodes());
+            ctx->node_pred.add_new_samples(config.min_split, config.max_depth, forest_container.avg_nodes());
 
             RF_DEBUG_2(0, "🌲 Forest built successfully: ", forest_container.get_total_nodes(), "nodes","");
             RF_DEBUG_2(1, "Min split: ", config.min_split, "- Max depth: ", config.max_depth);
@@ -180,9 +290,60 @@ namespace mcu{
             return true;
         }
         
+        bool prepare_training_data(){
+            auto* ctx = training_ctx;
+            if(!ctx){
+                return false;
+            }
+
+            // clone base_data to temp_base_data to avoid modifying original data
+            char base_path[RF_PATH_BUFFER];
+            base.get_base_data_path(base_path, sizeof(base_path));
+            cloneFile(base_path, temp_base_data);
+            if(!ctx->base_data.init(temp_base_data)){
+                RF_DEBUG(0, "❌ Error initializing base data");
+                return false;
+            }
+
+            // initialize data components
+            ctx->dataList.clear();
+            ctx->dataList.reserve(config.num_trees);
+            char path[RF_PATH_BUFFER];
+
+            base.build_data_file_path(path, "train_data");
+            ctx->train_data.init(path, config.num_features);
+
+            base.build_data_file_path(path, "test_data");
+            ctx->test_data.init(path, config.num_features);
+
+            if(config.use_validation()){
+                base.build_data_file_path(path, "valid_data");
+                ctx->validation_data.init(path, config.num_features);
+            }
+
+            // data splitting
+            vector<pair<float, Rf_data*>> dest;
+            dest.reserve(3);
+            dest.push_back(make_pair(config.train_ratio, &ctx->train_data));
+            dest.push_back(make_pair(config.test_ratio, &ctx->test_data));
+            if(config.use_validation()){
+                dest.push_back(make_pair(config.valid_ratio, &ctx->validation_data));
+            }
+            if(!splitData(ctx->base_data, dest)){
+                return false;
+            }
+            dest.clear();
+            ClonesData();
+            return true;
+        }
+
         // ----------------------------------------------------------------------------------
         // Split data into training and testing sets. Dest data must be init() before called by this function
-        bool splitData(Rf_data& source, vector<pair<float, Rf_data*>>& dest, Rf_ra) {
+        bool splitData(Rf_data& source, vector<pair<float, Rf_data*>>& dest) {
+            auto* ctx = training_ctx;
+            if(!ctx){
+                return false;
+            }
             size_t start = logger.drop_anchor();
             RF_DEBUG(0, "🔀 splitting data...");
             if(dest.empty() || source.size() == 0) {
@@ -210,7 +371,7 @@ namespace mcu{
                 sink_IDs.clear();
                 uint16_t sink_require = static_cast<uint16_t>(static_cast<float>(maxID) * dest[i].first);
                 while(sink_IDs.size() < sink_require) {
-                    uint16_t sampleId = static_cast<uint16_t>(random_generator.bounded(static_cast<uint32_t>(maxID)));
+                    uint16_t sampleId = static_cast<uint16_t>(ctx->random_generator.bounded(static_cast<uint32_t>(maxID)));
                     if (!used.contains(sampleId)) {
                         sink_IDs.push_back(sampleId);
                         used.push_back(sampleId);
@@ -226,11 +387,15 @@ namespace mcu{
         }
         
         void ClonesData() {
+            auto* ctx = training_ctx;
+            if(!ctx){
+                return;
+            }
             size_t start = logger.drop_anchor();
             RF_DEBUG(1, "🔀 Cloning data for each tree...");
-            dataList.clear();
-            dataList.reserve(config.num_trees);
-            uint16_t numSample = train_data.size();
+            ctx->dataList.clear();
+            ctx->dataList.reserve(config.num_trees);
+            uint16_t numSample = ctx->train_data.size();
             uint16_t numSubSample;
             if(config.use_boostrap) {
                 numSubSample = numSample; // Bootstrap sampling with replacement
@@ -255,7 +420,7 @@ namespace mcu{
                 uint64_t nonce = 0;
                 while (true) {
                     sub_data.clear();
-                    auto tree_rng = random_generator.deriveRNG(i, nonce);
+                    auto tree_rng = ctx->random_generator.deriveRNG(i, nonce);
 
                     if (config.use_boostrap) {
                         // Bootstrap sampling: allow duplicates, track occurrence count
@@ -279,7 +444,7 @@ namespace mcu{
                             sub_data.push_back(arr[t]);
                         }
                     }
-                    uint64_t h = random_generator.hashIDVector(sub_data);
+                    uint64_t h = ctx->random_generator.hashIDVector(sub_data);
                     if (seen_hashes.find(h) == seen_hashes.end()) {
                         seen_hashes.insert(h);
                         break; // unique, accept
@@ -303,18 +468,18 @@ namespace mcu{
                         }
                         
                         // accept after tweak
-                        seen_hashes.insert(random_generator.hashIDVector(sub_data));
+                        seen_hashes.insert(ctx->random_generator.hashIDVector(sub_data));
                         break;
                     }
                 }
-                dataList.push_back(std::move(sub_data));
+                ctx->dataList.push_back(std::move(sub_data));
                 logger.m_log("clone sub_data");
             }
 
             logger.m_log("clones data");  
             size_t end = logger.drop_anchor();
             logger.t_log("clones data time", start, end, "ms", print_log);
-            RF_DEBUG_2(1, "🎉 Created ", dataList.size(), "datasets for trees","");
+            RF_DEBUG_2(1, "🎉 Created ", ctx->dataList.size(), "datasets for trees","");
         }  
         
         typedef struct SplitInfo {
@@ -358,6 +523,10 @@ namespace mcu{
         SplitInfo findBestSplit(const b_vector<uint16_t, 8>& indices, uint16_t begin, uint16_t end,
                                     const unordered_set<uint16_t>& selectedFeatures, bool use_Gini, uint8_t numLabels) {
             SplitInfo bestSplit;
+            auto* ctx = training_ctx;
+            if(!ctx){
+                return bestSplit;
+            }
             uint16_t totalSamples = (begin < end) ? (end - begin) : 0;
             if (totalSamples < 2) return bestSplit;
 
@@ -365,8 +534,8 @@ namespace mcu{
             b_vector<uint16_t> baseLabelCounts(numLabels, 0);
             for (uint16_t k = begin; k < end; ++k) {
                 uint16_t sid = indices[k];
-                if (sid < train_data.size()) {
-                    uint8_t lbl = train_data.getLabel(sid);
+                if (sid < ctx->train_data.size()) {
+                    uint8_t lbl = ctx->train_data.getLabel(sid);
                     if (lbl < numLabels) baseLabelCounts[lbl]++;
                 }
             }
@@ -396,10 +565,10 @@ namespace mcu{
 
                 for (uint16_t k = begin; k < end; ++k) {
                     uint16_t sid = indices[k];
-                    if (sid < train_data.size()) {
-                        uint8_t lbl = train_data.getLabel(sid);
+                    if (sid < ctx->train_data.size()) {
+                        uint8_t lbl = ctx->train_data.getLabel(sid);
                         if (lbl < numLabels) {
-                            uint8_t fv = train_data.getFeature(sid, featureID);
+                            uint8_t fv = ctx->train_data.getFeature(sid, featureID);
                             if (fv < 4) {
                                 counts[fv * numLabels + lbl]++;
                                 value_totals[fv]++;
@@ -453,6 +622,10 @@ namespace mcu{
 
         // Breadth-first tree building for optimal node layout - MEMORY OPTIMIZED
         void buildTree(Rf_tree& tree, ID_vector<uint16_t,2>& sampleIDs, b_vector<NodeToBuild>& queue_nodes) {
+            auto* ctx = training_ctx;
+            if(!ctx){
+                return;
+            }
             tree.nodes.clear();
             if (sampleIDs.empty()) {
                 RF_DEBUG(1, "⚠️ Warning: sub_data is empty. Ignoring.. !");
@@ -478,7 +651,7 @@ namespace mcu{
                 
                 // Analyze node samples over the slice
                 NodeStats stats(config.num_labels);
-                stats.analyzeSamples(indices, current.begin, current.end, config.num_labels, train_data);
+                stats.analyzeSamples(indices, current.begin, current.end, config.num_labels, ctx->train_data);
 
                 if(current.nodeIndex >= RF_MAX_NODES){
                     RF_DEBUG(2, "⚠️ Warning: Exceeded maximum node limit. Forcing leaf node 🌿.");
@@ -513,7 +686,7 @@ namespace mcu{
                 uint16_t N = config.num_features;
                 uint16_t K = num_selected_features > N ? N : num_selected_features;
                 for (uint16_t j = N - K; j < N; ++j) {
-                    uint16_t t = static_cast<uint16_t>(random_generator.bounded(j + 1));
+                    uint16_t t = static_cast<uint16_t>(ctx->random_generator.bounded(j + 1));
                     if (selectedFeatures.find(t) == selectedFeatures.end()) selectedFeatures.insert(t);
                     else selectedFeatures.insert(j);
                 }
@@ -538,8 +711,8 @@ namespace mcu{
                 uint16_t iLeft = current.begin;
                 for (uint16_t k = current.begin; k < current.end; ++k) {
                     uint16_t sid = indices[k];
-                    if (sid < train_data.size() && 
-                        train_data.getFeature(sid, bestSplit.featureID) <= bestSplit.threshold) {
+                    if (sid < ctx->train_data.size() && 
+                        ctx->train_data.getFeature(sid, bestSplit.featureID) <= bestSplit.threshold) {
                         if (k != iLeft) {
                             uint16_t tmp = indices[iLeft];
                             indices[iLeft] = indices[k];
@@ -583,14 +756,19 @@ namespace mcu{
         float get_oob_score(){
             RF_DEBUG(1, "Getting OOB score..");
 
+            auto* ctx = training_ctx;
+            if(!ctx){
+                return 0.0f;
+            }
+
             // Check if we have trained trees and data
-            if(dataList.empty()){
+            if(ctx->dataList.empty()){
                 RF_DEBUG(0, "❌ No sub_data for validation");
                 return 0.0f;
             }
 
             // Determine chunk size for memory-efficient processing
-            uint16_t buffer_chunk = train_data.samplesPerChunk();
+            uint16_t buffer_chunk = ctx->train_data.samplesPerChunk();
 
             // Pre-allocate evaluation resources
             Rf_data train_samples_buffer;
@@ -611,8 +789,8 @@ namespace mcu{
             logger.m_log("get OOB score");
 
             // Process training samples in chunks for OOB evaluation
-            for(size_t chunk_index = 0; chunk_index < train_data.total_chunks(); chunk_index++){
-                train_samples_buffer.loadChunk(train_data, chunk_index, true);
+            for(size_t chunk_index = 0; chunk_index < ctx->train_data.total_chunks(); chunk_index++){
+                train_samples_buffer.loadChunk(ctx->train_data, chunk_index, true);
                 if(train_samples_buffer.size() == 0){
                     RF_DEBUG(0, "❌ Failed to load training samples chunk!");
                     continue;
@@ -625,9 +803,9 @@ namespace mcu{
 
                     // Find trees that didn't use this sample (OOB trees)
                     activeTrees.clear();
-                    for(uint8_t treeIdx = 0; treeIdx < config.num_trees && treeIdx < dataList.size(); treeIdx++){
+                    for(uint8_t treeIdx = 0; treeIdx < config.num_trees && treeIdx < ctx->dataList.size(); treeIdx++){
                         // Check if this sample ID is NOT in the tree's training data
-                        if(!dataList[treeIdx].contains(sampleID)){
+                        if(!ctx->dataList[treeIdx].contains(sampleID)){
                             activeTrees.push_back(treeIdx);
                         }
                     }
@@ -677,6 +855,10 @@ namespace mcu{
         // Evaluates using validation dataset if available
         float get_valid_score(){
             RF_DEBUG(1, "Get validation score... ");
+            auto* ctx = training_ctx;
+            if(!ctx){
+                return 0.0f;
+            }
             if(!config.use_validation()){
                 RF_DEBUG(1, "❌ Validation not enabled in config");
                 return 0.0f;
@@ -686,7 +868,7 @@ namespace mcu{
                 RF_DEBUG(0,"❌ Failed to load forest for validation evaluation!");
                 return 0.0f;
             }
-            if(!validation_data.loadData()){
+            if(!ctx->validation_data.loadData()){
                 RF_DEBUG(0,"❌ Failed to load validation data for evaluation!");
                 forest_container.releaseForest();
                 return 0.0f;
@@ -694,8 +876,8 @@ namespace mcu{
             // Initialize matrix score calculator for validation
             Rf_matrix_score valid_scorer(config.num_labels, static_cast<uint8_t>(config.metric_score));
 
-            for(uint16_t i = 0; i < validation_data.size(); i++){
-                const Rf_sample& sample = validation_data[i];
+            for(uint16_t i = 0; i < ctx->validation_data.size(); i++){
+                const Rf_sample& sample = ctx->validation_data[i];
                 uint8_t actualLabel = sample.label;
 
                 unordered_map<uint8_t, uint8_t> validPredictClass;
@@ -727,7 +909,7 @@ namespace mcu{
             }
             logger.m_log("get validation score");
             forest_container.releaseForest();
-            validation_data.releaseData(true);
+            ctx->validation_data.releaseData(true);
 
             // Calculate and return validation score
             return valid_scorer.calculate_score();
@@ -737,13 +919,17 @@ namespace mcu{
         // train_data -> base_data, fold_train_data ~ train_data, fold_valid_data ~ validation_data
         float get_cross_validation_score(){
             RF_DEBUG(1, "Get k-fold cross validation score... ");
+            auto* ctx = training_ctx;
+            if(!ctx){
+                return 0.0f;
+            }
 
             if(config.k_folds < 2 || config.k_folds > 10){
                 RF_DEBUG(0, "❌ Invalid k_folds value! Must be between 2 and 10.");
                 return 0.0f;
             }
 
-            uint16_t totalSamples = base_data.size();
+            uint16_t totalSamples = ctx->base_data.size();
             if(totalSamples < config.k_folds * config.num_labels * 2){
                 RF_DEBUG(0, "❌ Not enough samples for k-fold cross validation!");
                 return 0.0f;
@@ -764,20 +950,20 @@ namespace mcu{
 
                 fold_train_sampleIDs -= fold_valid_sampleIDs;
                 // create train_data and valid data for current fold 
-                validation_data.loadData(base_data, fold_valid_sampleIDs, true);
-                validation_data.releaseData(false);
-                train_data.loadData(base_data, fold_train_sampleIDs, true);      logger.m_log("load train_data");
-                train_data.releaseData(false); 
+                ctx->validation_data.loadData(ctx->base_data, fold_valid_sampleIDs, true);
+                ctx->validation_data.releaseData(false);
+                ctx->train_data.loadData(ctx->base_data, fold_train_sampleIDs, true);      logger.m_log("load train_data");
+                ctx->train_data.releaseData(false); 
                 
                 ClonesData();
                 build_forest();
             
-                validation_data.loadData();
+                ctx->validation_data.loadData();
                 forest_container.loadForest();
                 logger.m_log("fold evaluation");
                 // Process all samples
-                for(uint16_t i = 0; i < validation_data.size(); i++){
-                    const Rf_sample& sample = validation_data[i];
+                for(uint16_t i = 0; i < ctx->validation_data.size(); i++){
+                    const Rf_sample& sample = ctx->validation_data[i];
                     uint8_t actual = sample.label;
                     uint8_t pred = forest_container.predict_features(sample.features);
                 
@@ -786,7 +972,7 @@ namespace mcu{
                     }
                 }
                 
-                validation_data.releaseData();
+                ctx->validation_data.releaseData();
                 forest_container.releaseForest();
                 
                 k_fold_score += scorer.calculate_score();
@@ -807,6 +993,7 @@ namespace mcu{
             // Default fallback
             return get_oob_score();
         }
+#endif
 
     // ---------------------------------- operations -----------------------------------
     public:
@@ -833,6 +1020,28 @@ namespace mcu{
 
         // Memory-Efficient Grid Search Training Function
         void training(int epochs = 99999) {
+#if RF_ENABLE_TRAINING
+            if(!base.able_to_training()){
+                RF_DEBUG(0, "❌ Model not set for training");
+                return;
+            }
+
+            if(!begin_training_session()){
+                RF_DEBUG(0, "❌ Unable to allocate training context");
+                return;
+            }
+
+            auto* ctx = training_ctx;
+            if(!ctx){
+                end_training_session();
+                return;
+            }
+
+            if(!prepare_training_data()){
+                end_training_session();
+                return;
+            }
+
             size_t start = logger.drop_anchor();
             RF_DEBUG(0, "🌲 Starting training...");
             uint8_t min_ms = config.min_split_range.first;
@@ -845,18 +1054,16 @@ namespace mcu{
             int best_max_depth = config.max_depth;
 
             float best_score = get_training_evaluation_index();
-            
+
             char path[RF_PATH_BUFFER];
             Rf_data old_base_data;
             if(config.training_score == Rf_training_score::K_FOLD_SCORE){
-                // convert train_data to base_data
                 base.build_data_file_path(path, "temp_base_data");
                 old_base_data.init(path, config.num_features);
-                old_base_data = base_data; // backup
-                base_data = train_data; 
-                // init validation_data if not yet
-                if(!validation_data.isProperlyInitialized()){
-                    validation_data.init("/valid_data.bin", config.num_features);
+                old_base_data = ctx->base_data; // backup
+                ctx->base_data = ctx->train_data; 
+                if(!ctx->validation_data.isProperlyInitialized()){
+                    ctx->validation_data.init("/valid_data.bin", config.num_features);
                 }
             }
 
@@ -866,7 +1073,6 @@ namespace mcu{
                     config.max_depth = max_depth;
                     float score;
                     if(config.training_score == Rf_training_score::K_FOLD_SCORE){
-                        // convert train_data to base_data
                         score = get_cross_validation_score();
                     }else{
                         build_forest();
@@ -881,10 +1087,8 @@ namespace mcu{
                         best_min_split = min_split;
                         best_max_depth = max_depth;
                         config.result_score = best_score;
-                        //save best forest
                         if(config.training_score != Rf_training_score::K_FOLD_SCORE){
-                            // Save the best forest to LittleFS
-                            forest_container.releaseForest(); // Release current trees from RAM
+                            forest_container.releaseForest();
                         }
                     }
                     logger.m_log("epoch");
@@ -893,16 +1097,15 @@ namespace mcu{
                 }
                 if(epochs <= 0) break;
             }
-            // Set config to best found parameters
+
             config.min_split = best_min_split;
             config.max_depth = best_max_depth;
             if constexpr (!ENABLE_TEST_DATA)
-            config.result_score = best_score;
+                config.result_score = best_score;
 
-            // restore datas and rebuild model with best params if using K-FOLD
             if(config.training_score == Rf_training_score::K_FOLD_SCORE){
-                train_data = base_data;     // restore train_data
-                base_data = old_base_data;  // restore base_data
+                ctx->train_data = ctx->base_data;     // restore train_data
+                ctx->base_data = old_base_data;       // restore base_data
                 old_base_data.purgeData();
                 ClonesData();
                 build_forest();
@@ -914,7 +1117,14 @@ namespace mcu{
 
             size_t end = logger.drop_anchor();
             logger.t_log("total training time", start, end, "s", print_log);
-            // clean_forest();
+        #ifdef DEV_STATE
+            training_report();
+        #endif
+            end_training_session();
+#else
+            (void)epochs;
+            RF_DEBUG(0, "❌ Training disabled (RF_ENABLE_TRAINING = 0)");
+#endif
         }
 
         // Public API: predict() fills the provided label buffer with the predicted label and optionally returns the label index
@@ -937,27 +1147,31 @@ namespace mcu{
 
             // Inline categorization to avoid packed_vector copy overhead
             packed_vector<2> c_features = categorizer.categorizeFeatures(features, length);
+            return predict(c_features, labelBuffer, bufferSize, outLabel);
+        }
+
+        bool predict(const packed_vector<2>& c_features, char* labelBuffer, size_t bufferSize, uint8_t* outLabel = nullptr) {
+            const bool copyLabel = (labelBuffer != nullptr && bufferSize > 0);
+
             uint8_t i_label = forest_container.predict_features(c_features);
 
-            // Fast path: store label index first (most common operation)
             if (outLabel) {
                 *outLabel = i_label;
             }
 
-            // Deferred: only handle retraining if enabled (less common)
             if (__builtin_expect(config.enable_retrain, 0)) {
-                Rf_sample sample;
-                sample.features = std::move(c_features);
-                sample.label = i_label;
-                pending_data.add_pending_sample(sample, base_data);
+                Rf_sample sample(c_features, i_label);
+                if(auto* pd = ensure_pending_data()){
+                    if(Rf_data* base_handle = ensure_base_data_stub()){
+                        pd->add_pending_sample(sample, *base_handle);
+                    }
+                }
             }
 
-            // Fast path: if no label buffer requested, return early
             if (!copyLabel) {
                 return true;
             }
 
-            // Label string lookup and copy
             const char* labelPtr = nullptr;
             uint16_t labelLen = 0;
             if (__builtin_expect(!categorizer.getOriginalLabelView(i_label, &labelPtr, &labelLen), 0)) {
@@ -965,7 +1179,6 @@ namespace mcu{
                 return false;
             }
 
-            // Optimized string copy
             if (labelLen >= bufferSize) {
                 memcpy(labelBuffer, labelPtr, bufferSize - 1);
                 labelBuffer[bufferSize - 1] = '\0';
@@ -985,7 +1198,10 @@ namespace mcu{
          * @param timeout: Timeout duration in milliseconds.
          */
         void set_feedback_timeout(long unsigned timeout){
-            pending_data.set_max_wait_time(timeout);
+            Rf_pending_data* pd = config.enable_retrain ? ensure_pending_data() : pending_data;
+            if(pd){
+                pd->set_max_wait_time(timeout);
+            }
         }
 
         void add_actual_label(const char* label){
@@ -993,8 +1209,12 @@ namespace mcu{
                 return;
             }
             uint8_t i_label = categorizer.getNormalizedLabel(label);
+            Rf_pending_data* pd = config.enable_retrain ? ensure_pending_data() : pending_data;
+            if(!pd){
+                return;
+            }
             if(i_label < config.num_labels){
-                pending_data.add_actual_label(i_label);
+                pd->add_actual_label(i_label);
             } else {
                 RF_DEBUG(1, "❌ Unknown label: ", label);
             }
@@ -1031,7 +1251,13 @@ namespace mcu{
          * to the base dataset and logs the predictions to the inference log file.
          */
         void flush_pending_data() {
-            pending_data.flush_pending_data(base_data);
+            Rf_pending_data* pd = config.enable_retrain ? ensure_pending_data() : pending_data;
+            if(!pd){
+                return;
+            }
+            if(Rf_data* base_handle = ensure_base_data_stub()){
+                pd->flush_pending_data(*base_handle);
+            }
         }
 
         /**
@@ -1040,7 +1266,13 @@ namespace mcu{
          * sample stack and real label stack remains in pending_data after this operation.
          */
         void write_pending_data_to_dataset(){
-            pending_data.write_to_base_data(base_data);
+            Rf_pending_data* pd = config.enable_retrain ? ensure_pending_data() : pending_data;
+            if(!pd){
+                return;
+            }
+            if(Rf_data* base_handle = ensure_base_data_stub()){
+                pd->write_to_base_data(*base_handle);
+            }
         }
 
         /**
@@ -1048,17 +1280,24 @@ namespace mcu{
          * @note : sample stack and real label stack remains in pending_data after this operation.
          */
         void log_pending_data() {
-            pending_data.write_to_infer_log();
+            Rf_pending_data* pd = config.enable_retrain ? ensure_pending_data() : pending_data;
+            if(pd){
+                pd->write_to_infer_log();
+            }
         }
 
     // ----------------------------------------setters---------------------------------------
 
         void enable_retrain(){
             config.enable_retrain = true;
+            ensure_pending_data();
+            ensure_base_data_stub();
         }
 
         void disable_retrain(){
             config.enable_retrain = false;
+            release_pending_data();
+            release_base_data_stub();
         }
 
        // allow dataset to grow when new data is added, but limited to max_samples/max_dataset_size
@@ -1131,11 +1370,16 @@ namespace mcu{
 
         // set random seed , default is 37
         void set_random_seed(uint32_t seed) {
-            random_generator.seed(seed);
+            config.random_seed = seed;
+#if RF_ENABLE_TRAINING
+            if(training_ctx){
+                training_ctx->random_generator.seed(seed);
+            }
+#endif
         }
 
         void use_default_seed() {
-            random_generator.seed(0ULL);
+            set_random_seed(0ULL);
         }
         //  rename model.  This action will rename all forest file components.
         void set_model_name(const char* name) {
@@ -1370,11 +1614,17 @@ namespace mcu{
 
         // print metrix score on test set
         void training_report(){
-            if(config.test_ratio == 0.0f || test_data.size() == 0){
+#if RF_ENABLE_TRAINING
+            auto* ctx = training_ctx;
+            if(!ctx || config.test_ratio == 0.0f || ctx->test_data.size() == 0){
                 RF_DEBUG(0, "❌ No test set available for evaluation!", "");
                 return;
             }
-            auto result = predict(test_data);
+            auto result = predict(ctx->test_data);
+#else
+            RF_DEBUG(0, "❌ Training disabled (RF_ENABLE_TRAINING = 0)");
+            return;
+#endif
             RF_DEBUG(0, "Precision in test set:");
             b_vector<pair<uint8_t, float>> precision = result[0];
             for (const auto& p : precision) {;
@@ -1455,6 +1705,7 @@ namespace mcu{
             RF_DEBUG(0, "Average F1-Score: ", avgF1);
             RF_DEBUG(0, "Accuracy: ", avgAccuracy);
             RF_DEBUG(0, "Result Score: ", config.result_score);
+            RF_DEBUG(0, "Lowest RAM: ", logger.lowest_ram);
         }
 
         float precision(Rf_data& data) {
@@ -1555,16 +1806,25 @@ namespace mcu{
         
         // printout predicted & actual label for each sample in test set
         void visual_result() {
+#if RF_ENABLE_TRAINING
+            auto* ctx = training_ctx;
+            if(!ctx){
+                RF_DEBUG(0, "❌ No training context available for visual_result!", "");
+                return;
+            }
             forest_container.loadForest(); // Ensure all trees are loaded before prediction
-            test_data.loadData(); // Load test set data if not already loaded
+            ctx->test_data.loadData(); // Load test set data if not already loaded
             RF_DEBUG(0, "SampleID, Predicted, Actual");
-            for (uint16_t i = 0; i < test_data.size(); i++) {
-                const Rf_sample& sample = test_data[i];
+            for (uint16_t i = 0; i < ctx->test_data.size(); i++) {
+                const Rf_sample& sample = ctx->test_data[i];
                 uint8_t pred = forest_container.predict_features(sample.features);
                 Serial.printf("%d, %d, %d\n", i, pred, sample.label);
             }
-            test_data.releaseData(true); // Release test set data after use
+            ctx->test_data.releaseData(true); // Release test set data after use
             forest_container.releaseForest(); // Release all trees after prediction
+#else
+            RF_DEBUG(0, "❌ Training disabled (RF_ENABLE_TRAINING = 0)");
+#endif
         }
     #endif
     

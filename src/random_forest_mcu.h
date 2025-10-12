@@ -4,24 +4,23 @@
 #include <cstdio>
 
 namespace mcu{
-
-#if RF_ENABLE_TRAINING
-    struct TrainingContext {
-        Rf_data base_data;
-        Rf_data train_data;
-        Rf_data test_data;
-        Rf_data validation_data;
-        Rf_random random_generator;
-        Rf_node_predictor node_pred;
-        vector<ID_vector<uint16_t,2>> dataList;
-        bool data_prepared;
-
-        TrainingContext() : data_prepared(false) {}
-    };
-#endif
     
     class RandomForest{
 #if RF_ENABLE_TRAINING
+        struct TrainingContext {
+            Rf_data base_data;
+            Rf_data train_data;
+            Rf_data test_data;
+            Rf_data validation_data;
+            Rf_random random_generator;
+            Rf_node_predictor node_pred;
+            vector<ID_vector<uint16_t,2>> dataList;
+            bool build_model;
+            bool data_prepared;
+
+            TrainingContext() : data_prepared(false), build_model(true) {}
+        };
+
         TrainingContext* training_ctx = nullptr;
 #endif
 
@@ -198,6 +197,7 @@ namespace mcu{
             training_ctx->validation_data.purgeData();
             training_ctx->dataList.clear();
             // re_train node predictor after training session
+            if(!training_ctx->build_model)
             training_ctx->node_pred.re_train(); 
 #endif
         }
@@ -236,6 +236,12 @@ namespace mcu{
                 }
             } while(false);
 
+        #ifdef DEV_STAGE
+            // Print model report on test data after building
+            if(success){
+                model_report();
+            }
+        #endif
             end_training_session();
             return success;
 #else
@@ -1041,6 +1047,7 @@ namespace mcu{
                 end_training_session();
                 return;
             }
+            training_ctx->build_model = false;
 
             size_t start = logger.drop_anchor();
             RF_DEBUG(0, "🌲 Starting training...");
@@ -1117,8 +1124,8 @@ namespace mcu{
 
             size_t end = logger.drop_anchor();
             logger.t_log("total training time", start, end, "s", print_log);
-        #ifdef DEV_STATE
-            training_report();
+        #ifdef DEV_STAGE
+            model_report();
         #endif
             end_training_session();
 #else
@@ -1613,7 +1620,7 @@ namespace mcu{
         }
 
         // print metrix score on test set
-        void training_report(){
+        void model_report(){
 #if RF_ENABLE_TRAINING
             auto* ctx = training_ctx;
             if(!ctx || config.test_ratio == 0.0f || ctx->test_data.size() == 0){

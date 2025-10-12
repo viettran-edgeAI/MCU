@@ -52,8 +52,29 @@
     template<typename T>
     inline void rf_debug_print(const char* msg, const T& obj) {
         Serial.printf("%s", msg);
-        Serial.println(obj);
+        if constexpr (std::is_floating_point_v<T>) {
+            Serial.println(obj, 3);  // 3 decimal places for floats/doubles
+        } else {
+            Serial.println(obj);
+        }
     }
+
+    template<typename T1, typename T2>
+    inline void rf_debug_print_2(const char* msg1, const T1& obj1, const char* msg2, const T2& obj2) {
+        Serial.printf("%s", msg1);
+        if constexpr (std::is_floating_point_v<T1>) {
+            Serial.print(obj1, 3);
+        } else {
+            Serial.print(obj1);
+        }
+        Serial.printf(" %s", msg2);
+        if constexpr (std::is_floating_point_v<T2>) {
+            Serial.println(obj2, 3);
+        } else {
+            Serial.println(obj2);
+        }
+    }
+
     #define RF_DEBUG(level, ...)                        \
         do{                                              \
             if constexpr (RF_DEBUG_LEVEL > (level)) {     \
@@ -64,9 +85,8 @@
     #define RF_DEBUG_2(level, msg1, obj1, msg2, obj2)          \
         do{                                                     \
             if constexpr (RF_DEBUG_LEVEL > (level)) {            \
-                Serial.printf("%s%d %s",msg1, (int)obj1, msg2);   \
-                Serial.println(obj2);                              \
-            }                                                       \
+                rf_debug_print_2(msg1, obj1, msg2, obj2);         \
+            }                                                      \
         }while(0)
 #endif
 
@@ -3599,25 +3619,20 @@ namespace mcu {
         }
         
         // Add new training samples to buffer
-        void add_new_samples(uint8_t min_split, uint16_t max_depth, uint16_t total_nodes = 0) {
+        void add_new_samples(uint8_t min_split, uint16_t max_depth, uint16_t total_nodes) {
             if (min_split == 0 || max_depth == 0) return; // invalid sample
             if (buffer.size() >= 100) {
-                RF_DEBUG(2, "⚠️ Buffer full, consider retraining soon.");
+                RF_DEBUG(2, "⚠️ Node_pred buffer full, consider retraining soon.");
                 return;
             }
+            Serial.printf("➕ Adding training sample - min_split: %d, max_depth: %d, total_nodes: %d\n", min_split, max_depth, total_nodes);
             buffer.push_back(node_data(min_split, max_depth, total_nodes));
+            Serial.printf("   Current buffer size: %d\n", buffer.size());
         }
         // Retrain the predictor using data from rf_tree_log.csv (synchronized with PC version)
         bool re_train(bool save_after_retrain = true) {
             if (!has_base()){
                 RF_DEBUG(0, "❌ Base pointer is null, cannot retrain predictor.");
-                return false;
-            }
-            char node_predictor_log[RF_PATH_BUFFER];
-            base_ptr->get_node_log_path(node_predictor_log);
-            RF_DEBUG(2, "🔂 Starting retraining of node predictor...");
-            if(!can_retrain()) {
-                RF_DEBUG(2, "❌ No training data available for retraining.");
                 return false;
             }
             if(buffer.size() > 0){
@@ -3626,6 +3641,14 @@ namespace mcu {
             buffer.clear();
             buffer.fit();
 
+            if(!can_retrain()) {
+                RF_DEBUG(2, "❌ No training data available for retraining.");
+                return false;
+            }
+
+            char node_predictor_log[RF_PATH_BUFFER];
+            base_ptr->get_node_log_path(node_predictor_log);
+            RF_DEBUG(2, "🔂 Starting retraining of node predictor...");
             File file = LittleFS.open(node_predictor_log, FILE_READ);
             if (!file) {
                 RF_DEBUG(1, "❌ Failed to open node_predictor log file: ", node_predictor_log);
@@ -3911,12 +3934,17 @@ namespace mcu {
             }
         }
 
-        // Check if training log is available and size of the file is greater than 0
         bool can_retrain() const {
-            if (!has_base()) return false;
+            if (!has_base()) {
+                RF_DEBUG(0, "❌ can_retrain check failed: base pointer not ready");
+                return false;
+            }
             char node_predictor_log[RF_PATH_BUFFER];
             base_ptr->get_node_log_path(node_predictor_log);
-            if (!LittleFS.exists(node_predictor_log)) return false;
+            if (!LittleFS.exists(node_predictor_log)) {
+                RF_DEBUG(2, "❌ No log file found for retraining.");
+                return false;
+            }
             File file = LittleFS.open(node_predictor_log, FILE_READ);
             bool result = file && file.size() > 0;
             // only retrain if log file has more 4 samples (excluding header)
@@ -3930,6 +3958,9 @@ namespace mcu {
                 result = line_count > 4; // more than header + 3 samples
             }
             if (file) file.close();
+            if(!result){
+                RF_DEBUG(2, "❌ Not enough data for retraining (need > 3 samples).");
+            }
             return result;
         }
 

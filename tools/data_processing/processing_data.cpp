@@ -21,7 +21,7 @@ int truncate_csv(const char *in_path);
 static constexpr uint8_t quantization_coefficient = 2; // Coefficient for quantization (bits per feature value)
 
 static const int MAX_LABELS = 256; // Maximum number of unique labels supporte 
-static const int MAX_NUM_FEATURES = 1023; // Maximum number of features supported
+static const int MAX_FEATURES = 1023;
 static const int MAX_NUM_SAMPLES = 65535; // Maximum number of samples supported
 
 // Helper functions to calculate derived values from quantization coefficient
@@ -40,6 +40,8 @@ static constexpr uint8_t getFeaturesPerByte() {
 static constexpr uint8_t getFeatureMask() {
     return (1 << quantization_coefficient) - 1; // Bit mask for extracting feature values
 }
+
+static int num_features = 1023;
 
 // Split a line on commas (naïve; assumes no embedded commas/quotes)
 static mcu::vector<std::string> split(const std::string &line) {
@@ -815,7 +817,7 @@ DatasetInfo scanDataset(const char* inputFilePath) {
     }
     
     info.numFeatures = n_cols - 1; // Exclude label column
-    info.needsHorizontalTruncation = (info.numFeatures > MAX_NUM_FEATURES);
+    info.needsHorizontalTruncation = (info.numFeatures > num_features);
     
     // Collect unique labels
     mcu::vector<std::string> uniqueLabels;
@@ -877,8 +879,8 @@ DatasetInfo scanDataset(const char* inputFilePath) {
     }
     
     if (info.needsHorizontalTruncation) {
-        std::cout << "  ⚠️  Feature count (" << info.numFeatures << ") exceeds MAX_NUM_FEATURES (" 
-                  << MAX_NUM_FEATURES << "). Horizontal truncation needed.\n";
+        std::cout << "  ⚠️  Feature count (" << info.numFeatures << ") exceeds num_features (" 
+                  << num_features << "). Horizontal truncation needed.\n";
     }
     
     if (info.needsVerticalTruncation) {
@@ -939,14 +941,14 @@ int truncate_csv(const char *in_path) {
         auto firstLineCols = split(line);
         int n_cols = (int)firstLineCols.size();
         
-        needsHorizontalTruncation = (n_cols > MAX_NUM_FEATURES + 1); // +1 for label column
+        needsHorizontalTruncation = (n_cols > num_features + 1); // +1 for label column
         
         // Reset file to beginning for actual processing
         fin.clear();
         fin.seekg(0, std::ios::beg);
         
         std::cout << "🔧 Truncation Analysis:\n";
-        std::cout << "   Original features: " << (n_cols - 1) << " (max allowed: " << MAX_NUM_FEATURES << ")\n";
+        std::cout << "   Original features: " << (n_cols - 1) << " (max allowed: " << num_features << ")\n";
         std::cout << "   Horizontal truncation needed: " << (needsHorizontalTruncation ? "YES" : "NO") << "\n";
     }
 
@@ -961,9 +963,9 @@ int truncate_csv(const char *in_path) {
                 // Write label (first column)
                 fout << cols[0];
                 
-                // Write features up to MAX_NUM_FEATURES
+                // Write features up to num_features
                 int features_written = 0;
-                for (size_t i = 1; i < cols.size() && features_written < MAX_NUM_FEATURES; ++i) {
+                for (size_t i = 1; i < cols.size() && features_written < num_features; ++i) {
                     fout << "," << cols[i];
                     features_written++;
                 }
@@ -1034,7 +1036,7 @@ void generateDatasetParamsCSV(std::string path, const DatasetInfo& datasetInfo, 
     }
     
     // Calculate actual number of features after possible truncation
-    uint16_t actualFeatures = std::min(datasetInfo.numFeatures, MAX_NUM_FEATURES);
+    uint16_t actualFeatures = std::min(datasetInfo.numFeatures, num_features);
     
     // Write CSV header
     fout << "parameter,value\n";
@@ -1280,7 +1282,7 @@ int main(int argc, char* argv[]) {
     try {
         bool skipHeader = false; // Default to not skipping header (process all lines)
         bool headerSpecified = false; // Track if user explicitly specified header option
-        bool runVisualization = false; // Default to not running visualization
+        bool runVisualization = true; // Default to running visualization
         std::string inputFile;
         
         // Parse command line arguments
@@ -1302,6 +1304,23 @@ int main(int argc, char* argv[]) {
                     skipHeader = true; // Default to skipping header if no value provided
                     headerSpecified = true;
                 }
+            } else if (arg == "-f" || arg == "-features") {
+                if (i + 1 < argc) {
+                    try {
+                        int featureLimit = std::stoi(argv[++i]);
+                        if (featureLimit <= 0 || featureLimit > MAX_FEATURES) {
+                            std::cerr << "Error: num_features must be between 1 and 1023\n";
+                            return 1;
+                        }
+                        num_features = featureLimit;
+                    } catch (const std::exception& e) {
+                        std::cerr << "Error: Invalid number for -f/-features option\n";
+                        return 1;
+                    }
+                } else {
+                    std::cerr << "Error: -f/-features requires a numeric value\n";
+                    return 1;
+                }
             } else if (arg == "-v" || arg == "-visualize") {
                 runVisualization = true;
             } else if (arg == "-h" || arg == "--help") {
@@ -1309,10 +1328,11 @@ int main(int argc, char* argv[]) {
                 std::cout << "Options:\n";
                 std::cout << "  -p, -path <file>        Path to input CSV file (required)\n";
                 std::cout << "  -he, -header <yes/no>   Skip header if 'yes', process all lines if 'no' (auto-detect if not specified)\n";
-                std::cout << "  -v, -visualize          Run quantization visualization after processing\n";
+                std::cout << "  -f, -features <number>  Maximum number of features (default: 1023, range: 1-1023)\n";
+                std::cout << "  -v, -visualize          Run quantization visualization after processing (default: enabled)\n";
                 std::cout << "  -h, --help              Show this help message\n";
                 std::cout << "\nExample:\n";
-                std::cout << "  " << argv[0] << " -p data/mydata.csv -header yes -visualize\n";
+                std::cout << "  " << argv[0] << " -p data/mydata.csv -header yes -features 512\n";
                 return 0;
             } else if (inputFile.empty() && arg.find('-') != 0) {
                 // If no flags and inputFile not set, treat as positional argument (backward compatibility)
@@ -1372,7 +1392,7 @@ int main(int argc, char* argv[]) {
             std::cout << "\n=== Dataset Truncation ===\n";
             
             if (datasetInfo.needsHorizontalTruncation) {
-                std::cout << "🔧 Horizontal truncation: " << datasetInfo.numFeatures << " → " << MAX_NUM_FEATURES << " features\n";
+                std::cout << "🔧 Horizontal truncation: " << datasetInfo.numFeatures << " → " << num_features << " features\n";
             }
             
             if (datasetInfo.needsVerticalTruncation) {

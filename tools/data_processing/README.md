@@ -64,7 +64,7 @@ For details on how quantization and categorizer work, please refer to:
 
 ⚠️ **Dataset Limits:**
 - **Max Labels**: 255 unique classes
-- **Max Features**: 1023 features per sample
+- **Max Features**: 1023 features per sample (configurable via `-f` option, range: 1-65535)
 - **Max Samples**: 65,535 samples per dataset
 - Datasets exceeding these limits will be automatically truncated (except labels)
 
@@ -90,15 +90,33 @@ For details on how quantization and categorizer work, please refer to:
 ### Basic Processing
 
 ```bash
-# Process a dataset (automatic header detection)
+# Process a dataset (automatic header detection, default 1023 max features, visualization enabled by default)
 ./quantize_dataset.sh -p data/iris_data.csv
+
+# Skip visualization
+./quantize_dataset.sh -p data/iris_data.csv -nv
+
+# Limit to 512 features maximum
+./quantize_dataset.sh -p data/iris_data.csv -f 512
+
+# Custom feature limit with explicit header handling
+./quantize_dataset.sh -p data/iris_data.csv -f 256 --header yes
 ```
 
-### With Visualization
+### With/Without Visualization
 
 ```bash
-# Process and generate plots
-./quantize_dataset.sh -p data/iris_data.csv --visualize
+# Process with visualization (default behavior)
+./quantize_dataset.sh -p data/iris_data.csv
+
+# Explicitly enable visualization
+./quantize_dataset.sh -p data/iris_data.csv -v
+
+# Skip visualization for faster processing
+./quantize_dataset.sh -p data/iris_data.csv -nv
+
+# With custom feature limit and no visualization
+./quantize_dataset.sh -p data/iris_data.csv -f 512 -nv
 ```
 
 Generated files will be in `data/result/` directory, ready for ESP32 transfer.
@@ -107,12 +125,14 @@ Generated files will be in `data/result/` directory, ready for ESP32 transfer.
 
 ### Basic Script
 
-`./quantize_dataset.sh -p <csv_path> [--visualize]`
+`./quantize_dataset.sh -p <csv_path> [options]`
 
 ### Available Options
 - `-p, --path <file>`: input CSV (required)
 - `-he, --header <yes/no>`: Skip header if 'yes', process all lines if 'no' (auto-detect if not specified)
-- `-v, --visualize`: run visualization after processing
+- `-f, --features <number>`: Maximum number of features (default: 1023, range: 1-65535)
+- `-v, --visualize`: run visualization after processing (default: enabled)
+- `-nv, --no-visualize`: skip visualization for faster processing
 - `-h, --help`: usage
 
 ## 📊 Input format
@@ -204,14 +224,18 @@ python3 unified_transfer.py iris_data /dev/ttyUSB0
 - Options:
   - `-p, --path <file>`: input CSV (required)
   - `-he, --header <yes/no>`: Skip header if 'yes', process all lines if 'no' (auto-detect if not specified)
-  - `-v, --visualize`: run visualization after processing
+  - `-f, --features <number>`: Maximum number of features (default: 1023, range: 1-65535)
+  - `-v, --visualize`: run visualization after processing (default: enabled)
+  - `-nv, --no-visualize`: skip visualization for faster processing
   - `-h, --help`: usage
 
 Examples:
 - Auto-detect header: `./quantize_dataset.sh -p data/iris_data.csv`
 - Force skip header: `./quantize_dataset.sh -p data/iris_data.csv --header yes`
 - Force process all lines: `./quantize_dataset.sh -p data/iris_data.csv --header no`
-- Auto-detect + visualize: `./quantize_dataset.sh -p data/iris_data.csv -v`
+- Limit to 512 features: `./quantize_dataset.sh -p data/iris_data.csv -f 512`
+- Custom features + header: `./quantize_dataset.sh -p data/iris_data.csv -f 256 --header yes`
+- Skip visualization: `./quantize_dataset.sh -p data/iris_data.csv -nv`
 
 **Header Detection Logic:**
 - Analyzes first two rows to detect header presence
@@ -219,6 +243,12 @@ Examples:
 - `--header yes`: Skip first line (treat as header)
 - `--header no`: Process all lines (no header present)
 - (no --header): Automatically detect and handle appropriately
+
+**Feature Limit:**
+- Default: 1023 features (optimized for ESP32 memory constraints)
+- Range: 1-65535 features
+- Higher limits may require more ESP32 memory during model training/inference
+- Datasets exceeding the limit will be automatically truncated horizontally
 
 ### Alternative Build Tools
 
@@ -238,6 +268,7 @@ Examples:
 - Options:
   - `-p, -path <file>`: input CSV
   - `-he, -header <yes/no>`: Skip header if 'yes', process all lines if 'no' (auto-detect if not specified)
+  - `-f, -features <number>`: Maximum number of features (default: 1023, range: 1-65535)
   - `-v, -visualize`
   - `-h, --help`
 

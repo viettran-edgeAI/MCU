@@ -18,7 +18,8 @@ NC='\033[0m' # No Color
 # Default values
 CSV_PATH=""
 HEADER_MODE=""  # Empty means auto-detect
-RUN_VISUALIZATION="no"
+MAX_FEATURES=""  # Empty means use default (1023)
+RUN_VISUALIZATION="yes"  # Default to yes
 HELP=false
 
 # Function to show usage
@@ -31,15 +32,18 @@ show_usage() {
     echo "Options:"
     echo "  -p, --path <file>         Path to input CSV file (required)"
     echo "  -he, --header <yes/no>    Skip header if 'yes', process all lines if 'no' (auto-detect if not specified)"
-    echo "  -v, --visualize           Run quantization visualization after processing"
+    echo "  -f, --features <number>   Maximum number of features (default: 1023, range: 1-65535)"
+    echo "  -v, --visualize           Run quantization visualization after processing (default: yes)"
+    echo "  -nv, --no-visualize       Skip visualization"
     echo "  -h, --help                Show this help message"
     echo ""
     echo "Examples:"
-    echo "  $0 -p data/iris_data.csv                           # Auto-detect header"
+    echo "  $0 -p data/iris_data.csv                           # Auto-detect header, default max features, visualize"
     echo "  $0 -p data/iris_data.csv --header no               # Process all lines (no header)"
     echo "  $0 -p data/iris_data.csv --header yes              # Skip first line (has header)"
-    echo "  $0 -p data/iris_data.csv -v                        # Auto-detect + visualize"
-    echo "  $0 -p data/iris_data.csv --header yes --visualize  # Skip header + visualize"
+    echo "  $0 -p data/iris_data.csv -f 512                    # Limit to 512 features max"
+    echo "  $0 -p data/iris_data.csv -nv                       # Skip visualization"
+    echo "  $0 -p data/iris_data.csv --header yes -f 256       # Skip header + 256 features + visualize (default)"
     echo ""
     echo -e "${YELLOW}Note: Header detection analyzes first two rows to determine if dataset has headers${NC}"
     echo -e "${YELLOW}      --header yes: Skip first line (treat as header)${NC}"
@@ -58,8 +62,16 @@ while [[ $# -gt 0 ]]; do
             HEADER_MODE="$2"
             shift 2
             ;;
+        -f|--features)
+            MAX_FEATURES="$2"
+            shift 2
+            ;;
         -v|--visualize)
             RUN_VISUALIZATION="yes"
+            shift
+            ;;
+        -nv|--no-visualize)
+            RUN_VISUALIZATION="no"
             shift
             ;;
         -h|--help)
@@ -108,6 +120,11 @@ if [[ -n "$HEADER_MODE" ]]; then
 else
     echo -e "  📋 Header mode: ${GREEN}auto-detect${NC}"
 fi
+if [[ -n "$MAX_FEATURES" ]]; then
+    echo -e "  📊 Max features: ${GREEN}$MAX_FEATURES${NC} (user-specified)"
+else
+    echo -e "  📊 Max features: ${GREEN}1023${NC} (default)"
+fi
 echo -e "  📊 Run visualization: ${GREEN}$RUN_VISUALIZATION${NC}"
 echo ""
 
@@ -131,6 +148,11 @@ PROCESS_ARGS="-p $CSV_PATH"
 # Add header argument only if user specified it
 if [[ -n "$HEADER_MODE" ]]; then
     PROCESS_ARGS="$PROCESS_ARGS -he $HEADER_MODE"
+fi
+
+# Add max features argument if user specified it
+if [[ -n "$MAX_FEATURES" ]]; then
+    PROCESS_ARGS="$PROCESS_ARGS -f $MAX_FEATURES"
 fi
 
 if [[ "$RUN_VISUALIZATION" == "yes" ]]; then

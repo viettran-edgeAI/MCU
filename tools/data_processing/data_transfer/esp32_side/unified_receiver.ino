@@ -46,7 +46,7 @@ State currentState = State::WAITING_FOR_SESSION;
 // --- Global Variables ---
 File currentFile;
 char receivedBaseName[32];  // This is the model_name used throughout the project
-char receivedFileName[32];
+char receivedFileName[64];
 uint32_t receivedFileSize = 0;
 uint32_t receivedFileCRC = 0;
 uint32_t receivedChunkSize = 0;

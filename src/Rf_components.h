@@ -3636,7 +3636,7 @@ namespace mcu {
                 return false;
             }
             if(buffer.size() > 0){
-                add_buffer(buffer);
+                flush_buffer();
             }
             buffer.clear();
             buffer.fit();
@@ -3883,14 +3883,14 @@ namespace mcu {
             if (est_nodes < min_peak_theory) return min_peak_theory;
         }
 
-        void add_buffer(b_vector<node_data,5>& new_samples) {
+        void flush_buffer() {
             if (!has_base()){
-                RF_DEBUG(0, "❌Failed to add_buffer : base pointer is null");
+                RF_DEBUG(0, "❌Failed to flush_buffer : base pointer is null");
                 return;
             }
             char node_predictor_log[RF_PATH_BUFFER];
             base_ptr->get_node_log_path(node_predictor_log);
-            if (new_samples.size() == 0) return;
+            if (buffer.size() == 0) return;
             // Read all existing lines
             b_vector<String> lines;
             File file = LittleFS.open(node_predictor_log, FILE_READ);
@@ -3913,8 +3913,8 @@ namespace mcu {
                 data_lines.push_back(lines[i]);
             }
             // Prepend new samples
-            for (int i = new_samples.size() - 1; i >= 0; --i) {
-                const node_data& nd = new_samples[i];
+            for (int i = buffer.size() - 1; i >= 0; --i) {
+                const node_data& nd = buffer[i];
                 String row = String(nd.min_split) + "," + String(nd.max_depth) + "," + String(nd.total_nodes);
                 data_lines.insert(0, row);
             }
@@ -4248,15 +4248,15 @@ namespace mcu {
             uint8_t numFlags = 0;
 
             // Calculate accuracy
-            if(metric_score & 0x01) { // ACCURACY flag
+            if(metric_score & 0x01) { // ACCURACY 
                 float accuracy = static_cast<float>(correct_predict) / total_predict;
-                RF_DEBUG(1, "Accuracy: ", accuracy);
+                RF_DEBUG(2, "Accuracy: ", accuracy);
                 combined_result += accuracy;
                 numFlags++;
             }
 
             // Calculate precision
-            if(metric_score & 0x02) { // PRECISION flag
+            if(metric_score & 0x02) { // PRECISION 
                 float total_precision = 0.0f;
                 uint8_t valid_labels = 0;
                 
@@ -4268,13 +4268,13 @@ namespace mcu {
                 }
                 
                 float precision = valid_labels > 0 ? total_precision / valid_labels : 0.0f;
-                RF_DEBUG(1, "Precision: ", precision);
+                RF_DEBUG(2, "Precision: ", precision);
                 combined_result += precision;
                 numFlags++;
             }
 
             // Calculate recall
-            if(metric_score & 0x04) { // RECALL flag
+            if(metric_score & 0x04) { // RECALL 
                 float total_recall = 0.0f;
                 uint8_t valid_labels = 0;
                 
@@ -4286,13 +4286,13 @@ namespace mcu {
                 }
                 
                 float recall = valid_labels > 0 ? total_recall / valid_labels : 0.0f;
-                RF_DEBUG(1, "Recall: ", recall);
+                RF_DEBUG(2, "Recall: ", recall);
                 combined_result += recall;
                 numFlags++;
             }
 
             // Calculate F1-Score
-            if(metric_score & 0x08) { // F1_SCORE flag
+            if(metric_score & 0x08) { // F1_SCORE 
                 float total_f1 = 0.0f;
                 uint8_t valid_labels = 0;
                 
@@ -4309,7 +4309,7 @@ namespace mcu {
                 }
                 
                 float f1_score = valid_labels > 0 ? total_f1 / valid_labels : 0.0f;
-                RF_DEBUG(1, "F1-Score: ", f1_score);
+                RF_DEBUG(2, "F1-Score: ", f1_score);
                 combined_result += f1_score;
                 numFlags++;
             }

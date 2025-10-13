@@ -113,19 +113,36 @@ for (uint8_t i = 0; i < 4; ++i) {
 - `fit()` trims capacity to match the current size (minimum of 1 slot retained).
 - For `TINY` flag, size and capacity share a single byte (4 bits each).
 
-### Quick estimator
+### Memory Footprint Analysis
 
-The packed storage consumes `ceil(size × bpv / 8)` bytes (plus a handful of bookkeeping bytes for size/capacity). A few practical examples:
+The total memory cost of a `packed_vector` has two parts:
 
-| Scenario | Configuration | Stored elements | Bits / value (`bpv`) | Estimated bytes* |
-| --- | --- | ---: | ---: | ---: |
-| Bit flags | `packed_vector<1>` | 64 | 1 | 8 |
-| Tiny lookup | `packed_vector<2, mcu::TINY>` | 12 | 2 | 3 |
-| Sensor states | `packed_vector<3>` | 120 | 3 | 45 |
-| Quantised features | `packed_vector<5>` | 200 | 5 | 125 |
-| Full byte fallback | `packed_vector<8>` | 128 | 8 | 128 |
+1.  **Object Size (Header)**: The space for the `packed_vector` object itself, which holds management variables. This is typically on the stack.
+2.  **Heap Allocation**: The dynamically allocated memory block where the packed elements are stored.
 
-\*Estimates assume the vector has already been fitted to size; additional headroom increases `memory_usage()` proportionally.
+The object size depends on the `SizeFlag` and the target architecture's pointer size. For a typical 32-bit MCU (like an ESP32 with 4-byte pointers):
+
+- `sizeof(packed_vector)` = `sizeof(pointer)` + `1 (bpv)` + `2 * sizeof(index_type)`
+  - **TINY**: `4 + 1 + 1` = 6 bytes (size/capacity are packed into one byte)
+  - **SMALL**: `4 + 1 + 2` = 7 bytes
+  - **MEDIUM**: `4 + 1 + 4` = 9 bytes
+  - **LARGE**: `4 + 1 + 8` = 13 bytes
+
+The heap allocation is `ceil(capacity × bpv / 8)` bytes, plus any overhead from the memory allocator itself.
+
+### Estimated Total RAM Usage
+
+This table provides more realistic estimates for a 32-bit system, assuming the vector is fitted to its size (`capacity == size`). The final column shows the estimated size of a `std::vector<uint8_t>` holding the same number of elements, highlighting the memory savings.
+
+| Scenario | Configuration | Elements | `bpv` | Header | Data | **`packed_vector` Total*** | `std::vector` Total |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Bit flags | `packed_vector<1>` | 64 | 1 | 9 bytes | 8 bytes | **17 bytes** | ~76 bytes |
+| Tiny lookup | `packed_vector<2, TINY>` | 12 | 2 | 6 bytes | 3 bytes | **9 bytes** | ~24 bytes |
+| Sensor states | `packed_vector<3>` | 120 | 3 | 9 bytes | 45 bytes | **54 bytes** | ~132 bytes |
+| Quantised features | `packed_vector<5>` | 200 | 5 | 9 bytes | 125 bytes | **134 bytes** | ~212 bytes |
+| Full byte fallback | `packed_vector<8>` | 128 | 8 | 9 bytes | 128 bytes | **137 bytes** | ~140 bytes |
+
+\*_Total RAM does not include the small, system-dependent overhead from the heap allocator. `std::vector` size is estimated as `12 bytes (header) + N bytes (data)` for a 32-bit system._
 
 Example comparison:
 

@@ -1363,7 +1363,7 @@ namespace mcu {
         }
 
         // Constructor with initial capacity
-        explicit b_vector(vector_index_type initialCapacity) noexcept : size_(initialCapacity) {
+        explicit b_vector(vector_index_type initialCapacity) noexcept : size_(0) {
             if (initialCapacity <= SBO_SIZE) {
                 using_heap = false;
                 capacity_ = SBO_SIZE;
@@ -1375,9 +1375,7 @@ namespace mcu {
                 using_heap = true;
                 capacity_ = initialCapacity;
                 heap_array = new T[initialCapacity];
-                for (vector_index_type i = 0; i < size_; ++i) {
-                    heap_array[i] = T();
-                }
+                // No need to initialize elements since size is 0
             }
         }
 
@@ -1716,7 +1714,7 @@ namespace mcu {
 
         void fill(const T& value) noexcept {
             T* ptr = data_ptr();
-            for (vector_index_type i = 0; i < size_; ++i) {
+            for (vector_index_type i = 0; i < capacity_; ++i) {
                 ptr[i] = value;
             }
             size_ = capacity_;
@@ -2995,6 +2993,7 @@ namespace mcu {
         // Copy constructor
         packed_vector(const packed_vector& other) 
             : packed_data(other.packed_data, other.calc_bytes(other.get_capacity())) {
+            packed_data.set_bpv(other.get_bits_per_value());
             if (IS_TINY) {
                 storage.packed_size_capacity = other.storage.packed_size_capacity;
             } else {
@@ -3042,9 +3041,16 @@ namespace mcu {
         //   - Values are clamped using MAX_VALUE for safety
         // NOTE: Use size_t for indices to avoid truncation when destination index type is small.
         packed_vector(const packed_vector& source, size_t start_index, size_t end_index) {
+            uint8_t source_bpv = source.get_bits_per_value();
+            uint8_t active_bpv = (source_bpv == 0) ? BitsPerElement : source_bpv;
+            if (active_bpv > BitsPerElement) {
+                active_bpv = BitsPerElement;
+            }
+
             if (start_index > end_index || start_index >= source.get_size()) {
                 // Invalid range - create empty vector with capacity 1
-                packed_data = PackedArray<BitsPerElement>(calc_bytes(1));
+                packed_data = PackedArray<BitsPerElement>(calc_bytes_for_bpv(1, active_bpv));
+                packed_data.set_bpv(active_bpv);
                 set_size_capacity(0, 1);
                 return;
             }
@@ -3059,7 +3065,8 @@ namespace mcu {
             vector_index_type range_size = static_cast<vector_index_type>(range_size_sz > static_cast<size_t>(VECTOR_MAX_CAP) ? VECTOR_MAX_CAP : range_size_sz);
             vector_index_type new_capacity = range_size > 0 ? range_size : 1;
             
-            packed_data = PackedArray<BitsPerElement>(calc_bytes(new_capacity));
+            packed_data = PackedArray<BitsPerElement>(calc_bytes_for_bpv(new_capacity, active_bpv));
+            packed_data.set_bpv(active_bpv);
             set_size_capacity(range_size, new_capacity);
             
             // Copy elements from source range with value clamping
@@ -3083,9 +3090,16 @@ namespace mcu {
         template<uint8_t SourceBitsPerElement, index_size_flag SourceSizeFlag = SizeFlag>
         packed_vector(const packed_vector<SourceBitsPerElement, SourceSizeFlag>& source, 
                      size_t start_index, size_t end_index) {
+            uint8_t source_bpv = source.get_bits_per_value();
+            uint8_t active_bpv = (source_bpv == 0) ? BitsPerElement : source_bpv;
+            if (active_bpv > BitsPerElement) {
+                active_bpv = BitsPerElement;
+            }
+
             if (start_index > end_index || start_index >= static_cast<size_t>(source.size())) {
                 // Invalid range - create empty vector with capacity 1
-                packed_data = PackedArray<BitsPerElement>(calc_bytes(1));
+                packed_data = PackedArray<BitsPerElement>(calc_bytes_for_bpv(1, active_bpv));
+                packed_data.set_bpv(active_bpv);
                 set_size_capacity(0, 1);
                 return;
             }
@@ -3099,7 +3113,8 @@ namespace mcu {
             vector_index_type range_size = static_cast<vector_index_type>(range_size_sz > static_cast<size_t>(VECTOR_MAX_CAP) ? VECTOR_MAX_CAP : range_size_sz);
             vector_index_type new_capacity = range_size > 0 ? range_size : 1;
             
-            packed_data = PackedArray<BitsPerElement>(calc_bytes(new_capacity));
+            packed_data = PackedArray<BitsPerElement>(calc_bytes_for_bpv(new_capacity, active_bpv));
+            packed_data.set_bpv(active_bpv);
             set_size_capacity(range_size, new_capacity);
             
             // Copy elements from source range with value clamping for different bit sizes
@@ -3235,16 +3250,28 @@ namespace mcu {
         
         // Fill all elements with specified value
         void fill(uint8_t value) {
-            value &= get_max_value();
-            vector_index_type current_size = get_size();
-            for (vector_index_type i = 0; i < current_size; ++i) {
-                packed_data.set_unsafe(i, value);
+            uint8_t clamped = value & get_max_value();
+            vector_index_type target_capacity = get_capacity();
+
+            if (target_capacity == 0) {
+                set_size(0);
+                return;
             }
-            // update size equal to capacity
-            set_size(current_size);
+
+            for (vector_index_type i = 0; i < target_capacity; ++i) {
+                packed_data.set_unsafe(i, clamped);
+            }
+            set_size(target_capacity);
         }
         
         __attribute__((always_inline)) inline uint8_t operator[](vector_index_type index) const {
+            vector_index_type current_size = get_size();
+            if (current_size == 0) {
+                return 0;
+            }
+            if (index >= current_size) {
+                return packed_data.get_unsafe(current_size - 1);
+            }
             return packed_data.get_unsafe(index);
         }
         
@@ -3305,7 +3332,9 @@ namespace mcu {
         void reserve(vector_index_type newCapacity) {
             vector_index_type current_capacity = get_capacity();
             if (newCapacity > current_capacity) {
-                PackedArray<BitsPerElement> new_data(calc_bytes(newCapacity));
+                uint8_t active_bpv = packed_data.get_bpv();
+                PackedArray<BitsPerElement> new_data(calc_bytes_for_bpv(newCapacity, active_bpv));
+                new_data.set_bpv(active_bpv);
                 new_data.copy_elements(packed_data, get_size());
                 packed_data = std::move(new_data);
                 set_capacity(newCapacity);
@@ -3354,8 +3383,7 @@ namespace mcu {
         
         // Set bits per value at runtime - reinitializes the vector
         void set_bits_per_value(uint8_t bpv) {
-            // static_assert(bpv == 0 || bpv > 8, "BitsPerElement must be between 1 and 8");
-            if (bpv == 0 || bpv > 8) return;  // Invalid bpv
+            if(bpv == packed_data.get_bpv()) return;
             init(bpv);
         }
 
@@ -3363,10 +3391,13 @@ namespace mcu {
         void fit() {
             vector_index_type current_size = get_size();
             if (current_size < get_capacity()) {
-                PackedArray<BitsPerElement> new_data(calc_bytes(current_size ? current_size : 1));
+                uint8_t active_bpv = packed_data.get_bpv();
+                vector_index_type target_capacity = current_size ? current_size : 1;
+                PackedArray<BitsPerElement> new_data(calc_bytes_for_bpv(target_capacity, active_bpv));
+                new_data.set_bpv(active_bpv);
                 new_data.copy_elements(packed_data, current_size);
                 packed_data = std::move(new_data);
-                set_capacity(current_size ? current_size : 1);
+                set_capacity(target_capacity);
             }
         }
         

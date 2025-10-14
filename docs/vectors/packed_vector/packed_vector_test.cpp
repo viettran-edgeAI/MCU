@@ -1,6 +1,6 @@
 #include <iostream>
-#include "../../../src/STL_MCU.h"
-// #include "packed_vector.h"
+// #include "../../../src/STL_MCU.h"
+#include "packed_vector.h"
 #include <cstdint>
 
 using namespace mcu;
@@ -668,6 +668,83 @@ void test_dynamic_bits_per_value() {
     } END_TEST
 }
 
+void test_runtime_bpv_memory_safety() {
+    std::cout << "------------- Runtime BPV Memory Safety Tests -------------\n";
+
+    TEST("Range constructor retains runtime bpv") {
+        packed_vector<4> source;
+        source.set_bits_per_value(3);
+        for (uint8_t i = 0; i < 10; ++i) {
+            source.push_back(i & 0x7);
+        }
+        packed_vector<4> slice(source, 2, 9);
+        EXPECT(slice.size() == 7);
+        EXPECT(slice.get_bits_per_value() == source.get_bits_per_value());
+        EXPECT(slice[0] == 2 && slice[6] == 0);  // index 8 in source is 8 & 0x7 = 0
+        EXPECT(slice.capacity() >= slice.size());
+    } END_TEST
+
+    TEST("Cross-type range clamps runtime bpv to destination") {
+        packed_vector<4> source;
+        source.set_bits_per_value(3);
+        for (uint8_t i = 0; i < 6; ++i) {
+            source.push_back(static_cast<uint8_t>(i + 4));
+        }
+        packed_vector<2> dest(source, 0, source.size());
+        uint8_t expected_bpv = source.get_bits_per_value();
+        if (expected_bpv > dest.bits_per_element()) {
+            expected_bpv = dest.bits_per_element();
+        }
+        EXPECT(dest.size() == source.size());
+        EXPECT(dest.get_bits_per_value() == expected_bpv);
+        // Last value in source is (5+4) & 0x7 = 1, then clamped to 2-bit: 1 & 0x3 = 1
+        EXPECT(dest.back() == 1);
+    } END_TEST
+
+    TEST("Reserve after runtime bpv change preserves values") {
+        packed_vector<5> vec;
+        vec.set_bits_per_value(3);
+        for (uint8_t i = 0; i < 6; ++i) {
+            vec.push_back(i & 0x7);
+        }
+        auto original_bits = vec.get_bits_per_value();
+        auto original_values_ok = (vec[0] == 0 && vec[5] == 5);
+        vec.reserve(vec.capacity() + 8);
+        EXPECT(vec.get_bits_per_value() == original_bits);
+        EXPECT(original_values_ok);
+        EXPECT(vec.size() == 6);
+        EXPECT(vec[5] == 5);
+    } END_TEST
+
+    TEST("Fit after runtime bpv change shrinks capacity") {
+        packed_vector<6> vec;
+        vec.set_bits_per_value(4);
+        for (uint8_t i = 0; i < 12; ++i) {
+            vec.push_back(static_cast<uint8_t>(i & 0xF));
+        }
+        vec.pop_back();
+        auto expected_size = vec.size();
+        vec.fit();
+        EXPECT(vec.get_bits_per_value() == 4);
+        EXPECT(vec.size() == expected_size);
+        EXPECT(vec.capacity() == (expected_size == 0 ? 1 : expected_size));
+        EXPECT(vec.back() == ((expected_size == 0) ? 0 : static_cast<uint8_t>((expected_size - 1) & 0xF)));
+    } END_TEST
+
+    TEST("Move assignment retains runtime bpv metadata") {
+        packed_vector<5> source;
+        source.set_bits_per_value(3);
+        source.push_back(5);
+        uint8_t runtime_bits = source.get_bits_per_value();
+        packed_vector<5> dest;
+        dest = std::move(source);
+        EXPECT(dest.get_bits_per_value() == runtime_bits);
+        EXPECT(dest.size() == 1);
+        EXPECT(dest[0] == 5);
+        EXPECT(source.size() == 0);
+    } END_TEST
+}
+
 int main(){
     test_packed_vector();
     test_constructors_and_assignments();
@@ -676,6 +753,7 @@ int main(){
     test_iterators();
     test_range_constructor();
     test_dynamic_bits_per_value();
+    test_runtime_bpv_memory_safety();
     
     // Print summary
     std::cout << "===============================================\n";

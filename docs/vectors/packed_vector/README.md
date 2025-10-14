@@ -45,7 +45,9 @@ Use `mcu::min_init_list<uint8_t>` or the `MAKE_UINT8_LIST` macro family:
 ```cpp
 // Macro can prepend the target bpv for readability. The loader strips it automatically
 // when it detects values that exceed the header.
-packed_vector<3> from_macro = MAKE_UINT8_LIST(3, 1, 2, 3, 4, 5, 6, 7, 0);
+packed_vector<3> test_vec = MAKE_UINT8_LIST(3, 1, 2, 3, 4, 5, 6, 7, 0);
+// or 
+packed_vector<3> test_vec = MAKE_LIST(uint8_t, 1, 2, 0, 4, 6, 2, 7, 0);
 
 // Direct min_init_list
 auto init = mcu::min_init_list<uint8_t>((const uint8_t[]){1,2,3,0}, 4);
@@ -76,6 +78,39 @@ vec.fill(2);             // set all elements
 vec.pop_back();
 vec.fit();               // shrink capacity to current size
 ```
+
+### ⚠️ Important: Assignment Operations
+
+**`packed_vector` does not support direct assignment via `operator[]`** because elements are bit-packed and cannot return references. This is similar to `std::vector<bool>` in the C++ standard library.
+
+```cpp
+packed_vector<4> vec;
+vec.push_back(5);
+
+// ❌ WRONG - Compilation error: "lvalue required as left operand of assignment"
+vec[0] = 10;
+
+// ✅ CORRECT - Use set() method for assignment
+vec.set(0, 10);
+
+// ✅ Reading works normally
+uint8_t value = vec[0];  // Returns by value
+```
+
+**Why this limitation?**
+- Elements are bit-packed across byte boundaries (e.g., a 4-bit element spans half a byte)
+- There's no physical memory address for a single bit-packed element
+- C++ references require an addressable memory location
+
+**API summary for element access:**
+
+| Operation | Syntax | Use Case |
+|-----------|--------|----------|
+| **Read** | `value = vec[index]` | Get element value (returns by value) |
+| **Write** | `vec.set(index, value)` | Set element value |
+| **Safe read** | `value = vec.at(index)` | Bounds-checked read |
+| **Unsafe write** | `vec.set_unsafe(index, value)` | Set without bounds check (use carefully) |
+| **Append** | `vec.push_back(value)` | Add to end |
 
 ### Iterators
 
@@ -120,7 +155,7 @@ The total memory cost of a `packed_vector` has two parts:
 1.  **Object Size (Header)**: The space for the `packed_vector` object itself, which holds management variables. This is typically on the stack.
 2.  **Heap Allocation**: The dynamically allocated memory block where the packed elements are stored.
 
-The object size depends on the `SizeFlag` and the target architecture's pointer size. For a typical 32-bit MCU (like an ESP32 with 4-byte pointers):
+The object size depends on the `SizeFlag` and the target architecture's pointer size. For a typical 32-bit MCU (4-byte pointers):
 
 - `sizeof(packed_vector)` = `sizeof(pointer)` + `1 (bpv)` + `2 * sizeof(index_type)`
   - **TINY**: `4 + 1 + 1` = 6 bytes (size/capacity are packed into one byte)
@@ -144,7 +179,7 @@ This table provides more realistic estimates for a 32-bit system, assuming the v
 
 \*_Total RAM does not include the small, system-dependent overhead from the heap allocator. `std::vector` size is estimated as `12 bytes (header) + N bytes (data)` for a 32-bit system._
 
-Example comparison:
+Example - get memory usage:
 
 ```cpp
 packed_vector<1> bits(8, 1);
@@ -157,12 +192,11 @@ size_t nibble_bytes = nybbles.memory_usage();
 
 ## 🧪 Patterns & tips
 
-- Values passed to mutating functions (`push_back`, `set`, `fill`, `resize`, etc.) are automatically masked to the current `bpv`.
-- Use `assign(min_init_list)` to efficiently replace contents from raw arrays or macro lists.
-- Cross-size range copies make it simple to downsample or upsample bit widths between packed vectors without manual looping.
-- Combine with `index_size_flag::TINY` when you need tight storage for ≤15 elements with minimal overhead (ideal for lookup tables or bitfields).
+- **Element assignment**: Use `vec.set(index, value)` instead of `vec[index] = value` (the latter won't compile due to bit-packing).
 - It recommends to use `reserve()` before bulk `push_back()` operations to minimize reallocations.
-- Use `fit()` after bulk operations to reclaim unused memory.
+- Use `fit()` to reclaim unused memory.
+- Use `TINY' flag for very small vectors (≤15 elements) to minimize overhead.
+- Values are automatically clamped to the maximum representable value: `max_value() = (1 << bpv) - 1`.
 
 ---
 

@@ -4,7 +4,7 @@
 #include <cstdio>
 
 namespace mcu{
-    
+
     class RandomForest{
 #if RF_ENABLE_TRAINING
         struct TrainingContext {
@@ -82,7 +82,7 @@ namespace mcu{
                 char base_path[RF_PATH_BUFFER];
                 base.get_base_data_path(base_path, sizeof(base_path));
                 if(config.num_features > 0){
-                    base_data_stub->init(base_path, config.num_features);
+                    base_data_stub->init(base_path, config);
                 } else {
                     base_data_stub->setfile_path(base_path);
                 }
@@ -196,9 +196,13 @@ namespace mcu{
             if(config.use_validation())
             training_ctx->validation_data.purgeData();
             training_ctx->dataList.clear();
+
             // re_train node predictor after training session
-            if(!training_ctx->build_model)
-            training_ctx->node_pred.re_train(); 
+            if(!training_ctx->build_model){
+                training_ctx->node_pred.re_train(); 
+            }else{
+                training_ctx->node_pred.flush_buffer();
+            }
 #endif
         }
 
@@ -224,7 +228,7 @@ namespace mcu{
                     break;
                 }
 
-                if(!prepare_training_data()){
+                if(!prepare_forest_building_resource()){
                     success = false;
                     break;
                 }
@@ -296,7 +300,7 @@ namespace mcu{
             return true;
         }
         
-        bool prepare_training_data(){
+        bool prepare_forest_building_resource(){
             auto* ctx = training_ctx;
             if(!ctx){
                 return false;
@@ -306,7 +310,7 @@ namespace mcu{
             char base_path[RF_PATH_BUFFER];
             base.get_base_data_path(base_path, sizeof(base_path));
             cloneFile(base_path, temp_base_data);
-            if(!ctx->base_data.init(temp_base_data)){
+            if(!ctx->base_data.init(temp_base_data, config)){
                 RF_DEBUG(0, "❌ Error initializing base data");
                 return false;
             }
@@ -317,14 +321,14 @@ namespace mcu{
             char path[RF_PATH_BUFFER];
 
             base.build_data_file_path(path, "train_data");
-            ctx->train_data.init(path, config.num_features);
+            ctx->train_data.init(path, config);
 
             base.build_data_file_path(path, "test_data");
-            ctx->test_data.init(path, config.num_features);
+            ctx->test_data.init(path, config);
 
             if(config.use_validation()){
                 base.build_data_file_path(path, "valid_data");
-                ctx->validation_data.init(path, config.num_features);
+                ctx->validation_data.init(path, config);
             }
 
             // data splitting
@@ -1043,7 +1047,7 @@ namespace mcu{
                 return;
             }
 
-            if(!prepare_training_data()){
+            if(!prepare_forest_building_resource()){
                 end_training_session();
                 return;
             }
@@ -1066,11 +1070,11 @@ namespace mcu{
             Rf_data old_base_data;
             if(config.training_score == Rf_training_score::K_FOLD_SCORE){
                 base.build_data_file_path(path, "temp_base_data");
-                old_base_data.init(path, config.num_features);
+                old_base_data.init(path, config);
                 old_base_data = ctx->base_data; // backup
                 ctx->base_data = ctx->train_data; 
                 if(!ctx->validation_data.isProperlyInitialized()){
-                    ctx->validation_data.init("/valid_data.bin", config.num_features);
+                    ctx->validation_data.init("/valid_data.bin", config);
                 }
             }
 
@@ -1210,6 +1214,15 @@ namespace mcu{
                 pd->set_max_wait_time(timeout);
             }
         }
+#ifdef ARDUINO
+        void add_actual_label(String label) {
+            add_actual_label(label.c_str());
+        }
+#else
+        void add_actual_label(std::string label) {
+            add_actual_label(label.c_str());
+        }
+#endif
 
         void add_actual_label(const char* label){
             if (!label) {

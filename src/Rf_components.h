@@ -144,1472 +144,6 @@ namespace mcu {
 
     /*
     ------------------------------------------------------------------------------------------------------------------
-    -------------------------------------------------- RF_DATA ------------------------------------------------------
-    ------------------------------------------------------------------------------------------------------------------
-    */
-    using sampleID_set = ID_vector<uint16_t>;       // set of unique sample IDs
-
-    struct Rf_sample{
-        packed_vector<2> features;           // set containing the values ​​of the features corresponding to that sample , 2 bit per value.
-        uint8_t label;                     // label of the sample 
-
-        Rf_sample() : features(), label(0) {}
-        Rf_sample(uint8_t label, const packed_vector<2, LARGE>& source, size_t start, size_t end){
-            this->label = label;
-            features = packed_vector<2>(source, start, end);
-        }
-        Rf_sample(const packed_vector<2> features, uint8_t label) : features(features), label(label) {}
-    };
-    
-    class Rf_data {
-    private:
-        static constexpr size_t MAX_CHUNKS_SIZE = 8192; // max bytes per chunk (8kB)
-
-        // Chunked packed storage - eliminates both heap overhead per sample and large contiguous allocations
-        vector<packed_vector<2, LARGE>> sampleChunks;  // Multiple chunks of packed features
-        b_vector<uint8_t> allLabels;                  // Labels storage 
-        uint16_t bitsPerSample;                        // Number of bits per sample (numFeatures * 2)
-        uint16_t samplesEachChunk;                     // Maximum samples per chunk
-        size_t size_;  
-        char file_path[RF_PATH_BUFFER] = {0};          // dataset file_path (in LittleFS)
-
-    public:
-        bool isLoaded;      
-
-        Rf_data() : isLoaded(false), size_(0), bitsPerSample(0), samplesEachChunk(0) {}
-        // Constructor with file_path and numFeatures
-        Rf_data(const char* path, uint16_t numFeatures) {
-            init(path, numFeatures);
-        }
-        Rf_data(const char* path){
-            init(path);
-        }
-
-        // standard init 
-        bool init(const char* file_path, uint16_t numFeatures) {
-            strncpy(this->file_path, file_path, RF_PATH_BUFFER);
-            this->file_path[RF_PATH_BUFFER - 1] = '\0';
-            bitsPerSample = numFeatures * 2;
-            updateSamplesEachChunk();
-            RF_DEBUG_2(1, "ℹ️ Rf_data initialized (", samplesEachChunk, "samples/chunk): ", file_path);
-            isLoaded = false;
-            size_ = 0;
-            sampleChunks.clear();
-            allLabels.clear();
-            return isProperlyInitialized();
-        }
-
-        // for temp base_data 
-        bool init(const char* path) {
-            strncpy(this->file_path, path, RF_PATH_BUFFER);
-            file_path[RF_PATH_BUFFER - 1] = '\0';
-            isLoaded = false;
-            sampleChunks.clear();
-            allLabels.clear();
-            
-            // read header to get size_ and bitsPerSample
-            File file = LittleFS.open(file_path, FILE_READ);
-            if (!file) {
-                RF_DEBUG(0, "❌ Failed to open dataset file: ", file_path);
-                if(LittleFS.exists(file_path)) {
-                    LittleFS.remove(file_path);
-                }
-                size_ = 0;
-                bitsPerSample = 0;
-                samplesEachChunk = 0;
-                return false;
-            }
-   
-            // Read binary header
-            uint32_t numSamples;
-            uint16_t numFeatures;
-            
-            if(file.read((uint8_t*)&numSamples, sizeof(numSamples)) != sizeof(numSamples) ||
-            file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
-                RF_DEBUG(0, "❌ Failed to read dataset header: ", file_path);
-                file.close();
-                return false;
-            }
-            size_ = numSamples;
-            bitsPerSample = numFeatures * 2;
-            updateSamplesEachChunk();
-            file.close();
-            RF_DEBUG_2(1, "ℹ️ Rf_data initialized (", samplesEachChunk, "samples/chunk): ", file_path);
-            return isProperlyInitialized();
-        }
-
-        // for temporary Rf_data (without saving to LittleFS)
-        bool init(uint16_t numFeatures) {   
-            strncpy(this->file_path, "temp_data", RF_PATH_BUFFER);
-            file_path[RF_PATH_BUFFER - 1] = '\0';
-            bitsPerSample = numFeatures * 2;
-            updateSamplesEachChunk();
-            RF_DEBUG(1, "ℹ️ Temporary Rf_data initialized: ", file_path);
-            isLoaded = false;
-            size_ = 0;
-            sampleChunks.clear();
-            allLabels.clear();
-            return true;
-        }
-        
-        // Iterator class (returns Rf_sample by value for read-only querying)
-        class iterator {
-        private:
-            Rf_data* data_;
-            size_t index_;
-
-        public:
-            iterator(Rf_data* data, size_t index) : data_(data), index_(index) {}
-
-            Rf_sample operator*() const {
-                return data_->getSample(index_);
-            }
-
-            iterator& operator++() {
-                ++index_;
-                return *this;
-            }
-
-            iterator operator++(int) {
-                iterator temp = *this;
-                ++index_;
-                return temp;
-            }
-
-            bool operator==(const iterator& other) const {
-                return data_ == other.data_ && index_ == other.index_;
-            }
-
-            bool operator!=(const iterator& other) const {
-                return !(*this == other);
-            }
-        };
-
-        // Iterator support
-        iterator begin() { return iterator(this, 0); }
-        iterator end() { return iterator(this, size_); }
-
-        // Array access operator (return by value; read-only usage in algorithms)
-        Rf_sample operator[](size_t index) {
-            return getSample(index);
-        }
-
-        // Const version of array access operator
-        Rf_sample operator[](size_t index) const {
-            return getSample(index);
-        }
-
-        // Validate that the Rf_data has been properly initialized
-        bool isProperlyInitialized() const {
-            // return bitsPerSample > 0 && samplesEachChunk > 0 && file_path[0] != '\0';
-            return bitsPerSample > 0 && samplesEachChunk > 0;
-        }
-    private:
-        // Calculate maximum samples per chunk based on bitsPerSample
-        void updateSamplesEachChunk() {
-            if (bitsPerSample > 0) {
-                // Each sample needs bitsPerSample bits, MAX_CHUNKS_SIZE is in bytes (8 bits each)
-                samplesEachChunk = (MAX_CHUNKS_SIZE * 8) / bitsPerSample;
-                if (samplesEachChunk == 0) samplesEachChunk = 1; // At least 1 sample per chunk
-            }
-        }
-
-        // Get chunk index and local index within chunk for a given sample index
-        pair<size_t, size_t> getChunkLocation(size_t sampleIndex) const {
-            size_t chunkIndex = sampleIndex / samplesEachChunk;
-            size_t localIndex = sampleIndex % samplesEachChunk;
-            return make_pair(chunkIndex, localIndex);
-        }
-
-        // Ensure we have enough chunks to store the given number of samples
-        void ensureChunkCapacity(size_t totalSamples) {
-            size_t requiredChunks = (totalSamples + samplesEachChunk - 1) / samplesEachChunk;
-            while (sampleChunks.size() < requiredChunks) {
-                packed_vector<2, LARGE> newChunk;
-                // Reserve space for elements (each feature is 1 element in packed_vector<2>)
-                size_t elementsPerSample = bitsPerSample / 2;  // numFeatures
-                newChunk.reserve(samplesEachChunk * elementsPerSample);
-                sampleChunks.push_back(newChunk); // Add new empty chunk
-            }
-        }
-
-        // Helper method to reconstruct Rf_sample from chunked packed storage
-        Rf_sample getSample(size_t sampleIndex) const {
-            if (!isLoaded) {
-                RF_DEBUG(2, "❌ Rf_data not loaded. Call loadData() first.");
-                return Rf_sample();
-            }
-            if(sampleIndex >= size_){
-                RF_DEBUG_2(2, "❌ Sample index out of bounds: ", sampleIndex, "size: ", size_);
-                return Rf_sample();
-            }
-            pair<size_t, size_t> location = getChunkLocation(sampleIndex);
-            return Rf_sample(
-                allLabels[sampleIndex],
-                sampleChunks[location.first],
-                location.second * (bitsPerSample / 2),
-                (location.second + 1) * (bitsPerSample / 2)
-            );    
-        }
-
-        // Helper method to store Rf_sample in chunked packed storage
-        bool storeSample(const Rf_sample& sample, size_t sampleIndex) {
-            if (!isProperlyInitialized()) {
-                RF_DEBUG(2, "❌ Store sample failed: Rf_data not properly initialized.");
-                return false;
-            }
-            
-            // Store label
-            if (sampleIndex == allLabels.size()) {
-                // Appending in order (fast path)
-                allLabels.push_back(sample.label);
-            } else if (sampleIndex < allLabels.size()) {
-                // Overwrite existing position
-                allLabels[sampleIndex] = sample.label;
-            } else {
-                // Rare case: out-of-order insert; fill gaps with 0
-                allLabels.reserve(sampleIndex + 1);
-                allLabels.fill(0);
-                allLabels.push_back(sample.label);
-            }
-            
-            // Ensure we have enough chunks
-            ensureChunkCapacity(sampleIndex + 1);
-            
-            auto location = getChunkLocation(sampleIndex);
-            size_t chunkIndex = location.first;
-            size_t localIndex = location.second;
-            
-            // Store features in packed format within the specific chunk
-            size_t elementsPerSample = bitsPerSample / 2;  // numFeatures
-            size_t startElementIndex = localIndex * elementsPerSample;
-            size_t requiredSizeInChunk = startElementIndex + elementsPerSample;
-            
-            if (sampleChunks[chunkIndex].size() < requiredSizeInChunk) {
-                sampleChunks[chunkIndex].resize(requiredSizeInChunk);
-            }
-            
-            // Store each feature as one element in the packed_vector<2>
-            for (size_t featureIdx = 0; featureIdx < sample.features.size(); featureIdx++) {
-                size_t elementIndex = startElementIndex + featureIdx;
-                uint8_t featureValue = sample.features[featureIdx] & 0x03; // 2-bit mask
-                
-                // Store 2-bit value directly as one element
-                if (elementIndex < sampleChunks[chunkIndex].size()) {
-                    sampleChunks[chunkIndex].set(elementIndex, featureValue);
-                }
-            }
-            return true;
-        }
-
-    private:
-        // Load data from CSV format (used only once for initial dataset conversion)
-        bool loadCSVData(const char* csvfile_path, uint8_t numFeatures) {
-            if(isLoaded) {
-                // clear existing data
-                sampleChunks.clear();
-                allLabels.clear();
-                size_ = 0;
-                isLoaded = false;
-            }
-            
-            File file = LittleFS.open(csvfile_path, FILE_READ);
-            if (!file) {
-                RF_DEBUG(0, "❌ Failed to open CSV file for reading: ", csvfile_path);
-                return false;
-            }
-
-            if(numFeatures == 0){       
-                // Read header line to determine number of features
-                String line = file.readStringUntil('\n');
-                line.trim();
-                if (line.length() == 0) {
-                    RF_DEBUG(0, "❌ CSV file is empty or missing header: ", csvfile_path);
-                    file.close();
-                    return false;
-                }
-                int commaCount = 0;
-                for (char c : line) {
-                    if (c == ',') commaCount++;
-                }
-                numFeatures = commaCount;
-            }
-
-            // Set bitsPerSample and calculate chunk parameters only if not already initialized
-            if (bitsPerSample == 0) {
-                bitsPerSample = numFeatures * 2;
-                updateSamplesEachChunk();
-            } else {
-                // Validate that the provided numFeatures matches the initialized bitsPerSample
-                uint16_t expectedFeatures = bitsPerSample / 2;
-                if (numFeatures != expectedFeatures) {
-                    RF_DEBUG_2(0, "❌ Feature count mismatch: expected ", expectedFeatures, ", found ", numFeatures);   
-                    file.close();
-                    return false;
-                }
-            }
-            
-            uint16_t linesProcessed = 0;
-            uint16_t emptyLines = 0;
-            uint16_t validSamples = 0;
-            uint16_t invalidSamples = 0;
-            
-            // Pre-allocate for efficiency
-            allLabels.reserve(1000); // Initial capacity
-            
-            while (file.available()) {
-                String line = file.readStringUntil('\n');
-                line.trim();
-                linesProcessed++;
-                
-                if (line.length() == 0) {
-                    emptyLines++;
-                    continue;
-                }
-
-                Rf_sample s;
-                s.features.clear();
-                s.features.reserve(numFeatures);
-
-                uint8_t fieldIdx = 0;
-                int start = 0;
-                while (start < line.length()) {
-                    int comma = line.indexOf(',', start);
-                    if (comma < 0) comma = line.length();
-
-                    String tok = line.substring(start, comma);
-                    uint8_t v = (uint8_t)tok.toInt();
-
-                    if (fieldIdx == 0) {
-                        s.label = v;
-                    } else {
-                        s.features.push_back(v);
-                    }
-
-                    fieldIdx++;
-                    start = comma + 1;
-                }
-                
-                // Validate the sample
-                if (fieldIdx != numFeatures + 1) {
-                    RF_DEBUG_2(2, "❌ Invalid field count in line ", linesProcessed, ": expected ", numFeatures + 1);
-                    invalidSamples++;
-                    continue;
-                }
-                
-                if (s.features.size() != numFeatures) {
-                    RF_DEBUG_2(2, "❌ Feature count mismatch in line ", linesProcessed, ": expected ", numFeatures);
-                    invalidSamples++;
-                    continue;
-                }
-                
-                s.features.fit();
-
-                // Store in chunked packed format
-                storeSample(s, validSamples);
-                validSamples++;
-                
-                if (validSamples >= RF_MAX_SAMPLES) {
-                    RF_DEBUG(1, "⚠️ Reached maximum sample limit");
-                    break;
-                }
-            }
-            size_ = validSamples;
-            
-            RF_DEBUG(1, "📋 CSV Processing Results: ");
-            RF_DEBUG(1, "   Lines processed: ", linesProcessed);
-            RF_DEBUG(1, "   Empty lines: ", emptyLines);
-            RF_DEBUG(1, "   Valid samples: ", validSamples);
-            RF_DEBUG(1, "   Invalid samples: ", invalidSamples);
-            RF_DEBUG(1, "   Total samples in memory: ", size_);
-            RF_DEBUG(1, "   Chunks used: ", sampleChunks.size());
-            
-            allLabels.fit();
-            for (auto& chunk : sampleChunks) {
-                chunk.fit();
-            }
-            file.close();
-            isLoaded = true;
-            LittleFS.remove(csvfile_path);
-            RF_DEBUG(1, "✅ CSV data loaded and file removed: ", csvfile_path);
-            return true;
-        }
-
-    public:
-        int total_chunks() const {
-            return size_/samplesEachChunk + (size_ % samplesEachChunk != 0 ? 1 : 0);
-        }
-        
-        uint16_t total_features() const {
-            return bitsPerSample / 2;
-        }
-
-        uint16_t samplesPerChunk() const {
-            return samplesEachChunk;
-        }
-
-        size_t size() const {
-            return size_;
-        }
-
-        void setfile_path(const char* path) {
-            strncpy(this->file_path, path, RF_PATH_BUFFER);
-            this->file_path[RF_PATH_BUFFER - 1] = '\0';
-        }
-
-        // Fast accessors for training-time hot paths (avoid reconstructing Rf_sample)
-        inline uint16_t num_features() const { return bitsPerSample / 2; }
-
-        inline uint8_t getLabel(size_t sampleIndex) const {
-            if (sampleIndex >= size_) return 0;
-            return allLabels[sampleIndex];
-        }
-
-        inline uint8_t getFeature(size_t sampleIndex, uint16_t featureIndex) const {
-            if (!isProperlyInitialized()) return 0;
-            uint16_t nf = bitsPerSample / 2;
-            if (featureIndex >= nf || sampleIndex >= size_) return 0;
-            auto loc = getChunkLocation(sampleIndex);
-            size_t chunkIndex = loc.first;
-            size_t localIndex = loc.second;
-            if (chunkIndex >= sampleChunks.size()) return 0;
-            size_t elementsPerSample = nf;
-            size_t startElementIndex = localIndex * elementsPerSample;
-            size_t elementIndex = startElementIndex + featureIndex;
-            if (elementIndex >= sampleChunks[chunkIndex].size()) return 0;
-            return sampleChunks[chunkIndex][elementIndex];
-        }
-
-        // Reserve space for a specified number of samples
-        void reserve(size_t numSamples) {
-            if (!isProperlyInitialized()) {
-                RF_DEBUG(1, "❌ Cannot reserve space: Rf_data not properly initialized", file_path);
-                return;
-            }
-            allLabels.reserve(numSamples);
-            ensureChunkCapacity(numSamples);
-            RF_DEBUG_2(2, "📦 Reserved space for", numSamples, "samples, used chunks: ", sampleChunks.size());
-        }
-
-        bool convertCSVtoBinary(const char* csvfile_path, uint8_t numFeatures = 0) {
-            RF_DEBUG(1, "🔄 Converting CSV to binary format from: ", csvfile_path);
-            if(!loadCSVData(csvfile_path, numFeatures)) return false;
-            if(!releaseData(false)) return false; 
-            RF_DEBUG(1, "✅ CSV converted to binary and saved: ", file_path);
-            return true;
-        }
-
-        /**
-         * @brief Save data to LittleFS in binary format and clear from RAM.
-         * @param reuse If true, keeps data in RAM after saving; if false, clears data from RAM.
-         * @note: after first time rf_data created, it must be releaseData(false) to save data
-         */
-        bool releaseData(bool reuse = true) {
-            if(!isLoaded) return false;
-            
-            if(!reuse){
-                RF_DEBUG(1, "💾 Saving data to LittleFS and clearing from RAM...");
-                // Remove any existing file
-                if (LittleFS.exists(file_path)) {
-                    LittleFS.remove(file_path);
-                }
-                File file = LittleFS.open(file_path, FILE_WRITE);
-                if (!file) {
-                    RF_DEBUG(0, "❌ Failed to open binary file for writing: ", file_path);
-                    return false;
-                }
-                RF_DEBUG(2, "📂 Saving data to: ", file_path);
-
-                // Write binary header
-                uint32_t numSamples = size_;
-                uint16_t numFeatures = bitsPerSample / 2;
-                
-                file.write((uint8_t*)&numSamples, sizeof(numSamples));
-                file.write((uint8_t*)&numFeatures, sizeof(numFeatures));
-
-                // Calculate packed bytes needed for features (4 values per byte)
-                uint16_t packedFeatureBytes = (numFeatures + 3) / 4;
-
-                // Write samples WITHOUT sample IDs (using vector indices)
-                for (uint32_t i = 0; i < size_; i++) {
-                    // Reconstruct sample from chunked packed storage
-                    Rf_sample s = getSample(i);
-                    
-                    // Write label only (no sample ID needed)
-                    file.write(&s.label, sizeof(s.label));
-                    
-                    // Pack and write features
-                    uint8_t packedBuffer[packedFeatureBytes];
-                    // Initialize buffer to 0
-                    for(uint16_t j = 0; j < packedFeatureBytes; j++) {
-                        packedBuffer[j] = 0;
-                    }
-                    
-                    // Pack 4 feature values into each byte
-                    for (size_t j = 0; j < s.features.size(); ++j) {
-                        uint16_t byteIndex = j / 4;
-                        uint8_t bitOffset = (j % 4) * 2;
-                        uint8_t feature_value = s.features[j] & 0x03;
-                        packedBuffer[byteIndex] |= (feature_value << bitOffset);
-                    }
-                    
-                    file.write(packedBuffer, packedFeatureBytes);
-                }
-                file.close();
-            }
-            
-            // Clear chunked memory
-            sampleChunks.clear();
-            sampleChunks.fit();
-            allLabels.clear();
-            allLabels.fit();
-            isLoaded = false;
-            RF_DEBUG_2(1, "✅ Data saved(", size_, "samples) to: ", file_path); 
-            return true;
-        }
-
-        // Load data using sequential indices 
-        bool loadData(bool re_use = true) {
-            if(isLoaded || !isProperlyInitialized()) return false;
-            RF_DEBUG(1, "📂 Loading data from: ", file_path);
-            
-            File file = LittleFS.open(file_path, FILE_READ);
-            if (!file) {
-                RF_DEBUG(0, "❌ Failed to open data file: ", file_path);
-                if(LittleFS.exists(file_path)) {
-                    LittleFS.remove(file_path);
-                }
-                return false;
-            }
-   
-            // Read binary header
-            uint32_t numSamples;
-            uint16_t numFeatures;
-            
-            if(file.read((uint8_t*)&numSamples, sizeof(numSamples)) != sizeof(numSamples) ||
-            file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
-                RF_DEBUG(0, "❌ Failed to read data header: ", file_path);
-                file.close();
-                return false;
-            }
-
-            if(numFeatures * 2 != bitsPerSample) {
-                RF_DEBUG_2(0, "❌ Feature count mismatch: expected ", bitsPerSample / 2, ",found ", numFeatures);
-                file.close();
-                return false;
-            }
-            size_ = numSamples;
-
-            // Calculate sizes
-            const uint16_t packedFeatureBytes = (numFeatures + 3) / 4; // 4 values per byte
-            const size_t recordSize = sizeof(uint8_t) + packedFeatureBytes; // label + packed features
-            const size_t elementsPerSample = numFeatures; // each feature is one element in packed_vector<2>
-
-            // Prepare storage: labels and chunks pre-sized to avoid per-sample resizing
-            allLabels.clear();
-            allLabels.reserve(numSamples);
-            sampleChunks.clear();
-            ensureChunkCapacity(numSamples);
-            // Pre-size each chunk's element count and explicitly initialize to zero
-            size_t remaining = numSamples;
-            for (size_t ci = 0; ci < sampleChunks.size(); ++ci) {
-                size_t chunkSamples = remaining > samplesEachChunk ? samplesEachChunk : remaining;
-                size_t reqElems = chunkSamples * elementsPerSample;
-                sampleChunks[ci].resize(reqElems, 0);  // Explicitly pass 0 as value
-                remaining -= chunkSamples;
-                if (remaining == 0) break;
-            }
-
-            // Batch read to reduce LittleFS overhead
-            const size_t MAX_BATCH_BYTES = 2048; // conservative for MCU
-            uint8_t* ioBuf = (uint8_t*)malloc(MAX_BATCH_BYTES);
-            if (!ioBuf) {
-                RF_DEBUG(1, "❌ Failed to allocate IO buffer");
-                file.close();
-                return false;
-            }
-
-            bool fallback_yet = false;
-            size_t processed = 0;
-            while (processed < numSamples) {
-                size_t batchSamples;
-                if (ioBuf) {
-                    size_t maxSamplesByBuf = MAX_BATCH_BYTES / recordSize;
-                    if (maxSamplesByBuf == 0) maxSamplesByBuf = 1;
-                    batchSamples = (numSamples - processed) < maxSamplesByBuf ? (numSamples - processed) : maxSamplesByBuf;
-
-                    size_t bytesToRead = batchSamples * recordSize;
-                    size_t bytesRead = 0;
-                    while (bytesRead < bytesToRead) {
-                        int r = file.read(ioBuf + bytesRead, bytesToRead - bytesRead);
-                        if (r <= 0) {
-                            RF_DEBUG(0, "❌ Read batch failed: ", file_path);
-                            if (ioBuf) free(ioBuf);
-                            file.close();
-                            return false;
-                        }
-                        bytesRead += r;
-                    }
-
-                    // Process buffer
-                    for (size_t bi = 0; bi < batchSamples; ++bi) {
-                        size_t off = bi * recordSize;
-                        uint8_t lbl = ioBuf[off];
-                        allLabels.push_back(lbl);
-
-                        const uint8_t* packed = ioBuf + off + 1;
-                        size_t sampleIndex = processed + bi;
-
-                        // Locate chunk and base element index for this sample
-                        auto loc = getChunkLocation(sampleIndex);
-                        size_t chunkIndex = loc.first;
-                        size_t localIndex = loc.second;
-                        size_t startElementIndex = localIndex * elementsPerSample;
-
-                        // Unpack features directly into chunk storage using set_unsafe for pre-sized storage
-                        for (uint16_t j = 0; j < numFeatures; ++j) {
-                            uint16_t byteIndex = j / 4;
-                            uint8_t bitOffset = (j % 4) * 2;
-                            uint8_t fv = (packed[byteIndex] >> bitOffset) & 0x03;
-                            size_t elemIndex = startElementIndex + j;
-                            if (elemIndex >= sampleChunks[chunkIndex].size()) {
-                                RF_DEBUG_2(0, "❌ Index out of bounds: elemIndex=", elemIndex, ", size=", sampleChunks[chunkIndex].size());
-                            }
-                            sampleChunks[chunkIndex].set_unsafe(elemIndex, fv);
-                        }
-                    }
-                } else {
-                    if (!fallback_yet) {
-                        RF_DEBUG(2, "⚠️ IO buffer allocation failed, falling back to per-sample read");
-                        fallback_yet = true;
-                    }
-                    // Fallback: per-sample small buffer
-                    batchSamples = 1;
-                    uint8_t lbl;
-                    if (file.read(&lbl, sizeof(lbl)) != sizeof(lbl)) {
-                        RF_DEBUG_2(0, "❌ Read label failed at sample: ", processed, ": ", file_path);
-                        if (ioBuf) free(ioBuf);
-                        file.close();
-                        return false;
-                    }
-                    allLabels.push_back(lbl);
-                    uint8_t packed[packedFeatureBytes] = {0};
-                    if (file.read(packed, packedFeatureBytes) != packedFeatureBytes) {
-                        RF_DEBUG_2(0, "❌ Read features failed at sample: ", processed, ": ", file_path);
-                        if (ioBuf) free(ioBuf);
-                        file.close();
-                        return false;
-                    }
-                    auto loc = getChunkLocation(processed);
-                    size_t chunkIndex = loc.first;
-                    size_t localIndex = loc.second;
-                    size_t startElementIndex = localIndex * elementsPerSample;
-                    for (uint16_t j = 0; j < numFeatures; ++j) {
-                        uint16_t byteIndex = j / 4;
-                        uint8_t bitOffset = (j % 4) * 2;
-                        uint8_t fv = (packed[byteIndex] >> bitOffset) & 0x03;
-                        size_t elemIndex = startElementIndex + j;
-                        if (elemIndex < sampleChunks[chunkIndex].size()) {
-                            sampleChunks[chunkIndex].set(elemIndex, fv);
-                        }
-                    }
-                }
-                processed += batchSamples;
-            }
-
-            if (ioBuf) free(ioBuf);
-
-            allLabels.fit();
-            for (auto& chunk : sampleChunks) {
-                chunk.fit();
-            }
-            isLoaded = true;
-            file.close();
-            if(!re_use) {
-                RF_DEBUG(1, "♻️ Single-load mode: removing file after loading: ", file_path);
-                LittleFS.remove(file_path); // Remove file after loading in single mode
-            }
-            RF_DEBUG_2(1, "✅ Data loaded(", sampleChunks.size(), "chunks): ", file_path);
-            return true;
-        }
-
-        /**
-         * @brief Load specific samples from another Rf_data source by sample IDs.
-         * @param source The source Rf_data to load samples from.
-         * @param sample_IDs A sorted set of sample IDs to load from the source.
-         * @param save_ram If true, release source data(if loaded) during process to avoid both datasets in RAM.
-         * @note: The state of the source data will be automatically restored, no need to reload.
-         */
-        bool loadData(Rf_data& source, const sampleID_set& sample_IDs, bool save_ram = true) {
-            // Only the source must exist on LittleFS; destination can be an in-memory buffer
-            if (!LittleFS.exists(source.file_path)) {
-                RF_DEBUG(0, "❌ Source file does not exist: ", source.file_path);
-                return false;
-            }
-
-            File file = LittleFS.open(source.file_path, FILE_READ);
-            if (!file) {
-                RF_DEBUG(0, "❌ Failed to open source file: ", source.file_path);
-                return false;
-            }
-            bool pre_loaded = source.isLoaded;
-            if(pre_loaded && save_ram) {
-                source.releaseData();
-            }
-
-            // Read binary header
-            uint32_t numSamples;
-            uint16_t numFeatures;
-            
-            if(file.read((uint8_t*)&numSamples, sizeof(numSamples)) != sizeof(numSamples) ||
-            file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
-                RF_DEBUG(0, "❌ Failed to read source header: ", source.file_path);
-                file.close();
-                return false;
-            }
-
-            // Clear current data and initialize parameters
-            sampleChunks.clear();
-            allLabels.clear();
-            bitsPerSample = numFeatures * 2;
-            updateSamplesEachChunk();
-
-            // Calculate packed bytes needed for features (4 values per byte)
-            uint16_t packedFeatureBytes = (numFeatures + 3) / 4;
-            size_t sampleDataSize = sizeof(uint8_t) + packedFeatureBytes; // label + packed features
-            
-            // Reserve space for requested samples
-            size_t numRequestedSamples = sample_IDs.size();
-            allLabels.reserve(numRequestedSamples);
-            
-            RF_DEBUG_2(2, "📦 Loading ", numRequestedSamples, "samples from source: ", source.file_path);
-            
-            size_t addedSamples = 0;
-            // Since sample_IDs are sorted in ascending order, we can read efficiently
-            for(uint16_t sampleIdx : sample_IDs) {
-                if(sampleIdx >= numSamples) {
-                    RF_DEBUG_2(2, "⚠️ Sample ID ", sampleIdx, "exceeds source sample count ", numSamples);
-                    continue;
-                }
-                
-                // Calculate file position for this sample
-                size_t headerSize = sizeof(uint32_t) + sizeof(uint16_t);
-                size_t sampleFilePos = headerSize + (sampleIdx * sampleDataSize);
-                
-                // Seek to the sample position
-                if (!file.seek(sampleFilePos)) {
-                    RF_DEBUG_2(2, "⚠️ Failed to seek to sample ", sampleIdx, "position ", sampleFilePos);
-                    continue;
-                }
-                
-                Rf_sample s;
-                
-                // Read label
-                if(file.read(&s.label, sizeof(s.label)) != sizeof(s.label)) {
-                    RF_DEBUG(2, "⚠️ Failed to read label for sample ", sampleIdx);
-                    continue;
-                }
-                
-                // Read packed features
-                s.features.clear();
-                s.features.reserve(numFeatures);
-                
-                uint8_t packedBuffer[packedFeatureBytes];
-                if(file.read(packedBuffer, packedFeatureBytes) != packedFeatureBytes) {
-                    RF_DEBUG(2, "⚠️ Failed to read features for sample ", sampleIdx);
-                    continue;
-                }
-                
-                // Unpack features from bytes
-                for(uint16_t j = 0; j < numFeatures; j++) {
-                    uint16_t byteIndex = j / 4;
-                    uint8_t bitOffset = (j % 4) * 2;
-                    uint8_t mask = 0x03 << bitOffset;
-                    uint8_t feature = (packedBuffer[byteIndex] & mask) >> bitOffset;
-                    s.features.push_back(feature);
-                }
-                s.features.fit();
-                
-                // Store in chunked packed format using addedSamples as the new index
-                storeSample(s, addedSamples);
-                addedSamples++;
-            }
-            
-            size_ = addedSamples;
-            allLabels.fit();
-            for (auto& chunk : sampleChunks) {
-                chunk.fit();
-            }
-            isLoaded = true;
-            file.close();
-            if(pre_loaded && save_ram) {
-                source.loadData();
-            }
-            RF_DEBUG_2(2, "✅ Loaded ", addedSamples, "samples from source: ", source.file_path);
-            return true;
-        }
-        
-        /**
-         * @brief Load a specific chunk of samples from another Rf_data source.
-         * @param source The source Rf_data to load samples from.
-         * @param chunkIndex The index of the chunk to load (0-based).
-         * @param save_ram If true, release source data(if loaded) during process to avoid both datasets in RAM.
-         * @note: this function will call loadData(source, chunkIDs) internally.
-         */
-        bool loadChunk(Rf_data& source, size_t chunkIndex, bool save_ram = true) {
-            RF_DEBUG_2(2, "📂 Loading chunk ", chunkIndex, "from source: ", source.file_path);
-            if(chunkIndex >= source.total_chunks()) {
-                RF_DEBUG_2(2, "❌ Chunk index ", chunkIndex, "out of bounds : total chunks=", source.total_chunks());
-                return false; 
-            }
-            bool pre_loaded = source.isLoaded;
-
-            uint16_t startSample = chunkIndex * source.samplesEachChunk;
-            uint16_t endSample = startSample + source.samplesEachChunk;
-            if(endSample > source.size()) {
-                endSample = source.size();
-            }
-            if(startSample >= endSample) {
-                RF_DEBUG_2(2, "❌ Invalid chunk range: start ", startSample, ", end ", endSample);
-                return false;
-            }
-            sampleID_set chunkIDs(startSample, endSample - 1);
-            chunkIDs.fill();
-            loadData(source, chunkIDs, save_ram);   
-            return true;
-        }
-
-        /**
-         *@brief: copy assignment (but not copy file_path to avoid LittleFS over-writing)
-         *@note : Rf_data will be put into release state. loadData() to reload into RAM if needed.
-        */
-        Rf_data& operator=(const Rf_data& other) {
-            purgeData(); // Clear existing data safely
-            if (this != &other) {
-                if (LittleFS.exists(other.file_path)) {
-                    File testFile = LittleFS.open(other.file_path, FILE_READ);
-                    if (testFile) {
-                        uint32_t testNumSamples;
-                        uint16_t testNumFeatures;
-                        bool headerValid = (testFile.read((uint8_t*)&testNumSamples, sizeof(testNumSamples)) == sizeof(testNumSamples) &&
-                                          testFile.read((uint8_t*)&testNumFeatures, sizeof(testNumFeatures)) == sizeof(testNumFeatures) &&
-                                          testNumSamples > 0 && testNumFeatures > 0);
-                        testFile.close();
-                        
-                        if (headerValid) {
-                            if (!cloneFile(other.file_path, file_path)) {
-                                RF_DEBUG(0, "❌ Failed to clone source file: ", other.file_path);
-                            }
-                        } else {
-                            RF_DEBUG(0, "❌ Source file has invalid header: ", other.file_path);
-                        }
-                    } else {
-                        RF_DEBUG(0, "❌ Cannot open source file: ", other.file_path);
-                    }
-                } else {
-                    RF_DEBUG(0, "❌ Source file does not exist: ", other.file_path);
-                }
-                bitsPerSample = other.bitsPerSample;
-                samplesEachChunk = other.samplesEachChunk;
-                isLoaded = false; // Always start in unloaded state
-                size_ = other.size_;
-                // Deep copy of labels if loaded in memory
-                allLabels = other.allLabels; // b_vector has its own copy semantics
-            }
-            return *this;   
-        }
-
-        // Clear data at both memory and LittleFS
-        void purgeData() {
-            // Clear in-memory structures first
-            sampleChunks.clear();
-            sampleChunks.fit();
-            allLabels.clear();
-            allLabels.fit();
-            isLoaded = false;
-            size_ = 0;
-            bitsPerSample = 0;
-            samplesEachChunk = 0;
-
-            // Then remove the LittleFS file if one was specified
-            if (LittleFS.exists(file_path)) {
-                LittleFS.remove(file_path);
-                RF_DEBUG(1, "🗑️ Deleted file: ", file_path);
-            }
-        }
-
-        /**
-         * @brief Add new data directly to file without loading into RAM
-         * @param samples Vector of new samples to add
-         * @param extend If false, keeps file size same (overwrites old data from start); 
-         *               if true, appends new data while respecting size limits
-         * @return : deleted labels
-         * @note Directly writes to LittleFS file to save RAM. File must exist and be properly initialized.
-         */
-        b_vector<uint8_t> addNewData(const b_vector<Rf_sample>& samples, bool extend = true) {
-            b_vector<uint8_t> deletedLabels;
-
-            if (!isProperlyInitialized()) {
-                RF_DEBUG(0, "❌ Rf_data not properly initialized. Cannot add new data.");
-                return deletedLabels;
-            }
-            if (!LittleFS.exists(file_path)) {
-                RF_DEBUG(0, "⚠️ File does not exist for adding new data: ", file_path);
-                return deletedLabels;
-            }
-            if (samples.size() == 0) {
-                RF_DEBUG(1, "⚠️ No samples to add");
-                return deletedLabels;
-            }
-
-            // Read current file header to get existing info
-            File file = LittleFS.open(file_path, FILE_READ);
-            if (!file) {
-                RF_DEBUG(0, "❌ Failed to open file for adding new data: ", file_path);
-                return deletedLabels;
-            }
-
-            uint32_t currentNumSamples;
-            uint16_t numFeatures;
-            
-            if (file.read((uint8_t*)&currentNumSamples, sizeof(currentNumSamples)) != sizeof(currentNumSamples) ||
-                file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
-                RF_DEBUG(0, "❌ Failed to read file header: ", file_path);
-                file.close();
-                return deletedLabels;
-            }
-            file.close();
-
-            // Validate feature count compatibility
-            if (samples.size() > 0 && samples[0].features.size() != numFeatures) {
-                RF_DEBUG_2(0, "❌ Feature count mismatch: expected ", numFeatures, ", found ", samples[0].features.size());
-                return deletedLabels;
-            }
-
-            // Calculate packed bytes needed for features (4 values per byte)
-            uint16_t packedFeatureBytes = (numFeatures + 3) / 4;
-            size_t sampleDataSize = sizeof(uint8_t) + packedFeatureBytes; // label + packed features
-            size_t headerSize = sizeof(uint32_t) + sizeof(uint16_t);
-
-            uint32_t newNumSamples;
-            size_t writePosition;
-            
-            if (extend) {
-                // Append mode: add to existing samples
-                newNumSamples = currentNumSamples + samples.size();
-                
-                // Check limits
-                if (newNumSamples > RF_MAX_SAMPLES) {
-                    size_t maxAddable = RF_MAX_SAMPLES - currentNumSamples;
-                    RF_DEBUG(2, "⚠️ Reaching maximum sample limit, limiting to ", maxAddable);
-                    newNumSamples = RF_MAX_SAMPLES;
-                }
-                
-                size_t newFileSize = headerSize + (newNumSamples * sampleDataSize);
-                if (newFileSize > MAX_DATASET_SIZE) {
-                    size_t maxSamplesBySize = (MAX_DATASET_SIZE - headerSize) / sampleDataSize;
-                    RF_DEBUG(2, "⚠️ Limiting samples by file size to ", maxSamplesBySize);
-                    newNumSamples = maxSamplesBySize;
-                }
-                
-                writePosition = headerSize + (currentNumSamples * sampleDataSize);
-            } else {
-                // Overwrite mode: keep same file size, write from beginning
-                newNumSamples = currentNumSamples; // Keep same sample count - ALWAYS preserve original dataset size
-                writePosition = headerSize; // Write from beginning of data section
-            }
-
-            // Calculate actual number of samples to write
-            uint32_t samplesToWrite = extend ? 
-                (newNumSamples - currentNumSamples) : 
-                min((uint32_t)samples.size(), newNumSamples);
-
-            RF_DEBUG_2(1, "📝 Adding ", samplesToWrite, "samples to ", file_path);
-            RF_DEBUG_2(2, "📊 Dataset info: current=", currentNumSamples, ", new_total=", newNumSamples);
-
-            // Open file for writing (r+ mode to update existing file)
-            file = LittleFS.open(file_path, "r+");
-            if (!file) {
-                RF_DEBUG(0, "❌ Failed to open file for writing: ", file_path);
-                return deletedLabels;
-            }
-
-            // In overwrite mode, read the labels that will be overwritten
-            if (!extend && samplesToWrite > 0) {
-                RF_DEBUG(2, "📋 Reading labels that will be overwritten: ", samplesToWrite);
-                
-                // Seek to the start of data section to read existing labels
-                if (!file.seek(headerSize)) {
-                    RF_DEBUG(0, "Seek to data section for reading labels: ", file_path);
-                    file.close();
-                    return deletedLabels;
-                }
-                
-                // Reserve space for deleted labels
-                deletedLabels.reserve(samplesToWrite);
-                
-                // Read labels that will be overwritten
-                for (uint32_t i = 0; i < samplesToWrite; ++i) {
-                    uint8_t existingLabel;
-                    if (file.read(&existingLabel, sizeof(existingLabel)) != sizeof(existingLabel)) {
-                        RF_DEBUG_2(0, "❌ Read existing label failed at index ", i, ": ", file_path);
-                        break;
-                    }
-                    deletedLabels.push_back(existingLabel);
-                    
-                    // Skip the packed features to get to next label
-                    if (!file.seek(file.position() + packedFeatureBytes)) {
-                        RF_DEBUG_2(0, "❌ Seek past features failed at index ", i, ": ", file_path);
-                        break;
-                    }
-                }
-                
-                RF_DEBUG_2(1, "📋 Collected ", deletedLabels.size(), " labels that will be overwritten", "");
-            }
-
-            // Update header with new sample count
-            file.seek(0);
-            file.write((uint8_t*)&newNumSamples, sizeof(newNumSamples));
-            file.write((uint8_t*)&numFeatures, sizeof(numFeatures));
-
-            // Seek to write position
-            if (!file.seek(writePosition)) {
-                RF_DEBUG_2(0, "❌ Failed seek to write position ", writePosition, ": ", file_path);
-                file.close();
-                return deletedLabels;
-            }
-
-            // Write samples directly to file
-            uint32_t written = 0;
-            for (uint32_t i = 0; i < samplesToWrite && i < samples.size(); ++i) {
-                const Rf_sample& sample = samples[i];
-                
-                // Validate sample feature count
-                if (sample.features.size() != numFeatures) {
-                    RF_DEBUG_2(2, "⚠️ Skipping sample ", i, " due to feature count mismatch: ", file_path);
-                    continue;
-                }
-
-                // Write label
-                if (file.write(&sample.label, sizeof(sample.label)) != sizeof(sample.label)) {
-                    RF_DEBUG_2(0, "❌ Write label failed at sample ", i, ": ", file_path);
-                    break;
-                }
-
-                // Pack and write features
-                uint8_t packedBuffer[packedFeatureBytes];
-                // Initialize buffer to 0
-                for (uint16_t j = 0; j < packedFeatureBytes; j++) {
-                    packedBuffer[j] = 0;
-                }
-                
-                // Pack 4 feature values into each byte
-                for (size_t j = 0; j < sample.features.size(); ++j) {
-                    uint16_t byteIndex = j / 4;
-                    uint8_t bitOffset = (j % 4) * 2;
-                    uint8_t feature_value = sample.features[j] & 0x03;
-                    packedBuffer[byteIndex] |= (feature_value << bitOffset);
-                }
-                
-                if (file.write(packedBuffer, packedFeatureBytes) != packedFeatureBytes) {
-                    RF_DEBUG_2(0, "❌ Write features failed at sample ", i, ": ", file_path);
-                    break;
-                }
-                
-                written++;
-            }
-
-            file.close();
-
-            // Update internal size if data is loaded in memory
-            if (isLoaded) {
-                size_ = newNumSamples;
-                RF_DEBUG(1, "ℹ️ Data is loaded in memory. Consider reloading for consistency.");
-            }
-
-            RF_DEBUG_2(1, "✅ Successfully wrote ", written, "samples to: ", file_path);
-            if (!extend && deletedLabels.size() > 0) {
-                RF_DEBUG_2(1, "📊 Overwrote ", deletedLabels.size(), "samples with labels: ","");
-            }
-            
-            return deletedLabels;
-        }
-
-        size_t memory_usage() const {
-            size_t total = sizeof(Rf_data);
-            total += allLabels.capacity() * sizeof(uint8_t);
-            for (const auto& chunk : sampleChunks) {
-                total += sizeof(packed_vector<2, LARGE>);
-                total += chunk.capacity() * sizeof(uint8_t); // each element is 2 bits, but stored in bytes
-            }
-            return total;
-        }
-    };
-
-
-    /*
-    ------------------------------------------------------------------------------------------------------------------
-    ---------------------------------------------------- RF_TREE -----------------------------------------------------
-    ------------------------------------------------------------------------------------------------------------------
-    */
-    struct Tree_node{
-        uint32_t packed_data; 
-        
-        /** Bit layout optimize for breadth-first tree building:
-            * Bits 0-9  :  featureID        (10 bits)     -> 0 - 1023 features
-            * Bits 10-17:  label            (8 bits)      -> 0 - 255 classes  
-            * Bits 18-19:  threshold        (2 bits)      -> 0 | 1 | 2 | 3
-            * Bit 20    :  is_leaf          (1 bit)       -> 0/1 
-            * Bits 21-31:  left child index (11 bits)     -> 0 - 2047 nodes (max 8kB RAM per tree) 
-        @note: right child index = left child index + 1 
-        */
-
-        // Constructor
-        Tree_node() : packed_data(0) {}
-
-        // Getter methods for packed data
-        uint16_t getFeatureID() const {
-            return packed_data & 0x3FF;  // Bits 0-9 (10 bits)
-        }
-        
-        uint8_t getLabel() const {
-            return (packed_data >> 10) & 0xFF;  // Bits 10-17 (8 bits)
-        }
-        
-        uint8_t getThreshold() const {
-            return (packed_data >> 18) & 0x03;  // Bits 18-19 (2 bits)
-        }
-        
-        bool getIsLeaf() const {
-            return (packed_data >> 20) & 0x01;  // Bit 20
-        }
-        
-        uint16_t getLeftChildIndex() const {
-            return (packed_data >> 21) & 0x7FF;  // Bits 21-31 (11 bits)
-        }
-        
-        uint16_t getRightChildIndex() const {
-            return getLeftChildIndex() + 1;  // Breadth-first property: right = left + 1
-        }
-        
-        // Setter methods for packed data
-        void setFeatureID(uint16_t featureID) {
-            packed_data = (packed_data & 0xFFFFFC00) | (featureID & 0x3FF);  // Bits 0-9
-        }
-        
-        void setLabel(uint8_t label) {
-            packed_data = (packed_data & 0xFFFC03FF) | ((uint32_t)(label & 0xFF) << 10);  // Bits 10-17
-        }
-        
-        void setThreshold(uint8_t threshold) {
-            packed_data = (packed_data & 0xFFF3FFFF) | ((uint32_t)(threshold & 0x03) << 18);  // Bits 18-19
-        }
-        
-        void setIsLeaf(bool isLeaf) {
-            packed_data = (packed_data & 0xFFEFFFFF) | ((uint32_t)(isLeaf ? 1 : 0) << 20);  // Bit 20
-        }
-        
-        void setLeftChildIndex(uint16_t index) {
-            packed_data = (packed_data & 0x001FFFFF) | ((uint32_t)(index & 0x7FF) << 21);  // Bits 21-31
-        }
-    };
-
-    struct NodeToBuild {
-        uint16_t nodeIndex;
-        uint16_t begin;   // inclusive
-        uint16_t end;     // exclusive
-        uint8_t depth;
-        
-        NodeToBuild() : nodeIndex(0), begin(0), end(0), depth(0) {}
-        NodeToBuild(uint16_t idx, uint16_t b, uint16_t e, uint8_t d) 
-            : nodeIndex(idx), begin(b), end(e), depth(d) {}
-    };
-
-    class Rf_tree {
-    public:
-        vector<Tree_node> nodes;  // Vector-based tree storage
-        uint8_t index;
-        bool isLoaded;
-
-        Rf_tree() : index(255), isLoaded(false) {}
-        
-        Rf_tree(uint8_t idx) : index(idx), isLoaded(false) {}
-
-        // Copy constructor
-        Rf_tree(const Rf_tree& other) 
-            : nodes(other.nodes), index(other.index), isLoaded(other.isLoaded) {}
-
-        // Copy assignment operator
-        Rf_tree& operator=(const Rf_tree& other) {
-            if (this != &other) {
-                nodes = other.nodes;
-                index = other.index;
-                isLoaded = other.isLoaded;
-            }
-            return *this;
-        }
-
-        // Move constructor
-        Rf_tree(Rf_tree&& other) noexcept 
-            : nodes(std::move(other.nodes)), index(other.index), isLoaded(other.isLoaded) {
-            other.index = 255;
-            other.isLoaded = false;
-        }
-
-        // Move assignment operator
-        Rf_tree& operator=(Rf_tree&& other) noexcept {
-            if (this != &other) {
-                nodes = std::move(other.nodes);
-                index = other.index;
-                isLoaded = other.isLoaded;
-                other.index = 255;
-                other.isLoaded = false;
-            }
-            return *this;
-        }
-
-        // Count total number of nodes in the tree (including leaf nodes)
-        uint32_t countNodes() const {
-            return nodes.size();
-        }
-
-        size_t memory_usage() const {
-            return nodes.size() * 4 + sizeof(*this);
-        }
-
-        // Count leaf nodes in the tree
-        uint32_t countLeafNodes() const {
-            uint32_t leafCount = 0;
-            for (const auto& node : nodes) {
-                if (node.getIsLeaf()) {
-                    leafCount++;
-                }
-            }
-            return leafCount;
-        }
-
-        // Get tree depth
-        uint16_t getTreeDepth() const {
-            if (nodes.empty()) return 0;
-            return getTreeDepthRecursive(0);
-        }
-
-        // Save tree to LittleFS for ESP32
-        bool releaseTree(const char* path, bool re_use = false) {
-            if(!re_use){
-                if (index > RF_MAX_TREES || nodes.empty()) {
-                    RF_DEBUG(0, "❌ save tree failed, invalid tree index: ", index);
-                    return false;
-                }
-                if (path == nullptr || strlen(path) == 0) {
-                    RF_DEBUG(0, "❌ save tree failed, invalid path: ", path);
-                    return false;
-                }
-                if (LittleFS.exists(path)) {
-                    // delete existing file to avoid conflicts
-                    if (!LittleFS.remove(path)) {
-                        RF_DEBUG(0, "❌ Failed to remove existing tree file: ", path);
-                        return false;
-                    }
-                }
-                File file = LittleFS.open(path, FILE_WRITE);
-                if (!file) {
-                    RF_DEBUG(0, "❌ Failed to open tree file for writing: ", path);
-                    return false;
-                }
-                
-                // Write header - magic number for validation
-                uint32_t magic = 0x54524545; // "TREE" in hex
-                file.write((uint8_t*)&magic, sizeof(magic));
-                
-                // Write number of nodes
-                uint32_t nodeCount = nodes.size();
-                file.write((uint8_t*)&nodeCount, sizeof(nodeCount));
-                
-                // Batch write all nodes for better performance
-                if(nodeCount > 0) {
-                    // Calculate total size needed
-                    size_t totalSize = nodeCount * sizeof(nodes[0].packed_data);
-                    
-                    // Create buffer for batch write
-                    uint8_t* buffer = (uint8_t*)malloc(totalSize);
-                    if(buffer) {
-                        // Copy all packed_data to buffer
-                        for(uint32_t i = 0; i < nodeCount; i++) {
-                            memcpy(buffer + (i * sizeof(nodes[0].packed_data)), 
-                                   &nodes[i].packed_data, sizeof(nodes[0].packed_data));
-                        }
-                        
-                        // Single write operation
-                        size_t written = file.write(buffer, totalSize);
-                        free(buffer);
-                        
-                        if(written != totalSize) {
-                            RF_DEBUG(1, "⚠️ Incomplete tree write to LittleFS");
-                        }
-                    } else {
-                        // Fallback to individual writes if malloc fails
-                        for (const auto& node : nodes) {
-                            file.write((uint8_t*)&node.packed_data, sizeof(node.packed_data));
-                        }
-                    }
-                }    
-                file.close();
-            }  
-            nodes.clear();
-            nodes.fit(); 
-            isLoaded = false;
-            RF_DEBUG(2, "✅ Tree saved to LittleFS: ", index);
-            return true;
-        }
-
-        // Load tree from LittleFS into RAM for ESP32
-        bool loadTree(const char* path, bool re_use = false) {
-            if (isLoaded) return true;
-            
-            if (index >= RF_MAX_TREES) {
-                RF_DEBUG(0, "❌ Invalid tree index: ", index);
-                return false;
-            }
-            if (path == nullptr || strlen(path) == 0) {
-                RF_DEBUG(0, "❌ Invalid path for loading tree: ", path);
-                return false;
-            }
-            if (!LittleFS.exists(path)) {
-                RF_DEBUG(0, "❌ Tree file does not exist: ", path);
-                return false;
-            }
-            File file = LittleFS.open(path, FILE_READ);
-            if (!file) {
-                RF_DEBUG(2, "❌ Failed to open tree file: ", path);
-                return false;
-            }
-            
-            // Read and verify magic number
-            uint32_t magic;
-            if (file.read((uint8_t*)&magic, sizeof(magic)) != sizeof(magic) || magic != 0x54524545) {
-                RF_DEBUG(0, "❌ Invalid tree file format: ", path);
-                file.close();
-                return false;
-            }
-            
-            // Read number of nodes
-            uint32_t nodeCount;
-            if (file.read((uint8_t*)&nodeCount, sizeof(nodeCount)) != sizeof(nodeCount)) {
-                RF_DEBUG(0, "❌ Failed to read node count: ", path);
-                file.close();
-                return false;
-            }
-            
-            if (nodeCount == 0 || nodeCount > 2047) { // 11-bit limit for child indices
-                RF_DEBUG(1, "❌ Invalid node count in tree file");
-                file.close();
-                return false;
-            }
-            
-            // Clear existing nodes and reserve space
-            nodes.clear();
-            nodes.reserve(nodeCount);
-            
-            // Load all nodes
-            for (uint32_t i = 0; i < nodeCount; i++) {
-                Tree_node node;
-                if (file.read((uint8_t*)&node.packed_data, sizeof(node.packed_data)) != sizeof(node.packed_data)) {
-                    RF_DEBUG(0, "❌ Faile to read node data");
-                    nodes.clear();
-                    file.close();
-                    return false;
-                }
-                nodes.push_back(node);
-            }
-            
-            file.close();
-            
-            // Update state
-            isLoaded = true;
-            RF_DEBUG_2(2, "✅ Tree loaded (", nodeCount, "nodes): ", path);
-
-            if (!re_use) { 
-                RF_DEBUG(2, "♻️ Single-load mode: removing tree file after loading; ", path); 
-                LittleFS.remove(path); // Remove file after loading in single mode
-            }
-            return true;
-        }
-
-        // predict single (normalized)sample - packed features - hot path optimized
-        __attribute__((always_inline)) inline uint8_t predict_features(const packed_vector<2>& packed_features) const {
-            // Fast path: assume tree is loaded and valid
-            uint16_t currentIndex = 0;  // Start from root
-            const Tree_node* node_data = nodes.data();
-            const uint16_t node_count = nodes.size();
-            
-            // Unroll first iteration (root is never leaf in practice)
-            uint32_t packed = node_data[0].packed_data;
-            uint16_t featureID = packed & 0x3FF;
-            uint8_t threshold = (packed >> 18) & 0x03;
-            uint8_t featureValue = packed_features[featureID];
-            currentIndex = (featureValue <= threshold) ? ((packed >> 21) & 0x7FF) : (((packed >> 21) & 0x7FF) + 1);
-            
-            // Main traversal loop - inline everything
-            while (__builtin_expect(currentIndex < node_count, 1)) {
-                packed = node_data[currentIndex].packed_data;
-                
-                // Check if leaf (bit 20)
-                if (__builtin_expect((packed >> 20) & 0x01, 0)) {
-                    // It's a leaf - return label (bits 10-17)
-                    return (packed >> 10) & 0xFF;
-                }
-                
-                // Internal node - extract and traverse
-                featureID = packed & 0x3FF;  // bits 0-9
-                threshold = (packed >> 18) & 0x03;  // bits 18-19
-                featureValue = packed_features[featureID];
-                
-                // Navigate: left child = bits 21-31, right = left + 1
-                const uint16_t leftChild = (packed >> 21) & 0x7FF;
-                currentIndex = (featureValue <= threshold) ? leftChild : (leftChild + 1);
-            }
-            return 0; // Should not reach here in valid tree
-        }
-
-        void clearTree(bool freeMemory = false) {
-            nodes.clear();
-            nodes.fit();
-            if(freeMemory) nodes.fit(); // Release excess memory
-            isLoaded = false;
-        }
-
-        void purgeTree(const char* path, bool rmf = true) {
-            nodes.clear();
-            nodes.fit(); // Release excess memory
-            if(rmf && index < RF_MAX_TREES) {
-                if (LittleFS.exists(path)) {
-                    LittleFS.remove(path);
-                    RF_DEBUG(2, "🗑️ Tree file removed: ", path);
-                } 
-            }
-            index = 255;
-            isLoaded = false;
-        }
-
-    private:
-        // Recursive helper to get tree depth
-        uint16_t getTreeDepthRecursive(uint16_t nodeIndex) const {
-            if (nodeIndex >= nodes.size()) return 0;
-            if (nodes[nodeIndex].getIsLeaf()) return 1;
-            
-            uint16_t leftIndex = nodes[nodeIndex].getLeftChildIndex();
-            uint16_t rightIndex = nodes[nodeIndex].getRightChildIndex();
-            
-            uint16_t leftDepth = getTreeDepthRecursive(leftIndex);
-            uint16_t rightDepth = getTreeDepthRecursive(rightIndex);
-            
-            return 1 + (leftDepth > rightDepth ? leftDepth : rightDepth);
-        }
-    };
-    
-    /*
-    ------------------------------------------------------------------------------------------------------------------
     -------------------------------------------------- RF_BASE -------------------------------------------------------
     ------------------------------------------------------------------------------------------------------------------
     */
@@ -2714,7 +1248,1432 @@ namespace mcu {
         }
         
     };
+   
+    /*
+    ------------------------------------------------------------------------------------------------------------------
+    -------------------------------------------------- RF_DATA ------------------------------------------------------
+    ------------------------------------------------------------------------------------------------------------------
+    */
+    using sampleID_set = ID_vector<uint16_t>;       // set of unique sample IDs
+
+    struct Rf_sample{
+        packed_vector<2> features;           // set containing the values ​​of the features corresponding to that sample , 2 bit per value.
+        uint8_t label;                     // label of the sample 
+
+        Rf_sample() : features(), label(0) {}
+        Rf_sample(uint8_t label, const packed_vector<2, LARGE>& source, size_t start, size_t end){
+            this->label = label;
+            features = packed_vector<2>(source, start, end);
+        }
+        Rf_sample(const packed_vector<2> features, uint8_t label) : features(features), label(label) {}
+    };
     
+    class Rf_data {
+    private:
+        static constexpr size_t MAX_CHUNKS_SIZE = 8192; // max bytes per chunk (8kB)
+
+        // Chunked packed storage - eliminates both heap overhead per sample and large contiguous allocations
+        vector<packed_vector<2, LARGE>> sampleChunks;  // Multiple chunks of packed features
+        packed_vector<8> allLabels;                  // Labels storage 
+        uint16_t bitsPerSample;                        // Number of bits per sample (numFeatures * 2)
+        uint16_t samplesEachChunk;                     // Maximum samples per chunk
+        size_t size_;  
+        char file_path[RF_PATH_BUFFER] = {0};          // dataset file_path (in LittleFS)
+
+        uint8_t num_labels_2_bpv(uint8_t num_labels) {
+            if (num_labels <= 2) return 1;
+            else if (num_labels <= 4) return 2;
+            else if (num_labels <= 16) return 4;
+            else if (num_labels <= 256) return 8;
+            else return 16; // up to 65536 labels
+        }
+
+    public:
+        bool isLoaded;      
+
+        Rf_data() : isLoaded(false), size_(0), bitsPerSample(0), samplesEachChunk(0) {}
+
+        Rf_data(const char* path, Rf_config& config){ 
+            init(path, config);
+        }
+
+        bool init(const char* file_path, Rf_config& config) {
+            strncpy(this->file_path, file_path, RF_PATH_BUFFER);
+            this->file_path[RF_PATH_BUFFER - 1] = '\0';
+            bitsPerSample = config.num_features * 2;
+            uint8_t bpv = num_labels_2_bpv(config.num_labels);
+            allLabels.set_bits_per_value(bpv);
+            updateSamplesEachChunk();
+            RF_DEBUG_2(1, "ℹ️ Rf_data initialized (", samplesEachChunk, "samples/chunk): ", file_path);
+            isLoaded = false;
+            size_ = config.num_samples;
+            sampleChunks.clear();
+            allLabels.clear();
+            return isProperlyInitialized();
+        }
+
+        // Iterator class (returns Rf_sample by value for read-only querying)
+        class iterator {
+        private:
+            Rf_data* data_;
+            size_t index_;
+
+        public:
+            iterator(Rf_data* data, size_t index) : data_(data), index_(index) {}
+
+            Rf_sample operator*() const {
+                return data_->getSample(index_);
+            }
+
+            iterator& operator++() {
+                ++index_;
+                return *this;
+            }
+
+            iterator operator++(int) {
+                iterator temp = *this;
+                ++index_;
+                return temp;
+            }
+
+            bool operator==(const iterator& other) const {
+                return data_ == other.data_ && index_ == other.index_;
+            }
+
+            bool operator!=(const iterator& other) const {
+                return !(*this == other);
+            }
+        };
+
+        // Iterator support
+        iterator begin() { return iterator(this, 0); }
+        iterator end() { return iterator(this, size_); }
+
+        // Array access operator (return by value; read-only usage in algorithms)
+        Rf_sample operator[](size_t index) {
+            return getSample(index);
+        }
+
+        // Const version of array access operator
+        Rf_sample operator[](size_t index) const {
+            return getSample(index);
+        }
+
+        // Validate that the Rf_data has been properly initialized
+        bool isProperlyInitialized() const {
+            // return bitsPerSample > 0 && samplesEachChunk > 0 && file_path[0] != '\0';
+            return bitsPerSample > 0 && samplesEachChunk > 0;
+        }
+    private:
+        // Calculate maximum samples per chunk based on bitsPerSample
+        void updateSamplesEachChunk() {
+            if (bitsPerSample > 0) {
+                // Each sample needs bitsPerSample bits, MAX_CHUNKS_SIZE is in bytes (8 bits each)
+                samplesEachChunk = (MAX_CHUNKS_SIZE * 8) / bitsPerSample;
+                if (samplesEachChunk == 0) samplesEachChunk = 1; // At least 1 sample per chunk
+            }
+        }
+
+        // Get chunk index and local index within chunk for a given sample index
+        pair<size_t, size_t> getChunkLocation(size_t sampleIndex) const {
+            size_t chunkIndex = sampleIndex / samplesEachChunk;
+            size_t localIndex = sampleIndex % samplesEachChunk;
+            return make_pair(chunkIndex, localIndex);
+        }
+
+        // Ensure we have enough chunks to store the given number of samples
+        void ensureChunkCapacity(size_t totalSamples) {
+            size_t requiredChunks = (totalSamples + samplesEachChunk - 1) / samplesEachChunk;
+            while (sampleChunks.size() < requiredChunks) {
+                packed_vector<2, LARGE> newChunk;
+                // Reserve space for elements (each feature is 1 element in packed_vector<2>)
+                size_t elementsPerSample = bitsPerSample / 2;  // numFeatures
+                newChunk.reserve(samplesEachChunk * elementsPerSample);
+                sampleChunks.push_back(newChunk); // Add new empty chunk
+            }
+        }
+
+        // Helper method to reconstruct Rf_sample from chunked packed storage
+        Rf_sample getSample(size_t sampleIndex) const {
+            if (!isLoaded) {
+                RF_DEBUG(2, "❌ Rf_data not loaded. Call loadData() first.");
+                return Rf_sample();
+            }
+            if(sampleIndex >= size_){
+                RF_DEBUG_2(2, "❌ Sample index out of bounds: ", sampleIndex, "size: ", size_);
+                return Rf_sample();
+            }
+            pair<size_t, size_t> location = getChunkLocation(sampleIndex);
+            return Rf_sample(
+                allLabels[sampleIndex],
+                sampleChunks[location.first],
+                location.second * (bitsPerSample / 2),
+                (location.second + 1) * (bitsPerSample / 2)
+            );    
+        }
+
+        // Helper method to store Rf_sample in chunked packed storage
+        bool storeSample(const Rf_sample& sample, size_t sampleIndex) {
+            if (!isProperlyInitialized()) {
+                RF_DEBUG(2, "❌ Store sample failed: Rf_data not properly initialized.");
+                return false;
+            }
+            
+            // Store label
+            if (sampleIndex == allLabels.size()) {
+                // Appending in order (fast path)
+                allLabels.push_back(sample.label);
+            } else if (sampleIndex < allLabels.size()) {
+                // Overwrite existing position
+                allLabels.set(sampleIndex, sample.label);
+            } else {
+                // Rare case: out-of-order insert; fill gaps with 0
+                allLabels.resize(sampleIndex + 1, 0);
+                allLabels.push_back(sample.label);
+            }
+            
+            // Ensure we have enough chunks
+            ensureChunkCapacity(sampleIndex + 1);
+            
+            auto location = getChunkLocation(sampleIndex);
+            size_t chunkIndex = location.first;
+            size_t localIndex = location.second;
+            
+            // Store features in packed format within the specific chunk
+            size_t elementsPerSample = bitsPerSample / 2;  // numFeatures
+            size_t startElementIndex = localIndex * elementsPerSample;
+            size_t requiredSizeInChunk = startElementIndex + elementsPerSample;
+            
+            if (sampleChunks[chunkIndex].size() < requiredSizeInChunk) {
+                sampleChunks[chunkIndex].resize(requiredSizeInChunk);
+            }
+            
+            // Store each feature as one element in the packed_vector<2>
+            for (size_t featureIdx = 0; featureIdx < sample.features.size(); featureIdx++) {
+                size_t elementIndex = startElementIndex + featureIdx;
+                uint8_t featureValue = sample.features[featureIdx] & 0x03; // 2-bit mask
+                
+                // Store 2-bit value directly as one element
+                if (elementIndex < sampleChunks[chunkIndex].size()) {
+                    sampleChunks[chunkIndex].set(elementIndex, featureValue);
+                }
+            }
+            return true;
+        }
+
+    private:
+        // Load data from CSV format (used only once for initial dataset conversion)
+        bool loadCSVData(const char* csvfile_path, uint8_t numFeatures) {
+            if(isLoaded) {
+                // clear existing data
+                sampleChunks.clear();
+                allLabels.clear();
+                size_ = 0;
+                isLoaded = false;
+            }
+            
+            File file = LittleFS.open(csvfile_path, FILE_READ);
+            if (!file) {
+                RF_DEBUG(0, "❌ Failed to open CSV file for reading: ", csvfile_path);
+                return false;
+            }
+
+            if(numFeatures == 0){       
+                // Read header line to determine number of features
+                String line = file.readStringUntil('\n');
+                line.trim();
+                if (line.length() == 0) {
+                    RF_DEBUG(0, "❌ CSV file is empty or missing header: ", csvfile_path);
+                    file.close();
+                    return false;
+                }
+                int commaCount = 0;
+                for (char c : line) {
+                    if (c == ',') commaCount++;
+                }
+                numFeatures = commaCount;
+            }
+
+            // Set bitsPerSample and calculate chunk parameters only if not already initialized
+            if (bitsPerSample == 0) {
+                bitsPerSample = numFeatures * 2;
+                updateSamplesEachChunk();
+            } else {
+                // Validate that the provided numFeatures matches the initialized bitsPerSample
+                uint16_t expectedFeatures = bitsPerSample / 2;
+                if (numFeatures != expectedFeatures) {
+                    RF_DEBUG_2(0, "❌ Feature count mismatch: expected ", expectedFeatures, ", found ", numFeatures);   
+                    file.close();
+                    return false;
+                }
+            }
+            
+            uint16_t linesProcessed = 0;
+            uint16_t emptyLines = 0;
+            uint16_t validSamples = 0;
+            uint16_t invalidSamples = 0;
+            
+            // Pre-allocate for efficiency
+            allLabels.reserve(1000); // Initial capacity
+            
+            while (file.available()) {
+                String line = file.readStringUntil('\n');
+                line.trim();
+                linesProcessed++;
+                
+                if (line.length() == 0) {
+                    emptyLines++;
+                    continue;
+                }
+
+                Rf_sample s;
+                s.features.clear();
+                s.features.reserve(numFeatures);
+
+                uint8_t fieldIdx = 0;
+                int start = 0;
+                while (start < line.length()) {
+                    int comma = line.indexOf(',', start);
+                    if (comma < 0) comma = line.length();
+
+                    String tok = line.substring(start, comma);
+                    uint8_t v = (uint8_t)tok.toInt();
+
+                    if (fieldIdx == 0) {
+                        s.label = v;
+                    } else {
+                        s.features.push_back(v);
+                    }
+
+                    fieldIdx++;
+                    start = comma + 1;
+                }
+                
+                // Validate the sample
+                if (fieldIdx != numFeatures + 1) {
+                    RF_DEBUG_2(2, "❌ Invalid field count in line ", linesProcessed, ": expected ", numFeatures + 1);
+                    invalidSamples++;
+                    continue;
+                }
+                
+                if (s.features.size() != numFeatures) {
+                    RF_DEBUG_2(2, "❌ Feature count mismatch in line ", linesProcessed, ": expected ", numFeatures);
+                    invalidSamples++;
+                    continue;
+                }
+                
+                s.features.fit();
+
+                // Store in chunked packed format
+                storeSample(s, validSamples);
+                validSamples++;
+                
+                if (validSamples >= RF_MAX_SAMPLES) {
+                    RF_DEBUG(1, "⚠️ Reached maximum sample limit");
+                    break;
+                }
+            }
+            size_ = validSamples;
+            
+            RF_DEBUG(1, "📋 CSV Processing Results: ");
+            RF_DEBUG(1, "   Lines processed: ", linesProcessed);
+            RF_DEBUG(1, "   Empty lines: ", emptyLines);
+            RF_DEBUG(1, "   Valid samples: ", validSamples);
+            RF_DEBUG(1, "   Invalid samples: ", invalidSamples);
+            RF_DEBUG(1, "   Total samples in memory: ", size_);
+            RF_DEBUG(1, "   Chunks used: ", sampleChunks.size());
+            
+            allLabels.fit();
+            for (auto& chunk : sampleChunks) {
+                chunk.fit();
+            }
+            file.close();
+            isLoaded = true;
+            LittleFS.remove(csvfile_path);
+            RF_DEBUG(1, "✅ CSV data loaded and file removed: ", csvfile_path);
+            return true;
+        }
+
+    public:
+        uint8_t get_bits_per_label() const {
+            return allLabels.get_bits_per_value();
+        }
+
+        int total_chunks() const {
+            return size_/samplesEachChunk + (size_ % samplesEachChunk != 0 ? 1 : 0);
+        }
+        
+        uint16_t total_features() const {
+            return bitsPerSample / 2;
+        }
+
+        uint16_t samplesPerChunk() const {
+            return samplesEachChunk;
+        }
+
+        size_t size() const {
+            return size_;
+        }
+
+        void setfile_path(const char* path) {
+            strncpy(this->file_path, path, RF_PATH_BUFFER);
+            this->file_path[RF_PATH_BUFFER - 1] = '\0';
+        }
+
+        // Fast accessors for training-time hot paths (avoid reconstructing Rf_sample)
+        inline uint16_t num_features() const { return bitsPerSample / 2; }
+
+        inline uint8_t getLabel(size_t sampleIndex) const {
+            if (sampleIndex >= size_) return 0;
+            return allLabels[sampleIndex];
+        }
+
+        inline uint8_t getFeature(size_t sampleIndex, uint16_t featureIndex) const {
+            if (!isProperlyInitialized()) return 0;
+            uint16_t nf = bitsPerSample / 2;
+            if (featureIndex >= nf || sampleIndex >= size_) return 0;
+            auto loc = getChunkLocation(sampleIndex);
+            size_t chunkIndex = loc.first;
+            size_t localIndex = loc.second;
+            if (chunkIndex >= sampleChunks.size()) return 0;
+            size_t elementsPerSample = nf;
+            size_t startElementIndex = localIndex * elementsPerSample;
+            size_t elementIndex = startElementIndex + featureIndex;
+            if (elementIndex >= sampleChunks[chunkIndex].size()) return 0;
+            return sampleChunks[chunkIndex][elementIndex];
+        }
+
+        // Reserve space for a specified number of samples
+        void reserve(size_t numSamples) {
+            if (!isProperlyInitialized()) {
+                RF_DEBUG(1, "❌ Cannot reserve space: Rf_data not properly initialized", file_path);
+                return;
+            }
+            allLabels.reserve(numSamples);
+            ensureChunkCapacity(numSamples);
+            RF_DEBUG_2(2, "📦 Reserved space for", numSamples, "samples, used chunks: ", sampleChunks.size());
+        }
+
+        bool convertCSVtoBinary(const char* csvfile_path, uint8_t numFeatures = 0) {
+            RF_DEBUG(1, "🔄 Converting CSV to binary format from: ", csvfile_path);
+            if(!loadCSVData(csvfile_path, numFeatures)) return false;
+            if(!releaseData(false)) return false; 
+            RF_DEBUG(1, "✅ CSV converted to binary and saved: ", file_path);
+            return true;
+        }
+
+        /**
+         * @brief Save data to LittleFS in binary format and clear from RAM.
+         * @param reuse If true, keeps data in RAM after saving; if false, clears data from RAM.
+         * @note: after first time rf_data created, it must be releaseData(false) to save data
+         */
+        bool releaseData(bool reuse = true) {
+            if(!isLoaded) return false;
+            
+            if(!reuse){
+                RF_DEBUG(1, "💾 Saving data to LittleFS and clearing from RAM...");
+                // Remove any existing file
+                if (LittleFS.exists(file_path)) {
+                    LittleFS.remove(file_path);
+                }
+                File file = LittleFS.open(file_path, FILE_WRITE);
+                if (!file) {
+                    RF_DEBUG(0, "❌ Failed to open binary file for writing: ", file_path);
+                    return false;
+                }
+                RF_DEBUG(2, "📂 Saving data to: ", file_path);
+
+                // Write binary header
+                uint32_t numSamples = size_;
+                uint16_t numFeatures = bitsPerSample / 2;
+                
+                file.write((uint8_t*)&numSamples, sizeof(numSamples));
+                file.write((uint8_t*)&numFeatures, sizeof(numFeatures));
+
+                // Calculate packed bytes needed for features (4 values per byte)
+                uint16_t packedFeatureBytes = (numFeatures + 3) / 4;
+
+                // Write samples WITHOUT sample IDs (using vector indices)
+                for (uint32_t i = 0; i < size_; i++) {
+                    // Reconstruct sample from chunked packed storage
+                    Rf_sample s = getSample(i);
+                    
+                    // Write label only (no sample ID needed)
+                    file.write(&s.label, sizeof(s.label));
+                    
+                    // Pack and write features
+                    uint8_t packedBuffer[packedFeatureBytes];
+                    // Initialize buffer to 0
+                    for(uint16_t j = 0; j < packedFeatureBytes; j++) {
+                        packedBuffer[j] = 0;
+                    }
+                    
+                    // Pack 4 feature values into each byte
+                    for (size_t j = 0; j < s.features.size(); ++j) {
+                        uint16_t byteIndex = j / 4;
+                        uint8_t bitOffset = (j % 4) * 2;
+                        uint8_t feature_value = s.features[j] & 0x03;
+                        packedBuffer[byteIndex] |= (feature_value << bitOffset);
+                    }
+                    
+                    file.write(packedBuffer, packedFeatureBytes);
+                }
+                file.close();
+            }
+            
+            // Clear chunked memory
+            sampleChunks.clear();
+            sampleChunks.fit();
+            allLabels.clear();
+            allLabels.fit();
+            isLoaded = false;
+            RF_DEBUG_2(1, "✅ Data saved(", size_, "samples) to: ", file_path); 
+            return true;
+        }
+
+        // Load data using sequential indices 
+        bool loadData(bool re_use = true) {
+            if(isLoaded || !isProperlyInitialized()) return false;
+            RF_DEBUG(1, "📂 Loading data from: ", file_path);
+            
+            File file = LittleFS.open(file_path, FILE_READ);
+            if (!file) {
+                RF_DEBUG(0, "❌ Failed to open data file: ", file_path);
+                if(LittleFS.exists(file_path)) {
+                    LittleFS.remove(file_path);
+                }
+                return false;
+            }
+   
+            // Read binary header
+            uint32_t numSamples;
+            uint16_t numFeatures;
+            
+            if(file.read((uint8_t*)&numSamples, sizeof(numSamples)) != sizeof(numSamples) ||
+            file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
+                RF_DEBUG(0, "❌ Failed to read data header: ", file_path);
+                file.close();
+                return false;
+            }
+
+            if(numFeatures * 2 != bitsPerSample) {
+                RF_DEBUG_2(0, "❌ Feature count mismatch: expected ", bitsPerSample / 2, ",found ", numFeatures);
+                file.close();
+                return false;
+            }
+            size_ = numSamples;
+
+            // Calculate sizes
+            const uint16_t packedFeatureBytes = (numFeatures + 3) / 4; // 4 values per byte
+            const size_t recordSize = sizeof(uint8_t) + packedFeatureBytes; // label + packed features
+            const size_t elementsPerSample = numFeatures; // each feature is one element in packed_vector<2>
+
+            // Prepare storage: labels and chunks pre-sized to avoid per-sample resizing
+            allLabels.clear();
+            allLabels.reserve(numSamples);
+            sampleChunks.clear();
+            ensureChunkCapacity(numSamples);
+            // Pre-size each chunk's element count and explicitly initialize to zero
+            size_t remaining = numSamples;
+            for (size_t ci = 0; ci < sampleChunks.size(); ++ci) {
+                size_t chunkSamples = remaining > samplesEachChunk ? samplesEachChunk : remaining;
+                size_t reqElems = chunkSamples * elementsPerSample;
+                sampleChunks[ci].resize(reqElems, 0);  // Explicitly pass 0 as value
+                remaining -= chunkSamples;
+                if (remaining == 0) break;
+            }
+
+            // Batch read to reduce LittleFS overhead
+            const size_t MAX_BATCH_BYTES = 2048; // conservative for MCU
+            uint8_t* ioBuf = (uint8_t*)malloc(MAX_BATCH_BYTES);
+            if (!ioBuf) {
+                RF_DEBUG(1, "❌ Failed to allocate IO buffer");
+                file.close();
+                return false;
+            }
+
+            bool fallback_yet = false;
+            size_t processed = 0;
+            while (processed < numSamples) {
+                size_t batchSamples;
+                if (ioBuf) {
+                    size_t maxSamplesByBuf = MAX_BATCH_BYTES / recordSize;
+                    if (maxSamplesByBuf == 0) maxSamplesByBuf = 1;
+                    batchSamples = (numSamples - processed) < maxSamplesByBuf ? (numSamples - processed) : maxSamplesByBuf;
+
+                    size_t bytesToRead = batchSamples * recordSize;
+                    size_t bytesRead = 0;
+                    while (bytesRead < bytesToRead) {
+                        int r = file.read(ioBuf + bytesRead, bytesToRead - bytesRead);
+                        if (r <= 0) {
+                            RF_DEBUG(0, "❌ Read batch failed: ", file_path);
+                            if (ioBuf) free(ioBuf);
+                            file.close();
+                            return false;
+                        }
+                        bytesRead += r;
+                    }
+
+                    // Process buffer
+                    for (size_t bi = 0; bi < batchSamples; ++bi) {
+                        size_t off = bi * recordSize;
+                        uint8_t lbl = ioBuf[off];
+                        allLabels.push_back(lbl);
+
+                        const uint8_t* packed = ioBuf + off + 1;
+                        size_t sampleIndex = processed + bi;
+
+                        // Locate chunk and base element index for this sample
+                        auto loc = getChunkLocation(sampleIndex);
+                        size_t chunkIndex = loc.first;
+                        size_t localIndex = loc.second;
+                        size_t startElementIndex = localIndex * elementsPerSample;
+
+                        // Unpack features directly into chunk storage using set_unsafe for pre-sized storage
+                        for (uint16_t j = 0; j < numFeatures; ++j) {
+                            uint16_t byteIndex = j / 4;
+                            uint8_t bitOffset = (j % 4) * 2;
+                            uint8_t fv = (packed[byteIndex] >> bitOffset) & 0x03;
+                            size_t elemIndex = startElementIndex + j;
+                            if (elemIndex >= sampleChunks[chunkIndex].size()) {
+                                RF_DEBUG_2(0, "❌ Index out of bounds: elemIndex=", elemIndex, ", size=", sampleChunks[chunkIndex].size());
+                            }
+                            sampleChunks[chunkIndex].set_unsafe(elemIndex, fv);
+                        }
+                    }
+                } else {
+                    if (!fallback_yet) {
+                        RF_DEBUG(2, "⚠️ IO buffer allocation failed, falling back to per-sample read");
+                        fallback_yet = true;
+                    }
+                    // Fallback: per-sample small buffer
+                    batchSamples = 1;
+                    uint8_t lbl;
+                    if (file.read(&lbl, sizeof(lbl)) != sizeof(lbl)) {
+                        RF_DEBUG_2(0, "❌ Read label failed at sample: ", processed, ": ", file_path);
+                        if (ioBuf) free(ioBuf);
+                        file.close();
+                        return false;
+                    }
+                    allLabels.push_back(lbl);
+                    uint8_t packed[packedFeatureBytes] = {0};
+                    if (file.read(packed, packedFeatureBytes) != packedFeatureBytes) {
+                        RF_DEBUG_2(0, "❌ Read features failed at sample: ", processed, ": ", file_path);
+                        if (ioBuf) free(ioBuf);
+                        file.close();
+                        return false;
+                    }
+                    auto loc = getChunkLocation(processed);
+                    size_t chunkIndex = loc.first;
+                    size_t localIndex = loc.second;
+                    size_t startElementIndex = localIndex * elementsPerSample;
+                    for (uint16_t j = 0; j < numFeatures; ++j) {
+                        uint16_t byteIndex = j / 4;
+                        uint8_t bitOffset = (j % 4) * 2;
+                        uint8_t fv = (packed[byteIndex] >> bitOffset) & 0x03;
+                        size_t elemIndex = startElementIndex + j;
+                        if (elemIndex < sampleChunks[chunkIndex].size()) {
+                            sampleChunks[chunkIndex].set(elemIndex, fv);
+                        }
+                    }
+                }
+                processed += batchSamples;
+            }
+
+            if (ioBuf) free(ioBuf);
+
+            allLabels.fit();
+            for (auto& chunk : sampleChunks) {
+                chunk.fit();
+            }
+            isLoaded = true;
+            file.close();
+            if(!re_use) {
+                RF_DEBUG(1, "♻️ Single-load mode: removing file after loading: ", file_path);
+                LittleFS.remove(file_path); // Remove file after loading in single mode
+            }
+            RF_DEBUG_2(1, "✅ Data loaded(", sampleChunks.size(), "chunks): ", file_path);
+            return true;
+        }
+
+        /**
+         * @brief Load specific samples from another Rf_data source by sample IDs.
+         * @param source The source Rf_data to load samples from.
+         * @param sample_IDs A sorted set of sample IDs to load from the source.
+         * @param save_ram If true, release source data(if loaded) during process to avoid both datasets in RAM.
+         * @note: The state of the source data will be automatically restored, no need to reload.
+         */
+        bool loadData(Rf_data& source, const sampleID_set& sample_IDs, bool save_ram = true) {
+            // Only the source must exist on LittleFS; destination can be an in-memory buffer
+            if (!LittleFS.exists(source.file_path)) {
+                RF_DEBUG(0, "❌ Source file does not exist: ", source.file_path);
+                return false;
+            }
+
+            File file = LittleFS.open(source.file_path, FILE_READ);
+            if (!file) {
+                RF_DEBUG(0, "❌ Failed to open source file: ", source.file_path);
+                return false;
+            }
+            bool pre_loaded = source.isLoaded;
+            if(pre_loaded && save_ram) {
+                source.releaseData();
+            }
+            // set all_labels bits_per_value according to source
+            uint8_t bpl = source.get_bits_per_label();
+            allLabels.set_bits_per_value(bpl);
+
+            // Read binary header
+            uint32_t numSamples;
+            uint16_t numFeatures;
+            
+            if(file.read((uint8_t*)&numSamples, sizeof(numSamples)) != sizeof(numSamples) ||
+            file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
+                RF_DEBUG(0, "❌ Failed to read source header: ", source.file_path);
+                file.close();
+                return false;
+            }
+
+            // Clear current data and initialize parameters
+            sampleChunks.clear();
+            allLabels.clear();
+            bitsPerSample = numFeatures * 2;
+            updateSamplesEachChunk();
+
+            // Calculate packed bytes needed for features (4 values per byte)
+            uint16_t packedFeatureBytes = (numFeatures + 3) / 4;
+            size_t sampleDataSize = sizeof(uint8_t) + packedFeatureBytes; // label + packed features
+            
+            // Reserve space for requested samples
+            size_t numRequestedSamples = sample_IDs.size();
+            allLabels.reserve(numRequestedSamples);
+            
+            RF_DEBUG_2(2, "📦 Loading ", numRequestedSamples, "samples from source: ", source.file_path);
+            
+            size_t addedSamples = 0;
+            // Since sample_IDs are sorted in ascending order, we can read efficiently
+            for(uint16_t sampleIdx : sample_IDs) {
+                if(sampleIdx >= numSamples) {
+                    RF_DEBUG_2(2, "⚠️ Sample ID ", sampleIdx, "exceeds source sample count ", numSamples);
+                    continue;
+                }
+                
+                // Calculate file position for this sample
+                size_t headerSize = sizeof(uint32_t) + sizeof(uint16_t);
+                size_t sampleFilePos = headerSize + (sampleIdx * sampleDataSize);
+                
+                // Seek to the sample position
+                if (!file.seek(sampleFilePos)) {
+                    RF_DEBUG_2(2, "⚠️ Failed to seek to sample ", sampleIdx, "position ", sampleFilePos);
+                    continue;
+                }
+                
+                Rf_sample s;
+                
+                // Read label
+                if(file.read(&s.label, sizeof(s.label)) != sizeof(s.label)) {
+                    RF_DEBUG(2, "⚠️ Failed to read label for sample ", sampleIdx);
+                    continue;
+                }
+                
+                // Read packed features
+                s.features.clear();
+                s.features.reserve(numFeatures);
+                
+                uint8_t packedBuffer[packedFeatureBytes];
+                if(file.read(packedBuffer, packedFeatureBytes) != packedFeatureBytes) {
+                    RF_DEBUG(2, "⚠️ Failed to read features for sample ", sampleIdx);
+                    continue;
+                }
+                
+                // Unpack features from bytes
+                for(uint16_t j = 0; j < numFeatures; j++) {
+                    uint16_t byteIndex = j / 4;
+                    uint8_t bitOffset = (j % 4) * 2;
+                    uint8_t mask = 0x03 << bitOffset;
+                    uint8_t feature = (packedBuffer[byteIndex] & mask) >> bitOffset;
+                    s.features.push_back(feature);
+                }
+                s.features.fit();
+                
+                // Store in chunked packed format using addedSamples as the new index
+                storeSample(s, addedSamples);
+                addedSamples++;
+            }
+            
+            size_ = addedSamples;
+            allLabels.fit();
+            for (auto& chunk : sampleChunks) {
+                chunk.fit();
+            }
+            isLoaded = true;
+            file.close();
+            if(pre_loaded && save_ram) {
+                source.loadData();
+            }
+            RF_DEBUG_2(2, "✅ Loaded ", addedSamples, "samples from source: ", source.file_path);
+            return true;
+        }
+        
+        /**
+         * @brief Load a specific chunk of samples from another Rf_data source.
+         * @param source The source Rf_data to load samples from.
+         * @param chunkIndex The index of the chunk to load (0-based).
+         * @param save_ram If true, release source data(if loaded) during process to avoid both datasets in RAM.
+         * @note: this function will call loadData(source, chunkIDs) internally.
+         */
+        bool loadChunk(Rf_data& source, size_t chunkIndex, bool save_ram = true) {
+            RF_DEBUG_2(2, "📂 Loading chunk ", chunkIndex, "from source: ", source.file_path);
+            if(chunkIndex >= source.total_chunks()) {
+                RF_DEBUG_2(2, "❌ Chunk index ", chunkIndex, "out of bounds : total chunks=", source.total_chunks());
+                return false; 
+            }
+            bool pre_loaded = source.isLoaded;
+
+            uint16_t startSample = chunkIndex * source.samplesEachChunk;
+            uint16_t endSample = startSample + source.samplesEachChunk;
+            if(endSample > source.size()) {
+                endSample = source.size();
+            }
+            if(startSample >= endSample) {
+                RF_DEBUG_2(2, "❌ Invalid chunk range: start ", startSample, ", end ", endSample);
+                return false;
+            }
+            sampleID_set chunkIDs(startSample, endSample - 1);
+            chunkIDs.fill();
+            loadData(source, chunkIDs, save_ram);   
+            return true;
+        }
+
+        /**
+         *@brief: copy assignment (but not copy file_path to avoid LittleFS over-writing)
+         *@note : Rf_data will be put into release state. loadData() to reload into RAM if needed.
+        */
+        Rf_data& operator=(const Rf_data& other) {
+            purgeData(); // Clear existing data safely
+            if (this != &other) {
+                if (LittleFS.exists(other.file_path)) {
+                    File testFile = LittleFS.open(other.file_path, FILE_READ);
+                    if (testFile) {
+                        uint32_t testNumSamples;
+                        uint16_t testNumFeatures;
+                        bool headerValid = (testFile.read((uint8_t*)&testNumSamples, sizeof(testNumSamples)) == sizeof(testNumSamples) &&
+                                          testFile.read((uint8_t*)&testNumFeatures, sizeof(testNumFeatures)) == sizeof(testNumFeatures) &&
+                                          testNumSamples > 0 && testNumFeatures > 0);
+                        testFile.close();
+                        
+                        if (headerValid) {
+                            if (!cloneFile(other.file_path, file_path)) {
+                                RF_DEBUG(0, "❌ Failed to clone source file: ", other.file_path);
+                            }
+                        } else {
+                            RF_DEBUG(0, "❌ Source file has invalid header: ", other.file_path);
+                        }
+                    } else {
+                        RF_DEBUG(0, "❌ Cannot open source file: ", other.file_path);
+                    }
+                } else {
+                    RF_DEBUG(0, "❌ Source file does not exist: ", other.file_path);
+                }
+                bitsPerSample = other.bitsPerSample;
+                samplesEachChunk = other.samplesEachChunk;
+                isLoaded = false; // Always start in unloaded state
+                size_ = other.size_;
+                // Deep copy of labels if loaded in memory
+                allLabels = other.allLabels; // b_vector has its own copy semantics
+            }
+            return *this;   
+        }
+
+        // Clear data at both memory and LittleFS
+        void purgeData() {
+            // Clear in-memory structures first
+            sampleChunks.clear();
+            sampleChunks.fit();
+            allLabels.clear();
+            allLabels.fit();
+            isLoaded = false;
+            size_ = 0;
+            bitsPerSample = 0;
+            samplesEachChunk = 0;
+
+            // Then remove the LittleFS file if one was specified
+            if (LittleFS.exists(file_path)) {
+                LittleFS.remove(file_path);
+                RF_DEBUG(1, "🗑️ Deleted file: ", file_path);
+            }
+        }
+
+        /**
+         * @brief Add new data directly to file without loading into RAM
+         * @param samples Vector of new samples to add
+         * @param extend If false, keeps file size same (overwrites old data from start); 
+         *               if true, appends new data while respecting size limits
+         * @return : deleted labels
+         * @note Directly writes to LittleFS file to save RAM. File must exist and be properly initialized.
+         */
+        b_vector<uint8_t> addNewData(const b_vector<Rf_sample>& samples, bool extend = true) {
+            b_vector<uint8_t> deletedLabels;
+
+            if (!isProperlyInitialized()) {
+                RF_DEBUG(0, "❌ Rf_data not properly initialized. Cannot add new data.");
+                return deletedLabels;
+            }
+            if (!LittleFS.exists(file_path)) {
+                RF_DEBUG(0, "⚠️ File does not exist for adding new data: ", file_path);
+                return deletedLabels;
+            }
+            if (samples.size() == 0) {
+                RF_DEBUG(1, "⚠️ No samples to add");
+                return deletedLabels;
+            }
+
+            // Read current file header to get existing info
+            File file = LittleFS.open(file_path, FILE_READ);
+            if (!file) {
+                RF_DEBUG(0, "❌ Failed to open file for adding new data: ", file_path);
+                return deletedLabels;
+            }
+
+            uint32_t currentNumSamples;
+            uint16_t numFeatures;
+            
+            if (file.read((uint8_t*)&currentNumSamples, sizeof(currentNumSamples)) != sizeof(currentNumSamples) ||
+                file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
+                RF_DEBUG(0, "❌ Failed to read file header: ", file_path);
+                file.close();
+                return deletedLabels;
+            }
+            file.close();
+
+            // Validate feature count compatibility
+            if (samples.size() > 0 && samples[0].features.size() != numFeatures) {
+                RF_DEBUG_2(0, "❌ Feature count mismatch: expected ", numFeatures, ", found ", samples[0].features.size());
+                return deletedLabels;
+            }
+
+            // Calculate packed bytes needed for features (4 values per byte)
+            uint16_t packedFeatureBytes = (numFeatures + 3) / 4;
+            size_t sampleDataSize = sizeof(uint8_t) + packedFeatureBytes; // label + packed features
+            size_t headerSize = sizeof(uint32_t) + sizeof(uint16_t);
+
+            uint32_t newNumSamples;
+            size_t writePosition;
+            
+            if (extend) {
+                // Append mode: add to existing samples
+                newNumSamples = currentNumSamples + samples.size();
+                
+                // Check limits
+                if (newNumSamples > RF_MAX_SAMPLES) {
+                    size_t maxAddable = RF_MAX_SAMPLES - currentNumSamples;
+                    RF_DEBUG(2, "⚠️ Reaching maximum sample limit, limiting to ", maxAddable);
+                    newNumSamples = RF_MAX_SAMPLES;
+                }
+                
+                size_t newFileSize = headerSize + (newNumSamples * sampleDataSize);
+                if (newFileSize > MAX_DATASET_SIZE) {
+                    size_t maxSamplesBySize = (MAX_DATASET_SIZE - headerSize) / sampleDataSize;
+                    RF_DEBUG(2, "⚠️ Limiting samples by file size to ", maxSamplesBySize);
+                    newNumSamples = maxSamplesBySize;
+                }
+                
+                writePosition = headerSize + (currentNumSamples * sampleDataSize);
+            } else {
+                // Overwrite mode: keep same file size, write from beginning
+                newNumSamples = currentNumSamples; // Keep same sample count - ALWAYS preserve original dataset size
+                writePosition = headerSize; // Write from beginning of data section
+            }
+
+            // Calculate actual number of samples to write
+            uint32_t samplesToWrite = extend ? 
+                (newNumSamples - currentNumSamples) : 
+                min((uint32_t)samples.size(), newNumSamples);
+
+            RF_DEBUG_2(1, "📝 Adding ", samplesToWrite, "samples to ", file_path);
+            RF_DEBUG_2(2, "📊 Dataset info: current=", currentNumSamples, ", new_total=", newNumSamples);
+
+            // Open file for writing (r+ mode to update existing file)
+            file = LittleFS.open(file_path, "r+");
+            if (!file) {
+                RF_DEBUG(0, "❌ Failed to open file for writing: ", file_path);
+                return deletedLabels;
+            }
+
+            // In overwrite mode, read the labels that will be overwritten
+            if (!extend && samplesToWrite > 0) {
+                RF_DEBUG(2, "📋 Reading labels that will be overwritten: ", samplesToWrite);
+                
+                // Seek to the start of data section to read existing labels
+                if (!file.seek(headerSize)) {
+                    RF_DEBUG(0, "Seek to data section for reading labels: ", file_path);
+                    file.close();
+                    return deletedLabels;
+                }
+                
+                // Reserve space for deleted labels
+                deletedLabels.reserve(samplesToWrite);
+                
+                // Read labels that will be overwritten
+                for (uint32_t i = 0; i < samplesToWrite; ++i) {
+                    uint8_t existingLabel;
+                    if (file.read(&existingLabel, sizeof(existingLabel)) != sizeof(existingLabel)) {
+                        RF_DEBUG_2(0, "❌ Read existing label failed at index ", i, ": ", file_path);
+                        break;
+                    }
+                    deletedLabels.push_back(existingLabel);
+                    
+                    // Skip the packed features to get to next label
+                    if (!file.seek(file.position() + packedFeatureBytes)) {
+                        RF_DEBUG_2(0, "❌ Seek past features failed at index ", i, ": ", file_path);
+                        break;
+                    }
+                }
+                
+                RF_DEBUG_2(1, "📋 Collected ", deletedLabels.size(), " labels that will be overwritten", "");
+            }
+
+            // Update header with new sample count
+            file.seek(0);
+            file.write((uint8_t*)&newNumSamples, sizeof(newNumSamples));
+            file.write((uint8_t*)&numFeatures, sizeof(numFeatures));
+
+            // Seek to write position
+            if (!file.seek(writePosition)) {
+                RF_DEBUG_2(0, "❌ Failed seek to write position ", writePosition, ": ", file_path);
+                file.close();
+                return deletedLabels;
+            }
+
+            // Write samples directly to file
+            uint32_t written = 0;
+            for (uint32_t i = 0; i < samplesToWrite && i < samples.size(); ++i) {
+                const Rf_sample& sample = samples[i];
+                
+                // Validate sample feature count
+                if (sample.features.size() != numFeatures) {
+                    RF_DEBUG_2(2, "⚠️ Skipping sample ", i, " due to feature count mismatch: ", file_path);
+                    continue;
+                }
+
+                // Write label
+                if (file.write(&sample.label, sizeof(sample.label)) != sizeof(sample.label)) {
+                    RF_DEBUG_2(0, "❌ Write label failed at sample ", i, ": ", file_path);
+                    break;
+                }
+
+                // Pack and write features
+                uint8_t packedBuffer[packedFeatureBytes];
+                // Initialize buffer to 0
+                for (uint16_t j = 0; j < packedFeatureBytes; j++) {
+                    packedBuffer[j] = 0;
+                }
+                
+                // Pack 4 feature values into each byte
+                for (size_t j = 0; j < sample.features.size(); ++j) {
+                    uint16_t byteIndex = j / 4;
+                    uint8_t bitOffset = (j % 4) * 2;
+                    uint8_t feature_value = sample.features[j] & 0x03;
+                    packedBuffer[byteIndex] |= (feature_value << bitOffset);
+                }
+                
+                if (file.write(packedBuffer, packedFeatureBytes) != packedFeatureBytes) {
+                    RF_DEBUG_2(0, "❌ Write features failed at sample ", i, ": ", file_path);
+                    break;
+                }
+                
+                written++;
+            }
+
+            file.close();
+
+            // Update internal size if data is loaded in memory
+            if (isLoaded) {
+                size_ = newNumSamples;
+                RF_DEBUG(1, "ℹ️ Data is loaded in memory. Consider reloading for consistency.");
+            }
+
+            RF_DEBUG_2(1, "✅ Successfully wrote ", written, "samples to: ", file_path);
+            if (!extend && deletedLabels.size() > 0) {
+                RF_DEBUG_2(1, "📊 Overwrote ", deletedLabels.size(), "samples with labels: ","");
+            }
+            
+            return deletedLabels;
+        }
+
+        size_t memory_usage() const {
+            size_t total = sizeof(Rf_data);
+            total += allLabels.capacity() * sizeof(uint8_t);
+            for (const auto& chunk : sampleChunks) {
+                total += sizeof(packed_vector<2, LARGE>);
+                total += chunk.capacity() * sizeof(uint8_t); // each element is 2 bits, but stored in bytes
+            }
+            return total;
+        }
+    };
+
+
+    /*
+    ------------------------------------------------------------------------------------------------------------------
+    ---------------------------------------------------- RF_TREE -----------------------------------------------------
+    ------------------------------------------------------------------------------------------------------------------
+    */
+    struct Tree_node{
+        uint32_t packed_data; 
+        
+        /** Bit layout optimize for breadth-first tree building:
+            * Bits 0-9  :  featureID        (10 bits)     -> 0 - 1023 features
+            * Bits 10-17:  label            (8 bits)      -> 0 - 255 classes  
+            * Bits 18-19:  threshold        (2 bits)      -> 0 | 1 | 2 | 3
+            * Bit 20    :  is_leaf          (1 bit)       -> 0/1 
+            * Bits 21-31:  left child index (11 bits)     -> 0 - 2047 nodes (max 8kB RAM per tree) 
+        @note: right child index = left child index + 1 
+        */
+
+        // Constructor
+        Tree_node() : packed_data(0) {}
+
+        // Getter methods for packed data
+        uint16_t getFeatureID() const {
+            return packed_data & 0x3FF;  // Bits 0-9 (10 bits)
+        }
+        
+        uint8_t getLabel() const {
+            return (packed_data >> 10) & 0xFF;  // Bits 10-17 (8 bits)
+        }
+        
+        uint8_t getThreshold() const {
+            return (packed_data >> 18) & 0x03;  // Bits 18-19 (2 bits)
+        }
+        
+        bool getIsLeaf() const {
+            return (packed_data >> 20) & 0x01;  // Bit 20
+        }
+        
+        uint16_t getLeftChildIndex() const {
+            return (packed_data >> 21) & 0x7FF;  // Bits 21-31 (11 bits)
+        }
+        
+        uint16_t getRightChildIndex() const {
+            return getLeftChildIndex() + 1;  // Breadth-first property: right = left + 1
+        }
+        
+        // Setter methods for packed data
+        void setFeatureID(uint16_t featureID) {
+            packed_data = (packed_data & 0xFFFFFC00) | (featureID & 0x3FF);  // Bits 0-9
+        }
+        
+        void setLabel(uint8_t label) {
+            packed_data = (packed_data & 0xFFFC03FF) | ((uint32_t)(label & 0xFF) << 10);  // Bits 10-17
+        }
+        
+        void setThreshold(uint8_t threshold) {
+            packed_data = (packed_data & 0xFFF3FFFF) | ((uint32_t)(threshold & 0x03) << 18);  // Bits 18-19
+        }
+        
+        void setIsLeaf(bool isLeaf) {
+            packed_data = (packed_data & 0xFFEFFFFF) | ((uint32_t)(isLeaf ? 1 : 0) << 20);  // Bit 20
+        }
+        
+        void setLeftChildIndex(uint16_t index) {
+            packed_data = (packed_data & 0x001FFFFF) | ((uint32_t)(index & 0x7FF) << 21);  // Bits 21-31
+        }
+    };
+
+    struct NodeToBuild {
+        uint16_t nodeIndex;
+        uint16_t begin;   // inclusive
+        uint16_t end;     // exclusive
+        uint8_t depth;
+        
+        NodeToBuild() : nodeIndex(0), begin(0), end(0), depth(0) {}
+        NodeToBuild(uint16_t idx, uint16_t b, uint16_t e, uint8_t d) 
+            : nodeIndex(idx), begin(b), end(e), depth(d) {}
+    };
+
+    class Rf_tree {
+    public:
+        vector<Tree_node> nodes;  // Vector-based tree storage
+        uint8_t index;
+        bool isLoaded;
+
+        Rf_tree() : index(255), isLoaded(false) {}
+        
+        Rf_tree(uint8_t idx) : index(idx), isLoaded(false) {}
+
+        // Copy constructor
+        Rf_tree(const Rf_tree& other) 
+            : nodes(other.nodes), index(other.index), isLoaded(other.isLoaded) {}
+
+        // Copy assignment operator
+        Rf_tree& operator=(const Rf_tree& other) {
+            if (this != &other) {
+                nodes = other.nodes;
+                index = other.index;
+                isLoaded = other.isLoaded;
+            }
+            return *this;
+        }
+
+        // Move constructor
+        Rf_tree(Rf_tree&& other) noexcept 
+            : nodes(std::move(other.nodes)), index(other.index), isLoaded(other.isLoaded) {
+            other.index = 255;
+            other.isLoaded = false;
+        }
+
+        // Move assignment operator
+        Rf_tree& operator=(Rf_tree&& other) noexcept {
+            if (this != &other) {
+                nodes = std::move(other.nodes);
+                index = other.index;
+                isLoaded = other.isLoaded;
+                other.index = 255;
+                other.isLoaded = false;
+            }
+            return *this;
+        }
+
+        // Count total number of nodes in the tree (including leaf nodes)
+        uint32_t countNodes() const {
+            return nodes.size();
+        }
+
+        size_t memory_usage() const {
+            return nodes.size() * 4 + sizeof(*this);
+        }
+
+        // Count leaf nodes in the tree
+        uint32_t countLeafNodes() const {
+            uint32_t leafCount = 0;
+            for (const auto& node : nodes) {
+                if (node.getIsLeaf()) {
+                    leafCount++;
+                }
+            }
+            return leafCount;
+        }
+
+        // Get tree depth
+        uint16_t getTreeDepth() const {
+            if (nodes.empty()) return 0;
+            return getTreeDepthRecursive(0);
+        }
+
+        // Save tree to LittleFS for ESP32
+        bool releaseTree(const char* path, bool re_use = false) {
+            if(!re_use){
+                if (index > RF_MAX_TREES || nodes.empty()) {
+                    RF_DEBUG(0, "❌ save tree failed, invalid tree index: ", index);
+                    return false;
+                }
+                if (path == nullptr || strlen(path) == 0) {
+                    RF_DEBUG(0, "❌ save tree failed, invalid path: ", path);
+                    return false;
+                }
+                if (LittleFS.exists(path)) {
+                    // delete existing file to avoid conflicts
+                    if (!LittleFS.remove(path)) {
+                        RF_DEBUG(0, "❌ Failed to remove existing tree file: ", path);
+                        return false;
+                    }
+                }
+                File file = LittleFS.open(path, FILE_WRITE);
+                if (!file) {
+                    RF_DEBUG(0, "❌ Failed to open tree file for writing: ", path);
+                    return false;
+                }
+                
+                // Write header - magic number for validation
+                uint32_t magic = 0x54524545; // "TREE" in hex
+                file.write((uint8_t*)&magic, sizeof(magic));
+                
+                // Write number of nodes
+                uint32_t nodeCount = nodes.size();
+                file.write((uint8_t*)&nodeCount, sizeof(nodeCount));
+                
+                // Batch write all nodes for better performance
+                if(nodeCount > 0) {
+                    // Calculate total size needed
+                    size_t totalSize = nodeCount * sizeof(nodes[0].packed_data);
+                    
+                    // Create buffer for batch write
+                    uint8_t* buffer = (uint8_t*)malloc(totalSize);
+                    if(buffer) {
+                        // Copy all packed_data to buffer
+                        for(uint32_t i = 0; i < nodeCount; i++) {
+                            memcpy(buffer + (i * sizeof(nodes[0].packed_data)), 
+                                   &nodes[i].packed_data, sizeof(nodes[0].packed_data));
+                        }
+                        
+                        // Single write operation
+                        size_t written = file.write(buffer, totalSize);
+                        free(buffer);
+                        
+                        if(written != totalSize) {
+                            RF_DEBUG(1, "⚠️ Incomplete tree write to LittleFS");
+                        }
+                    } else {
+                        // Fallback to individual writes if malloc fails
+                        for (const auto& node : nodes) {
+                            file.write((uint8_t*)&node.packed_data, sizeof(node.packed_data));
+                        }
+                    }
+                }    
+                file.close();
+            }  
+            nodes.clear();
+            nodes.fit(); 
+            isLoaded = false;
+            RF_DEBUG(2, "✅ Tree saved to LittleFS: ", index);
+            return true;
+        }
+
+        // Load tree from LittleFS into RAM for ESP32
+        bool loadTree(const char* path, bool re_use = false) {
+            if (isLoaded) return true;
+            
+            if (index >= RF_MAX_TREES) {
+                RF_DEBUG(0, "❌ Invalid tree index: ", index);
+                return false;
+            }
+            if (path == nullptr || strlen(path) == 0) {
+                RF_DEBUG(0, "❌ Invalid path for loading tree: ", path);
+                return false;
+            }
+            if (!LittleFS.exists(path)) {
+                RF_DEBUG(0, "❌ Tree file does not exist: ", path);
+                return false;
+            }
+            File file = LittleFS.open(path, FILE_READ);
+            if (!file) {
+                RF_DEBUG(2, "❌ Failed to open tree file: ", path);
+                return false;
+            }
+            
+            // Read and verify magic number
+            uint32_t magic;
+            if (file.read((uint8_t*)&magic, sizeof(magic)) != sizeof(magic) || magic != 0x54524545) {
+                RF_DEBUG(0, "❌ Invalid tree file format: ", path);
+                file.close();
+                return false;
+            }
+            
+            // Read number of nodes
+            uint32_t nodeCount;
+            if (file.read((uint8_t*)&nodeCount, sizeof(nodeCount)) != sizeof(nodeCount)) {
+                RF_DEBUG(0, "❌ Failed to read node count: ", path);
+                file.close();
+                return false;
+            }
+            
+            if (nodeCount == 0 || nodeCount > 2047) { // 11-bit limit for child indices
+                RF_DEBUG(1, "❌ Invalid node count in tree file");
+                file.close();
+                return false;
+            }
+            
+            // Clear existing nodes and reserve space
+            nodes.clear();
+            nodes.reserve(nodeCount);
+            
+            // Load all nodes
+            for (uint32_t i = 0; i < nodeCount; i++) {
+                Tree_node node;
+                if (file.read((uint8_t*)&node.packed_data, sizeof(node.packed_data)) != sizeof(node.packed_data)) {
+                    RF_DEBUG(0, "❌ Faile to read node data");
+                    nodes.clear();
+                    file.close();
+                    return false;
+                }
+                nodes.push_back(node);
+            }
+            
+            file.close();
+            
+            // Update state
+            isLoaded = true;
+            RF_DEBUG_2(2, "✅ Tree loaded (", nodeCount, "nodes): ", path);
+
+            if (!re_use) { 
+                RF_DEBUG(2, "♻️ Single-load mode: removing tree file after loading; ", path); 
+                LittleFS.remove(path); // Remove file after loading in single mode
+            }
+            return true;
+        }
+
+        // predict single (normalized)sample - packed features - hot path optimized
+        __attribute__((always_inline)) inline uint8_t predict_features(const packed_vector<2>& packed_features) const {
+            // Fast path: assume tree is loaded and valid
+            uint16_t currentIndex = 0;  // Start from root
+            const Tree_node* node_data = nodes.data();
+            const uint16_t node_count = nodes.size();
+            
+            // Unroll first iteration (root is never leaf in practice)
+            uint32_t packed = node_data[0].packed_data;
+            uint16_t featureID = packed & 0x3FF;
+            uint8_t threshold = (packed >> 18) & 0x03;
+            uint8_t featureValue = packed_features[featureID];
+            currentIndex = (featureValue <= threshold) ? ((packed >> 21) & 0x7FF) : (((packed >> 21) & 0x7FF) + 1);
+            
+            // Main traversal loop - inline everything
+            while (__builtin_expect(currentIndex < node_count, 1)) {
+                packed = node_data[currentIndex].packed_data;
+                
+                // Check if leaf (bit 20)
+                if (__builtin_expect((packed >> 20) & 0x01, 0)) {
+                    // It's a leaf - return label (bits 10-17)
+                    return (packed >> 10) & 0xFF;
+                }
+                
+                // Internal node - extract and traverse
+                featureID = packed & 0x3FF;  // bits 0-9
+                threshold = (packed >> 18) & 0x03;  // bits 18-19
+                featureValue = packed_features[featureID];
+                
+                // Navigate: left child = bits 21-31, right = left + 1
+                const uint16_t leftChild = (packed >> 21) & 0x7FF;
+                currentIndex = (featureValue <= threshold) ? leftChild : (leftChild + 1);
+            }
+            return 0; // Should not reach here in valid tree
+        }
+
+        void clearTree(bool freeMemory = false) {
+            nodes.clear();
+            nodes.fit();
+            if(freeMemory) nodes.fit(); // Release excess memory
+            isLoaded = false;
+        }
+
+        void purgeTree(const char* path, bool rmf = true) {
+            nodes.clear();
+            nodes.fit(); // Release excess memory
+            if(rmf && index < RF_MAX_TREES) {
+                if (LittleFS.exists(path)) {
+                    LittleFS.remove(path);
+                    RF_DEBUG(2, "🗑️ Tree file removed: ", path);
+                } 
+            }
+            index = 255;
+            isLoaded = false;
+        }
+
+    private:
+        // Recursive helper to get tree depth
+        uint16_t getTreeDepthRecursive(uint16_t nodeIndex) const {
+            if (nodeIndex >= nodes.size()) return 0;
+            if (nodes[nodeIndex].getIsLeaf()) return 1;
+            
+            uint16_t leftIndex = nodes[nodeIndex].getLeftChildIndex();
+            uint16_t rightIndex = nodes[nodeIndex].getRightChildIndex();
+            
+            uint16_t leftDepth = getTreeDepthRecursive(leftIndex);
+            uint16_t rightDepth = getTreeDepthRecursive(rightIndex);
+            
+            return 1 + (leftDepth > rightDepth ? leftDepth : rightDepth);
+        }
+    };
+     
     /*
     ------------------------------------------------------------------------------------------------------------------
     ----------------------------------------------- RF_CATEGORIZER ---------------------------------------------------

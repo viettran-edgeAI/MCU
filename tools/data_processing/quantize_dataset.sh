@@ -33,7 +33,7 @@ show_usage() {
     echo "Options:"
     echo "  -p, --path <file>         Path to input CSV file (required)"
     echo "  -he, --header <yes/no>    Skip header if 'yes', process all lines if 'no' (auto-detect if not specified)"
-    echo "  -f, --features <number>   Maximum number of features (default: 1023, range: 1-65535)"
+    echo "  -f, --features <number>   Maximum number of features (default: 1023, range: 1-1023)"
     echo "  -q, --bits <1-8>          Quantization coefficient in bits per feature (default: 2)"
     echo "  -v, --visualize           Run quantization visualization after processing (default: yes)"
     echo "  -nv, --no-visualize       Skip visualization"

@@ -2,7 +2,14 @@
 """
 Quantization Data Visualizer
 
-This program creates PCA scatter plots to visualize the data dispersion 
+T            
+        return features, labels, label_mapping
+    except FileNotFoundError:
+        print(f"Error: File {filepath} not found!")
+        return None, None, None
+    except Exception as e:
+        print(f"Error loading {filepath}: {e}")
+        return None, None, Noneram creates PCA scatter plots to visualize the data dispersion 
 before and after quantization for classification datasets.
 
 Usage:
@@ -33,27 +40,31 @@ def load_data(filepath):
     Returns:
         features: numpy array of feature data
         labels: numpy array of class labels
+        label_mapping: dict mapping numeric labels to original string labels (or None)
     """
     try:
-        # First, try to read as numbers (no header)
-        data = pd.read_csv(filepath, header=None)
+        # First, try to read as numbers (no header), with low_memory=False to suppress warnings
+        data = pd.read_csv(filepath, header=None, low_memory=False)
         
         # Check if the first row contains strings (indicating a header)
         first_row = data.iloc[0]
         if any(isinstance(val, str) for val in first_row):
             # Reload with header
-            data = pd.read_csv(filepath, header=0)
+            data = pd.read_csv(filepath, header=0, low_memory=False)
         
         labels = data.iloc[:, 0].values  # First column is the class label
         features = data.iloc[:, 1:].values  # Rest are features
         
         # Convert string labels to numeric if needed
+        label_mapping = None
         if not np.issubdtype(labels.dtype, np.number):
             from sklearn.preprocessing import LabelEncoder
             le = LabelEncoder()
             labels = le.fit_transform(labels)
+            # Create mapping from numeric to original string labels
+            label_mapping = {i: label for i, label in enumerate(le.classes_)}
             
-        return features, labels
+        return features, labels, label_mapping
     except FileNotFoundError:
         print(f"Error: File {filepath} not found!")
         return None, None
@@ -494,13 +505,29 @@ def print_pca_info(original_var, quantized_var, original_features, quantized_fea
     print("="*80)
 
 
-def get_class_names(model_name):
-    """Get appropriate class names based on the dataset."""
+def get_class_names(model_name, label_mapping=None):
+    """
+    Get appropriate class names based on the dataset.
+    
+    Args:
+        model_name: Name of the dataset/model
+        label_mapping: Optional dict mapping numeric labels to original string labels
+    
+    Returns:
+        List of class names, or None if not available
+    """
+    # If we have a label mapping from the original data, use it
+    if label_mapping is not None:
+        # Sort by numeric label to maintain order
+        sorted_labels = sorted(label_mapping.items())
+        return [label for _, label in sorted_labels]
+    
+    # Otherwise, use predefined mappings
     class_name_mapping = {
         'iris': ['Setosa', 'Versicolor', 'Virginica'],
         'cancer': ['Malignant', 'Benign'],
         'digit': [f'Digit {i}' for i in range(10)],
-        'walker_fall': ['Normal', 'Fall']
+        'walker_fall': ['Idle', 'Fall', 'Step', 'Motion']  # Updated to 4 classes
     }
     return class_name_mapping.get(model_name, None)
 
@@ -519,9 +546,9 @@ def main():
     print(f"Loading original data from: {original_file}")
     print(f"Loading quantized data from: {quantized_file}")
     
-    # Load data
-    original_features, original_labels = load_data(original_file)
-    quantized_features, quantized_labels = load_data(quantized_file)
+    # Load data - only the original file may have string labels
+    original_features, original_labels, label_mapping = load_data(original_file)
+    quantized_features, quantized_labels, _ = load_data(quantized_file)
     
     if original_features is None or quantized_features is None:
         sys.exit(1)
@@ -535,8 +562,12 @@ def main():
     print(f"Quantized data shape: {quantized_features.shape}")
     print(f"Number of classes: {len(np.unique(original_labels))}")
     
-    # Get class names
-    class_names = get_class_names(model_name)
+    # Get class names - prefer label mapping from original data
+    class_names = get_class_names(model_name, label_mapping)
+    if class_names:
+        print(f"Class names: {class_names}")
+    else:
+        print("Class names: Using default numbering")
     
     # Create visualization with 3x3 layout
     fig = plt.figure(figsize=(18, 14))

@@ -58,11 +58,11 @@ flowchart LR
 - `{model_name}_nml.bin` - Standard format for transfer to ESP32
 - `{model_name}_nml.csv` - Used for pre_train tool or manual transfer
 - `{model_name}_dp.csv` - File containing general parameters of the dataset
-- `{model_name}_ctg.csv` - File containing categorizer
+- `{model_name}_ctg.csv` - File containing quantizer
 
 **Technical Details:**
-For details on how variable quantization (1-8 bits) and categorizer work, please refer to:
-`/home/viettran/Arduino/libraries/STL_MCU/docs/Quantization/Rf_categorizer_Technical_Overview.md`
+For details on how variable quantization (1-8 bits) and quantizer work, please refer to:
+`/home/viettran/Arduino/libraries/STL_MCU/docs/Quantization/Rf_quantizer_Technical_Overview.md`
 
 ⚠️ **Dataset Limits:**
 - **Max Labels**: 255 unique classes
@@ -319,15 +319,15 @@ The script compiles this automatically if needed.
 
 ## 🧪 Processing details
 
-### How Quantization and Categorizer Work
+### How Quantization Work
 
-For comprehensive technical details on the variable quantization process (1-8 bits) and categorizer implementation, please refer to:
+For comprehensive technical details on the variable quantization process (1-8 bits) and quantizer implementation, please refer to:
 
-**📖 [Rf_categorizer Technical Overview](../../docs/Quantization/Rf_categorizer_Technical_Overview.md)**
+**📖 [Rf_quantizer Technical Overview](../../docs/Quantization/Rf_quantizer.md)**
 
 This document covers:
 - Detailed variable quantization algorithms (1-8 bits per feature)
-- Categorizer architecture and optimization
+- Quantizer architecture and optimization
 - Feature binning strategies (quantile-based, discrete detection)
 - Label normalization processes
 - Memory optimization techniques for ESP32
@@ -356,7 +356,7 @@ Options:
 
 2) Individual transfer
 - From `data_transfer/pc_side/`:
-  - `transfer_categorizer.py ../data/result/<name>_ctg.csv <serial>`
+  - `transfer_quantizer.py ../data/result/<name>_ctg.csv <serial>`
   - `transfer_dataset_params.py ../data/result/<name>_dp.csv <serial>`
   - `transfer_dataset.py ../data/result/<name>_nml.bin <serial>`
 - ESP32 sketches: use corresponding receivers in `data_transfer/esp32_side/`
@@ -472,7 +472,7 @@ tools/data_processing/
 └── data_transfer/                  # Transfer tools
     ├── pc_side/
     │   ├── unified_transfer.py
-    │   ├── transfer_categorizer.py
+    │   ├── transfer_quantizer.py
     │   ├── transfer_dataset.py
     │   └── transfer_dataset_params.py
     └── esp32_side/

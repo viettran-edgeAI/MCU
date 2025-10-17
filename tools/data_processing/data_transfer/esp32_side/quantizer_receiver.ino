@@ -1,6 +1,6 @@
 /*
- * ESP32 Categorizer CSV Receiver with V2 Protocol
- * Upload this sketch to ESP32, then use transfer_categorizer.py to send files
+ * ESP32 Quantizer CSV Receiver with V2 Protocol
+ * Upload this sketch to ESP32, then use transfer_quantizer.py to send files
  * Saves files to LittleFS with model_name/filename structure and CRC verification
  */
 

@@ -85,7 +85,7 @@ struct FeatureStats {
 };
 
 // Structure for building CTG v2 format with pattern sharing and optimization
-class Rf_categorizer{
+class Rf_quantizer{
     uint16_t numFeatures = 0;
     uint16_t groupsPerFeature = 0;
     uint32_t scaleFactor = 50000; // Scaling factor for uint16_t conversion
@@ -93,7 +93,7 @@ class Rf_categorizer{
     // Feature type definitions
     enum FeatureType { FT_DF = 0, FT_DC = 1, FT_CS = 2, FT_CU = 3 };
     
-    // Structures for building the categorizer
+    // Structures for building the quantizer
     struct SharedPattern {
         mcu::vector<uint16_t> scaledEdges;
         uint16_t patternId;
@@ -133,10 +133,10 @@ class Rf_categorizer{
 
 public:
     // Default constructor
-    Rf_categorizer() = default;
+    Rf_quantizer() = default;
     
-    // Constructor for building categorizer
-    Rf_categorizer(uint16_t numFeatures, uint16_t gpf, uint32_t scale = 50000)
+    // Constructor for building quantizer
+    Rf_quantizer(uint16_t numFeatures, uint16_t gpf, uint32_t scale = 50000)
         : numFeatures(numFeatures), groupsPerFeature(gpf), scaleFactor(scale) {
         features.reserve(numFeatures);
         for (uint16_t i = 0; i < numFeatures; ++i) {
@@ -145,7 +145,7 @@ public:
     }
     
     // Constructor with label mapping
-    Rf_categorizer(uint16_t numFeatures, uint16_t gpf, const mcu::vector<mcu::pair<std::string, uint8_t>>& labelMap, uint32_t scale = 50000)
+    Rf_quantizer(uint16_t numFeatures, uint16_t gpf, const mcu::vector<mcu::pair<std::string, uint8_t>>& labelMap, uint32_t scale = 50000)
         : numFeatures(numFeatures), groupsPerFeature(gpf), scaleFactor(scale), labelMapping(labelMap) {
         features.reserve(numFeatures);
         for (uint16_t i = 0; i < numFeatures; ++i) {
@@ -219,8 +219,8 @@ public:
         labelMapping = labelMap;
     }
     
-    // Categorize a single feature value
-    uint8_t categorizeFeature(uint16_t featureIdx, float value) const {
+    // Quantize a single feature value
+    uint8_t quantizeFeature(uint16_t featureIdx, float value) const {
         if (featureIdx >= numFeatures) return 0;
         
         const FeatureInfo& info = features[featureIdx];
@@ -265,20 +265,20 @@ public:
         return 0;
     }
     
-    // Categorize an entire sample
-    mcu::vector<uint8_t> categorizeSample(const mcu::vector<float>& sample) const {
+    // Quantize an entire sample
+    mcu::vector<uint8_t> quantizeSample(const mcu::vector<float>& sample) const {
         mcu::vector<uint8_t> result;
         result.reserve(numFeatures);
         
         for (uint16_t i = 0; i < numFeatures && i < sample.size(); ++i) {
-            result.push_back(categorizeFeature(i, sample[i]));
+            result.push_back(quantizeFeature(i, sample[i]));
         }
         
         return result;
     }
     
-    // Save categorizer to CTG v2 format for ESP32 transfer
-    void saveCategorizer(const char* filename) const {
+    // Save quantizer to CTG v2 format for ESP32 transfer
+    void saveQuantizer(const char* filename) const {
         std::ofstream fout(filename);
         if (!fout) {
             throw std::runtime_error(std::string("Cannot open CTG2 file: ") + filename);
@@ -339,7 +339,7 @@ public:
     
     // Legacy CSV format (keep for backward compatibility if needed)
     void saveToCSV(const char* filename) const {
-        saveCategorizer(filename); // Default to CTG2 format
+        saveQuantizer(filename); // Default to CTG2 format
     }
     
     // Accessors
@@ -575,7 +575,7 @@ bool detectCSVHeader(const char* inputFilePath) {
 // Forward declaration
 uint8_t getNormalizedLabel(const std::string& originalLabel, const mcu::vector<mcu::pair<std::string, uint8_t>>& labelMapping);
 
-Rf_categorizer categorizeCSVFeatures(const char* inputFilePath, const char* outputFilePath, int groupsPerFeature, const mcu::vector<mcu::pair<std::string, uint8_t>>& labelMapping, bool skipHeader = false){
+Rf_quantizer quantizeCSVFeatures(const char* inputFilePath, const char* outputFilePath, int groupsPerFeature, const mcu::vector<mcu::pair<std::string, uint8_t>>& labelMapping, bool skipHeader = false){
     if (groupsPerFeature < 1) {
         throw std::runtime_error("groupsPerFeature must be >= 1");
     }
@@ -727,8 +727,8 @@ Rf_categorizer categorizeCSVFeatures(const char* inputFilePath, const char* outp
     
     uint32_t scaleFactor = maxEdgeValue > 0 ? std::min(65535.0f / maxEdgeValue, 50000.0f) : 50000;
 
-    // Setup categorizer with CTG v2 format
-    Rf_categorizer ctg(n_feats, groupsPerFeature, labelMapping, scaleFactor);
+    // Setup quantizer with CTG v2 format
+    Rf_quantizer ctg(n_feats, groupsPerFeature, labelMapping, scaleFactor);
     
     for (int j = 0; j < n_feats; ++j) {
         mcu::vector<float> distinct_after_clip = collectUniqueValues(data, j, n_samples);
@@ -766,7 +766,7 @@ Rf_categorizer categorizeCSVFeatures(const char* inputFilePath, const char* outp
     // Encode into uint8_t categories
     mcu::vector<mcu::vector<u8>> encoded(n_samples, mcu::vector<u8>(n_feats));
     for (int i = 0; i < n_samples; ++i) {
-        encoded[i] = ctg.categorizeSample(data[i]);
+        encoded[i] = ctg.quantizeSample(data[i]);
     }
     
     // Write output CSV (quantized data without headers)
@@ -1415,7 +1415,7 @@ int main(int argc, char* argv[]) {
         if (!std::filesystem::exists(resultDir)) {
             std::filesystem::create_directories(resultDir);
         }
-        std::string categorizerFile = resultDir + "/" + baseName + "_ctg.csv";
+        std::string quantizerFile = resultDir + "/" + baseName + "_ctg.csv";
         std::string dataParamsFile = resultDir + "/" + baseName + "_dp.csv";
         std::string normalizedFile = resultDir + "/" + baseName + "_nml.csv";
         std::string truncatedFile = resultDir + "/" + baseName + "_truncated.csv";
@@ -1462,14 +1462,14 @@ int main(int argc, char* argv[]) {
             workingFile = truncatedFile.c_str();
         }
 
-        // Step 3: Categorize features with the (possibly truncated) dataset
+        // Step 3: Quantize features with the (possibly truncated) dataset
         std::cout << "\n=== Feature Categorization ===\n";
-        Rf_categorizer test_ctg = categorizeCSVFeatures(workingFile, normalizedFile.c_str(), getGroupsPerFeature(), datasetInfo.labelMapping, skipHeader);
+        Rf_quantizer test_ctg = quantizeCSVFeatures(workingFile, normalizedFile.c_str(), getGroupsPerFeature(), datasetInfo.labelMapping, skipHeader);
         std::cout << "Categorization completed successfully.\n";
 
-        // Save categorizer for ESP32 transfer
-        test_ctg.saveCategorizer(categorizerFile.c_str());
-        std::cout << "Categorizer saved to " << categorizerFile << " for ESP32 transfer.\n";
+        // Save quantizer for ESP32 transfer
+        test_ctg.saveQuantizer(quantizerFile.c_str());
+        std::cout << "Quantizer saved to " << quantizerFile << " for ESP32 transfer.\n";
 
         // Step 4: CSV dataset generation completed
         std::cout << "\n=== CSV Dataset Generation Complete ===\n";
@@ -1493,7 +1493,7 @@ int main(int argc, char* argv[]) {
                   << "-bit values: 0-" << static_cast<int>(getMaxFeatureValue()) << ")\n";
         std::cout << "   🏷️  Labels: " << datasetInfo.labelMapping.size() << " classes (normalized 0-"
                   << (datasetInfo.labelMapping.size() - 1) << ")\n";
-        std::cout << "   📋 Categorizer: " << categorizerFile << "\n";
+        std::cout << "   📋 Quantizer: " << quantizerFile << "\n";
         std::cout << "   ⚙️  Parameters: " << dataParamsFile << "\n";
         std::cout << "\n🚀 Ready for ESP32 transfer!\n";
         

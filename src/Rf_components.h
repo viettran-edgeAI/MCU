@@ -104,7 +104,7 @@ static constexpr size_t   MAX_INFER_LOGFILE_SIZE = 2048;   // Max log file size 
  NOTE : Forest file components (with each model)
     1. model_name_nml.bin       : base data (dataset)
     2. model_name_config.json   : model configuration file 
-    3. model_name_ctg.csv       : categorizer (feature quantizer and label mapping)
+    3. model_name_ctg.csv       : quantizer (feature quantizer and label mapping)
     4. model_name_dp.csv        : information about dataset (num_features, num_labels...)
     5. model_name_forest.bin    : model file (all trees) in unified format
     6. model_name_tree_*.bin    : model files (tree files) in individual format. (Given from pc/use during training)
@@ -131,7 +131,7 @@ namespace mcu {
     class Rf_config;            // forest configuration & dataset parameters
     class Rf_base;              // Manage and monitor the status of forest components and resources
     class Rf_node_predictor;    // Helper class: predict and pre-allocate resources needed before building/loading a tree
-    class Rf_categorizer;       // sample quantizer (categorize features and labels mapping)
+    class Rf_quantizer;         // sample quantizer (quantize features and labels mapping)
     class Rf_logger;            // logging forest events timing, memory usage, messages, errors
     class Rf_random;            // random generator (for stability across platforms and runs)
     class Rf_matrix_score;      // confusion matrix and metrics calculator
@@ -245,13 +245,13 @@ namespace mcu {
                 flags |= static_cast<Rf_base_flags>(BASE_DATA_EXIST);
             }
 
-            // check : categorizer file exists
+            // check : quantizer file exists
             build_file_path(filepath, "_ctg.csv");
             if (LittleFS.exists(filepath)) {
-                RF_DEBUG(1, "✅ Found categorizer file: ", filepath);
+                RF_DEBUG(1, "✅ Found quantizer file: ", filepath);
                 flags |= static_cast<Rf_base_flags>(CTG_FILE_EXIST);
             } else {
-                RF_DEBUG(0, "❌ No categorizer file found: ", filepath);
+                RF_DEBUG(0, "❌ No quantizer file found: ", filepath);
                 this->model_name[0] = '\0';
                 return;
             }
@@ -295,7 +295,7 @@ namespace mcu {
                 RF_DEBUG(2, "🔂 Switching to use default node_predictor");
             }
 
-            // able to inference : forest file + categorizer
+            // able to inference : forest file + quantizer
             if ((flags & UNIFIED_FOREST_EXIST) && (flags & CTG_FILE_EXIST)) {
                 flags |= static_cast<Rf_base_flags>(ABLE_TO_INFERENCE);
                 RF_DEBUG(1, "✅ Model is ready for inference.");
@@ -303,7 +303,7 @@ namespace mcu {
                 RF_DEBUG(0, "⚠️ Model is NOT ready for inference.");
             }
 
-            // able to re-training : base data + categorizer 
+            // able to re-training : base data + quantizer 
             if ((flags & BASE_DATA_EXIST) && (flags & CTG_FILE_EXIST)) {
                 flags |= static_cast<Rf_base_flags>(ABLE_TO_TRAINING);
                 RF_DEBUG(1, "✅ Model is ready for re-training.");
@@ -443,7 +443,7 @@ namespace mcu {
                 // Rename all model files
                 rename_file("_nml.bin");       // base file
                 rename_file("_dp.csv");        // data_params file
-                rename_file("_ctg.csv");       // categorizer file
+                rename_file("_ctg.csv");       // quantizer file
                 rename_file("_infer_log.bin"); // inference log file
                 rename_file("_node_pred.bin"); // node predictor file
                 rename_file("_node_log.bin");  // node predict log file
@@ -2811,7 +2811,7 @@ namespace mcu {
      
     /*
     ------------------------------------------------------------------------------------------------------------------
-    ----------------------------------------------- RF_CATEGORIZER ---------------------------------------------------
+    ----------------------------------------------- RF_QUANTIZER ---------------------------------------------------
     ------------------------------------------------------------------------------------------------------------------
     */
 
@@ -2834,7 +2834,7 @@ namespace mcu {
         uint8_t getOffset() const { return packed & 0xFF; }
     };
 
-    // Template trait to check supported vector types for Rf_categorizer
+    // Template trait to check supported vector types for Rf_quantizer
     template<typename T>
     struct is_supported_vector : std::false_type {};
 
@@ -2850,7 +2850,7 @@ namespace mcu {
     template<size_t sboSize>
     struct is_supported_vector<b_vector<int, sboSize>> : std::true_type {};
 
-    class Rf_categorizer {
+    class Rf_quantizer {
     private:
         uint16_t numFeatures = 0;
         uint8_t groupsPerFeature = 0;
@@ -2913,7 +2913,7 @@ namespace mcu {
                 // If next char isn't newline, line exceeded buffer
                 int next = file.peek();
                 if (next != '\n' && next != '\r') {
-                    RF_DEBUG(0, "❌ Categorizer line exceeds buffer size");
+                    RF_DEBUG(0, "❌ Quantizer line exceeds buffer size");
                     return false;
                 }
             }
@@ -2985,7 +2985,7 @@ namespace mcu {
         }
 
         // Optimized feature categorization - hot path, force inline
-        __attribute__((always_inline)) inline uint8_t categorizeFeature(uint16_t featureIdx, float value) const {
+        __attribute__((always_inline)) inline uint8_t quantizeFeature(uint16_t featureIdx, float value) const {
             // Fast path: assume valid input during prediction (bounds checked during loading)
             const FeatureRef& ref = featureRefs[featureIdx];
             const uint8_t type = ref.getType();
@@ -3043,12 +3043,12 @@ namespace mcu {
         }
          
     public:
-        Rf_categorizer() = default;
+        Rf_quantizer() = default;
         
-        Rf_categorizer(Rf_base* base) {
+        Rf_quantizer(Rf_base* base) {
             init(base);
         }
-        ~Rf_categorizer() {
+        ~Rf_quantizer() {
             base_ptr = nullptr;
             isLoaded = false;
             featureRefs.clear();
@@ -3066,26 +3066,26 @@ namespace mcu {
             isLoaded = false;
         }
         
-        // Load categorizer data from CTG v2 format without dynamic String allocations
-        bool loadCategorizer() {
+        // Load quantizer data from CTG v2 format without dynamic String allocations
+        bool loadQuantizer() {
             if (isLoaded) {
                 return true;
             }
             if (!has_base()) {
-                RF_DEBUG(0, "❌ Load Categorizer failed: data pointer not ready");
+                RF_DEBUG(0, "❌ Load Quantizer failed: data pointer not ready");
                 return false;
             }
 
             char file_path[RF_PATH_BUFFER];
             base_ptr->get_ctg_path(file_path);
             if (!LittleFS.exists(file_path)) {
-                RF_DEBUG(0, "❌ Categorizer file not found: ", file_path);
+                RF_DEBUG(0, "❌ Quantizer file not found: ", file_path);
                 return false;
             }
 
             File file = LittleFS.open(file_path, "r");
             if (!file) {
-                RF_DEBUG(0, "❌ Failed to open Categorizer file: ", file_path);
+                RF_DEBUG(0, "❌ Failed to open Quantizer file: ", file_path);
                 return false;
             }
 
@@ -3114,7 +3114,7 @@ namespace mcu {
 
             do {
                 if (!readTrimmedLine(file, line, MAX_LINE_BUFFER, lineLength)) {
-                    RF_DEBUG(0, "❌ Empty Categorizer file: ", file_path);
+                    RF_DEBUG(0, "❌ Empty Quantizer file: ", file_path);
                     success = false;
                     break;
                 }
@@ -3122,7 +3122,7 @@ namespace mcu {
                 char* tokens[64];
                 size_t tokenCount = tokenize(line, ',', tokens, 64);
                 if (tokenCount != 6) {
-                    RF_DEBUG(0, "❌ Invalid Categorizer header token count");
+                    RF_DEBUG(0, "❌ Invalid Quantizer header token count");
                     success = false;
                     break;
                 }
@@ -3131,7 +3131,7 @@ namespace mcu {
                 }
 
                 if (strcmp(tokens[0], "CTG2") != 0) {
-                    RF_DEBUG(0, "❌ Unsupported Categorizer format identifier");
+                    RF_DEBUG(0, "❌ Unsupported Quantizer format identifier");
                     success = false;
                     break;
                 }
@@ -3144,7 +3144,7 @@ namespace mcu {
 
                 // Calculate quantization_coefficient from groupsPerFeature
                 if (groupsPerFeature == 0) {
-                    RF_DEBUG(0, "❌ Invalid groupsPerFeature value in categorizer header");
+                    RF_DEBUG(0, "❌ Invalid groupsPerFeature value in quantizer header");
                     success = false;
                     break;
                 }
@@ -3335,7 +3335,7 @@ namespace mcu {
             }
 
             isLoaded = true;
-            RF_DEBUG(1, "✅ Categorizer loaded successfully! : ", file_path);
+            RF_DEBUG(1, "✅ Quantizer loaded successfully! : ", file_path);
             RF_DEBUG_2(2, "📊 Features: ", numFeatures, ", Groups: ", groupsPerFeature);
             RF_DEBUG_2(2, "   Labels: ", numLabels, ", Patterns: ", numSharedPatterns);
             RF_DEBUG(2, "   Scale Factor: ", scaleFactor);
@@ -3344,7 +3344,7 @@ namespace mcu {
         
         
         // Release loaded data from memory
-        void releaseCategorizer(bool re_use = true) {
+        void releaseQuantizer(bool re_use = true) {
             if (!isLoaded) {
                 return;
             }
@@ -3358,15 +3358,15 @@ namespace mcu {
             labelLengths.clear();
             labelStorage.clear();
             isLoaded = false;
-            RF_DEBUG(2, "🧹 Categorizer data released from memory");
+            RF_DEBUG(2, "🧹 Quantizer data released from memory");
         }
 
         // Core categorization function: write directly to pre-allocated buffer
         // This is the ONLY internal categorization method - optimized for zero allocations
-        __attribute__((always_inline)) inline void categorizeFeatures(const float* features, packed_vector<8>& output) const {
+        __attribute__((always_inline)) inline void quantizeFeatures(const float* features, packed_vector<8>& output) const {
             // Write directly to pre-allocated buffer
             for (uint16_t i = 0; i < numFeatures; ++i) {
-                output.set(i, categorizeFeature(i, features[i]));
+                output.set(i, quantizeFeature(i, features[i]));
             }
         }
         
@@ -5463,10 +5463,6 @@ namespace mcu {
 
             largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
             fragmentation = 100 - (largestBlock * 100 / freeHeap);
-            // if(print){       
-            //     if(msg && strlen(msg) > 0) RF_DEBUG(1, "📋 ", msg);
-            //     RF_DEBUG_2(1, "🧠 Free Heap(bytes): ", freeHeap, ", Free Disk(bytes): ", freeDisk);
-            // }
 
             // Log to file with timestamp
             if(log) {        
@@ -5508,13 +5504,13 @@ namespace mcu {
         }
 
         // for durtion measurement between two anchors
-        void t_log(const char* msg, size_t begin_anchor_index, size_t end_anchor_idex, const char* unit = "ms" , bool print = true){
+        long unsigned t_log(const char* msg, size_t begin_anchor_index, size_t end_anchor_idex, const char* unit = "ms"){
             float ratio = 1;  // default to ms 
             if(strcmp(unit, "s") == 0 || strcmp(unit, "second") == 0) ratio = 1000.0f;
             else if(strcmp(unit, "us") == 0 || strcmp(unit, "microsecond") == 0) ratio = 0.001f;
 
-            if(time_anchors.size() == 0) return; // no anchors set
-            if(begin_anchor_index >= time_anchors.size() || end_anchor_idex >= time_anchors.size()) return; // invalid index
+            if(time_anchors.size() == 0) return 0; // no anchors set
+            if(begin_anchor_index >= time_anchors.size() || end_anchor_idex >= time_anchors.size()) return 0; // invalid index
             if(end_anchor_idex <= begin_anchor_index) {
                 std::swap(begin_anchor_index, end_anchor_idex);
             }
@@ -5522,19 +5518,7 @@ namespace mcu {
             long unsigned begin_time = time_anchors[begin_anchor_index].anchor_time;
             long unsigned end_time = time_anchors[end_anchor_idex].anchor_time;
             float elapsed = (end_time - begin_time)/ratio;
-            if(print){
-                if constexpr(RF_DEBUG_LEVEL >= 1) {         
-                    if(msg && strlen(msg) > 0){
-                        Serial.print("⏱️  ");
-                        Serial.print(msg);
-                        Serial.print(": ");
-                    } else {
-                        Serial.print("⏱️  unknown event: ");
-                    }
-                    Serial.print(elapsed);
-                    Serial.println(unit);
-                }
-            }
+
             // Log to file with timestamp      ; 
             File logFile = LittleFS.open(time_log_path, FILE_APPEND);
             if (logFile) {
@@ -5552,6 +5536,7 @@ namespace mcu {
             }
 
             time_anchors[end_anchor_idex].anchor_time = GET_CURRENT_TIME_IN_MILLISECONDS; // reset end anchor to current time
+            return (long unsigned)elapsed;
         }
     
         /**
@@ -5562,12 +5547,12 @@ namespace mcu {
          * @param print whether to print to Serial, will be disabled if RF_DEBUG_LEVEL <= 1
          * @note : this action will create a new anchor at the current time
          */
-        void t_log(const char* msg, size_t begin_anchor_index, const char* unit = "ms" , bool print = true){
+        long unsigned t_log(const char* msg, size_t begin_anchor_index, const char* unit = "ms"){
             time_anchor end_anchor;
             end_anchor.anchor_time = GET_CURRENT_TIME_IN_MILLISECONDS;
             end_anchor.index = time_anchors.size();
             time_anchors.push_back(end_anchor);
-            t_log(msg, begin_anchor_index, end_anchor.index, unit, print);
+            return t_log(msg, begin_anchor_index, end_anchor.index, unit);
         }
 
         /**
@@ -5576,21 +5561,9 @@ namespace mcu {
          * @param print whether to print to Serial, will be disabled if RF_DEBUG_LEVEL <= 1
          * @note : this action will NOT create a new anchor
          */
-        void t_log(const char* msg, bool print = true){
+        long unsigned t_log(const char* msg){
             long unsigned current_time = GET_CURRENT_TIME_IN_MILLISECONDS - starting_time;
-            if(print){
-                if constexpr(RF_DEBUG_LEVEL > 1) {         
-                    if(msg && strlen(msg) > 0){
-                        Serial.print("⏱️  ");
-                        Serial.print(msg);
-                        Serial.print(": ");
-                    } else {
-                        Serial.print("⏱️  unknown event: ");
-                    }
-                    Serial.print(current_time);       // timeline always in ms
-                    Serial.println("ms");
-                }
-            }
+
             // Log to file with timestamp
             File logFile = LittleFS.open(time_log_path, FILE_APPEND);
             if (logFile) {
@@ -5603,6 +5576,7 @@ namespace mcu {
             }else{
                 RF_DEBUG(1, "❌ Failed to open time log file: ", time_log_path);
             }
+            return current_time;
         }
         
         // print out memory_log file to Serial
@@ -5620,8 +5594,11 @@ namespace mcu {
                 RF_DEBUG(1, "❌ Cannot open memory log file for reading: ", memory_log_path);
                 return;
             }
+            String line;
             while(file.available()){
-                Serial.println(file.readStringUntil('\n'));
+                // Serial.println(file.readStringUntil('\n'));
+                line = file.readStringUntil('\n');
+                RF_DEBUG(0, line.c_str());
             }
             file.close();
         }
@@ -5641,8 +5618,11 @@ namespace mcu {
                 RF_DEBUG(1, "❌ Cannot open time log file for reading: ", time_log_path);
                 return;
             }
+            String line;
             while(file.available()){
-                Serial.println(file.readStringUntil('\n'));
+                // Serial.println(file.readStringUntil('\n'));
+                line = file.readStringUntil('\n');
+                RF_DEBUG(0, line.c_str());
             }
             file.close();
         }

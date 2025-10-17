@@ -1,7 +1,7 @@
 /*
  * Unified Data Receiver for ESP32
  * 
- * This sketch receives a complete dataset (categorizer, parameters, and binary data)
+ * This sketch receives a complete dataset (quantizer, parameters, and binary data)
  * from a PC in a single, coordinated session and saves the files to LittleFS.
  * Files are saved to /model_name/file_path structure.
  * 
@@ -120,7 +120,7 @@ void deleteOldDatasetFiles(const char* basename) {
     // Delete all three dataset files for this basename (basename is the model_name)
     char filepath[128];
     
-    // Delete categorizer file
+    // Delete quantizer file
     snprintf(filepath, sizeof(filepath), "/%s/%s_ctg.csv", basename, basename);
     safeDeleteFile(filepath);
     

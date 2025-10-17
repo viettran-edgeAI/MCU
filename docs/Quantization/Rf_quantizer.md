@@ -1,8 +1,8 @@
-# Rf_categorizer: Development Lifecycle and ESP32 Implementation
+# Rf_quantizer: Development Lifecycle and ESP32 Implementation
 
 ## Overview
 
-The `Rf_categorizer` system represents a complete machine learning preprocessing pipeline that transforms raw sensor data into normalized categorical values suitable for random forest classification. This documentation traces the development lifecycle from initial PC-based data processing through optimized ESP32 deployment, highlighting the architectural decisions and optimizations that enable practical embedded ML applications.
+The `Rf_quantizer` system represents a complete machine learning preprocessing pipeline that transforms raw sensor data into normalized categorical values suitable for random forest classification. This documentation traces the development lifecycle from initial PC-based data processing through optimized ESP32 deployment, highlighting the architectural decisions and optimizations that enable practical embedded ML applications.
 
 The system bridges the gap between desktop machine learning development and embedded inference, maintaining mathematical consistency while adapting to microcontroller resource constraints through sophisticated memory optimization techniques.
 
@@ -10,7 +10,7 @@ The system bridges the gap between desktop machine learning development and embe
 
 ### Purpose and Data Normalization
 
-The PC-side component serves as the preprocessing foundation, analyzing entire datasets to establish normalization parameters and generate categorizer configurations for embedded deployment. This stage handles the computationally intensive statistical analysis that would be impractical on microcontrollers.
+The PC-side component serves as the preprocessing foundation, analyzing entire datasets to establish normalization parameters and generate quantizer configurations for embedded deployment. This stage handles the computationally intensive statistical analysis that would be impractical on microcontrollers.
 
 #### Dataset Analysis and Feature Classification
 
@@ -105,17 +105,29 @@ This preprocessing ensures that extreme values don't distort the quantile bounda
 
 #### Quantile Bin Edge Computation
 
-For continuous features, the PC generates quantile boundaries that divide the feature space into equal-probability bins:
+For continuous features, the PC generates quantile boundaries that divide the feature space into equal-probability bins. The quantization resolution is variable (1-8 bits per feature), allowing flexible trade-offs between model accuracy and resource consumption:
 
 ```
-               Quantile-Based Binning Process
+               Quantile-Based Binning Process (Variable Quantization)
     
-    Step 1: Sort Values
+    Step 1: Determine Quantization Level (1-8 bits)
+    ┌──────────────┬──────────┬──────────┬──────────┐
+    │ Bits Per     │ Possible │ Memory   │   Use    │
+    │ Feature      │ Values   │ Per Val  │   Case   │
+    ├──────────────┼──────────┼──────────┼──────────┤
+    │ 1 bit        │ 2 (0-1)  │ 1 byte   │ Binary   │
+    │ 2 bits       │ 4 (0-3)  │ 2 bytes  │ Default  │
+    │ 3 bits       │ 8 (0-7)  │ 3 bytes  │ Medium   │
+    │ 4 bits       │ 16 (0-15)│ 4 bytes  │ Detail   │
+    │ 8 bits       │ 256      │ 8 bytes  │ Full     │
+    └──────────────┴──────────┴──────────┴──────────┘
+    
+    Step 2: Sort Values
     Raw: [25.3, 23.7, 26.1, 24.8, 22.9, 27.2, 25.0, 23.1]
            ↓
     Sorted: [22.9, 23.1, 23.7, 24.8, 25.0, 25.3, 26.1, 27.2]
     
-    Step 2: Calculate Quantile Positions (for 4 bins = 3 edges)
+    Step 3: Calculate Quantile Positions (for 4 bins = 3 edges)
     ┌────────┬────────┬────────┬────────┐
     │  Q1    │  Q2    │  Q3    │  Q4    │
     │ (25%)  │ (50%)  │ (75%)  │(100%)  │
@@ -124,18 +136,55 @@ For continuous features, the PC generates quantile boundaries that divide the fe
            Edge1    Edge2    Edge3
           (23.6)   (25.1)   (26.5)
     
-    Step 3: Linear Interpolation
-    Position Index: 2.0 → Value: 23.7
-    Position Index: 4.0 → Value: 25.0  
-    Position Index: 6.0 → Value: 26.1
+    Step 4: Create Bin Edges based on Quantization Level
+    For 2-bit (4 values): 3 edges needed
+    For 3-bit (8 values): 7 edges needed
+    For 4-bit (16 values): 15 edges needed
     
-    Final Binning Structure:
+    Final Binning Structure (2-bit example):
     ┌─────────┬─────────┬─────────┬─────────┐
     │  Bin 0  │  Bin 1  │  Bin 2  │  Bin 3  │
     │ <23.6   │23.6-25.1│25.1-26.5│ ≥26.5   │
     │ (25%)   │ (25%)   │ (25%)   │ (25%)   │
     └─────────┴─────────┴─────────┴─────────┘
 ```
+
+**Variable Quantization Strategy:**
+
+The system automatically selects the quantization level based on feature importance and distribution complexity:
+
+```
+Feature Analysis Flow (PC-Side):
+┌──────────────────────────────────────────────────────┐
+│  Raw Feature Distribution Analysis                   │
+├──────────────────────────────────────────────────────┤
+│  • Calculate statistical spread (variance)           │
+│  • Analyze class separability                        │
+│  • Estimate information gain                         │
+│  • Measure feature importance                        │
+└──────────────────────────────────────────────────────┘
+                        │
+                        ▼
+         ┌──────────────────────────────┐
+         │ Decision: Quantization Level │
+         └──────────────────────────────┘
+                        │
+         ┌──────────┬───┴───┬──────────┐
+         ▼          ▼       ▼          ▼
+    ┌────────┐ ┌────────┐┌────────┐┌────────┐
+    │ 1-bit  │ │ 2-bit  ││ 3-bit  ││ 4-bit  │
+    │Binary  │ │Default ││Medium  ││Detail  │
+    │Feature │ │Balance ││Quality ││High    │
+    └────────┘ └────────┘└────────┘└────────┘
+
+Typical Assignment Rules:
+• High variance + high importance → 3-4 bits
+• Moderate variance + medium importance → 2 bits
+• Low variance + low importance → 1 bit
+• Discrete/categorical → 1-2 bits
+```
+
+This approach ensures that model accuracy is preserved across varying feature distributions while maintaining control over memory footprint and inference speed.
 
 Equal Probability Distribution:
 ```
@@ -148,9 +197,10 @@ Equal Probability Distribution:
 
 This approach ensures that each categorical bin contains approximately the same number of training samples, optimizing information content for decision tree algorithms.
 
-### Categorizer Generation
 
-The PC processes the normalized dataset to generate categorical labels and export the categorizer configuration:
+### Quantizer Generation
+
+The PC processes the normalized dataset to generate categorical labels and export the quantizer configuration:
 
 #### Sample Categorization Logic
 
@@ -193,16 +243,19 @@ The PC processes the normalized dataset to generate categorical labels and expor
 
 #### CSV Export Format
 
-The PC generates a structured CSV format optimized for ESP32 parsing:
+The PC generates a structured CSV format optimized for ESP32 parsing. The header includes quantization information to enable variable bit-depth support:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    Categorizer CSV Structure                    │
+│                    Quantizer CSV Structure                      │
 ├─────────────────────────────────────────────────────────────────┤
-│ HEADER SECTION                                                  │
+│ HEADER SECTION (Variable Quantization Support)                  │
 │ ┌─────────────────────────────────────────────────────────────┐ │
-│ │ numFeatures,groupsPerFeature,numLabels                      │ │
-│ │ 120,4,3                                                     │ │
+│ │ numFeatures,groupsPerFeature,quantization_coefficient,      │ │
+│ │                                    numLabels                │ │
+│ │ 120,4,2,3                                                   │ │
+│ │ ↓  ↓  ↓  ↓                                                  │ │
+│ │Features | Values per Feature | Bits/Feature | Classes       │ │
 │ └─────────────────────────────────────────────────────────────┘ │
 │                                  ↓                              │
 │ LABEL MAPPING SECTION                                           │
@@ -213,12 +266,16 @@ The PC generates a structured CSV format optimized for ESP32 parsing:
 │ │ LABEL,suspicious,2                                          │ │
 │ └─────────────────────────────────────────────────────────────┘ │
 │                                  ↓                              │
-│ FEATURE DATA SECTION                                            │
+│ FEATURE DATA SECTION (Variable Bin Edges)                       │
 │ ┌─────────────────────────────────────────────────────────────┐ │
 │ │ isDiscrete,dataCount,value1,value2,value3,...               │ │
 │ │ 0,3,0.234567,0.789123,0.945678  ← Continuous: 3 edges       │ │
+│ │                                   (2-bit: 4 values)         │ │
 │ │ 1,2,0.0,1.0                     ← Discrete: 2 values        │ │
-│ │ 0,3,0.156789,0.456123,0.789456  ← Continuous: 3 edges       │ │
+│ │ 0,7,0.156789,0.256123,...       ← Continuous: 7 edges       │ │
+│ │                                   (3-bit: 8 values)         │ │
+│ │ 0,15,0.1,...,0.9                ← Continuous: 15 edges      │ │
+│ │                                   (4-bit: 16 values)        │ │
 │ │ 1,4,A,B,C,D                     ← Discrete: 4 categories    │ │
 │ └─────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
@@ -230,30 +287,41 @@ Raw Dataset → PC Processing → CSV Export → Serial Transfer → ESP32 SPIFF
 ┌────────┐    ┌────────┐    ┌────────┐    ┌────────┐    ┌────────┐
 │Sensors │    │Quantile│    │Compact │    │Serial  │    │SPIFFS  │
 │ Data   │    │Binning │    │CSV File│    │Protocol│    │Storage │
+│        │    │(1-8bit)│    │(VAR Q) │    │        │    │        │
 └────────┘    └────────┘    └────────┘    └────────┘    └────────┘
 ```
 
+**Quantization Coefficient Encoding:**
+
+The `quantization_coefficient` value (1-8) specifies how many bits are used per feature:
+- **1**: 2 possible values (binary features)
+- **2**: 4 possible values (default, balanced)
+- **3**: 8 possible values (higher precision)
+- **4**: 16 possible values (detailed quantization)
+- **8**: 256 possible values (near-continuous)
+
 This format encodes all normalization parameters needed for ESP32 runtime categorization while maintaining human readability for debugging.
+
 
 ## Stage 2: Embedded Deployment Pipeline
 
 ### Data Transfer to ESP32
 
-The categorizer CSV files are transferred from PC to ESP32 via serial protocol and stored in SPIFFS filesystem. This separation allows for:
-- **Offline Development**: Categorizer development on PC with full datasets
-- **Field Updates**: Remote categorizer updates via wireless communication  
+The quantizer CSV files are transferred from PC to ESP32 via serial protocol and stored in SPIFFS filesystem. This separation allows for:
+- **Offline Development**: Quantizer development on PC with full datasets
+- **Field Updates**: Remote quantizer updates via wireless communication  
 - **Storage Optimization**: SPIFFS compression reduces storage footprint
 
 ### ESP32 Version Architecture
 
-The ESP32 implementation transforms the PC-generated categorizer into a memory-optimized runtime system designed for real-time single-sample processing.
+The ESP32 implementation transforms the PC-generated quantizer into a memory-optimized runtime system designed for real-time single-sample processing.
 
 #### Adaptive Storage Strategy
 
-The system automatically selects storage architecture based on dataset size:
+The system automatically selects storage architecture based on dataset size and quantization requirements:
 
 ```
-                Dataset Size Analysis
+                Dataset Size and Quantization Analysis
                          │
                          ▼
                ┌─────────────────────┐
@@ -279,7 +347,7 @@ The system automatically selects storage architecture based on dataset size:
     • Fast access         • Reference counting
     • Low complexity      • 60-80% memory saved
 
-Memory Usage Comparison:
+Memory Usage Comparison (Variable Quantization - 2-bit default):
 ┌─────────────────┬─────────────┬─────────────┬──────────────┐
 │ Dataset Size    │ Simple Mode │Optimized Mode│ Memory Saved│
 ├─────────────────┼─────────────┼─────────────┼──────────────┤
@@ -288,6 +356,10 @@ Memory Usage Comparison:
 │ 144 features    │  18.6 KB    │   5.6 KB    │     70%      │
 │ 234 features    │  30.1 KB    │   8.8 KB    │     71%      │
 └─────────────────┴─────────────┴─────────────┴──────────────┘
+
+Note: Memory usage scales with quantization_coefficient. 
+Using 1-bit quantization reduces memory by 50% further;
+using 3-bit increases by 50%.
 ```
 
 ## Stage 3: ESP32 Optimizations and Improvements
@@ -405,33 +477,34 @@ Typical compression results for large datasets:
 
 #### Single-Sample Categorization
 
-Unlike PC batch processing, ESP32 handles individual sensor readings in real-time:
+Unlike PC batch processing, ESP32 handles individual sensor readings in real-time, transforming them into variable-precision quantized values:
 
 ```
-         ESP32 Real-Time Processing Pipeline
+         ESP32 Real-Time Processing Pipeline (Variable Quantization)
     
-    Sensor Input                   Categorized Output
-    ┌──────────────┐              ┌──────────────────┐
-    │ Temperature: │              │ 2-bit Values:    │
-    │   25.7°C     │              │   [2, 1, 3, 0]   │
-    │ Humidity:    │    ──────►   │                  │
-    │   68.3%      │     <1ms     │ Memory: 75% less │
-    │ Pressure:    │              │ than float array │
-    │   1013.2 hPa │              │                  │
-    │ Light: 450lx │              │                  │
-    └──────────────┘              └──────────────────┘
+    Sensor Input                   Quantized Output
+    ┌──────────────┐              ┌──────────────────────┐
+    │ Temperature: │              │ Variable-bit Values: │
+    │   25.7°C     │              │   [2, 1, 3, 0, 1]    │
+    │ Humidity:    │    ──────►   │                      │
+    │   68.3%      │     <1ms     │ Format:              │
+    │ Pressure:    │              │ • 1-bit: 50% mem     │
+    │   1013.2 hPa │              │ • 2-bit: Default     │
+    │ Light: 450lx │              │ • 3-bit: 150% mem    │
+    └──────────────┘              │ • 8-bit: 400% mem    │
+                                  └──────────────────────┘
     
-    Processing Flow:
+    Processing Flow (with variable quantization):
     ┌────────────┐    ┌────────────┐    ┌────────────┐
-    │   Input    │    │ Categorize │    │   Pack     │
+    │   Input    │    │ Quantize │    │   Pack     │
     │ Validation │ -> │    Each    │ -> │  Results   │
     │            │    │  Feature   │    │            │
     └────────────┘    └────────────┘    └────────────┘
             │                │                │
             ▼                ▼                ▼
-    Size = numFeatures? Find Quantile Bin  packed_vector<2>
-    Range checking      Compare with edges  Store 2-bit values
-    Error handling      Return bin number   Memory optimized
+    Size = numFeatures? Find Quantile Bin  packed_vector<N>
+    Range checking      Compare with edges  Store N-bit values
+    Error handling      Return bin number   (N = quantization_coeff)
     
     Input Validation Matrix:
     ┌─────────────────┬──────────────┬──────────────────┐
@@ -444,6 +517,12 @@ Unlike PC batch processing, ESP32 handles individual sensor readings in real-tim
     └─────────────────┴──────────────┴──────────────────┘
 ```
 
+**Quantization Advantages:**
+- **1-bit quantization**: Minimal memory (50% smaller than 2-bit)
+- **2-bit quantization**: Balanced default (4 values per feature)
+- **3-4 bit**: Higher precision for important features
+- **8-bit**: Near-continuous precision when needed
+
 #### Performance Characteristics
 
 **Memory Efficiency**: 60-80% reduction for large feature sets while maintaining <0.1% categorization accuracy difference from PC ground truth.
@@ -454,11 +533,11 @@ Unlike PC batch processing, ESP32 handles individual sensor readings in real-tim
 
 ### Integration with STL_MCU Ecosystem
 
-The categorizer leverages custom container classes optimized for microcontroller memory patterns:
+The quantizer leverages custom container classes optimized for microcontroller memory patterns:
 
 - **`b_vector`**: Basic vector with embedded-optimized allocation strategies
 - **`packed_vector<2>`**: Bit-packed storage for 2-bit categorical values (75% memory reduction)
-- **SPIFFS Integration**: Persistent storage with wear leveling for categorizer updates
+- **SPIFFS Integration**: Persistent storage with wear leveling for quantizer updates
 
 ## Development Lifecycle Summary
 
@@ -493,7 +572,7 @@ The categorizer leverages custom container classes optimized for microcontroller
 │            │                               │                             │          │
 │            ▼                               │                             ▼          │
 │  ┌─────────────────┐                       │                   ┌─────────────────┐  │
-│  │ Categorizer     │                       │                   │ ML Pipeline     │  │
+│  │ Quantizer       │                       │                   │ ML Pipeline     │  │
 │  │ CSV Generation  │                       │                   │ Integration     │  │
 │  │ • Header        │                       │                   │ • Random Forest │  │
 │  │ • Labels        │                       │                   │ • Classification│  │
@@ -504,17 +583,17 @@ The categorizer leverages custom container classes optimized for microcontroller
 
 Development Timeline:
 Phase 1: PC Analysis     → Dataset understanding, feature engineering    (Hours)
-Phase 2: Categorizer Gen → Quantile computation, CSV generation         (Minutes)  
+Phase 2: Quantizer Gen → Quantile computation, CSV generation         (Minutes)  
 Phase 3: Data Transfer   → Serial communication, SPIFFS storage         (Seconds)
 Phase 4: ESP32 Loading   → Memory optimization, pattern compression     (Seconds)
 Phase 5: Runtime Proc    → Real-time categorization, ML inference       (Microseconds)
 ```
 
-This lifecycle enables seamless development workflows where data scientists can develop and validate categorizers on PC platforms while maintaining mathematical consistency and optimal performance in embedded production environments.
+This lifecycle enables seamless development workflows where data scientists can develop and validate quantizers on PC platforms while maintaining mathematical consistency and optimal performance in embedded production environments.
 
 ## Future Enhancements: Advanced Quantization Optimization
 
-In future iterations of the categorizer system, quantization will be performed with greater sophistication by comparing the accuracy difference between the original dataset and the normalized dataset to find reasonable thresholds for the edges, rather than the current default approach of dividing equally into 4 intervals between min-max values.
+In future iterations of the quantizer system, quantization will be performed with greater sophistication by comparing the accuracy difference between the original dataset and the normalized dataset to find reasonable thresholds for the edges, rather than the current default approach of dividing equally into 4 intervals between min-max values.
 
 ### Planned Improvements:
 
@@ -559,11 +638,11 @@ This approach will ensure optimal balance between memory constraints and classif
 
 ---
 
-## Rf_categorizer v1.1 - CTG2 Format Implementation
+## Rf_quantizer v1.1 - CTG2 Format Implementation
 
 ### Version 1.1 Overview
 
- Rf_categorizer v1.1 introduces the **CTG2 binary format**, delivering an **83% memory reduction** (from ~12KB to ~1.35KB - on 144 features dataset) while maintaining full backward compatibility with existing code. This major optimization makes the categorizer suitable for deployment on severely memory-constrained microcontrollers.
+ Rf_quantizer v1.1 introduces the **CTG2 binary format**, delivering an **83% memory reduction** (from ~12KB to ~1.35KB - on 144 features dataset) while maintaining full backward compatibility with existing code. This major optimization makes the quantizer suitable for deployment on severely memory-constrained microcontrollers.
 
 ### 🚀 Key Improvements in v1.1
 
@@ -749,4 +828,8 @@ This approach will ensure optimal balance between memory constraints and classif
 - **Production Ready**: Robust error handling and validation built-in
 - **Cost Reduction**: Enables use of lower-cost, smaller memory MCUs
 
-The v1.1 CTG2 format represents a fundamental leap in embedded ML preprocessing efficiency, transforming the categorizer from a memory-intensive component into a lightweight, production-ready solution suitable for the most resource-constrained deployment scenarios.
+The v1.1 CTG2 format represents a fundamental leap in embedded ML preprocessing efficiency, transforming the quantizer from a memory-intensive component into a lightweight, production-ready solution suitable for the most resource-constrained deployment scenarios.
+
+## See Also
+
+For detailed information about real-time prediction performance optimizations including compiler-assisted hot path inlining and performance results, see [**inference_speedup_technical.md**](inference_speedup_technical.md).

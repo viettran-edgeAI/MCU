@@ -4,7 +4,7 @@
         "description": "Path to the normalized csv dataset."
     },
     "random_seed": {
-        "value": 42,
+        "value": 37,
         "description": "Random seed for Rf_random."
     },
     "num_trees": {
@@ -18,12 +18,12 @@
         "description": "Ratios for splitting the dataset into training, testing, and validation sets."
     },
     "use_bootstrap": {
-        "value": false,
+        "value": true,
         "options": [true, false],
         "description": "Whether to use bootstrap sampling for trees."
     },
     "criterion": {
-        "value": "entropy",
+        "value": "gini",
         "options": ["gini", "entropy"],
         "description": "Splitting criteria for decision trees."
     },

@@ -205,7 +205,7 @@ if [[ -f "$RESULT_DIR/${BASENAME}_nml.bin" ]]; then
     echo -e "  💾 Binary dataset: ${GREEN}$RESULT_DIR/${BASENAME}_nml.bin${NC}"
 fi
 if [[ -f "$RESULT_DIR/${BASENAME}_ctg.csv" ]]; then
-    echo -e "  📋 Categorizer: ${GREEN}$RESULT_DIR/${BASENAME}_ctg.csv${NC}"
+    echo -e "  📋 Quantizer: ${GREEN}$RESULT_DIR/${BASENAME}_ctg.csv${NC}"
 fi
 if [[ -f "$RESULT_DIR/${BASENAME}_dp.csv" ]]; then
     echo -e "  ⚙️  Parameters: ${GREEN}$RESULT_DIR/${BASENAME}_dp.csv${NC}"

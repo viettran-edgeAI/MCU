@@ -39,7 +39,7 @@ const char* RESP_OK = "OK";
 const char* RESP_ERROR = "ERROR";
 
 const uint16_t CHUNK_SIZE = 256;  // Must match PC side
-const uint32_t CHUNK_DELAY = 50;  // Delay between chunk processing
+const uint32_t CHUNK_DELAY = 20;  // Delay between chunk processing
 const uint32_t SERIAL_TIMEOUT_MS = 30000;  // Extended timeout for large files
 const uint32_t HEADER_WAIT_MS = 100;  // Wait time for header assembly
 

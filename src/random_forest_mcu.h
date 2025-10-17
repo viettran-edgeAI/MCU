@@ -27,10 +27,8 @@ namespace mcu{
         Rf_base base;
         Rf_config config;
         Rf_logger logger;
-        Rf_categorizer categorizer;
+        Rf_quantizer quantizer;
         Rf_tree_container forest_container;
-
-        bool print_log = false;
 
         Rf_pending_data* pending_data = nullptr;
         Rf_data* base_data_stub = nullptr;
@@ -123,16 +121,16 @@ namespace mcu{
 
             logger.init(&base);
             config.init(&base);
-            categorizer.init(&base);
+            quantizer.init(&base);
             forest_container.init(&base, &config);               
 
             // load resources
             config.loadConfig();
-            categorizer.loadCategorizer();  // Load categorizer first to get quantization_coefficient
+            quantizer.loadQuantizer();  // Load quantizer first to get quantization_coefficient
             
-            // Synchronize quantization_coefficient from categorizer to config if not already set
-            if (categorizer.loaded() && config.quantization_coefficient != categorizer.getQuantizationCoefficient()) {
-                config.quantization_coefficient = categorizer.getQuantizationCoefficient();
+            // Synchronize quantization_coefficient from quantizer to config if not already set
+            if (quantizer.loaded() && config.quantization_coefficient != quantizer.getQuantizationCoefficient()) {
+                config.quantization_coefficient = quantizer.getQuantizationCoefficient();
                 RF_DEBUG(1, "✅ Synchronized quantization_coefficient: ", config.quantization_coefficient);
             }
 
@@ -148,8 +146,6 @@ namespace mcu{
             if (threshold_cache.empty()) {
                 threshold_cache.push_back(0);
             }
-
-            if constexpr (RF_DEBUG_LEVEL > 2) print_log = true;
         }
         
         // Enhanced destructor
@@ -311,7 +307,8 @@ namespace mcu{
             RF_DEBUG_2(0, "🌲 Forest built successfully: ", forest_container.get_total_nodes(), "nodes","");
             RF_DEBUG_2(1, "Min split: ", config.min_split, "- Max depth: ", config.max_depth);
             size_t end = logger.drop_anchor();
-            logger.t_log("forest building time", start, end, "s", print_log);
+            long unsigned dur = logger.t_log("forest building time", start, end, "s");
+            RF_DEBUG_2(1, "⏱️  Forest building time: ", dur, "s","");
             return true;
         }
         
@@ -407,7 +404,8 @@ namespace mcu{
             }
             size_t end = logger.drop_anchor();
             logger.m_log("split data");
-            logger.t_log("split time", start, end, "s", print_log);
+            long unsigned dur = logger.t_log("split time", start, end, "s");
+            RF_DEBUG_2(1, "⏱️  Data splitting time: ", dur, "s","");
             return true;
         }
         
@@ -503,8 +501,9 @@ namespace mcu{
 
             logger.m_log("clones data");  
             size_t end = logger.drop_anchor();
-            logger.t_log("clones data time", start, end, "ms", print_log);
+            long unsigned dur = logger.t_log("clones data time", start, end, "ms");
             RF_DEBUG_2(1, "🎉 Created ", ctx->dataList.size(), "datasets for trees","");
+            RF_DEBUG_2(1, "⏱️  Created datasets time: ", dur, "ms","");
         }  
         
         typedef struct SplitInfo {
@@ -1229,7 +1228,9 @@ namespace mcu{
             RF_DEBUG(0, "Best score: ", best_score);
 
             size_t end = logger.drop_anchor();
-            logger.t_log("total training time", start, end, "s", print_log);
+            long unsigned dur = logger.t_log("total training time", start, end, "s");
+            RF_DEBUG_2(0, "⏱️ Total training time: ", dur / 1000.0f, " seconds","");
+
         #ifdef DEV_STAGE
             model_report();
         #endif
@@ -1259,7 +1260,7 @@ namespace mcu{
             }
 
             // Optimized: write directly to pre-allocated buffer
-            categorizer.categorizeFeatures(features, categorization_buffer);
+            quantizer.quantizeFeatures(features, categorization_buffer);
             return predict(categorization_buffer, labelBuffer, bufferSize);
         }
 
@@ -1284,7 +1285,7 @@ namespace mcu{
 
             const char* labelPtr = nullptr;
             uint16_t labelLen = 0;
-            if (__builtin_expect(!categorizer.getOriginalLabelView(i_label, &labelPtr, &labelLen), 0)) {
+            if (__builtin_expect(!quantizer.getOriginalLabelView(i_label, &labelPtr, &labelLen), 0)) {
                 labelBuffer[0] = '\0';
                 return false;
             }
@@ -1307,7 +1308,7 @@ namespace mcu{
                 RF_DEBUG(0, "❌ Feature length mismatch!","");
                 return 255;
             }
-            categorizer.categorizeFeatures(features, categorization_buffer);
+            quantizer.quantizeFeatures(features, categorization_buffer);
             return forest_container.predict_features(categorization_buffer, threshold_cache);
         }
 
@@ -1343,7 +1344,7 @@ namespace mcu{
             if (!label) {
                 return;
             }
-            uint8_t i_label = categorizer.getNormalizedLabel(label);
+            uint8_t i_label = quantizer.getNormalizedLabel(label);
             Rf_pending_data* pd = config.enable_retrain ? ensure_pending_data() : pending_data;
             if(!pd){
                 return;
@@ -1636,7 +1637,7 @@ namespace mcu{
         }
 
         bool get_label_view(uint8_t normalizedLabel, const char** outLabel, uint16_t* outLength = nullptr) const {
-            return categorizer.getOriginalLabelView(normalizedLabel, outLabel, outLength);
+            return quantizer.getOriginalLabelView(normalizedLabel, outLabel, outLength);
         }
 
         size_t lowest_ram() const {
@@ -1748,7 +1749,8 @@ namespace mcu{
             forest_container.releaseForest();
             return result;
             size_t end = logger.drop_anchor();
-            logger.t_log("data prediction time", start, end, "ms", print_log);
+            long unsigned dur = logger.t_log("data prediction time", start, end, "ms");
+            RF_DEBUG_2(1, "⏱️ Data prediction time: ", dur / 1000.0f, " seconds","");
         }
 
         // print metrix score on test set
@@ -1954,11 +1956,11 @@ namespace mcu{
             forest_container.loadForest(); // Ensure all trees are loaded before prediction
             ctx->test_data.loadData(); // Load test set data if not already loaded
 
-            RF_DEBUG(0, "SampleID, Predicted, Actual");
+            RF_DEBUG(0, "Predicted, Actual");
             for (uint16_t i = 0; i < ctx->test_data.size(); i++) {
                 const Rf_sample& sample = ctx->test_data[i];
                 uint8_t pred = forest_container.predict_features(sample.features, threshold_cache);
-                Serial.printf("%d, %d, %d\n", i, pred, sample.label);
+                RF_DEBUG_2(0, String(pred).c_str(), ", ", String(sample.label).c_str(), "");
             }
             ctx->test_data.releaseData(true); // Release test set data after use
             forest_container.releaseForest(); // Release all trees after prediction

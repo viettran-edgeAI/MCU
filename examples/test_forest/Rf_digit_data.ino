@@ -1,3 +1,19 @@
+/*
+ * Digit Recognition Example
+ * 
+ * This example demonstrates handwritten digit classification (0-9) using a Random Forest
+ * model trained on extracted features from digit images.
+ * 
+ * Features:
+ * - Trains and evaluates Random Forest model for multi-class classification
+ * - Performs predictions on 10 sample feature vectors (144 features each)
+ * - Classifies digits from 0 to 9
+ * - Calculates accuracy and timing metrics
+ * 
+ * Hardware: ESP32 or compatible microcontroller with LittleFS support
+ * Dataset: Handwritten digits with normalized pixel/feature values
+ */
+
 #define DEV_STAGE    
 #define RF_DEBUG_LEVEL 2
 
@@ -9,27 +25,52 @@ void setup() {
     Serial.begin(115200);  
     while (!Serial);       // <-- Waits for Serial monitor to connect (important for USB CDC)
 
-    delay(2000);
+    Serial.println("\n╔════════════════════════════════════════════════════╗");
+    Serial.println("║  Digit Recognition - Random Forest Example        ║");
+    Serial.println("╚════════════════════════════════════════════════════╝\n");
+    
+    delay(1000);
 
+    // Initialize filesystem
+    Serial.print("Initializing LittleFS... ");
     if (!LittleFS.begin(true)) {
-        Serial.println("LittleFS mount failed");
+        Serial.println("❌ FAILED");
         return;
     }
+    Serial.println("✅ OK");
+    
     manage_files();
-    delay(1000);
+    delay(500);
+    
     long unsigned start_forest = GET_CURRENT_TIME_IN_MILLISECONDS;
     
-    const char* model_name = "digit_data"; // hard dataset : use_Gini = true/false | boostrap = true; 89/92% - sklearn : 90% (6,5);
-    RandomForest forest = RandomForest(model_name); // reproducible by default (can omit random_seed)
+    // Initialize Random Forest model
+    Serial.print("Setting up model 'digit_data'... ");
+    const char* model_name = "digit_data";
+    RandomForest forest = RandomForest(model_name);
+    
+    // Optional: Configure forest parameters
     // forest.set_num_trees(20);
     // forest.set_random_seed(42);
-    // forest.set_training_score(Rf_training_score::OOB_SCORE); // OOB_SCORE, VALID_SCORE, K_FOLD_SCORE
+    // forest.set_training_score(Rf_training_score::OOB_SCORE);
 
-    forest.build_model();
+    // Build and train the model
+    Serial.print("Building model... ");
+    if (!forest.build_model()) {
+        Serial.println("❌ FAILED");
+        return;
+    }
 
-    forest.training(1);
+    forest.training(6); // limit to 6 epochs
 
-    forest.loadForest();
+    // Load trained forest from filesystem
+    Serial.print("Loading forest... ");
+    if (!forest.loadForest()) {
+        Serial.println("❌ FAILED");
+        return;
+    }
+    
+    // Optional: Enable dataset extension for online learning
     // forest.enable_extend_base_data();
 
     // check actual prediction time 
@@ -58,32 +99,68 @@ void setup() {
 
     vector<uint8_t> true_labels = MAKE_UINT8_LIST(4,4,7,1,3,1,6,5,8,0);
 
-    char result[32];
-    unsigned long start, end, total = 0;
+    // Perform predictions on all samples
+    unsigned long total_time = 0;
+    uint8_t correct_predictions = 0;
+    
+    Serial.println("\n=== Prediction Results ===");
+    Serial.println("Sample | Predicted | Actual | Time (μs) | Match");
+    Serial.println("-------|-----------|--------|-----------|------");
+    
     for (int i = 0; i < samples.size(); i++){
-        start = micros();
-        forest.predict(samples[i], result, sizeof(result));
-        end = micros();
-        total += end - start;
+        RandomForest::rf_predict_result_t result;
+        forest.predict(samples[i], result);
+        
+        if (!result.success) {
+            Serial.printf("  %2d   | FAILED    |        |           | ✗\n", i+1);
+            continue;
+        }
+        
+        total_time += result.prediction_time;
         forest.add_actual_label(true_labels[i]);
-        Serial.printf("Sample %d - Predicted: %s - Actual: %d\n", i+1, result, true_labels[i]);
-    }    
-    Serial.printf("Average prediction time: %lu us\n", total / samples.size());
-    forest.releaseForest();
+        
+        bool is_correct = (atoi(result.label) == true_labels[i]);
+        const char* match = is_correct ? "✓" : "✗";
+        if (is_correct) correct_predictions++;
+        
+        Serial.printf("  %2d   | %-9s | %6d | %9lu | %s\n", 
+                     i+1, result.label, true_labels[i], 
+                     result.prediction_time, match);
+    }
+    
+    Serial.println("-----------------------------------------------");
+    Serial.printf("Total samples: %d\n", samples.size());
+    Serial.printf("Correct predictions: %d/%d (%.1f%%)\n", 
+                  correct_predictions, samples.size(), 
+                  (correct_predictions * 100.0f) / samples.size());
+    Serial.printf("Average prediction time: %lu μs\n", total_time / samples.size());
+    Serial.println();
+    
+    // Clean up and compute statistics
+    Serial.print("Releasing forest from memory... ");
+    if (forest.releaseForest()) {
+        Serial.println("✅ OK");
+    } else {
+        Serial.println("⚠️  WARNING: Release failed");
+    }
+    
+    // Optional: Write pending data to dataset for retraining
     // forest.flush_pending_data();
 
+    // Display inference statistics
+    Serial.println("\n=== Model Performance Metrics ===");
     float p_score = forest.get_practical_inference_score();
-    Serial.printf("Practical Inference Score : %.3f\n", p_score);
+    Serial.printf("Practical Inference Score: %.3f (%.1f%%)\n", p_score, p_score * 100.0f);
+    
     int total_logged = forest.get_total_logged_inference();
-    Serial.printf("Total Logged Inference with actual label feedback : %d\n", total_logged);
-
-    // // forest.visual_result(forest.test_data); // Optional visualization
-
+    Serial.printf("Total Logged Inferences: %d\n", total_logged);
 
     long unsigned end_forest = GET_CURRENT_TIME_IN_MILLISECONDS;
-    Serial.printf("\nTotal time: %lu ms\n", end_forest - start_forest);
+    Serial.println("\n=== Execution Summary ===");
+    Serial.printf("Total execution time: %lu ms\n", end_forest - start_forest);
+    Serial.println("\n✅ Example completed successfully!\n");
 }
 
 void loop() {
-    manage_files();
+    // Empty loop - all processing done in setup()
 }

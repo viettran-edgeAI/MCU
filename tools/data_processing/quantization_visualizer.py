@@ -546,8 +546,8 @@ def main():
     # Define viewing angles for better perspective (reduced to 3 views)
     view_angles = [
         (-150, 110, "Standard View"),
-        (20, 45, "Top-Front View"),
-        (-90, 0, "Side View")
+        (20, 45, "Side View"),
+        (-90, 0, "Top-front View")
     ]
     
     # Row 1: Original data (3 different views)

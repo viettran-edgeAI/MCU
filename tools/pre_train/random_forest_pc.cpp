@@ -31,6 +31,7 @@ std::string extract_model_name(const std::string& data_path) {
     return (first_underscore != std::string::npos) ? filename.substr(0, first_underscore) : filename;
 }
 
+static constexpr int RF_MAX_NODES = 1024; // Maximum nodes per tree
 
 
 class RandomForest{
@@ -56,14 +57,25 @@ private:
 
 public:
 
-    // RandomForest(){};
     RandomForest() : config(config_path) {
         rng = Rf_random(config.random_seed, true); // Initialize RNG with loaded seed
         model_name = extract_model_name(config.data_path);
         std::cout << "🌲 Model name: " << model_name << std::endl;
+
+        std::string metadataPath = buildMetadataPath();
+        uint8_t metadataBits = loadQuantizationFromMetadata(metadataPath);
+        if (metadataBits != 0) {
+            config.quantization_coefficient = metadataBits;
+        }
+        config.quantization_coefficient = QuantizationHelper::sanitizeBits(config.quantization_coefficient);
+
         generateFilePaths();
         createDataBackup(config.data_path, temp_base_data);     // create a backup to avoid damaging the original data
         config.init(temp_base_data); // Load configuration from model_config.json first
+        base_data.setFeatureBits(config.quantization_coefficient);
+        train_data.setFeatureBits(config.quantization_coefficient);
+        test_data.setFeatureBits(config.quantization_coefficient);
+        validation_data.setFeatureBits(config.quantization_coefficient);
         base_data.loadCSVData(temp_base_data, config.num_features);
         
         // OOB.reserve(numTree);
@@ -94,7 +106,7 @@ public:
         pre.train();
         float pre_ac = pre.get_accuracy();
         // Fix: get_accuracy() already returns percentage (0-100), don't multiply by 100 again
-        pre.accuracy = static_cast<uint16_t>(std::min(100.0f, std::max(0.0f, pre_ac)));
+    pre.accuracy = static_cast<uint8_t>(std::min(100.0f, std::max(0.0f, pre_ac)));
         std::cout << "node predictor accuracy: " << pre_ac << std::endl;
         pre.save_model(node_predictor_path);
     }
@@ -191,6 +203,81 @@ public:
         float computeObjectiveScore(const MetricsSummary& metrics, Rf_metric_scores flags);
         ThresholdSearchResult findBestThreshold(const std::vector<EvaluationSample>& samples, Rf_metric_scores flags);
 
+        std::string buildMetadataPath() const {
+            if (config.data_path.empty()) {
+                return "";
+            }
+
+            size_t lastSlash = config.data_path.find_last_of("/\\");
+            std::string directory = (lastSlash == std::string::npos)
+                                        ? ""
+                                        : config.data_path.substr(0, lastSlash + 1);
+            return directory + model_name + "_dp.csv";
+        }
+
+        uint8_t loadQuantizationFromMetadata(const std::string& metadataPath) const {
+            if (metadataPath.empty()) {
+                std::cout << "⚠️  Quantization metadata path is empty; using configuration value "
+                          << static_cast<int>(config.quantization_coefficient) << std::endl;
+                return 0;
+            }
+
+            std::ifstream metaFile(metadataPath);
+            if (!metaFile.is_open()) {
+                std::cout << "⚠️  Metadata file not found: " << metadataPath
+                          << ". Using configuration quantization bits ("
+                          << static_cast<int>(config.quantization_coefficient) << ")." << std::endl;
+                return 0;
+            }
+
+            auto trim = [](std::string& s) {
+                size_t start = s.find_first_not_of(" \t\r\n\"");
+                if (start == std::string::npos) {
+                    s.clear();
+                    return;
+                }
+                size_t end = s.find_last_not_of(" \t\r\n\"");
+                s = s.substr(start, end - start + 1);
+            };
+
+            std::string line;
+            uint8_t detectedBits = 0;
+            while (std::getline(metaFile, line)) {
+                if (line.empty()) continue;
+
+                std::stringstream ss(line);
+                std::string key;
+                std::string value;
+                if (!std::getline(ss, key, ',')) continue;
+                if (!std::getline(ss, value)) continue;
+
+                trim(key);
+                trim(value);
+
+                if (key == "quantization_coefficient") {
+                    try {
+                        int bits = std::stoi(value);
+                        detectedBits = QuantizationHelper::sanitizeBits(bits);
+                    } catch (...) {
+                        std::cout << "⚠️  Failed to parse quantization bits from metadata value '"
+                                  << value << "'. Using configuration setting." << std::endl;
+                    }
+                    break;
+                }
+            }
+
+            if (detectedBits == 0) {
+                std::cout << "⚠️  quantization_coefficient not found in metadata file "
+                          << metadataPath << ". Using configuration value ("
+                          << static_cast<int>(config.quantization_coefficient) << ")." << std::endl;
+            } else {
+                std::cout << "📦 Loaded quantization bits from metadata (" << metadataPath
+                          << "): " << static_cast<int>(detectedBits) << std::endl;
+            }
+
+            return detectedBits;
+        }
+
     // Create a backup copy of the original CSV data to avoid damaging the original
     void createDataBackup(const std::string& source_path, const std::string& backup_filename) {
         std::ifstream source(source_path, std::ios::binary);
@@ -254,8 +341,6 @@ public:
                 }
             }
         }
-        
-
 
         for (uint16_t id  = 0; id < maxID; id++) {
             if(train_sampleIDs.contains(id)) {
@@ -347,11 +432,14 @@ public:
     }
 
 
-    typedef struct SplitInfo {
+    struct SplitInfo {
         float gain = -1.0f;
         uint16_t featureID = 0;
-        uint16_t threshold = 0;
-    } SplitInfo;
+        uint8_t threshold_slot = 0;
+        uint16_t threshold_value = 0;
+        uint32_t leftCount = 0;
+        uint32_t rightCount = 0;
+    };
 
     struct NodeStats {
         unordered_set<uint16_t> labels;
@@ -394,7 +482,7 @@ public:
         if (totalSamples < 2) return bestSplit;
 
         // Base label counts
-        vector<uint16_t> baseLabelCounts(numLabels, 0);
+        std::vector<uint16_t> baseLabelCounts(numLabels, 0);
         for (uint16_t k = begin; k < end; ++k) {
             uint16_t sid = indices[k];
             if (sid < train_data.allSamples.size()) {
@@ -403,7 +491,7 @@ public:
             }
         }
 
-        float baseImpurity;
+        float baseImpurity = 0.0f;
         if (use_Gini) {
             baseImpurity = 1.0f;
             for (uint16_t i = 0; i < numLabels; i++) {
@@ -413,7 +501,6 @@ public:
                 }
             }
         } else {
-            baseImpurity = 0.0f;
             for (uint16_t i = 0; i < numLabels; i++) {
                 if (baseLabelCounts[i] > 0) {
                     float p = static_cast<float>(baseLabelCounts[i]) / totalSamples;
@@ -422,61 +509,165 @@ public:
             }
         }
 
-        for (const auto& featureID : selectedFeatures) {
-            vector<uint16_t> counts(4 * numLabels, 0);
-            uint32_t value_totals[4] = {0};
+        uint8_t quantBits = config.quantization_coefficient;
+        std::vector<uint16_t> thresholdCandidates;
+        QuantizationHelper::buildThresholdCandidates(quantBits, thresholdCandidates);
+        if (thresholdCandidates.empty()) {
+            return bestSplit;
+        }
 
-            for (uint16_t k = begin; k < end; ++k) {
-                uint16_t sid = indices[k];
-                if (sid < train_data.allSamples.size()) {
-                    uint16_t lbl = train_data.allSamples[sid].label;
-                    if (lbl < numLabels) {
-                        uint16_t fv = train_data.allSamples[sid].features[featureID];
-                        if (fv < 4) {
-                            counts[fv * numLabels + lbl]++;
-                            value_totals[fv]++;
-                        }
+        b_vector<uint16_t> leftCounts;
+        b_vector<uint16_t> rightCounts;
+        leftCounts.resize(numLabels, 0);
+        rightCounts.resize(numLabels, 0);
+
+        // Fast path for 1-bit quantization (only 2 values: 0 and 1)
+        if (quantBits == 1) {
+            for (const auto& featureID : selectedFeatures) {
+                // Reset counts
+                for (uint16_t i = 0; i < numLabels; ++i) {
+                    leftCounts[i] = 0;
+                    rightCounts[i] = 0;
+                }
+
+                uint32_t leftTotal = 0;
+                uint32_t rightTotal = 0;
+
+                // Collect counts for value 0 (left) and value 1 (right)
+                for (uint16_t k = begin; k < end; ++k) {
+                    uint16_t sid = indices[k];
+                    if (sid >= train_data.allSamples.size()) continue;
+                    const auto& sample = train_data.allSamples[sid];
+                    uint16_t lbl = sample.label;
+                    if (lbl >= numLabels) continue;
+                    uint16_t fv = sample.features[featureID];
+                    
+                    if (fv == 0) {
+                        leftCounts[lbl]++;
+                        leftTotal++;
+                    } else {
+                        rightCounts[lbl]++;
+                        rightTotal++;
                     }
                 }
-            }
 
-            for (uint16_t threshold = 0; threshold < 3; threshold++) {
-                uint32_t leftTotal = 0, rightTotal = 0;
-                vector<uint16_t> leftCounts(numLabels, 0), rightCounts(numLabels, 0);
-                for (uint16_t value = 0; value < 4; value++) {
-                    for (uint16_t label = 0; label < numLabels; label++) {
-                        uint16_t count = counts[value * numLabels + label];
-                        if (value <= threshold) {
-                            leftCounts[label] += count;
-                            leftTotal += count;
-                        } else {
-                            rightCounts[label] += count;
-                            rightTotal += count;
-                        }
-                    }
-                }
                 if (leftTotal == 0 || rightTotal == 0) continue;
 
-                float leftImpurity = 0.0f, rightImpurity = 0.0f;
+                // Calculate impurity and gain for the single threshold (0)
+                float leftImpurity = 0.0f;
+                float rightImpurity = 0.0f;
                 if (use_Gini) {
-                    leftImpurity = 1.0f; rightImpurity = 1.0f;
+                    leftImpurity = 1.0f;
+                    rightImpurity = 1.0f;
                     for (uint16_t i = 0; i < numLabels; i++) {
-                        if (leftCounts[i] > 0) { float p = static_cast<float>(leftCounts[i]) / leftTotal; leftImpurity -= p * p; }
-                        if (rightCounts[i] > 0) { float p = static_cast<float>(rightCounts[i]) / rightTotal; rightImpurity -= p * p; }
+                        if (leftCounts[i] > 0) {
+                            float p = static_cast<float>(leftCounts[i]) / leftTotal;
+                            leftImpurity -= p * p;
+                        }
+                        if (rightCounts[i] > 0) {
+                            float p = static_cast<float>(rightCounts[i]) / rightTotal;
+                            rightImpurity -= p * p;
+                        }
                     }
                 } else {
                     for (uint16_t i = 0; i < numLabels; i++) {
-                        if (leftCounts[i] > 0) { float p = static_cast<float>(leftCounts[i]) / leftTotal; leftImpurity -= p * log2f(p); }
-                        if (rightCounts[i] > 0) { float p = static_cast<float>(rightCounts[i]) / rightTotal; rightImpurity -= p * log2f(p); }
+                        if (leftCounts[i] > 0) {
+                            float p = static_cast<float>(leftCounts[i]) / leftTotal;
+                            leftImpurity -= p * log2f(p);
+                        }
+                        if (rightCounts[i] > 0) {
+                            float p = static_cast<float>(rightCounts[i]) / rightTotal;
+                            rightImpurity -= p * log2f(p);
+                        }
                     }
                 }
-                float weightedImpurity = (static_cast<float>(leftTotal) / totalSamples) * leftImpurity + 
-                                          (static_cast<float>(rightTotal) / totalSamples) * rightImpurity;
+
+                float weightedImpurity = (static_cast<float>(leftTotal) / totalSamples) * leftImpurity +
+                                         (static_cast<float>(rightTotal) / totalSamples) * rightImpurity;
                 float gain = baseImpurity - weightedImpurity;
+
                 if (gain > bestSplit.gain) {
                     bestSplit.gain = gain;
                     bestSplit.featureID = featureID;
-                    bestSplit.threshold = threshold;
+                    bestSplit.threshold_slot = 0;  // Only one threshold slot for 1-bit
+                    bestSplit.threshold_value = 0;  // Threshold value: 0 (0 goes left, 1 goes right)
+                    bestSplit.leftCount = leftTotal;
+                    bestSplit.rightCount = rightTotal;
+                }
+            }
+        } else {
+            // General case: multi-bit quantization with multiple threshold candidates
+            for (const auto& featureID : selectedFeatures) {
+                for (size_t slot = 0; slot < thresholdCandidates.size(); ++slot) {
+                    uint16_t thresholdValue = thresholdCandidates[slot];
+
+                    uint32_t leftTotal = 0;
+                    uint32_t rightTotal = 0;
+                    for (uint16_t i = 0; i < numLabels; ++i) {
+                        leftCounts[i] = 0;
+                        rightCounts[i] = 0;
+                    }
+
+                    for (uint16_t k = begin; k < end; ++k) {
+                        uint16_t sid = indices[k];
+                        if (sid >= train_data.allSamples.size()) continue;
+                        const auto& sample = train_data.allSamples[sid];
+                        uint16_t lbl = sample.label;
+                        if (lbl >= numLabels) continue;
+                        uint16_t fv = sample.features[featureID];
+                        if (fv <= thresholdValue) {
+                            leftCounts[lbl]++;
+                            leftTotal++;
+                        } else {
+                            rightCounts[lbl]++;
+                            rightTotal++;
+                        }
+                    }
+
+                    if (leftTotal == 0 || rightTotal == 0) {
+                        continue;
+                    }
+
+                    float leftImpurity = 0.0f;
+                    float rightImpurity = 0.0f;
+                    if (use_Gini) {
+                        leftImpurity = 1.0f;
+                        rightImpurity = 1.0f;
+                        for (uint16_t i = 0; i < numLabels; i++) {
+                            if (leftCounts[i] > 0) {
+                                float p = static_cast<float>(leftCounts[i]) / leftTotal;
+                                leftImpurity -= p * p;
+                            }
+                            if (rightCounts[i] > 0) {
+                                float p = static_cast<float>(rightCounts[i]) / rightTotal;
+                                rightImpurity -= p * p;
+                            }
+                        }
+                    } else {
+                        for (uint16_t i = 0; i < numLabels; i++) {
+                            if (leftCounts[i] > 0) {
+                                float p = static_cast<float>(leftCounts[i]) / leftTotal;
+                                leftImpurity -= p * log2f(p);
+                            }
+                            if (rightCounts[i] > 0) {
+                                float p = static_cast<float>(rightCounts[i]) / rightTotal;
+                                rightImpurity -= p * log2f(p);
+                            }
+                        }
+                    }
+
+                    float weightedImpurity = (static_cast<float>(leftTotal) / totalSamples) * leftImpurity +
+                                             (static_cast<float>(rightTotal) / totalSamples) * rightImpurity;
+                    float gain = baseImpurity - weightedImpurity;
+
+                    if (gain > bestSplit.gain) {
+                        bestSplit.gain = gain;
+                        bestSplit.featureID = featureID;
+                        bestSplit.threshold_slot = static_cast<uint8_t>(slot);
+                        bestSplit.threshold_value = thresholdValue;
+                        bestSplit.leftCount = leftTotal;
+                        bestSplit.rightCount = rightTotal;
+                    }
                 }
             }
         }
@@ -519,6 +710,15 @@ public:
             // Analyze node samples over the slice
             NodeStats stats(config.num_labels);
             stats.analyzeSamplesRange(indices, current.begin, current.end, config.num_labels, train_data);
+
+            if(current.nodeIndex >= RF_MAX_NODES){
+                // force leaf if exceeding max nodes
+                uint8_t leafLabel = stats.majorityLabel;
+                tree.nodes[current.nodeIndex].setIsLeaf(true);
+                tree.nodes[current.nodeIndex].setLabel(leafLabel);
+                tree.nodes[current.nodeIndex].setFeatureID(0);
+                continue;
+            }
             bool shouldBeLeaf = false;
             uint16_t leafLabel = stats.majorityLabel;
             
@@ -552,7 +752,7 @@ public:
             SplitInfo bestSplit = findBestSplitRange(indices, current.begin, current.end,
                                                      selectedFeatures, config.use_gini, config.num_labels);
             float gain_threshold = config.use_gini ? config.impurity_threshold/2 : config.impurity_threshold;
-            
+
             if (bestSplit.gain <= gain_threshold) {
                 tree.nodes[current.nodeIndex].setIsLeaf(true);
                 tree.nodes[current.nodeIndex].setLabel(leafLabel);
@@ -560,9 +760,16 @@ public:
                 continue;
             }
             
+            if (tree.nodes.size() + 2 > 1023) {
+                tree.nodes[current.nodeIndex].setIsLeaf(true);
+                tree.nodes[current.nodeIndex].setLabel(leafLabel);
+                tree.nodes[current.nodeIndex].setFeatureID(0);
+                continue;
+            }
+
             // Configure as internal node
             tree.nodes[current.nodeIndex].setFeatureID(bestSplit.featureID);
-            tree.nodes[current.nodeIndex].setThreshold(bestSplit.threshold);
+            tree.nodes[current.nodeIndex].setThresholdSlot(bestSplit.threshold_slot);
             tree.nodes[current.nodeIndex].setIsLeaf(false);
             
             // In-place partition of indices[current.begin, current.end) using the best feature
@@ -570,7 +777,7 @@ public:
             for (uint16_t k = current.begin; k < current.end; ++k) {
                 uint16_t sid = indices[k];
                 if (sid < train_data.allSamples.size() &&
-                    train_data.allSamples[sid].features[bestSplit.featureID] <= bestSplit.threshold) {
+                    train_data.allSamples[sid].features[bestSplit.featureID] <= bestSplit.threshold_value) {
                     if (k != iLeft) {
                         uint16_t tmp = indices[iLeft];
                         indices[iLeft] = indices[k];
@@ -638,7 +845,7 @@ public:
             std::cerr << "❌ Failed to create node_predictor log file\n";
             return;
         }
-        file << "min_split,max_depth,total_nodes,best_threshold\n";
+        file << "min_split,max_depth,total_nodes\n";
         file.close();
 
         bool use_cv = (config.training_score == "k_fold_score");
@@ -781,8 +988,7 @@ public:
                     if (log_file.is_open()) {
                         log_file << static_cast<int>(config.min_split) << ","
                                  << static_cast<int>(config.max_depth) << ","
-                                 << static_cast<int>(std::round(avg_nodes)) << ","
-                                 << std::fixed << std::setprecision(3) << aggregated_result.threshold << "\n";
+                                 << static_cast<int>(std::round(avg_nodes)) << "\n";
                     }
                 }
 
@@ -1098,8 +1304,9 @@ public:
     }
 
     // overload: predict for new sample - enhanced with SPIFFS loading
-    uint16_t predict(packed_vector<2>& features) {
+    uint16_t predict(packed_vector<8>& features) {
         Rf_sample sample;
+        features.set_bits_per_value(config.quantization_coefficient);
         sample.features = features;
         return predClassSample(sample);
     }
@@ -1117,7 +1324,7 @@ RandomForest::ConsensusResult RandomForest::computeConsensus(const Rf_sample& sa
         if (tree_index >= root.size()) {
             return;
         }
-        uint16_t predict = root[tree_index].predictSample(sample);
+    uint16_t predict = root[tree_index].predictSample(sample, config.quantization_coefficient);
         if (predict < config.num_labels) {
             vote_counts[predict]++;
             result.total_votes++;
@@ -1498,10 +1705,12 @@ RandomForest::ThresholdSearchResult RandomForest::findBestThreshold(const std::v
 }
 
 
-int main() {
+int main(int argc, char** argv) {
+    (void)argc;
+    (void)argv;
     auto start = std::chrono::high_resolution_clock::now();
     std::cout << "Random Forest PC Training\n";
-    RandomForest forest = RandomForest(); // Use random_seed from config file
+    RandomForest forest;
     // Build initial forest
     forest.MakeForest();
     // forest.printForestStatistics();

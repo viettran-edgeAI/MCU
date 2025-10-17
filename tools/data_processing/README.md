@@ -1,33 +1,35 @@
 # ESP32 Dataset Processing, Visualization, and Transfer (STL_MCU)
 
-Process CSV datasets → quantize to 2-bit categories → transfer to ESP32.
+Process CSV datasets → quantize with variable 1-8 bit coefficients → transfer to ESP32.
 
-Complete pipeline for STL_MCU Random Forest: converts CSV data to ESP32-ready format with automatic header detection, 2-bit quantization, and binary export.
+Complete pipeline for STL_MCU Random Forest: converts CSV data to ESP32-ready format with automatic header detection, configurable quantization (1-8 bits per feature), and binary export.
 
 ## 🎯 What you get
 
-- 2-bit dataset quantization 
+- Variable quantization (1-8 bits per feature, configurable via command-line)
 - Visualization effects of quantization
-- transfer to ESP32
+- Transfer to ESP32
 
 ## 🧭 Pipeline at a glance
 
 ```mermaid
 flowchart LR
-  A["Raw CSV<br/>[model_name.csv]"] --> B["Quantization<br/>2-bit"]
-  B --> C["Generated Files<br/>• model_name_nml.bin <br/>• model_name_nml.csv <br/>• momdel_name_dp.csv <br/>• model_name_ctg.csv"]
+  A["Raw CSV<br/>[model_name.csv]"] --> B["Quantization<br/>1-8 bits"]
+  B --> C["Generated Files<br/>• model_name_nml.bin <br/>• model_name_nml.csv <br/>• model_name_dp.csv <br/>• model_name_ctg.csv"]
   B --> D["Visualization<br/>PCA 3D views"]
   C --> E["Transfer to ESP32<br/> (unified /individual /manual)"]
 ```
 ```
 📊 Raw Dataset (CSV)
     ↓
-� Internal pre-processing
+🔍 Internal pre-processing
     ├── Headers detected → Skip first line
     ├── No headers → Process all lines
     └── exceeds limits → truncate  
     ↓
-�🔄 Quantization Process (features categorizing, labels mapping)
+🔄 Quantization Process (1-8 bits configurable)
+    ├── Feature categorizing (variable bits per feature)
+    └── Label mapping
     ↓
 📁 Generated Files:
    ├── model_name_nml.bin 
@@ -59,8 +61,8 @@ flowchart LR
 - `{model_name}_ctg.csv` - File containing categorizer
 
 **Technical Details:**
-For details on how quantization and categorizer work, please refer to:
-`/home/viettran/Arduino/libraries/STL_MCU/docs/Rf_components/Rf_categorizer_Technical_Overview.md`
+For details on how variable quantization (1-8 bits) and categorizer work, please refer to:
+`/home/viettran/Arduino/libraries/STL_MCU/docs/Quantization/Rf_categorizer_Technical_Overview.md`
 
 ⚠️ **Dataset Limits:**
 - **Max Labels**: 255 unique classes
@@ -90,33 +92,47 @@ For details on how quantization and categorizer work, please refer to:
 ### Basic Processing
 
 ```bash
-# Process a dataset (automatic header detection, default 1023 max features, visualization enabled by default)
+# Process with default settings (2-bit quantization, auto-detect header, visualization enabled)
 ./quantize_dataset.sh -p data/iris_data.csv
 
-# Skip visualization
+# Use 3-bit quantization instead of default 2-bit
+./quantize_dataset.sh -p data/iris_data.csv -q 3
+
+# Use 1-bit quantization (binary features)
+./quantize_dataset.sh -p data/iris_data.csv -q 1
+
+# Use 8-bit quantization (more granular, uses more memory)
+./quantize_dataset.sh -p data/iris_data.csv -q 8
+
+# Skip visualization for faster processing
 ./quantize_dataset.sh -p data/iris_data.csv -nv
 
 # Limit to 512 features maximum
 ./quantize_dataset.sh -p data/iris_data.csv -f 512
 
-# Custom feature limit with explicit header handling
-./quantize_dataset.sh -p data/iris_data.csv -f 256 --header yes
+# Combine options: 4-bit quantization + 256 features + no visualization
+./quantize_dataset.sh -p data/iris_data.csv -q 4 -f 256 -nv
 ```
 
-### With/Without Visualization
+### With/Without Visualization and Quantization Options
 
 ```bash
-# Process with visualization (default behavior)
+# Process with visualization (default 2-bit quantization)
 ./quantize_dataset.sh -p data/iris_data.csv
 
-# Explicitly enable visualization
-./quantize_dataset.sh -p data/iris_data.csv -v
+# Use 1-bit (binary) quantization with visualization
+./quantize_dataset.sh -p data/iris_data.csv -q 1 -v
 
-# Skip visualization for faster processing
-./quantize_dataset.sh -p data/iris_data.csv -nv
+# Use 3-bit quantization, skip visualization for faster processing
+./quantize_dataset.sh -p data/iris_data.csv -q 3 -nv
 
-# With custom feature limit and no visualization
-./quantize_dataset.sh -p data/iris_data.csv -f 512 -nv
+# Compare different quantization levels (run separately):
+./quantize_dataset.sh -p data/iris_data.csv -q 2    # Default: 4 categories
+./quantize_dataset.sh -p data/iris_data.csv -q 3    # 8 categories (more detail)
+./quantize_dataset.sh -p data/iris_data.csv -q 4    # 16 categories (higher precision)
+
+# With custom feature limit and quantization, no visualization
+./quantize_dataset.sh -p data/iris_data.csv -q 2 -f 512 -nv
 ```
 
 Generated files will be in `data/result/` directory, ready for ESP32 transfer.
@@ -131,6 +147,7 @@ Generated files will be in `data/result/` directory, ready for ESP32 transfer.
 - `-p, --path <file>`: input CSV (required)
 - `-he, --header <yes/no>`: Skip header if 'yes', process all lines if 'no' (auto-detect if not specified)
 - `-f, --features <number>`: Maximum number of features (default: 1023, range: 1-65535)
+- `-q, --bits <1-8>`: Quantization coefficient in bits per feature (default: 2, range: 1-8)
 - `-v, --visualize`: run visualization after processing (default: enabled)
 - `-nv, --no-visualize`: skip visualization for faster processing
 - `-h, --help`: usage
@@ -158,10 +175,17 @@ python3 unified_transfer.py <dataset_name> /dev/ttyUSB0
 
 ## 📊 Visualization
 
-The visualization feature reveals how 2-bit quantization affects your dataset's classification performance. When data is compressed from continuous values to just 4 categories (0,1,2,3), some information is inevitably lost. The PCA analysis shows you exactly what happens:
+The visualization feature reveals how variable quantization affects your dataset's classification performance. By choosing quantization coefficient between 1-8 bits, you can control the trade-off between model accuracy and resource consumption:
+
+**Quantization Levels:**
+- **1-bit**: 2 categories (binary split) - Extreme compression, fastest inference
+- **2-bit**: 4 categories (default) - Good balance of accuracy and memory
+- **3-bit**: 8 categories - More detail, slightly higher memory usage
+- **4-bit**: 16 categories - Higher precision, noticeable memory increase
+- **8-bit**: 256 categories - Near-original precision, significant memory cost
 
 **What you'll see:**
-- **3D PCA plots**: Original data vs quantized data comparison
+- **3D PCA plots**: Original data vs quantized data comparison (with your chosen quantization level)
 - **Class separation**: How well different classes remain distinguishable after quantization
 - **Variance retention**: Information preserved through the quantization process
 
@@ -169,7 +193,7 @@ The visualization feature reveals how 2-bit quantization affects your dataset's 
 
 The visualization compares original high-dimensional data vs quantized data in 3D PCA space, helping you understand:
 - **Before Quantization**: Natural class boundaries and feature relationships
-- **After Quantization**: How 2-bit compression affects class separability
+- **After Quantization**: How your chosen bit quantization affects class separability
 - **Trade-off Assessment**: Whether the compression is suitable for your classification task
 
 **Classification Impact:**
@@ -225,6 +249,7 @@ python3 unified_transfer.py iris_data /dev/ttyUSB0
   - `-p, --path <file>`: input CSV (required)
   - `-he, --header <yes/no>`: Skip header if 'yes', process all lines if 'no' (auto-detect if not specified)
   - `-f, --features <number>`: Maximum number of features (default: 1023, range: 1-65535)
+  - `-q, --bits <1-8>`: Quantization coefficient in bits per feature (default: 2, range: 1-8)
   - `-v, --visualize`: run visualization after processing (default: enabled)
   - `-nv, --no-visualize`: skip visualization for faster processing
   - `-h, --help`: usage
@@ -234,8 +259,11 @@ Examples:
 - Force skip header: `./quantize_dataset.sh -p data/iris_data.csv --header yes`
 - Force process all lines: `./quantize_dataset.sh -p data/iris_data.csv --header no`
 - Limit to 512 features: `./quantize_dataset.sh -p data/iris_data.csv -f 512`
-- Custom features + header: `./quantize_dataset.sh -p data/iris_data.csv -f 256 --header yes`
+- Use 3-bit quantization: `./quantize_dataset.sh -p data/iris_data.csv -q 3`
+- Binary features (1-bit): `./quantize_dataset.sh -p data/iris_data.csv -q 1 -nv`
+- High precision (4-bit) with custom features: `./quantize_dataset.sh -p data/iris_data.csv -q 4 -f 256`
 - Skip visualization: `./quantize_dataset.sh -p data/iris_data.csv -nv`
+- Combined options: `./quantize_dataset.sh -p data/iris_data.csv -q 2 -f 256 --header yes -nv`
 
 **Header Detection Logic:**
 - Analyzes first two rows to detect header presence
@@ -248,6 +276,18 @@ Examples:
 - Default: 1023 features (optimized for ESP32 memory constraints)
 - Range: 1-65535 features
 - Higher limits may require more ESP32 memory during model training/inference
+- Datasets exceeding the limit will be automatically truncated horizontally
+
+**Quantization Coefficient:**
+- Range: 1-8 bits per feature
+- Default: 2 bits (4 categories per feature)
+- Lower bits = smaller model, faster inference, less accuracy
+- Higher bits = larger model, slower inference, more accuracy
+- 1-bit: Use for binary features or extreme memory constraints
+- 2-bit: Recommended default, good balance
+- 3-4 bits: For higher accuracy requirements
+- 8-bit: Near-original precision but significant memory usage
+- Choose based on your accuracy vs memory/speed trade-off requirements
 - Datasets exceeding the limit will be automatically truncated horizontally
 
 ### Alternative Build Tools
@@ -269,6 +309,7 @@ Examples:
   - `-p, -path <file>`: input CSV
   - `-he, -header <yes/no>`: Skip header if 'yes', process all lines if 'no' (auto-detect if not specified)
   - `-f, -features <number>`: Maximum number of features (default: 1023, range: 1-65535)
+  - `-q, -bits <1-8>`: Quantization coefficient in bits per feature (default: 2, range: 1-8)
   - `-v, -visualize`
   - `-h, --help`
 
@@ -280,23 +321,24 @@ The script compiles this automatically if needed.
 
 ### How Quantization and Categorizer Work
 
-For comprehensive technical details on the quantization process and categorizer implementation, please refer to:
+For comprehensive technical details on the variable quantization process (1-8 bits) and categorizer implementation, please refer to:
 
-**📖 [Rf_categorizer Technical Overview](../../docs/Rf_components/Rf_categorizer_Technical_Overview.md)**
+**📖 [Rf_categorizer Technical Overview](../../docs/Quantization/Rf_categorizer_Technical_Overview.md)**
 
 This document covers:
-- Detailed quantization algorithms (2-bit categorical encoding)
+- Detailed variable quantization algorithms (1-8 bits per feature)
 - Categorizer architecture and optimization
 - Feature binning strategies (quantile-based, discrete detection)
 - Label normalization processes
 - Memory optimization techniques for ESP32
+- Performance benchmarks with different quantization levels
 
 ### Quick Overview
 
 - **Input**: Continuous feature values and string/numeric labels
-- **Process**: 2-bit quantization (4 categories: 0,1,2,3) with outlier handling
+- **Process**: Variable quantization (1-8 bits configurable, default 2-bit = 4 categories) with outlier handling
 - **Output**: Categorical dataset optimized for ESP32 Random Forest
-- **Compression**: Overall compression ratio can reach ~28x, depending on the data and number of features
+- **Compression**: Overall compression ratio varies by quantization level (1-bit ~50% of 2-bit, 8-bit ~4× of 2-bit)
 
 
 ## 🔌 Transfer to ESP32

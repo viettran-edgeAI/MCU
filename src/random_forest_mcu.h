@@ -35,6 +35,10 @@ namespace mcu{
         Rf_pending_data* pending_data = nullptr;
         Rf_data* base_data_stub = nullptr;
 
+        // Optimization: Pre-allocated buffers for inference
+        packed_vector<8> categorization_buffer;
+        b_vector<uint16_t> threshold_cache;
+
 #if RF_ENABLE_TRAINING
         inline TrainingContext* ensure_training_context(){
             if(!training_ctx){
@@ -109,9 +113,9 @@ namespace mcu{
             UBaseType_t stackRemaining = uxTaskGetStackHighWaterMark(NULL);
             size_t stackBytes = stackRemaining * sizeof(StackType_t);
             if(stackBytes < 2048) {
-                Serial.printf("⚠️ WARNING: Low stack space (%u bytes). May cause crash!\n", stackBytes);
-                Serial.println("   Solution: Increase CONFIG_ARDUINO_LOOP_STACK_SIZE to 16384");
-                Serial.println("   See docs/ESP32_Stack_Fix.md for details");
+                RF_DEBUG_2(0, "⚠️ WARNING: Low stack space (", stackBytes, "bytes", ". May cause crash!");
+                RF_DEBUG(0, "   Solution: Increase CONFIG_ARDUINO_LOOP_STACK_SIZE to 16384");
+                RF_DEBUG(0, "   See docs/ESP32_Stack_Fix.md for details");
             }
         #endif
             // initial components
@@ -119,19 +123,30 @@ namespace mcu{
 
             logger.init(&base);
             config.init(&base);
-            // node_pred.init(&base);
             categorizer.init(&base);
             forest_container.init(&base, &config);               
 
             // load resources
             config.loadConfig();
-            // node_pred.loadPredictor();
-            categorizer.loadCategorizer(); 
-            // random_generator.init(config.random_seed);
+            categorizer.loadCategorizer();  // Load categorizer first to get quantization_coefficient
+            
+            // Synchronize quantization_coefficient from categorizer to config if not already set
+            if (categorizer.loaded() && config.quantization_coefficient != categorizer.getQuantizationCoefficient()) {
+                config.quantization_coefficient = categorizer.getQuantizationCoefficient();
+                RF_DEBUG(1, "✅ Synchronized quantization_coefficient: ", config.quantization_coefficient);
+            }
 
             if(config.enable_retrain){
                 ensure_pending_data();
                 ensure_base_data_stub();
+            }
+
+            // Initialize inference optimization buffers
+            categorization_buffer.set_bits_per_value(config.quantization_coefficient);
+            categorization_buffer.resize(config.num_features, 0);
+            buildThresholdCandidates(config.quantization_coefficient, threshold_cache);
+            if (threshold_cache.empty()) {
+                threshold_cache.push_back(0);
             }
 
             if constexpr (RF_DEBUG_LEVEL > 2) print_log = true;
@@ -495,7 +510,8 @@ namespace mcu{
         typedef struct SplitInfo {
             float gain = -1.0f;
             uint16_t featureID = 0;
-            uint8_t threshold = 0;
+            uint8_t thresholdSlot = 0;  // Changed from threshold to thresholdSlot (0-7)
+            uint16_t thresholdValue = 0; // Actual threshold value for splitting
         } SplitInfo;
 
         struct NodeStats {
@@ -540,6 +556,11 @@ namespace mcu{
             uint16_t totalSamples = (begin < end) ? (end - begin) : 0;
             if (totalSamples < 2) return bestSplit;
 
+            // Get quantization info
+            uint8_t quant_bits = config.quantization_coefficient;
+            uint16_t maxFeatureValue = (quant_bits >= 8) ? 255 : ((1u << quant_bits) - 1);
+            uint8_t numCandidates = static_cast<uint8_t>(threshold_cache.size());
+
             // Base label counts
             b_vector<uint16_t> baseLabelCounts(numLabels, 0);
             for (uint16_t k = begin; k < end; ++k) {
@@ -569,41 +590,46 @@ namespace mcu{
                 }
             }
 
-            for (const auto& featureID : selectedFeatures) {
-                vector<uint16_t> counts(4 * numLabels, 0);
-                uint32_t value_totals[4] = {0};
-
-                for (uint16_t k = begin; k < end; ++k) {
-                    uint16_t sid = indices[k];
-                    if (sid < ctx->train_data.size()) {
-                        uint8_t lbl = ctx->train_data.getLabel(sid);
-                        if (lbl < numLabels) {
-                            uint8_t fv = ctx->train_data.getFeature(sid, featureID);
-                            if (fv < 4) {
-                                counts[fv * numLabels + lbl]++;
-                                value_totals[fv]++;
+            // Pre-allocate count arrays (for up to 256 unique values)
+            const uint16_t numPossibleValues = maxFeatureValue + 1;
+            b_vector<uint16_t> counts;
+            counts.resize(numPossibleValues * numLabels, 0);
+            
+            // Fast path for 1-bit quantization (only 2 values: 0 and 1)
+            if (quant_bits == 1) {
+                for (const auto& featureID : selectedFeatures) {
+                    // Reset counts
+                    for (size_t i = 0; i < counts.size(); i++) counts[i] = 0;
+                    
+                    // Collect counts for value 0 and value 1
+                    for (uint16_t k = begin; k < end; ++k) {
+                        uint16_t sid = indices[k];
+                        if (sid < ctx->train_data.size()) {
+                            uint8_t lbl = ctx->train_data.getLabel(sid);
+                            if (lbl < numLabels) {
+                                uint16_t fv = ctx->train_data.getFeature(sid, featureID);
+                                if (fv <= 1) {
+                                    counts[fv * numLabels + lbl]++;
+                                }
                             }
                         }
                     }
-                }
-
-                for (uint8_t threshold = 0; threshold < 3; threshold++) {
+                    
+                    // Single threshold: 0 (left) vs 1 (right)
                     uint32_t leftTotal = 0, rightTotal = 0;
-                    vector<uint16_t> leftCounts(numLabels, 0), rightCounts(numLabels, 0);
-                    for (uint8_t value = 0; value < 4; value++) {
-                        for (uint8_t label = 0; label < numLabels; label++) {
-                            uint16_t count = counts[value * numLabels + label];
-                            if (value <= threshold) {
-                                leftCounts[label] += count;
-                                leftTotal += count;
-                            } else {
-                                rightCounts[label] += count;
-                                rightTotal += count;
-                            }
-                        }
+                    b_vector<uint16_t> leftCounts(numLabels, 0), rightCounts(numLabels, 0);
+                    
+                    // Left side: value == 0
+                    for (uint8_t label = 0; label < numLabels; label++) {
+                        leftCounts[label] = counts[label];  // value 0
+                        leftTotal += leftCounts[label];
+                        rightCounts[label] = counts[numLabels + label];  // value 1
+                        rightTotal += rightCounts[label];
                     }
+                    
                     if (leftTotal == 0 || rightTotal == 0) continue;
-
+                    
+                    // Calculate impurity and gain
                     float leftImpurity = 0.0f, rightImpurity = 0.0f;
                     if (use_Gini) {
                         leftImpurity = 1.0f; rightImpurity = 1.0f;
@@ -617,16 +643,91 @@ namespace mcu{
                             if (rightCounts[i] > 0) { float p = static_cast<float>(rightCounts[i]) / rightTotal; rightImpurity -= p * log2f(p); }
                         }
                     }
+                    
                     float weightedImpurity = (static_cast<float>(leftTotal) / totalSamples) * leftImpurity + 
                                             (static_cast<float>(rightTotal) / totalSamples) * rightImpurity;
                     float gain = baseImpurity - weightedImpurity;
+                    
                     if (gain > bestSplit.gain) {
                         bestSplit.gain = gain;
                         bestSplit.featureID = featureID;
-                        bestSplit.threshold = threshold;
+                        bestSplit.thresholdSlot = 0;  // Only one threshold slot for 1-bit
+                        bestSplit.thresholdValue = 0;  // Threshold value: 0 (<=0 goes left, >0 goes right)
+                    }
+                }
+            } else {
+                // General case: multi-bit quantization with multiple threshold candidates
+                for (const auto& featureID : selectedFeatures) {
+                    // Reset counts for this feature
+                    for (size_t i = 0; i < counts.size(); i++) counts[i] = 0;
+                    
+                    b_vector<uint32_t> value_totals(numPossibleValues, 0);
+
+                    // Collect feature value distributions
+                    for (uint16_t k = begin; k < end; ++k) {
+                        uint16_t sid = indices[k];
+                        if (sid < ctx->train_data.size()) {
+                            uint8_t lbl = ctx->train_data.getLabel(sid);
+                            if (lbl < numLabels) {
+                                uint16_t fv = ctx->train_data.getFeature(sid, featureID);
+                                if (fv <= maxFeatureValue) {
+                                    counts[fv * numLabels + lbl]++;
+                                    value_totals[fv]++;
+                                }
+                            }
+                        }
+                    }
+
+                    // Try each threshold candidate
+                    for (uint8_t slot = 0; slot < numCandidates; slot++) {
+                        uint16_t threshold = threshold_cache[slot];
+                        
+                        uint32_t leftTotal = 0, rightTotal = 0;
+                        b_vector<uint16_t> leftCounts(numLabels, 0), rightCounts(numLabels, 0);
+                        
+                        // Split samples based on threshold
+                        for (uint16_t value = 0; value <= maxFeatureValue; value++) {
+                            for (uint8_t label = 0; label < numLabels; label++) {
+                                uint16_t count = counts[value * numLabels + label];
+                                if (value <= threshold) {
+                                    leftCounts[label] += count;
+                                    leftTotal += count;
+                                } else {
+                                    rightCounts[label] += count;
+                                    rightTotal += count;
+                                }
+                            }
+                        }
+                        
+                        if (leftTotal == 0 || rightTotal == 0) continue;
+
+                        float leftImpurity = 0.0f, rightImpurity = 0.0f;
+                        if (use_Gini) {
+                            leftImpurity = 1.0f; rightImpurity = 1.0f;
+                            for (uint8_t i = 0; i < numLabels; i++) {
+                                if (leftCounts[i] > 0) { float p = static_cast<float>(leftCounts[i]) / leftTotal; leftImpurity -= p * p; }
+                            if (rightCounts[i] > 0) { float p = static_cast<float>(rightCounts[i]) / rightTotal; rightImpurity -= p * p; }
+                        }
+                    } else {
+                        for (uint8_t i = 0; i < numLabels; i++) {
+                            if (leftCounts[i] > 0) { float p = static_cast<float>(leftCounts[i]) / leftTotal; leftImpurity -= p * log2f(p); }
+                            if (rightCounts[i] > 0) { float p = static_cast<float>(rightCounts[i]) / rightTotal; rightImpurity -= p * log2f(p); }
+                        }
+                    }
+                    
+                    float weightedImpurity = (static_cast<float>(leftTotal) / totalSamples) * leftImpurity + 
+                                            (static_cast<float>(rightTotal) / totalSamples) * rightImpurity;
+                    float gain = baseImpurity - weightedImpurity;
+                    
+                    if (gain > bestSplit.gain) {
+                        bestSplit.gain = gain;
+                        bestSplit.featureID = featureID;
+                        bestSplit.thresholdSlot = slot;
+                        bestSplit.thresholdValue = threshold;
                     }
                 }
             }
+            }  // End of else block for multi-bit quantization
             return bestSplit;
         }
 
@@ -714,15 +815,15 @@ namespace mcu{
                 
                 // Configure as internal node
                 tree.nodes[current.nodeIndex].setFeatureID(bestSplit.featureID);
-                tree.nodes[current.nodeIndex].setThreshold(bestSplit.threshold);
+                tree.nodes[current.nodeIndex].setThresholdSlot(bestSplit.thresholdSlot);
                 tree.nodes[current.nodeIndex].setIsLeaf(false);
                 
-                // In-place partition of indices[current.begin, current.end)
+                // In-place partition of indices[current.begin, current.end) using actual threshold value
                 uint16_t iLeft = current.begin;
                 for (uint16_t k = current.begin; k < current.end; ++k) {
                     uint16_t sid = indices[k];
                     if (sid < ctx->train_data.size() && 
-                        ctx->train_data.getFeature(sid, bestSplit.featureID) <= bestSplit.threshold) {
+                        ctx->train_data.getFeature(sid, bestSplit.featureID) <= bestSplit.thresholdValue) {
                         if (k != iLeft) {
                             uint16_t tmp = indices[iLeft];
                             indices[iLeft] = indices[k];
@@ -830,7 +931,7 @@ namespace mcu{
 
                     for(const uint8_t& treeIdx : activeTrees){
                         if(treeIdx < forest_container.size()){
-                            uint8_t predict = forest_container[treeIdx].predict_features(sample.features);
+                            uint8_t predict = forest_container[treeIdx].predict_features(sample.features, threshold_cache);
                             if(predict < config.num_labels){
                                 oobPredictClass[predict]++;
                                 oobTotalPredict++;
@@ -895,7 +996,7 @@ namespace mcu{
 
                 // Use all trees for validation prediction
                 for(uint8_t t = 0; t < config.num_trees && t < forest_container.size(); t++){
-                    uint8_t predict = forest_container[t].predict_features(sample.features);
+                    uint8_t predict = forest_container[t].predict_features(sample.features, threshold_cache);
                     if(predict < config.num_labels){
                         validPredictClass[predict]++;
                         validTotalPredict++;
@@ -971,11 +1072,12 @@ namespace mcu{
                 ctx->validation_data.loadData();
                 forest_container.loadForest();
                 logger.m_log("fold evaluation");
+
                 // Process all samples
                 for(uint16_t i = 0; i < ctx->validation_data.size(); i++){
                     const Rf_sample& sample = ctx->validation_data[i];
                     uint8_t actual = sample.label;
-                    uint8_t pred = forest_container.predict_features(sample.features);
+                    uint8_t pred = forest_container.predict_features(sample.features, threshold_cache);
                 
                     if(actual < config.num_labels && pred < config.num_labels) {
                         scorer.update_prediction(actual, pred);
@@ -1138,14 +1240,14 @@ namespace mcu{
 #endif
         }
 
-        // Public API: predict() fills the provided label buffer with the predicted label and optionally returns the label index
+        // Public API: predict() fills the provided label buffer with the predicted label
         template<typename T>
-        bool predict(const T& features, char* labelBuffer, size_t bufferSize, uint8_t* outLabel = nullptr) {
+        bool predict(const T& features, char* labelBuffer, size_t bufferSize) {
             static_assert(mcu::is_supported_vector<T>::value, "Unsupported type. Use mcu::vector or mcu::b_vector.");
-            return predict(features.data(), features.size(), labelBuffer, bufferSize, outLabel);
+            return predict(features.data(), features.size(), labelBuffer, bufferSize);
         }
 
-        bool predict(const float* features, size_t length, char* labelBuffer, size_t bufferSize, uint8_t* outLabel = nullptr) {
+        bool predict(const float* features, size_t length, char* labelBuffer, size_t bufferSize) {
             const bool copyLabel = (labelBuffer != nullptr && bufferSize > 0);
 
             if (__builtin_expect(length != config.num_features, 0)) {
@@ -1156,19 +1258,16 @@ namespace mcu{
                 return false;
             }
 
-            // Inline categorization to avoid packed_vector copy overhead
-            packed_vector<2> c_features = categorizer.categorizeFeatures(features, length);
-            return predict(c_features, labelBuffer, bufferSize, outLabel);
+            // Optimized: write directly to pre-allocated buffer
+            categorizer.categorizeFeatures(features, categorization_buffer);
+            return predict(categorization_buffer, labelBuffer, bufferSize);
         }
 
-        bool predict(const packed_vector<2>& c_features, char* labelBuffer, size_t bufferSize, uint8_t* outLabel = nullptr) {
+        bool predict(const packed_vector<8>& c_features, char* labelBuffer, size_t bufferSize) {
             const bool copyLabel = (labelBuffer != nullptr && bufferSize > 0);
 
-            uint8_t i_label = forest_container.predict_features(c_features);
-
-            if (outLabel) {
-                *outLabel = i_label;
-            }
+            // Use pre-computed threshold cache
+            uint8_t i_label = forest_container.predict_features(c_features, threshold_cache);
 
             if (__builtin_expect(config.enable_retrain, 0)) {
                 Rf_sample sample(c_features, i_label);
@@ -1200,6 +1299,22 @@ namespace mcu{
             }
             labelBuffer[labelLen] = '\0';
             return true;
+        }
+
+        // Convenience overload: returns the internal label index directly
+        uint8_t predict(const float* features, size_t length) {
+            if (__builtin_expect(length != config.num_features, 0)) {
+                RF_DEBUG(0, "❌ Feature length mismatch!","");
+                return 255;
+            }
+            categorizer.categorizeFeatures(features, categorization_buffer);
+            return forest_container.predict_features(categorization_buffer, threshold_cache);
+        }
+
+        template<typename T>
+        uint8_t predict(const T& features) {
+            static_assert(mcu::is_supported_vector<T>::value, "Unsupported type. Use mcu::vector or mcu::b_vector.");
+            return predict(features.data(), features.size());
         }
 
         /**
@@ -1512,6 +1627,10 @@ namespace mcu{
             return get_practical_inference_score(static_cast<uint8_t>(config.metric_score));
         }
 
+        uint8_t get_quantization_coefficient() const {
+            return config.quantization_coefficient;
+        }
+
         void get_model_name(char* name, size_t length) const {
             base.get_model_name(name, length);
         }
@@ -1601,7 +1720,7 @@ namespace mcu{
                 pre_load_data = false;
             }
             forest_container.loadForest();
-            
+
             // Initialize matrix score calculator
             Rf_matrix_score scorer(config.num_labels, 0xFF); // Use all flags for detailed metrics
             
@@ -1609,7 +1728,7 @@ namespace mcu{
             for (uint16_t i = 0; i < data.size(); i++) {
                 const Rf_sample& sample = data[i];
                 uint8_t actual = sample.label;
-                uint8_t pred = forest_container.predict_features(sample.features);
+                uint8_t pred = forest_container.predict_features(sample.features, threshold_cache);
                 
                 // Update metrics using matrix scorer
                 if(actual < config.num_labels && pred < config.num_labels) {
@@ -1734,12 +1853,12 @@ namespace mcu{
             
             if(!data.isLoaded) data.loadData();
             forest_container.loadForest();
-            
+
             // Process all samples
             for (uint16_t i = 0; i < data.size(); i++) {
                 const Rf_sample& sample = data[i];
                 uint8_t actual = sample.label;
-                uint8_t pred = forest_container.predict_features(sample.features);
+                uint8_t pred = forest_container.predict_features(sample.features, threshold_cache);
                 
                 if(actual < config.num_labels && pred < config.num_labels) {
                     scorer.update_prediction(actual, pred);
@@ -1758,12 +1877,12 @@ namespace mcu{
             
             if(!data.isLoaded) data.loadData();
             forest_container.loadForest();
-            
+
             // Process all samples
             for (uint16_t i = 0; i < data.size(); i++) {
                 const Rf_sample& sample = data[i];
                 uint8_t actual = sample.label;
-                uint8_t pred = forest_container.predict_features(sample.features);
+                uint8_t pred = forest_container.predict_features(sample.features, threshold_cache);
                 
                 if(actual < config.num_labels && pred < config.num_labels) {
                     scorer.update_prediction(actual, pred);
@@ -1782,12 +1901,12 @@ namespace mcu{
             
             if(!data.isLoaded) data.loadData();
             forest_container.loadForest();
-            
+
             // Process all samples
             for (uint16_t i = 0; i < data.size(); i++) {
                 const Rf_sample& sample = data[i];
                 uint8_t actual = sample.label;
-                uint8_t pred = forest_container.predict_features(sample.features);
+                uint8_t pred = forest_container.predict_features(sample.features, threshold_cache);
                 
                 if(actual < config.num_labels && pred < config.num_labels) {
                     scorer.update_prediction(actual, pred);
@@ -1806,12 +1925,12 @@ namespace mcu{
             
             if(!data.isLoaded) data.loadData();
             forest_container.loadForest();
-            
+
             // Process all samples
             for (uint16_t i = 0; i < data.size(); i++) {
                 const Rf_sample& sample = data[i];
                 uint8_t actual = sample.label;
-                uint8_t pred = forest_container.predict_features(sample.features);
+                uint8_t pred = forest_container.predict_features(sample.features, threshold_cache);
                 
                 if(actual < config.num_labels && pred < config.num_labels) {
                     scorer.update_prediction(actual, pred);
@@ -1834,10 +1953,11 @@ namespace mcu{
             }
             forest_container.loadForest(); // Ensure all trees are loaded before prediction
             ctx->test_data.loadData(); // Load test set data if not already loaded
+
             RF_DEBUG(0, "SampleID, Predicted, Actual");
             for (uint16_t i = 0; i < ctx->test_data.size(); i++) {
                 const Rf_sample& sample = ctx->test_data[i];
-                uint8_t pred = forest_container.predict_features(sample.features);
+                uint8_t pred = forest_container.predict_features(sample.features, threshold_cache);
                 Serial.printf("%d, %d, %d\n", i, pred, sample.label);
             }
             ctx->test_data.releaseData(true); // Release test set data after use

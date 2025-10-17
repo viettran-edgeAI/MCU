@@ -95,7 +95,7 @@ static constexpr uint8_t  RF_MAX_TREES           = 100;          // maximum numb
 static constexpr uint16_t RF_MAX_LABELS          = 255;         // maximum number of unique labels supported 
 static constexpr uint16_t RF_MAX_FEATURES        = 1023;       // maximum number of features
 static constexpr uint16_t RF_MAX_SAMPLES         = 65535;     // maximum number of samples in a dataset
-static constexpr uint16_t RF_MAX_NODES           = 2047;     // Maximum nodes per tree 
+static constexpr uint16_t RF_MAX_NODES           = 1023;     // Maximum nodes per tree (reduced from 2047 due to threshold slot expansion)
 static constexpr size_t   MAX_DATASET_SIZE       = 150000;  // Max dataset file size - 150kB
 static constexpr size_t   MAX_INFER_LOGFILE_SIZE = 2048;   // Max log file size in bytes (1000 inferences)
 
@@ -141,6 +141,48 @@ namespace mcu {
     // enum Rf_metric_scores;      // flags for training process/score calculation (accuracy, precision, recall, f1_score)
     // enum Rf_training_score;     // score types for training process (oob, validation, k-fold)
     // ...
+
+    static void buildThresholdCandidates(uint8_t bits, b_vector<uint16_t>& out) {
+        out.clear();
+        // santize bits input
+        if (bits < 1) bits = 1;
+        if (bits > 8) bits = 8;
+
+        if (bits <= 1) {
+            out.push_back(0);
+            return;
+        }
+        if (bits == 2) {
+            out.push_back(0);
+            out.push_back(1);
+            out.push_back(2);
+            return;
+        }
+
+        uint16_t maxValue = static_cast<uint16_t>((1u << bits) - 1);
+        uint16_t availableOdd = maxValue / 2;
+        if (availableOdd == 0) {
+            out.push_back(maxValue ? (maxValue - 1) : 0);
+            return;
+        }
+
+        uint16_t desired = min<uint16_t>(8, availableOdd);
+        for (uint16_t i = 0; i < desired; ++i) {
+            uint32_t numerator = static_cast<uint32_t>(2 * i + 1) * static_cast<uint32_t>(availableOdd);
+            uint16_t oddIndex = static_cast<uint16_t>(numerator / (2 * desired));
+            if (oddIndex >= availableOdd) oddIndex = availableOdd - 1;
+            uint16_t threshold = static_cast<uint16_t>(2 * oddIndex + 1);
+            if (threshold >= maxValue) {
+                threshold = static_cast<uint16_t>(maxValue - 1);
+            }
+            if (!out.empty() && threshold <= out.back()) {
+                uint16_t candidate = static_cast<uint16_t>(out.back() + 2);
+                if (candidate >= maxValue) candidate = static_cast<uint16_t>(maxValue - 1);
+                threshold = candidate;
+            }
+            out.push_back(threshold);
+        }
+    }
 
     /*
     ------------------------------------------------------------------------------------------------------------------
@@ -526,7 +568,8 @@ namespace mcu {
         // Dataset parameters 
         uint16_t num_samples;
         uint16_t num_features;
-        uint8_t  num_labels; 
+        uint8_t  num_labels;
+        uint8_t  quantization_coefficient; // Bits per feature value (1-8)
         float lowest_distribution; 
         b_vector<uint16_t> samples_per_label; // index = label, value = count
 
@@ -554,6 +597,7 @@ namespace mcu {
             extend_base_data    = true;
             enable_retrain      = true;
             enable_auto_config  = false;
+            quantization_coefficient = 2; // Default 2 bits per value
         }
         
         Rf_config() {
@@ -596,8 +640,9 @@ namespace mcu {
             num_samples = numSamples;
             num_features = numFeatures;
 
-            // Calculate packed feature bytes per sample
-            const uint16_t packedFeatureBytes = (numFeatures + 3) / 4; // 4 values per byte (2 bits each)
+            // Calculate packed feature bytes per sample (using existing quantization_coefficient)
+            uint32_t totalBits = static_cast<uint32_t>(numFeatures) * quantization_coefficient;
+            const uint16_t packedFeatureBytes = (totalBits + 7) / 8; // Round up to nearest byte
             const size_t recordSize = sizeof(uint8_t) + packedFeatureBytes; // label + packed features
 
             // Track unique labels and their counts
@@ -791,6 +836,7 @@ namespace mcu {
             uint16_t numSamples = 0;
             uint16_t numFeatures = 0;
             uint8_t numLabels = 0;
+            uint8_t quantCoeff = 2;  // Default 2 bits
             unordered_map<uint8_t, uint16_t> labelCounts; // label -> count
             uint8_t maxFeatureValue = 3;    // Default for 2-bit quantized data
 
@@ -815,6 +861,8 @@ namespace mcu {
                     numSamples = value.toInt();
                 } else if (parameter == "num_labels") {
                     numLabels = value.toInt();
+                } else if (parameter == "quantization_coefficient") {
+                    quantCoeff = value.toInt();
                 } else if (parameter == "max_feature_value") {
                     maxFeatureValue = value.toInt();
                 } else if (parameter.startsWith("samples_label_")) {
@@ -831,6 +879,7 @@ namespace mcu {
             num_features = numFeatures;
             num_samples = numSamples;
             num_labels = numLabels;
+            quantization_coefficient = quantCoeff;
             
             // Initialize samples_per_label vector with the parsed label counts
             samples_per_label.clear();
@@ -861,9 +910,13 @@ namespace mcu {
                 return false;
             }
             file.println("parameter,value");
-            file.println("quantization_coefficient,2");  // Fixed for 2-bit quantization
-            file.println("max_feature_value,3");         // Fixed for 2-bit values (0-3)
-            file.println("features_per_byte,4");          // Fixed for 2-bit packing (4 features per byte)
+            file.printf("quantization_coefficient,%u\n", quantization_coefficient);
+            
+            uint8_t max_value = (quantization_coefficient >= 8) ? 255 : ((1u << quantization_coefficient) - 1);
+            uint8_t features_per_byte = (quantization_coefficient == 0) ? 0 : (8 / quantization_coefficient);
+            
+            file.printf("max_feature_value,%u\n", max_value);
+            file.printf("features_per_byte,%u\n", features_per_byte);
             
             file.printf("num_features,%u\n", num_features);
             file.printf("num_samples,%u\n", num_samples);
@@ -1257,15 +1310,20 @@ namespace mcu {
     using sampleID_set = ID_vector<uint16_t>;       // set of unique sample IDs
 
     struct Rf_sample{
-        packed_vector<2> features;           // set containing the values ​​of the features corresponding to that sample , 2 bit per value.
+        packed_vector<8> features;          // features stored 
         uint8_t label;                     // label of the sample 
 
         Rf_sample() : features(), label(0) {}
-        Rf_sample(uint8_t label, const packed_vector<2, LARGE>& source, size_t start, size_t end){
+        
+        // construct from parent packed_vector in Rf_data
+        template<uint8_t bpv>
+        Rf_sample(uint8_t label, const packed_vector<bpv, LARGE>& source, size_t start, size_t end){
             this->label = label;
-            features = packed_vector<2>(source, start, end);
+            features = packed_vector<8>(source, start, end);
         }
-        Rf_sample(const packed_vector<2> features, uint8_t label) : features(features), label(label) {}
+        
+        template<uint8_t bpv>
+        Rf_sample(const packed_vector<bpv>& features, uint8_t label) : features(features), label(label) {}
     };
     
     class Rf_data {
@@ -1273,11 +1331,12 @@ namespace mcu {
         static constexpr size_t MAX_CHUNKS_SIZE = 8192; // max bytes per chunk (8kB)
 
         // Chunked packed storage - eliminates both heap overhead per sample and large contiguous allocations
-        vector<packed_vector<2, LARGE>> sampleChunks;  // Multiple chunks of packed features
+        vector<packed_vector<8, LARGE>> sampleChunks;  // Multiple chunks of packed features (up to 8 bits per value)
         packed_vector<8> allLabels;                  // Labels storage 
-        uint16_t bitsPerSample;                        // Number of bits per sample (numFeatures * 2)
+        uint16_t bitsPerSample;                        // Number of bits per sample (numFeatures * quantization_coefficient)
         uint16_t samplesEachChunk;                     // Maximum samples per chunk
         size_t size_;  
+        uint8_t quantization_coefficient;              // Bits per feature value (1-8)
         char file_path[RF_PATH_BUFFER] = {0};          // dataset file_path (in LittleFS)
 
         uint8_t num_labels_2_bpv(uint8_t num_labels) {
@@ -1291,7 +1350,7 @@ namespace mcu {
     public:
         bool isLoaded;      
 
-        Rf_data() : isLoaded(false), size_(0), bitsPerSample(0), samplesEachChunk(0) {}
+        Rf_data() : isLoaded(false), size_(0), bitsPerSample(0), samplesEachChunk(0), quantization_coefficient(2) {}
 
         Rf_data(const char* path, Rf_config& config){ 
             init(path, config);
@@ -1300,9 +1359,10 @@ namespace mcu {
         bool init(const char* file_path, Rf_config& config) {
             strncpy(this->file_path, file_path, RF_PATH_BUFFER);
             this->file_path[RF_PATH_BUFFER - 1] = '\0';
-            bitsPerSample = config.num_features * 2;
-            uint8_t bpv = num_labels_2_bpv(config.num_labels);
-            allLabels.set_bits_per_value(bpv);
+            quantization_coefficient = config.quantization_coefficient;
+            bitsPerSample = config.num_features * quantization_coefficient;
+            uint8_t label_bpv = num_labels_2_bpv(config.num_labels);
+            allLabels.set_bits_per_value(label_bpv);
             updateSamplesEachChunk();
             RF_DEBUG_2(1, "ℹ️ Rf_data initialized (", samplesEachChunk, "samples/chunk): ", file_path);
             isLoaded = false;
@@ -1385,9 +1445,10 @@ namespace mcu {
         void ensureChunkCapacity(size_t totalSamples) {
             size_t requiredChunks = (totalSamples + samplesEachChunk - 1) / samplesEachChunk;
             while (sampleChunks.size() < requiredChunks) {
-                packed_vector<2, LARGE> newChunk;
-                // Reserve space for elements (each feature is 1 element in packed_vector<2>)
-                size_t elementsPerSample = bitsPerSample / 2;  // numFeatures
+                packed_vector<8, LARGE> newChunk;
+                // Reserve space for elements (each element uses quantization_coefficient bits)
+                size_t elementsPerSample = bitsPerSample / quantization_coefficient;  // numFeatures
+                newChunk.set_bits_per_value(quantization_coefficient);
                 newChunk.reserve(samplesEachChunk * elementsPerSample);
                 sampleChunks.push_back(newChunk); // Add new empty chunk
             }
@@ -1404,11 +1465,12 @@ namespace mcu {
                 return Rf_sample();
             }
             pair<size_t, size_t> location = getChunkLocation(sampleIndex);
+            size_t numFeatures = bitsPerSample / quantization_coefficient;
             return Rf_sample(
                 allLabels[sampleIndex],
                 sampleChunks[location.first],
-                location.second * (bitsPerSample / 2),
-                (location.second + 1) * (bitsPerSample / 2)
+                location.second * numFeatures,
+                (location.second + 1) * numFeatures
             );    
         }
 
@@ -1440,7 +1502,7 @@ namespace mcu {
             size_t localIndex = location.second;
             
             // Store features in packed format within the specific chunk
-            size_t elementsPerSample = bitsPerSample / 2;  // numFeatures
+            size_t elementsPerSample = bitsPerSample / quantization_coefficient;  // numFeatures
             size_t startElementIndex = localIndex * elementsPerSample;
             size_t requiredSizeInChunk = startElementIndex + elementsPerSample;
             
@@ -1448,12 +1510,12 @@ namespace mcu {
                 sampleChunks[chunkIndex].resize(requiredSizeInChunk);
             }
             
-            // Store each feature as one element in the packed_vector<2>
+            // Store each feature as one element in the packed_vector (with variable bpv)
             for (size_t featureIdx = 0; featureIdx < sample.features.size(); featureIdx++) {
                 size_t elementIndex = startElementIndex + featureIdx;
-                uint8_t featureValue = sample.features[featureIdx] & 0x03; // 2-bit mask
+                uint8_t featureValue = sample.features[featureIdx];
                 
-                // Store 2-bit value directly as one element
+                // Store value directly as one element (bpv determined by quantization_coefficient)
                 if (elementIndex < sampleChunks[chunkIndex].size()) {
                     sampleChunks[chunkIndex].set(elementIndex, featureValue);
                 }
@@ -1496,11 +1558,11 @@ namespace mcu {
 
             // Set bitsPerSample and calculate chunk parameters only if not already initialized
             if (bitsPerSample == 0) {
-                bitsPerSample = numFeatures * 2;
+                bitsPerSample = numFeatures * quantization_coefficient;
                 updateSamplesEachChunk();
             } else {
                 // Validate that the provided numFeatures matches the initialized bitsPerSample
-                uint16_t expectedFeatures = bitsPerSample / 2;
+                uint16_t expectedFeatures = bitsPerSample / quantization_coefficient;
                 if (numFeatures != expectedFeatures) {
                     RF_DEBUG_2(0, "❌ Feature count mismatch: expected ", expectedFeatures, ", found ", numFeatures);   
                     file.close();
@@ -1604,7 +1666,7 @@ namespace mcu {
         }
         
         uint16_t total_features() const {
-            return bitsPerSample / 2;
+            return bitsPerSample / quantization_coefficient;
         }
 
         uint16_t samplesPerChunk() const {
@@ -1621,7 +1683,7 @@ namespace mcu {
         }
 
         // Fast accessors for training-time hot paths (avoid reconstructing Rf_sample)
-        inline uint16_t num_features() const { return bitsPerSample / 2; }
+        inline uint16_t num_features() const { return bitsPerSample / quantization_coefficient; }
 
         inline uint8_t getLabel(size_t sampleIndex) const {
             if (sampleIndex >= size_) return 0;
@@ -1630,7 +1692,7 @@ namespace mcu {
 
         inline uint8_t getFeature(size_t sampleIndex, uint16_t featureIndex) const {
             if (!isProperlyInitialized()) return 0;
-            uint16_t nf = bitsPerSample / 2;
+            uint16_t nf = bitsPerSample / quantization_coefficient;
             if (featureIndex >= nf || sampleIndex >= size_) return 0;
             auto loc = getChunkLocation(sampleIndex);
             size_t chunkIndex = loc.first;
@@ -1685,13 +1747,14 @@ namespace mcu {
 
                 // Write binary header
                 uint32_t numSamples = size_;
-                uint16_t numFeatures = bitsPerSample / 2;
+                uint16_t numFeatures = bitsPerSample / quantization_coefficient;
                 
                 file.write((uint8_t*)&numSamples, sizeof(numSamples));
                 file.write((uint8_t*)&numFeatures, sizeof(numFeatures));
 
-                // Calculate packed bytes needed for features (4 values per byte)
-                uint16_t packedFeatureBytes = (numFeatures + 3) / 4;
+                // Calculate packed bytes needed for features
+                uint32_t totalBits = static_cast<uint32_t>(numFeatures) * quantization_coefficient;
+                uint16_t packedFeatureBytes = (totalBits + 7) / 8; // Round up to nearest byte
 
                 // Write samples WITHOUT sample IDs (using vector indices)
                 for (uint32_t i = 0; i < size_; i++) {
@@ -1708,12 +1771,22 @@ namespace mcu {
                         packedBuffer[j] = 0;
                     }
                     
-                    // Pack 4 feature values into each byte
+                    // Pack features into bytes according to quantization_coefficient
                     for (size_t j = 0; j < s.features.size(); ++j) {
-                        uint16_t byteIndex = j / 4;
-                        uint8_t bitOffset = (j % 4) * 2;
-                        uint8_t feature_value = s.features[j] & 0x03;
-                        packedBuffer[byteIndex] |= (feature_value << bitOffset);
+                        uint32_t bitPosition = static_cast<uint32_t>(j) * quantization_coefficient;
+                        uint16_t byteIndex = bitPosition / 8;
+                        uint8_t bitOffset = bitPosition % 8;
+                        uint8_t feature_value = s.features[j] & ((1 << quantization_coefficient) - 1);
+                        
+                        if (bitOffset + quantization_coefficient <= 8) {
+                            // Feature fits in single byte
+                            packedBuffer[byteIndex] |= (feature_value << bitOffset);
+                        } else {
+                            // Feature spans two bytes
+                            uint8_t bitsInFirstByte = 8 - bitOffset;
+                            packedBuffer[byteIndex] |= (feature_value << bitOffset);
+                            packedBuffer[byteIndex + 1] |= (feature_value >> bitsInFirstByte);
+                        }
                     }
                     
                     file.write(packedBuffer, packedFeatureBytes);
@@ -1756,17 +1829,18 @@ namespace mcu {
                 return false;
             }
 
-            if(numFeatures * 2 != bitsPerSample) {
-                RF_DEBUG_2(0, "❌ Feature count mismatch: expected ", bitsPerSample / 2, ",found ", numFeatures);
+            if(numFeatures * quantization_coefficient != bitsPerSample) {
+                RF_DEBUG_2(0, "❌ Feature count mismatch: expected ", bitsPerSample / quantization_coefficient, ",found ", numFeatures);
                 file.close();
                 return false;
             }
             size_ = numSamples;
 
-            // Calculate sizes
-            const uint16_t packedFeatureBytes = (numFeatures + 3) / 4; // 4 values per byte
+            // Calculate sizes based on quantization_coefficient
+            uint32_t totalBits = static_cast<uint32_t>(numFeatures) * quantization_coefficient;
+            const uint16_t packedFeatureBytes = (totalBits + 7) / 8; // Round up to nearest byte
             const size_t recordSize = sizeof(uint8_t) + packedFeatureBytes; // label + packed features
-            const size_t elementsPerSample = numFeatures; // each feature is one element in packed_vector<2>
+            const size_t elementsPerSample = numFeatures; // each feature is one element in packed_vector
 
             // Prepare storage: labels and chunks pre-sized to avoid per-sample resizing
             allLabels.clear();
@@ -1831,9 +1905,25 @@ namespace mcu {
 
                         // Unpack features directly into chunk storage using set_unsafe for pre-sized storage
                         for (uint16_t j = 0; j < numFeatures; ++j) {
-                            uint16_t byteIndex = j / 4;
-                            uint8_t bitOffset = (j % 4) * 2;
-                            uint8_t fv = (packed[byteIndex] >> bitOffset) & 0x03;
+                            uint32_t bitPosition = static_cast<uint32_t>(j) * quantization_coefficient;
+                            uint16_t byteIndex = bitPosition / 8;
+                            uint8_t bitOffset = bitPosition % 8;
+                            
+                            uint8_t fv = 0;
+                            if (bitOffset + quantization_coefficient <= 8) {
+                                // Feature in single byte
+                                uint8_t mask = ((1 << quantization_coefficient) - 1) << bitOffset;
+                                fv = (packed[byteIndex] & mask) >> bitOffset;
+                            } else {
+                                // Feature spans two bytes
+                                uint8_t bitsInFirstByte = 8 - bitOffset;
+                                uint8_t bitsInSecondByte = quantization_coefficient - bitsInFirstByte;
+                                uint8_t mask1 = ((1 << bitsInFirstByte) - 1) << bitOffset;
+                                uint8_t mask2 = (1 << bitsInSecondByte) - 1;
+                                fv = ((packed[byteIndex] & mask1) >> bitOffset) |
+                                     ((packed[byteIndex + 1] & mask2) << bitsInFirstByte);
+                            }
+                            
                             size_t elemIndex = startElementIndex + j;
                             if (elemIndex >= sampleChunks[chunkIndex].size()) {
                                 RF_DEBUG_2(0, "❌ Index out of bounds: elemIndex=", elemIndex, ", size=", sampleChunks[chunkIndex].size());
@@ -1867,10 +1957,28 @@ namespace mcu {
                     size_t chunkIndex = loc.first;
                     size_t localIndex = loc.second;
                     size_t startElementIndex = localIndex * elementsPerSample;
+                    
+                    // Unpack features according to quantization_coefficient
                     for (uint16_t j = 0; j < numFeatures; ++j) {
-                        uint16_t byteIndex = j / 4;
-                        uint8_t bitOffset = (j % 4) * 2;
-                        uint8_t fv = (packed[byteIndex] >> bitOffset) & 0x03;
+                        uint32_t bitPosition = static_cast<uint32_t>(j) * quantization_coefficient;
+                        uint16_t byteIndex = bitPosition / 8;
+                        uint8_t bitOffset = bitPosition % 8;
+                        
+                        uint8_t fv = 0;
+                        if (bitOffset + quantization_coefficient <= 8) {
+                            // Feature in single byte
+                            uint8_t mask = ((1 << quantization_coefficient) - 1) << bitOffset;
+                            fv = (packed[byteIndex] & mask) >> bitOffset;
+                        } else {
+                            // Feature spans two bytes
+                            uint8_t bitsInFirstByte = 8 - bitOffset;
+                            uint8_t bitsInSecondByte = quantization_coefficient - bitsInFirstByte;
+                            uint8_t mask1 = ((1 << bitsInFirstByte) - 1) << bitOffset;
+                            uint8_t mask2 = (1 << bitsInSecondByte) - 1;
+                            fv = ((packed[byteIndex] & mask1) >> bitOffset) |
+                                 ((packed[byteIndex + 1] & mask2) << bitsInFirstByte);
+                        }
+                        
                         size_t elemIndex = startElementIndex + j;
                         if (elemIndex < sampleChunks[chunkIndex].size()) {
                             sampleChunks[chunkIndex].set(elemIndex, fv);
@@ -1937,11 +2045,13 @@ namespace mcu {
             // Clear current data and initialize parameters
             sampleChunks.clear();
             allLabels.clear();
-            bitsPerSample = numFeatures * 2;
+            bitsPerSample = numFeatures * source.quantization_coefficient;
+            quantization_coefficient = source.quantization_coefficient;
             updateSamplesEachChunk();
 
-            // Calculate packed bytes needed for features (4 values per byte)
-            uint16_t packedFeatureBytes = (numFeatures + 3) / 4;
+            // Calculate packed bytes needed for features
+            uint32_t totalBits = static_cast<uint32_t>(numFeatures) * quantization_coefficient;
+            uint16_t packedFeatureBytes = (totalBits + 7) / 8; // Round up to nearest byte
             size_t sampleDataSize = sizeof(uint8_t) + packedFeatureBytes; // label + packed features
             
             // Reserve space for requested samples
@@ -1986,12 +2096,28 @@ namespace mcu {
                     continue;
                 }
                 
-                // Unpack features from bytes
+                // Unpack features from bytes according to quantization_coefficient
                 for(uint16_t j = 0; j < numFeatures; j++) {
-                    uint16_t byteIndex = j / 4;
-                    uint8_t bitOffset = (j % 4) * 2;
-                    uint8_t mask = 0x03 << bitOffset;
-                    uint8_t feature = (packedBuffer[byteIndex] & mask) >> bitOffset;
+                    // Calculate bit position for this feature
+                    uint32_t bitPosition = static_cast<uint32_t>(j) * quantization_coefficient;
+                    uint16_t byteIndex = bitPosition / 8;
+                    uint8_t bitOffset = bitPosition % 8;
+                    
+                    // Extract the feature value (might span byte boundaries)
+                    uint8_t feature = 0;
+                    if (bitOffset + quantization_coefficient <= 8) {
+                        // Feature fits in single byte
+                        uint8_t mask = ((1 << quantization_coefficient) - 1) << bitOffset;
+                        feature = (packedBuffer[byteIndex] & mask) >> bitOffset;
+                    } else {
+                        // Feature spans two bytes
+                        uint8_t bitsInFirstByte = 8 - bitOffset;
+                        uint8_t bitsInSecondByte = quantization_coefficient - bitsInFirstByte;
+                        uint8_t mask1 = ((1 << bitsInFirstByte) - 1) << bitOffset;
+                        uint8_t mask2 = (1 << bitsInSecondByte) - 1;
+                        feature = ((packedBuffer[byteIndex] & mask1) >> bitOffset) |
+                                  ((packedBuffer[byteIndex + 1] & mask2) << bitsInFirstByte);
+                    }
                     s.features.push_back(feature);
                 }
                 s.features.fit();
@@ -2152,8 +2278,9 @@ namespace mcu {
                 return deletedLabels;
             }
 
-            // Calculate packed bytes needed for features (4 values per byte)
-            uint16_t packedFeatureBytes = (numFeatures + 3) / 4;
+            // Calculate packed bytes needed for features
+            uint32_t totalBits = static_cast<uint32_t>(numFeatures) * quantization_coefficient;
+            uint16_t packedFeatureBytes = (totalBits + 7) / 8; // Round up to nearest byte
             size_t sampleDataSize = sizeof(uint8_t) + packedFeatureBytes; // label + packed features
             size_t headerSize = sizeof(uint32_t) + sizeof(uint16_t);
 
@@ -2269,12 +2396,22 @@ namespace mcu {
                     packedBuffer[j] = 0;
                 }
                 
-                // Pack 4 feature values into each byte
+                // Pack features according to quantization_coefficient
                 for (size_t j = 0; j < sample.features.size(); ++j) {
-                    uint16_t byteIndex = j / 4;
-                    uint8_t bitOffset = (j % 4) * 2;
-                    uint8_t feature_value = sample.features[j] & 0x03;
-                    packedBuffer[byteIndex] |= (feature_value << bitOffset);
+                    uint32_t bitPosition = static_cast<uint32_t>(j) * quantization_coefficient;
+                    uint16_t byteIndex = bitPosition / 8;
+                    uint8_t bitOffset = bitPosition % 8;
+                    uint8_t feature_value = sample.features[j] & ((1 << quantization_coefficient) - 1);
+                    
+                    if (bitOffset + quantization_coefficient <= 8) {
+                        // Feature fits in single byte
+                        packedBuffer[byteIndex] |= (feature_value << bitOffset);
+                    } else {
+                        // Feature spans two bytes
+                        uint8_t bitsInFirstByte = 8 - bitOffset;
+                        packedBuffer[byteIndex] |= (feature_value << bitOffset);
+                        packedBuffer[byteIndex + 1] |= (feature_value >> bitsInFirstByte);
+                    }
                 }
                 
                 if (file.write(packedBuffer, packedFeatureBytes) != packedFeatureBytes) {
@@ -2305,8 +2442,8 @@ namespace mcu {
             size_t total = sizeof(Rf_data);
             total += allLabels.capacity() * sizeof(uint8_t);
             for (const auto& chunk : sampleChunks) {
-                total += sizeof(packed_vector<2, LARGE>);
-                total += chunk.capacity() * sizeof(uint8_t); // each element is 2 bits, but stored in bytes
+                total += sizeof(packed_vector<8, LARGE>);
+                total += chunk.capacity() * sizeof(uint8_t); // stored in bytes regardless of bpv
             }
             return total;
         }
@@ -2321,12 +2458,12 @@ namespace mcu {
     struct Tree_node{
         uint32_t packed_data; 
         
-        /** Bit layout optimize for breadth-first tree building:
+        /** Bit layout optimized for breadth-first tree building:
             * Bits 0-9  :  featureID        (10 bits)     -> 0 - 1023 features
             * Bits 10-17:  label            (8 bits)      -> 0 - 255 classes  
-            * Bits 18-19:  threshold        (2 bits)      -> 0 | 1 | 2 | 3
-            * Bit 20    :  is_leaf          (1 bit)       -> 0/1 
-            * Bits 21-31:  left child index (11 bits)     -> 0 - 2047 nodes (max 8kB RAM per tree) 
+            * Bits 18-20:  threshold slot   (3 bits)      -> 0 - 7 (maps to actual thresholds)
+            * Bit 21    :  is_leaf          (1 bit)       -> 0/1 
+            * Bits 22-31:  left child index (10 bits)     -> 0 - 1023 nodes
         @note: right child index = left child index + 1 
         */
 
@@ -2342,16 +2479,16 @@ namespace mcu {
             return (packed_data >> 10) & 0xFF;  // Bits 10-17 (8 bits)
         }
         
-        uint8_t getThreshold() const {
-            return (packed_data >> 18) & 0x03;  // Bits 18-19 (2 bits)
+        uint8_t getThresholdSlot() const {
+            return (packed_data >> 18) & 0x07;  // Bits 18-20 (3 bits)
         }
         
         bool getIsLeaf() const {
-            return (packed_data >> 20) & 0x01;  // Bit 20
+            return (packed_data >> 21) & 0x01;  // Bit 21
         }
         
         uint16_t getLeftChildIndex() const {
-            return (packed_data >> 21) & 0x7FF;  // Bits 21-31 (11 bits)
+            return (packed_data >> 22) & 0x3FF;  // Bits 22-31 (10 bits)
         }
         
         uint16_t getRightChildIndex() const {
@@ -2367,16 +2504,16 @@ namespace mcu {
             packed_data = (packed_data & 0xFFFC03FF) | ((uint32_t)(label & 0xFF) << 10);  // Bits 10-17
         }
         
-        void setThreshold(uint8_t threshold) {
-            packed_data = (packed_data & 0xFFF3FFFF) | ((uint32_t)(threshold & 0x03) << 18);  // Bits 18-19
+        void setThresholdSlot(uint8_t slot) {
+            packed_data = (packed_data & 0xFFE3FFFF) | ((uint32_t)(slot & 0x07) << 18);  // Bits 18-20
         }
         
         void setIsLeaf(bool isLeaf) {
-            packed_data = (packed_data & 0xFFEFFFFF) | ((uint32_t)(isLeaf ? 1 : 0) << 20);  // Bit 20
+            packed_data = (packed_data & 0xFFDFFFFF) | ((uint32_t)(isLeaf ? 1 : 0) << 21);  // Bit 21
         }
         
         void setLeftChildIndex(uint16_t index) {
-            packed_data = (packed_data & 0x001FFFFF) | ((uint32_t)(index & 0x7FF) << 21);  // Bits 21-31
+            packed_data = (packed_data & 0x003FFFFF) | ((uint32_t)(index & 0x3FF) << 22);  // Bits 22-31
         }
     };
 
@@ -2603,39 +2740,37 @@ namespace mcu {
         }
 
         // predict single (normalized)sample - packed features - hot path optimized
-        __attribute__((always_inline)) inline uint8_t predict_features(const packed_vector<2>& packed_features) const {
+        // Optimized version: uses pre-computed threshold cache
+        __attribute__((always_inline)) inline uint8_t predict_features(const packed_vector<8>& packed_features, const b_vector<uint16_t>& thresholds) const {
             // Fast path: assume tree is loaded and valid
             uint16_t currentIndex = 0;  // Start from root
             const Tree_node* node_data = nodes.data();
             const uint16_t node_count = nodes.size();
             
-            // Unroll first iteration (root is never leaf in practice)
-            uint32_t packed = node_data[0].packed_data;
-            uint16_t featureID = packed & 0x3FF;
-            uint8_t threshold = (packed >> 18) & 0x03;
-            uint8_t featureValue = packed_features[featureID];
-            currentIndex = (featureValue <= threshold) ? ((packed >> 21) & 0x7FF) : (((packed >> 21) & 0x7FF) + 1);
-            
             // Main traversal loop - inline everything
             while (__builtin_expect(currentIndex < node_count, 1)) {
-                packed = node_data[currentIndex].packed_data;
+                uint32_t packed = node_data[currentIndex].packed_data;
                 
-                // Check if leaf (bit 20)
-                if (__builtin_expect((packed >> 20) & 0x01, 0)) {
+                // Check if leaf (bit 21)
+                if (__builtin_expect((packed >> 21) & 0x01, 0)) {
                     // It's a leaf - return label (bits 10-17)
                     return (packed >> 10) & 0xFF;
                 }
                 
                 // Internal node - extract and traverse
-                featureID = packed & 0x3FF;  // bits 0-9
-                threshold = (packed >> 18) & 0x03;  // bits 18-19
-                featureValue = packed_features[featureID];
+                uint16_t featureID = packed & 0x3FF;  // bits 0-9
+                uint8_t thresholdSlot = (packed >> 18) & 0x07;  // bits 18-20 (3 bits)
                 
-                // Navigate: left child = bits 21-31, right = left + 1
-                const uint16_t leftChild = (packed >> 21) & 0x7FF;
+                // Map slot to actual threshold value
+                uint16_t threshold = (thresholdSlot < thresholds.size()) ? thresholds[thresholdSlot] : thresholds.back();
+                
+                uint16_t featureValue = packed_features[featureID];
+                
+                // Navigate: left child = bits 22-31, right = left + 1
+                const uint16_t leftChild = (packed >> 22) & 0x3FF;
                 currentIndex = (featureValue <= threshold) ? leftChild : (leftChild + 1);
             }
-            return 0; // Should not reach here in valid tree
+            return 255; // invalid label - Should not reach here in valid tree
         }
 
         void clearTree(bool freeMemory = false) {
@@ -2720,6 +2855,7 @@ namespace mcu {
         uint16_t numFeatures = 0;
         uint8_t groupsPerFeature = 0;
         uint8_t numLabels = 0;
+        uint8_t quantization_coefficient = 2; // Bits per feature value (1-8)
         uint32_t scaleFactor = 50000;
         bool isLoaded = false;
         const Rf_base* base_ptr = nullptr;
@@ -2957,6 +3093,7 @@ namespace mcu {
                 numFeatures = 0;
                 groupsPerFeature = 0;
                 numLabels = 0;
+                quantization_coefficient = 2;
                 scaleFactor = 50000;
                 isLoaded = false;
                 featureRefs.clear();
@@ -3005,11 +3142,23 @@ namespace mcu {
                 numSharedPatterns = static_cast<uint16_t>(strtoul(tokens[4], nullptr, 10));
                 scaleFactor = static_cast<uint32_t>(strtoul(tokens[5], nullptr, 10));
 
+                // Calculate quantization_coefficient from groupsPerFeature
                 if (groupsPerFeature == 0) {
                     RF_DEBUG(0, "❌ Invalid groupsPerFeature value in categorizer header");
                     success = false;
                     break;
                 }
+                
+                // Compute bits needed: groupsPerFeature = 2^quantization_coefficient
+                quantization_coefficient = 0;
+                uint16_t temp = groupsPerFeature;
+                while (temp > 1) {
+                    temp >>= 1;
+                    quantization_coefficient++;
+                }
+                // Clamp to valid range
+                if (quantization_coefficient < 1) quantization_coefficient = 1;
+                if (quantization_coefficient > 8) quantization_coefficient = 8;
 
                 featureRefs.reserve(numFeatures);
                 if (groupsPerFeature > 1) {
@@ -3212,30 +3361,13 @@ namespace mcu {
             RF_DEBUG(2, "🧹 Categorizer data released from memory");
         }
 
-        // categorize features array - optimized to pre-allocate exact size
-        __attribute__((always_inline)) inline packed_vector<2> categorizeFeatures(const float* features, size_t featureCount = 0) const {
-            if (featureCount == 0) {
-                featureCount = numFeatures;
-            }
-            // Pre-allocate to exact size to avoid reallocation
-            packed_vector<2> result(numFeatures, 0);
-            
-            // Direct write to avoid push_back overhead
+        // Core categorization function: write directly to pre-allocated buffer
+        // This is the ONLY internal categorization method - optimized for zero allocations
+        __attribute__((always_inline)) inline void categorizeFeatures(const float* features, packed_vector<8>& output) const {
+            // Write directly to pre-allocated buffer
             for (uint16_t i = 0; i < numFeatures; ++i) {
-                result.set(i, categorizeFeature(i, features[i]));
+                output.set(i, categorizeFeature(i, features[i]));
             }
-            return result;
-        }
-
-        // overload for vector input
-        template<typename T>
-        packed_vector<2> categorizeFeatures(const T& features) const {
-            static_assert(is_supported_vector<T>::value, "Unsupported vector type for categorizeFeatures");
-            if (features.size() != numFeatures) {
-                RF_DEBUG_2(2, "⚠️ Feature count mismatch - Expected: ", numFeatures, ", Found: ", features.size());
-                return packed_vector<2>();
-            }
-            return categorizeFeatures(features.data(), features.size());
         }
         
         size_t memory_usage() const {
@@ -3243,7 +3375,7 @@ namespace mcu {
             
             // Basic members
             usage += sizeof(numFeatures) + sizeof(groupsPerFeature) + sizeof(numLabels) + 
-                    sizeof(scaleFactor) + sizeof(isLoaded);
+                    sizeof(quantization_coefficient) + sizeof(scaleFactor) + sizeof(isLoaded);
             usage += 4;
             
             // Core data structures
@@ -3257,6 +3389,14 @@ namespace mcu {
             
             return usage;
         }
+        
+        // Getters
+        uint16_t getNumFeatures() const { return numFeatures; }
+        uint8_t getGroupsPerFeature() const { return groupsPerFeature; }
+        uint8_t getNumLabels() const { return numLabels; }
+        uint8_t getQuantizationCoefficient() const { return quantization_coefficient; }
+        uint32_t getScaleFactor() const { return scaleFactor; }
+        bool loaded() const { return isLoaded; }
 
         const char* getOriginalLabelPtr(uint8_t normalizedLabel) const {
             if (normalizedLabel >= labelOffsets.size()) {
@@ -3584,9 +3724,7 @@ namespace mcu {
                 RF_DEBUG(2, "⚠️ Node_pred buffer full, consider retraining soon.");
                 return;
             }
-            Serial.printf("➕ Adding training sample - min_split: %d, max_depth: %d, total_nodes: %d\n", min_split, max_depth, total_nodes);
             buffer.push_back(node_data(min_split, max_depth, total_nodes));
-            Serial.printf("   Current buffer size: %d\n", buffer.size());
         }
         // Retrain the predictor using data from rf_tree_log.csv (synchronized with PC version)
         bool re_train(bool save_after_retrain = true) {
@@ -4415,7 +4553,7 @@ namespace mcu {
                 }
             }
 
-            uint8_t predict_features(const packed_vector<2>& features) {
+            uint8_t predict_features(const packed_vector<8>& features, const b_vector<uint16_t>& thresholds) {
                 if(__builtin_expect(trees.empty() || !is_loaded, 0)) {
                     RF_DEBUG(2, "❌ Forest not loaded or empty, cannot predict.");
                     return 255; // Unknown class
@@ -4428,7 +4566,7 @@ namespace mcu {
                 // Collect votes from all trees
                 const uint16_t numTrees = trees.size();
                 for(uint16_t t = 0; t < numTrees; ++t) {
-                    uint8_t predict = trees[t].predict_features(features);
+                    uint8_t predict = trees[t].predict_features(features, thresholds);
                     if(__builtin_expect(predict < numLabels, 1)) {
                         votes[predict]++;
                     }

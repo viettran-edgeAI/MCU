@@ -27,8 +27,73 @@
 using namespace mcu;
 
 struct Rf_sample{
-    packed_vector<2> features;           // set containing the values ​​of the features corresponding to that sample , 2 bit per value.
-    uint16_t label;                     // label of the sample 
+    packed_vector<8> features;           // features stored in packed form, runtime bits configurable up to 8
+    uint16_t label;                      // label of the sample 
+};
+
+struct QuantizationHelper {
+    static uint8_t sanitizeBits(int bits) {
+        if (bits < 1) return 1;
+        if (bits > 8) return 8;
+        return static_cast<uint8_t>(bits);
+    }
+
+    static void buildThresholdCandidates(uint8_t bits, std::vector<uint16_t>& out) {
+        out.clear();
+        uint8_t sanitized = sanitizeBits(bits);
+        if (sanitized <= 1) {
+            out.push_back(0);
+            return;
+        }
+        if (sanitized == 2) {
+            out.push_back(0);
+            out.push_back(1);
+            out.push_back(2);
+            return;
+        }
+
+        uint16_t maxValue = static_cast<uint16_t>((1u << sanitized) - 1);
+        uint16_t availableOdd = maxValue / 2; // number of odd thresholds below maxValue
+        if (availableOdd == 0) {
+            out.push_back(maxValue ? (maxValue - 1) : 0);
+            return;
+        }
+
+        uint16_t desired = std::min<uint16_t>(8, availableOdd);
+        for (uint16_t i = 0; i < desired; ++i) {
+            uint32_t numerator = static_cast<uint32_t>(2 * i + 1) * static_cast<uint32_t>(availableOdd);
+            uint16_t oddIndex = static_cast<uint16_t>(numerator / (2 * desired));
+            if (oddIndex >= availableOdd) oddIndex = availableOdd - 1;
+            uint16_t threshold = static_cast<uint16_t>(2 * oddIndex + 1);
+            if (threshold >= maxValue) {
+                threshold = static_cast<uint16_t>(maxValue - 1);
+            }
+            if (!out.empty() && threshold <= out.back()) {
+                uint16_t candidate = static_cast<uint16_t>(out.back() + 2);
+                if (candidate >= maxValue) candidate = static_cast<uint16_t>(maxValue - 1);
+                threshold = candidate;
+            }
+            out.push_back(threshold);
+        }
+    }
+
+    static uint16_t thresholdFromSlot(uint8_t bits, uint8_t slot) {
+        std::vector<uint16_t> candidates;
+        buildThresholdCandidates(bits, candidates);
+        if (candidates.empty()) {
+            return 0;
+        }
+        if (slot >= candidates.size()) {
+            return candidates.back();
+        }
+        return candidates[slot];
+    }
+
+    static uint8_t slotCount(uint8_t bits) {
+        std::vector<uint16_t> candidates;
+        buildThresholdCandidates(bits, candidates);
+        return static_cast<uint8_t>(candidates.size());
+    }
 };
 
 using sampleID_set = ID_vector<uint16_t>; // Sample ID set type
@@ -41,9 +106,9 @@ struct Tree_node{
     // Bit layout (32 bits total) - optimized for breadth-first tree building:
     // Bits 0-9:    featureID (10 bits) - 0 to 1023 features
     // Bits 10-17:  label (8 bits) - 0 to 255 classes  
-    // Bits 18-19:  threshold (2 bits) - 0 to 3
-    // Bit 20:      is_leaf (1 bit) - 0 or 1
-    // Bits 21-31:  left child index (11 bits) - 0 to 2047 nodes -> max 8kB RAM per tree 
+    // Bits 18-20:  threshold slot (3 bits) - 0 to 7 (maps to quantized thresholds)
+    // Bit 21:      is_leaf (1 bit) - 0 or 1
+    // Bits 22-31:  left child index (10 bits) - 0 to 1023 nodes
     // Note: right child index = left child index + 1 (breadth-first property)
 
     // Constructor
@@ -58,20 +123,20 @@ struct Tree_node{
         return (packed_data >> 10) & 0xFF;  // Bits 10-17 (8 bits)
     }
     
-    uint16_t getThreshold() const {
-        return (packed_data >> 18) & 0x03;  // Bits 18-19 (2 bits)
+    uint16_t getThresholdSlot() const {
+        return (packed_data >> 18) & 0x07;  // Bits 18-20 (3 bits)
     }
     
     bool getIsLeaf() const {
-        return (packed_data >> 20) & 0x01;  // Bit 20
+        return (packed_data >> 21) & 0x01;  // Bit 21
     }
     
     uint16_t getLeftChildIndex() const {
-        return (packed_data >> 21) & 0x7FF;  // Bits 21-31 (11 bits)
+        return (packed_data >> 22) & 0x3FF;  // Bits 22-31 (10 bits)
     }
     
     uint16_t getRightChildIndex() const {
-        return getLeftChildIndex() + 1;  // Breadth-first property: right = left + 1
+        return static_cast<uint16_t>(getLeftChildIndex() + 1);  // Breadth-first property: right = left + 1
     }
     
     // Setter methods for packed data
@@ -83,16 +148,16 @@ struct Tree_node{
         packed_data = (packed_data & 0xFFFC03FF) | ((uint32_t)(label & 0xFF) << 10);  // Bits 10-17
     }
     
-    void setThreshold(uint16_t threshold) {
-        packed_data = (packed_data & 0xFFF3FFFF) | ((uint32_t)(threshold & 0x03) << 18);  // Bits 18-19
+    void setThresholdSlot(uint16_t slot) {
+        packed_data = (packed_data & 0xFFE3FFFF) | ((uint32_t)(slot & 0x07) << 18);  // Bits 18-20
     }
     
     void setIsLeaf(bool isLeaf) {
-        packed_data = (packed_data & 0xFFEFFFFF) | ((uint32_t)(isLeaf ? 1 : 0) << 20);  // Bit 20
+        packed_data = (packed_data & 0xFFDFFFFF) | ((uint32_t)(isLeaf ? 1 : 0) << 21);  // Bit 21
     }
     
     void setLeftChildIndex(uint16_t index) {
-        packed_data = (packed_data & 0x001FFFFF) | ((uint32_t)(index & 0x7FF) << 21);  // Bits 21-31
+        packed_data = (packed_data & 0x003FFFFF) | ((uint32_t)(index & 0x3FF) << 22);  // Bits 22-31
     }
     
     // Note: setRightChildIndex is not needed since right = left + 1
@@ -192,7 +257,7 @@ class Rf_tree {
         // Read number of nodes
         uint32_t nodeCount;
         file.read(reinterpret_cast<char*>(&nodeCount), sizeof(nodeCount));
-        if (nodeCount == 0 || nodeCount > 2047) { // 11-bit limit
+        if (nodeCount == 0 || nodeCount > 1023) { // 10-bit limit after slot expansion
             std::cout << "❌ Invalid node count in tree file: " << nodeCount << std::endl;
             file.close();
             return;
@@ -226,8 +291,14 @@ class Rf_tree {
         //           << " (" << nodeCount << " nodes)" << std::endl;
     }
 
-    uint16_t predictSample(const Rf_sample& sample) const {
+    uint16_t predictSample(const Rf_sample& sample, uint8_t quant_bits) const {
         if (nodes.empty()) return 0;
+        uint8_t sanitizedBits = QuantizationHelper::sanitizeBits(quant_bits);
+        std::vector<uint16_t> cachedThresholds;
+        QuantizationHelper::buildThresholdCandidates(sanitizedBits, cachedThresholds);
+        if (cachedThresholds.empty()) {
+            cachedThresholds.push_back(0);
+        }
         
         uint16_t currentIndex = 0;  // Start from root
         
@@ -238,8 +309,12 @@ class Rf_tree {
             }
             
             uint16_t featureValue = sample.features[nodes[currentIndex].getFeatureID()];
-            
-            if (featureValue <= nodes[currentIndex].getThreshold()) {
+            uint16_t slot = nodes[currentIndex].getThresholdSlot();
+            uint16_t thresholdValue = (slot < cachedThresholds.size())
+                                        ? cachedThresholds[slot]
+                                        : cachedThresholds.back();
+
+            if (featureValue <= thresholdValue) {
                 // Go to left child
                 currentIndex = nodes[currentIndex].getLeftChildIndex();
             } else {
@@ -281,11 +356,20 @@ class Rf_data {
 public:
     b_vector<Rf_sample> allSamples;    // vector storage for all samples
     std::string filename = "";
+    uint8_t feature_bits = 2;
  
     Rf_data() {}  
     
     // Constructor with filename
     Rf_data(const std::string& fname) : filename(fname) {}
+
+    void setFeatureBits(uint8_t bits) {
+        feature_bits = QuantizationHelper::sanitizeBits(bits);
+    }
+
+    uint8_t getFeatureBits() const {
+        return feature_bits;
+    }
 
     // Load data from CSV format (used only once for initial dataset conversion)
     void loadCSVData(std::string csvFilename, uint16_t numFeatures) {
@@ -296,6 +380,20 @@ public:
         }
 
         std::cout << "📊 Loading CSV: " << csvFilename << " (expecting " << (int)numFeatures << " features per sample)" << std::endl;
+
+        uint8_t activeBits = QuantizationHelper::sanitizeBits(feature_bits);
+        if (activeBits != feature_bits) {
+            std::cout << "⚠️  Adjusting feature bit-width from " << (int)feature_bits
+                      << " to sanitized value " << (int)activeBits << std::endl;
+            feature_bits = activeBits;
+        }
+        uint16_t maxFeatureValue = (activeBits >= 8)
+                                       ? static_cast<uint16_t>(255)
+                                       : static_cast<uint16_t>((1u << activeBits) - 1);
+        std::cout << "   Active quantization bits: " << (int)activeBits
+                  << " (max allowed feature value " << (int)maxFeatureValue << ")" << std::endl;
+
+        uint16_t highestObservedValue = 0;
         
         uint16_t sampleID = 0;
         uint16_t linesProcessed = 0;
@@ -317,13 +415,14 @@ public:
             }
 
             Rf_sample s;
+            s.features.set_bits_per_value(activeBits);
             s.features.clear();
             s.features.reserve(numFeatures);
 
             uint16_t fieldIdx = 0;
             std::stringstream ss(line);
             std::string token;
-            
+            bool valueOutOfRange = false;
             while (std::getline(ss, token, ',')) {
                 // Trim token
                 token.erase(0, token.find_first_not_of(" \t"));
@@ -334,7 +433,18 @@ public:
                 if (fieldIdx == 0) {
                     s.label = v;
                 } else {
-                    s.features.push_back(v);
+                    if (v > maxFeatureValue) {
+                        valueOutOfRange = true;
+                        std::cout << "❌ Line " << linesProcessed << ": Feature value " << v
+                                  << " exceeds maximum " << (int)maxFeatureValue
+                                  << " for " << (int)activeBits << " bits."
+                                  << " Increase quantization bits or re-quantize dataset." << std::endl;
+                        break;
+                    }
+                    s.features.push_back(static_cast<uint8_t>(v));
+                    if (v > highestObservedValue) {
+                        highestObservedValue = v;
+                    }
                 }
 
                 fieldIdx++;
@@ -348,6 +458,11 @@ public:
             }
             if (s.features.size() != numFeatures) {
                 std::cout << "❌ Line " << linesProcessed << ": Expected " << (int)numFeatures << " features, got " << s.features.size() << std::endl;
+                invalidSamples++;
+                continue;
+            }
+            if (valueOutOfRange) {
+                std::cout << "❌ Line " << linesProcessed << ": Feature value exceeded quantization range (" << (int)maxFeatureValue << ")" << std::endl;
                 invalidSamples++;
                 continue;
             }
@@ -365,6 +480,7 @@ public:
         std::cout << "   Valid samples: " << validSamples << std::endl;
         std::cout << "   Invalid samples: " << invalidSamples << std::endl;
         std::cout << "   Total samples in memory: " << allSamples.size() << std::endl;
+        std::cout << "   Highest feature value observed: " << (int)highestObservedValue << std::endl;
         
         file.close();
         std::cout << "✅ CSV data loaded successfully." << std::endl;
@@ -438,6 +554,9 @@ struct Rf_config{
     b_vector<uint16_t> min_split_range;      // for training 
     b_vector<bool> overwrite{2}; // min_split-> max_depth
 
+    uint16_t max_feature_value = 0;
+    uint8_t dataset_quantization_bits = 1;
+
     Rf_metric_scores metric_score;
     std::string data_path;
     
@@ -493,6 +612,23 @@ public:
                 num_trees = static_cast<uint16_t>(std::stoi(value));
             }
         }
+
+        // Extract quantization_coefficient (bits per feature value)
+        pos = content.find("\"quantization_coefficient\"");
+        if (pos != std::string::npos) {
+            pos = content.find(":", pos);
+            if (pos != std::string::npos) {
+                pos += 1;
+                size_t end = content.find_first_of(",}", pos);
+                std::string value = content.substr(pos, end - pos);
+                value.erase(0, value.find_first_not_of(" \t\r\n"));
+                value.erase(value.find_last_not_of(" \t\r\n") + 1);
+                if (!value.empty()) {
+                    quantization_coefficient = static_cast<uint16_t>(std::stoi(value));
+                }
+            }
+        }
+        quantization_coefficient = QuantizationHelper::sanitizeBits(static_cast<int>(quantization_coefficient));
         
         
         // Extract criterion (gini or entropy)
@@ -786,6 +922,7 @@ public:
         if (json_ratios_found) {
             std::cout << "   JSON split ratios found: train=" << json_train_ratio << ", test=" << json_test_ratio << ", valid=" << json_valid_ratio << " (will be validated)" << std::endl;
         }
+        std::cout << "   Quantization bits: " << (int)quantization_coefficient << std::endl;
         std::cout << "   Random seed: " << random_seed << std::endl;
     }
 
@@ -797,11 +934,12 @@ public:
             return;
         }
 
-        unordered_map<uint16_t, uint16_t> labelCounts;
-        unordered_set<uint16_t> featureValues;
+    unordered_map<uint16_t, uint16_t> labelCounts;
+    unordered_set<uint16_t> featureValues;
 
         uint16_t numSamples = 0;
         uint16_t maxFeatures = 0;
+    uint16_t datasetMaxValue = 0;
 
         std::string line;
         while (std::getline(file, line)) {
@@ -829,6 +967,9 @@ public:
                     labelCounts[numValue]++;
                 } else {
                     featureValues.insert(numValue);
+                    if (numValue > datasetMaxValue) {
+                        datasetMaxValue = static_cast<uint16_t>(numValue);
+                    }
                     uint16_t featurePos = featureIndex - 1;
                     if (featurePos + 1 > maxFeatures) {
                         maxFeatures = featurePos + 1;
@@ -848,12 +989,39 @@ public:
         num_features = maxFeatures;
         num_samples = numSamples;
         num_labels = labelCounts.size();
+        max_feature_value = datasetMaxValue;
+
+        uint8_t datasetBits = 1;
+        while (datasetBits < 8 && datasetMaxValue > static_cast<uint16_t>((1u << datasetBits) - 1)) {
+            ++datasetBits;
+        }
+        if (datasetMaxValue > static_cast<uint16_t>((1u << datasetBits) - 1)) {
+            datasetBits = 8;
+        }
+        datasetBits = QuantizationHelper::sanitizeBits(datasetBits);
+        dataset_quantization_bits = datasetBits;
+
+        uint8_t configuredBits = QuantizationHelper::sanitizeBits(static_cast<int>(quantization_coefficient));
+        if (datasetBits > configuredBits) {
+            std::cout << "⚙️  Detected maximum feature value " << datasetMaxValue
+                      << ", requiring " << static_cast<int>(datasetBits)
+                      << " bits. Adjusting quantization from " << static_cast<int>(configuredBits)
+                      << " to " << static_cast<int>(datasetBits) << std::endl;
+            configuredBits = datasetBits;
+        } else if (datasetBits < configuredBits) {
+            std::cout << "ℹ️  Dataset values fit within " << static_cast<int>(datasetBits)
+                      << " bits; using configured " << static_cast<int>(configuredBits) << " bits." << std::endl;
+        }
+        quantization_coefficient = configuredBits;
 
         // Dataset summary
         std::cout << "📊 Dataset Summary:\n";
         std::cout << "  Total samples: " << numSamples << "\n";
         std::cout << "  Total features: " << maxFeatures << "\n";
         std::cout << "  Unique labels: " << labelCounts.size() << "\n";
+        std::cout << "  Maximum feature value: " << datasetMaxValue
+                  << " (dataset needs " << static_cast<int>(datasetBits) << " bits)\n";
+        std::cout << "  Active quantization bits: " << static_cast<int>(quantization_coefficient) << "\n";
 
         // Automatic ratio configuration based on dataset size and training method
         float samples_per_label = (float)numSamples / labelCounts.size();
@@ -1138,6 +1306,7 @@ public:
             // data_path in esp32 SPIFFS : "/base_name."
             config_file << "  \"numTrees\": " << (int)num_trees << ",\n";
             config_file << "  \"randomSeed\": " << random_seed << ",\n";
+            config_file << "  \"quantization_coefficient\": " << (int)quantization_coefficient << ",\n";
             config_file << "  \"train_ratio\": " << norm_train_ratio << ",\n";
             config_file << "  \"test_ratio\": " << norm_test_ratio << ",\n";
             config_file << "  \"valid_ratio\": " << norm_valid_ratio << ",\n";
@@ -1198,8 +1367,8 @@ public:
     b_vector<float> peak_nodes;
 public:
     bool is_trained;
-    uint16_t accuracy; // in percentage
-    uint16_t peak_percent;   // number of nodes at depth with maximum number of nodes / total number of nodes in tree
+    uint8_t accuracy; // in percentage
+    uint8_t peak_percent;   // number of nodes at depth with maximum number of nodes / total number of nodes in tree
     
     
     // Helper methods for regression analysis
@@ -1400,7 +1569,7 @@ public:
         for(auto count : percent_count) {
             float percent = total_peak_nodes > 0 ? (float)count/(float)total_peak_nodes * 100.0f : 0.0f; // Fix: calculate actual percentage
             if(percent < 10.0f && !peak_found) { // Fix: compare with 10.0 instead of 10
-                peak_percent = percent_track;
+                peak_percent = static_cast<uint8_t>(std::min<uint16_t>(percent_track, 100));
                 peak_found = true;
             }
             percent_track++;
@@ -1442,7 +1611,7 @@ public:
         file.write(reinterpret_cast<const char*>(&peak_percent), sizeof(peak_percent));
         
         // Write number of coefficients
-        uint16_t num_coefficients = 3;
+    uint8_t num_coefficients = 3;
         file.write(reinterpret_cast<const char*>(&num_coefficients), sizeof(num_coefficients));
         
         // Write coefficients
@@ -1479,7 +1648,7 @@ public:
         file.read(reinterpret_cast<char*>(&peak_percent), sizeof(peak_percent));
         
         // Read number of coefficients
-        uint16_t num_coefficients;
+    uint8_t num_coefficients;
         file.read(reinterpret_cast<char*>(&num_coefficients), sizeof(num_coefficients));
         
         if (num_coefficients != 3) {

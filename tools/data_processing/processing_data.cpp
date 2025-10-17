@@ -18,27 +18,41 @@ using u8 = uint8_t;
 // Function declarations
 int truncate_csv(const char *in_path);
 
-static constexpr uint8_t quantization_coefficient = 2; // Coefficient for quantization (bits per feature value)
+static uint8_t quantization_coefficient = 2; // Coefficient for quantization (bits per feature value)
 
 static const int MAX_LABELS = 256; // Maximum number of unique labels supporte 
 static const int MAX_FEATURES = 1023;
 static const int MAX_NUM_SAMPLES = 65535; // Maximum number of samples supported
 
 // Helper functions to calculate derived values from quantization coefficient
-static constexpr uint16_t getGroupsPerFeature() {
-    return quantization_coefficient >= 8 ? 256 : (1 << quantization_coefficient); // 2^quantization_coefficient
+static uint16_t getGroupsPerFeature() {
+    if (quantization_coefficient >= 8) {
+        return 256u;
+    }
+    return static_cast<uint16_t>(1u << quantization_coefficient); // 2^quantization_coefficient
 }
 
-static constexpr uint8_t getMaxFeatureValue() {
-    return quantization_coefficient >= 8 ? 255 : ((1 << quantization_coefficient) - 1); // 2^quantization_coefficient - 1
+static uint8_t getMaxFeatureValue() {
+    if (quantization_coefficient >= 8) {
+        return 255u;
+    }
+    return static_cast<uint8_t>((1u << quantization_coefficient) - 1u); // 2^quantization_coefficient - 1
 }
 
-static constexpr uint8_t getFeaturesPerByte() {
-    return 8 / quantization_coefficient; // How many features fit in one byte
+static uint16_t getFeatureMask() {
+    if (quantization_coefficient >= 8) {
+        return 0xFFu;
+    }
+    return static_cast<uint16_t>((1u << quantization_coefficient) - 1u); // Bit mask for extracting feature values
 }
 
-static constexpr uint8_t getFeatureMask() {
-    return (1 << quantization_coefficient) - 1; // Bit mask for extracting feature values
+static uint8_t getFeaturesPerByte() {
+    return quantization_coefficient == 0 ? 0 : static_cast<uint8_t>(8 / quantization_coefficient); // How many whole features fit in one byte
+}
+
+static uint16_t getPackedFeatureBytes(uint16_t featureCount) {
+    uint32_t totalBits = static_cast<uint32_t>(featureCount) * quantization_coefficient;
+    return static_cast<uint16_t>((totalBits + 7u) / 8u);
 }
 
 static int num_features = 1023;
@@ -73,7 +87,7 @@ struct FeatureStats {
 // Structure for building CTG v2 format with pattern sharing and optimization
 class Rf_categorizer{
     uint16_t numFeatures = 0;
-    uint8_t groupsPerFeature = 0;
+    uint16_t groupsPerFeature = 0;
     uint32_t scaleFactor = 50000; // Scaling factor for uint16_t conversion
     
     // Feature type definitions
@@ -122,7 +136,7 @@ public:
     Rf_categorizer() = default;
     
     // Constructor for building categorizer
-    Rf_categorizer(uint16_t numFeatures, uint8_t gpf, uint32_t scale = 50000)
+    Rf_categorizer(uint16_t numFeatures, uint16_t gpf, uint32_t scale = 50000)
         : numFeatures(numFeatures), groupsPerFeature(gpf), scaleFactor(scale) {
         features.reserve(numFeatures);
         for (uint16_t i = 0; i < numFeatures; ++i) {
@@ -131,7 +145,7 @@ public:
     }
     
     // Constructor with label mapping
-    Rf_categorizer(uint16_t numFeatures, uint8_t gpf, const mcu::vector<mcu::pair<std::string, uint8_t>>& labelMap, uint32_t scale = 50000)
+    Rf_categorizer(uint16_t numFeatures, uint16_t gpf, const mcu::vector<mcu::pair<std::string, uint8_t>>& labelMap, uint32_t scale = 50000)
         : numFeatures(numFeatures), groupsPerFeature(gpf), scaleFactor(scale), labelMapping(labelMap) {
         features.reserve(numFeatures);
         for (uint16_t i = 0; i < numFeatures; ++i) {
@@ -330,7 +344,7 @@ public:
     
     // Accessors
     uint16_t getNumFeatures() const { return numFeatures; }
-    uint8_t getGroupsPerFeature() const { return groupsPerFeature; }
+    uint16_t getGroupsPerFeature() const { return groupsPerFeature; }
     uint32_t getScaleFactor() const { return scaleFactor; }
     const mcu::vector<mcu::pair<std::string, uint8_t>>& getLabelMapping() const { return labelMapping; }
     
@@ -704,7 +718,7 @@ Rf_categorizer categorizeCSVFeatures(const char* inputFilePath, const char* outp
             for (int i = 0; i < n_samples; ++i) {
                 values.push_back(data[i][j]);
             }
-            mcu::vector<float> edges = computeQuantileBinEdges(values, groupsPerFeature);
+            mcu::vector<float> edges = computeQuantileBinEdges(values, static_cast<int>(groupsPerFeature));
             for (float edge : edges) {
                 maxEdgeValue = std::max(maxEdgeValue, edge);
             }
@@ -744,7 +758,7 @@ Rf_categorizer categorizeCSVFeatures(const char* inputFilePath, const char* outp
             for (int i = 0; i < n_samples; ++i) {
                 values.push_back(data[i][j]);
             }
-            mcu::vector<float> edges = computeQuantileBinEdges(values, groupsPerFeature);
+            mcu::vector<float> edges = computeQuantileBinEdges(values, static_cast<int>(groupsPerFeature));
             ctg.setContinuousFeature(j, edges);
         }
     }
@@ -1055,7 +1069,12 @@ void generateDatasetParamsCSV(std::string path, const DatasetInfo& datasetInfo, 
     }
     
     fout.close();
-    uint16_t packedFeatureBytes = (actualFeatures + getFeaturesPerByte() - 1) / getFeaturesPerByte(); // Round up to nearest byte
+    uint16_t packedFeatureBytes = getPackedFeatureBytes(actualFeatures);
+
+    float compressionRatio = 0.0f;
+    if (packedFeatureBytes > 0) {
+        compressionRatio = static_cast<float>(actualFeatures) / packedFeatureBytes;
+    }
     
     std::cout << "✅ Dataset parameters saved to: " << outputFile << "\n";
     std::cout << "   📊 Parameters summary:\n";
@@ -1063,7 +1082,7 @@ void generateDatasetParamsCSV(std::string path, const DatasetInfo& datasetInfo, 
     std::cout << "     Features: " << actualFeatures << "\n";
     std::cout << "     Samples: " << actualTotalSamples << "\n";
     std::cout << "     Labels: " << datasetInfo.labelMapping.size() << "\n";
-    std::cout << "     Compression: " << (float)actualFeatures / packedFeatureBytes << ":1\n";
+    std::cout << "     Compression: " << compressionRatio << ":1\n";
 }
 
 // Add binary conversion structures and functions before main()
@@ -1201,10 +1220,14 @@ void saveBinaryDataset(const mcu::vector<ESP32_Sample>& samples,
     file.write(reinterpret_cast<const char*>(&numFeatures_header), sizeof(uint16_t));
     
     // Calculate packed bytes needed for features
-    uint16_t packedFeatureBytes = (numFeatures + getFeaturesPerByte() - 1) / getFeaturesPerByte();
+    uint16_t packedFeatureBytes = getPackedFeatureBytes(numFeatures);
     
     std::cout << "🗜️  Packing configuration:" << std::endl;
-    std::cout << "   Features per byte: " << static_cast<int>(getFeaturesPerByte()) << std::endl;
+    std::cout << "   Bits per feature: " << static_cast<int>(quantization_coefficient) << std::endl;
+    if (packedFeatureBytes > 0) {
+        float effectiveFeaturesPerByte = static_cast<float>(numFeatures) / packedFeatureBytes;
+        std::cout << "   Effective features per byte: " << effectiveFeaturesPerByte << std::endl;
+    }
     std::cout << "   Packed bytes per sample: " << packedFeatureBytes << std::endl;
     
     // Write samples (exactly like ESP32 Rf_data)
@@ -1217,15 +1240,25 @@ void saveBinaryDataset(const mcu::vector<ESP32_Sample>& samples,
         // Pack and write features
         mcu::vector<uint8_t> packedBuffer(packedFeatureBytes, 0);
         
+        uint16_t mask = getFeatureMask();
+        size_t bitPosition = 0;
+        
         // Pack features into bytes
-        for (size_t f = 0; f < sample.features.size(); f++) {
-            uint16_t byteIndex = f / getFeaturesPerByte();
-            uint8_t bitOffset = (f % getFeaturesPerByte()) * quantization_coefficient;
-            uint8_t feature_value = sample.features[f] & getFeatureMask();
+        for (size_t f = 0; f < sample.features.size(); ++f) {
+            uint16_t featureValue = static_cast<uint16_t>(sample.features[f]) & mask;
+            size_t byteIndex = bitPosition / 8u;
+            uint8_t bitOffset = static_cast<uint8_t>(bitPosition % 8u);
+            uint16_t shifted = static_cast<uint16_t>(featureValue << bitOffset);
             
             if (byteIndex < packedBuffer.size()) {
-                packedBuffer[byteIndex] |= (feature_value << bitOffset);
+                packedBuffer[byteIndex] |= static_cast<uint8_t>(shifted & 0xFFu);
             }
+            
+            if (bitOffset + quantization_coefficient > 8 && (byteIndex + 1) < packedBuffer.size()) {
+                packedBuffer[byteIndex + 1] |= static_cast<uint8_t>(shifted >> 8);
+            }
+            
+            bitPosition += quantization_coefficient;
         }
         
         file.write(reinterpret_cast<const char*>(packedBuffer.data()), packedFeatureBytes);
@@ -1321,6 +1354,23 @@ int main(int argc, char* argv[]) {
                     std::cerr << "Error: -f/-features requires a numeric value\n";
                     return 1;
                 }
+            } else if (arg == "-q" || arg == "-bits" || arg == "-quant" || arg == "-quantization") {
+                if (i + 1 < argc) {
+                    try {
+                        int bits = std::stoi(argv[++i]);
+                        if (bits < 1 || bits > 8) {
+                            std::cerr << "Error: quantization coefficient must be between 1 and 8\n";
+                            return 1;
+                        }
+                        quantization_coefficient = static_cast<uint8_t>(bits);
+                    } catch (const std::exception& e) {
+                        std::cerr << "Error: Invalid number for -q/-bits option\n";
+                        return 1;
+                    }
+                } else {
+                    std::cerr << "Error: -q/-bits requires a numeric value\n";
+                    return 1;
+                }
             } else if (arg == "-v" || arg == "-visualize") {
                 runVisualization = true;
             } else if (arg == "-h" || arg == "--help") {
@@ -1329,10 +1379,11 @@ int main(int argc, char* argv[]) {
                 std::cout << "  -p, -path <file>        Path to input CSV file (required)\n";
                 std::cout << "  -he, -header <yes/no>   Skip header if 'yes', process all lines if 'no' (auto-detect if not specified)\n";
                 std::cout << "  -f, -features <number>  Maximum number of features (default: 1023, range: 1-1023)\n";
+                std::cout << "  -q, -bits <1-8>         Quantization coefficient in bits per feature (default: 2)\n";
                 std::cout << "  -v, -visualize          Run quantization visualization after processing (default: enabled)\n";
                 std::cout << "  -h, --help              Show this help message\n";
                 std::cout << "\nExample:\n";
-                std::cout << "  " << argv[0] << " -p data/mydata.csv -header yes -features 512\n";
+                std::cout << "  " << argv[0] << " -p data/mydata.csv -header yes -features 512 -q 3\n";
                 return 0;
             } else if (inputFile.empty() && arg.find('-') != 0) {
                 // If no flags and inputFile not set, treat as positional argument (backward compatibility)
@@ -1371,7 +1422,10 @@ int main(int argc, char* argv[]) {
         std::string binaryFile = resultDir + "/" + baseName + "_nml.bin";  // Add binary output file
 
         // Step 1: Scan dataset to get info and create label mapping
-        std::cout << "=== Dataset Analysis ===\n";
+                std::cout << "=== Dataset Analysis ===\n";
+                std::cout << "   Quantization: " << static_cast<int>(quantization_coefficient)
+                                    << " bits (" << getGroupsPerFeature() << " groups, max value "
+                                    << static_cast<int>(getMaxFeatureValue()) << ")\n";
         DatasetInfo datasetInfo = scanDataset(inputFile.c_str());
 
         // Auto-detect header if not explicitly specified by user

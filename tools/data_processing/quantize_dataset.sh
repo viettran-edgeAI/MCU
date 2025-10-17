@@ -19,6 +19,7 @@ NC='\033[0m' # No Color
 CSV_PATH=""
 HEADER_MODE=""  # Empty means auto-detect
 MAX_FEATURES=""  # Empty means use default (1023)
+QUANT_BITS=""  # Empty uses processing tool default (2 bits)
 RUN_VISUALIZATION="yes"  # Default to yes
 HELP=false
 
@@ -33,6 +34,7 @@ show_usage() {
     echo "  -p, --path <file>         Path to input CSV file (required)"
     echo "  -he, --header <yes/no>    Skip header if 'yes', process all lines if 'no' (auto-detect if not specified)"
     echo "  -f, --features <number>   Maximum number of features (default: 1023, range: 1-65535)"
+    echo "  -q, --bits <1-8>          Quantization coefficient in bits per feature (default: 2)"
     echo "  -v, --visualize           Run quantization visualization after processing (default: yes)"
     echo "  -nv, --no-visualize       Skip visualization"
     echo "  -h, --help                Show this help message"
@@ -43,6 +45,7 @@ show_usage() {
     echo "  $0 -p data/iris_data.csv --header yes              # Skip first line (has header)"
     echo "  $0 -p data/iris_data.csv -f 512                    # Limit to 512 features max"
     echo "  $0 -p data/iris_data.csv -nv                       # Skip visualization"
+    echo "  $0 -p data/iris_data.csv -q 3                     # Quantize with 3 bits per feature"
     echo "  $0 -p data/iris_data.csv --header yes -f 256       # Skip header + 256 features + visualize (default)"
     echo ""
     echo -e "${YELLOW}Note: Header detection analyzes first two rows to determine if dataset has headers${NC}"
@@ -64,6 +67,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -f|--features)
             MAX_FEATURES="$2"
+            shift 2
+            ;;
+        -q|--bits|--quant|--quantization)
+            QUANT_BITS="$2"
             shift 2
             ;;
         -v|--visualize)
@@ -106,6 +113,14 @@ if [[ -z "$CSV_PATH" ]]; then
     exit 1
 fi
 
+# Validate quantization bits if provided
+if [[ -n "$QUANT_BITS" ]]; then
+    if ! [[ "$QUANT_BITS" =~ ^[1-8]$ ]]; then
+        echo -e "${RED}Error: Quantization bits must be an integer between 1 and 8${NC}"
+        exit 1
+    fi
+fi
+
 # Check if file exists
 if [[ ! -f "$CSV_PATH" ]]; then
     echo -e "${RED}Error: File '$CSV_PATH' not found${NC}"
@@ -124,6 +139,11 @@ if [[ -n "$MAX_FEATURES" ]]; then
     echo -e "  📊 Max features: ${GREEN}$MAX_FEATURES${NC} (user-specified)"
 else
     echo -e "  📊 Max features: ${GREEN}1023${NC} (default)"
+fi
+if [[ -n "$QUANT_BITS" ]]; then
+    echo -e "  🧮 Quantization bits: ${GREEN}$QUANT_BITS${NC} (user-specified)"
+else
+    echo -e "  🧮 Quantization bits: ${GREEN}2${NC} (default)"
 fi
 echo -e "  📊 Run visualization: ${GREEN}$RUN_VISUALIZATION${NC}"
 echo ""
@@ -153,6 +173,11 @@ fi
 # Add max features argument if user specified it
 if [[ -n "$MAX_FEATURES" ]]; then
     PROCESS_ARGS="$PROCESS_ARGS -f $MAX_FEATURES"
+fi
+
+# Add quantization bits if user specified it
+if [[ -n "$QUANT_BITS" ]]; then
+    PROCESS_ARGS="$PROCESS_ARGS -q $QUANT_BITS"
 fi
 
 if [[ "$RUN_VISUALIZATION" == "yes" ]]; then

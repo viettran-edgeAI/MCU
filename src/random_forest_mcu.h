@@ -1233,6 +1233,7 @@ namespace mcu{
 
         #ifdef DEV_STAGE
             model_report();
+            // visual_result();
         #endif
             end_training_session();
 #else
@@ -1241,37 +1242,38 @@ namespace mcu{
 #endif
         }
 
+        typedef struct rf_predict_result_t {
+            bool success = false;
+            char label[RF_MAX_LABEL_LENGTH] = {'\0'};
+            size_t prediction_time;
+        } rf_predict_result_t;
+
         // Public API: predict() fills the provided label buffer with the predicted label
         template<typename T>
-        bool predict(const T& features, char* labelBuffer, size_t bufferSize) {
+        void predict(const T& features, rf_predict_result_t& result) {
             static_assert(mcu::is_supported_vector<T>::value, "Unsupported type. Use mcu::vector or mcu::b_vector.");
-            return predict(features.data(), features.size(), labelBuffer, bufferSize);
+            predict(features.data(), features.size(), result);
         }
 
-        bool predict(const float* features, size_t length, char* labelBuffer, size_t bufferSize) {
-            const bool copyLabel = (labelBuffer != nullptr && bufferSize > 0);
+        void predict(const float* features, size_t length, rf_predict_result_t& result) {
+            uint32_t start = GET_CURRENT_TIME_IN_MICROSECONDS();
 
             if (__builtin_expect(length != config.num_features, 0)) {
-                RF_DEBUG(0, "❌ Feature length mismatch!","");
-                if (copyLabel) {
-                    labelBuffer[0] = '\0';
-                }
-                return false;
+                RF_DEBUG_2(0, "❌ Feature length mismatch! Expected: ", config.num_features, ", Given: ", length);
+                result.label[0] = '\0';
+                result.success = false;
+                result.prediction_time = 0;
+                return;
             }
 
-            // Optimized: write directly to pre-allocated buffer
+            // Quantize input features into preallocated buffer
             quantizer.quantizeFeatures(features, categorization_buffer);
-            return predict(categorization_buffer, labelBuffer, bufferSize);
-        }
 
-        bool predict(const packed_vector<8>& c_features, char* labelBuffer, size_t bufferSize) {
-            const bool copyLabel = (labelBuffer != nullptr && bufferSize > 0);
+            // perform prediction using the quantized buffer (categorization_buffer -> actual features expected by forest)
+            uint8_t i_label = forest_container.predict_features(categorization_buffer, threshold_cache);
 
-            // Use pre-computed threshold cache
-            uint8_t i_label = forest_container.predict_features(c_features, threshold_cache);
-
-            if (__builtin_expect(config.enable_retrain, 0)) {
-                Rf_sample sample(c_features, i_label);
+            if (__builtin_expect(config.enable_retrain, 1)) {
+                Rf_sample sample(categorization_buffer, i_label);
                 if(auto* pd = ensure_pending_data()){
                     if(Rf_data* base_handle = ensure_base_data_stub()){
                         pd->add_pending_sample(sample, *base_handle);
@@ -1279,43 +1281,28 @@ namespace mcu{
                 }
             }
 
-            if (!copyLabel) {
-                return true;
-            }
-
             const char* labelPtr = nullptr;
             uint16_t labelLen = 0;
-            if (__builtin_expect(!quantizer.getOriginalLabelView(i_label, &labelPtr, &labelLen), 0)) {
-                labelBuffer[0] = '\0';
-                return false;
+            if (!quantizer.getOriginalLabelView(i_label, &labelPtr, &labelLen)) {
+                result.label[0] = '\0';
+                result.success = false;
+                result.prediction_time = GET_CURRENT_TIME_IN_MICROSECONDS() - start;
+                return;
             }
 
-            if (labelLen >= bufferSize) {
-                memcpy(labelBuffer, labelPtr, bufferSize - 1);
-                labelBuffer[bufferSize - 1] = '\0';
-                return false;
+            // Copy safely into result.label
+            if (labelLen >= RF_MAX_LABEL_LENGTH) {
+                memcpy(result.label, labelPtr, RF_MAX_LABEL_LENGTH - 1);
+                result.label[RF_MAX_LABEL_LENGTH - 1] = '\0';
+            } else if (labelLen > 0) {
+                memcpy(result.label, labelPtr, labelLen);
+                result.label[labelLen] = '\0';
+            } else {
+                result.label[0] = '\0';
             }
-            if (labelLen > 0) {
-                memcpy(labelBuffer, labelPtr, labelLen);
-            }
-            labelBuffer[labelLen] = '\0';
-            return true;
-        }
 
-        // Convenience overload: returns the internal label index directly
-        uint8_t predict(const float* features, size_t length) {
-            if (__builtin_expect(length != config.num_features, 0)) {
-                RF_DEBUG(0, "❌ Feature length mismatch!","");
-                return 255;
-            }
-            quantizer.quantizeFeatures(features, categorization_buffer);
-            return forest_container.predict_features(categorization_buffer, threshold_cache);
-        }
-
-        template<typename T>
-        uint8_t predict(const T& features) {
-            static_assert(mcu::is_supported_vector<T>::value, "Unsupported type. Use mcu::vector or mcu::b_vector.");
-            return predict(features.data(), features.size());
+            result.success = true;
+            result.prediction_time = GET_CURRENT_TIME_IN_MICROSECONDS() - start;
         }
 
         /**

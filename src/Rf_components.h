@@ -90,6 +90,7 @@
         }while(0)
 #endif
 
+static constexpr uint8_t  RF_MAX_LABEL_LENGTH    = 32;             // max label buffer length
 static constexpr uint8_t  RF_PATH_BUFFER         = 64;            // buffer for file_path(limit to 2 level of file)
 static constexpr uint8_t  RF_MAX_TREES           = 100;          // maximum number of trees in a forest
 static constexpr uint16_t RF_MAX_LABELS          = 255;         // maximum number of unique labels supported 

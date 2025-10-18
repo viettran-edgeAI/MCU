@@ -23,7 +23,7 @@
         "description": "Whether to use bootstrap sampling for trees."
     },
     "criterion": {
-        "value": "gini",
+        "value": "entropy",
         "options": ["gini", "entropy"],
         "description": "Splitting criteria for decision trees."
     },
@@ -68,7 +68,7 @@
         "description": "disabled by default. enable to override min_split_range in training process"
     },
     "max_depth": {
-        "value": 13,
+        "value": 50,
         "status": "disabled",
         "status_options": ["disabled", "enabled"],
         "description": "disabled by default. enable to override max_depth_range in training process"

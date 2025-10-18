@@ -1244,6 +1244,7 @@ namespace mcu{
 
         typedef struct rf_predict_result_t {
             bool success = false;
+            uint8_t i_label = 255;
             char label[RF_MAX_LABEL_LENGTH] = {'\0'};
             size_t prediction_time;
         } rf_predict_result_t;
@@ -1261,6 +1262,7 @@ namespace mcu{
             if (__builtin_expect(length != config.num_features, 0)) {
                 RF_DEBUG_2(0, "❌ Feature length mismatch! Expected: ", config.num_features, ", Given: ", length);
                 result.label[0] = '\0';
+                result.i_label = 255;
                 result.success = false;
                 result.prediction_time = 0;
                 return;
@@ -1270,10 +1272,10 @@ namespace mcu{
             quantizer.quantizeFeatures(features, categorization_buffer);
 
             // perform prediction using the quantized buffer (categorization_buffer -> actual features expected by forest)
-            uint8_t i_label = forest_container.predict_features(categorization_buffer, threshold_cache);
+            result.i_label = forest_container.predict_features(categorization_buffer, threshold_cache);
 
             if (__builtin_expect(config.enable_retrain, 1)) {
-                Rf_sample sample(categorization_buffer, i_label);
+                Rf_sample sample(categorization_buffer, result.i_label);
                 if(auto* pd = ensure_pending_data()){
                     if(Rf_data* base_handle = ensure_base_data_stub()){
                         pd->add_pending_sample(sample, *base_handle);
@@ -1283,7 +1285,7 @@ namespace mcu{
 
             const char* labelPtr = nullptr;
             uint16_t labelLen = 0;
-            if (!quantizer.getOriginalLabelView(i_label, &labelPtr, &labelLen)) {
+            if (!quantizer.getOriginalLabelView(result.i_label, &labelPtr, &labelLen)) {
                 result.label[0] = '\0';
                 result.success = false;
                 result.prediction_time = GET_CURRENT_TIME_IN_MICROSECONDS() - start;

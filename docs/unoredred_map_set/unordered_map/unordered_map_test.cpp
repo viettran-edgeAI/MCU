@@ -1,6 +1,7 @@
 #include <iostream>
 #include <unordered_map>
 #include "unordered_map.h"
+// #include "../../../src/STL_MCU.h"
 #include <cstring>
 #include <random>
 #include <chrono>
@@ -11,6 +12,8 @@
 // for memory usage measurement
 #include <memory>
 #include <atomic>
+
+using namespace mcu;
 
 /*
 --------------------------------------------------------------------------------------------------------------------------

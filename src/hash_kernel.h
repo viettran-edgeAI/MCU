@@ -127,7 +127,7 @@ namespace mcu{
             2,42,63,214,146,164,63,162,84,241,222,79,144,42,99,162,131,128,19,166,23,190,16,19,90,161,112,178,58,223,115
         };
         template<typename T>
-        [[nodiscard]] inline uint8_t hashFunction(uint8_t TABLE_SIZE, T key, int hash) noexcept {
+        [[nodiscard]] inline uint8_t hashFunction(uint8_t TABLE_SIZE, T key, int hash) const noexcept {
             size_t tranform_key = preprocess_hash_input(key);
 
             // return (uint8_t)(djb2Hash(key, hash) % TABLE_SIZE);  // normal hash func

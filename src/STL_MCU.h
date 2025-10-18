@@ -2,6 +2,12 @@
 #pragma once
 
 #include <stdexcept>
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <new>
 #include "hash_kernel.h"
 #include "initializer_list.h"
 #include <type_traits>
@@ -10,9 +16,160 @@
 
 #define hashers best_hashers_16 // change to best_hashers_8 to save 255 bytes of disk space, but more collisions
 
+// PSRAM Configuration
+// Users can define RF_USE_PSRAM before including this header to enable PSRAM allocation
+// Example: #define RF_USE_PSRAM
+#if defined(RF_USE_PSRAM) && defined(ESP32)
+    #include "esp_heap_caps.h"
+    #define RF_PSRAM_AVAILABLE 1
+#else
+    #define RF_PSRAM_AVAILABLE 0
+#endif
+
 // #include <cstring>
 // #include <iostream>
 namespace mcu {
+
+    // Memory allocation helpers - automatically use PSRAM when enabled
+    namespace mem_alloc {
+        namespace detail {
+            constexpr uint8_t FLAG_PSRAM = 0x1;
+            constexpr size_t header_payload = sizeof(size_t) + sizeof(uint8_t);
+            constexpr size_t header_padding = (alignof(std::max_align_t) - (header_payload % alignof(std::max_align_t))) % alignof(std::max_align_t);
+
+            struct alignas(std::max_align_t) AllocationHeader {
+                size_t count;
+                uint8_t flags;
+                std::array<uint8_t, header_padding> padding{};
+
+                AllocationHeader(size_t c, uint8_t f) noexcept : count(c), flags(f) {}
+
+                static constexpr size_t stride() noexcept { return sizeof(AllocationHeader); }
+                bool uses_psram() const noexcept { return (flags & FLAG_PSRAM) != 0; }
+            };
+        }
+
+        template<typename T>
+        inline T* allocate(size_t count) {
+            const size_t recorded_count = count;
+            const size_t actual_count = (count == 0) ? 1 : count;
+            if (actual_count == 0) {
+                return nullptr;
+            }
+
+            constexpr size_t stride = detail::AllocationHeader::stride();
+            const size_t alignment = std::max<size_t>(alignof(T), alignof(size_t));
+            const size_t total_bytes = stride + actual_count * sizeof(T) + alignment + sizeof(size_t);
+
+            uint8_t flags = 0;
+            void* raw = nullptr;
+
+            #if RF_PSRAM_AVAILABLE
+                raw = heap_caps_malloc(total_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                if (raw) {
+                    flags = detail::FLAG_PSRAM;
+                }
+            #endif
+
+            if (!raw) {
+                raw = std::malloc(total_bytes);
+                if (!raw) {
+                    return nullptr;
+                }
+            }
+
+            auto* base = static_cast<uint8_t*>(raw);
+            auto* header = new(raw) detail::AllocationHeader(recorded_count, flags);
+
+            uint8_t* data_start = base + stride;
+            uintptr_t aligned_addr = (reinterpret_cast<uintptr_t>(data_start) + alignment - 1) & ~(alignment - 1);
+            size_t offset = aligned_addr - reinterpret_cast<uintptr_t>(data_start);
+            while (offset < sizeof(size_t)) {
+                aligned_addr += alignment;
+                offset += alignment;
+            }
+
+            auto* aligned_data = reinterpret_cast<uint8_t*>(aligned_addr);
+            auto* offset_slot = reinterpret_cast<size_t*>(aligned_data) - 1;
+            *offset_slot = offset;
+
+            auto* data = reinterpret_cast<T*>(aligned_data);
+
+            if constexpr (!std::is_trivially_default_constructible_v<T>) {
+                for (size_t i = 0; i < recorded_count; ++i) {
+                    new (data + i) T();
+                }
+            }
+
+            return data;
+        }
+
+        template<typename T>
+        inline void deallocate(T* ptr) {
+            if (!ptr) {
+                return;
+            }
+
+            constexpr size_t stride = detail::AllocationHeader::stride();
+            auto* data_bytes = reinterpret_cast<uint8_t*>(ptr);
+            size_t offset = *(reinterpret_cast<const size_t*>(data_bytes) - 1);
+            auto* raw = data_bytes - offset - stride;
+            auto* header = reinterpret_cast<detail::AllocationHeader*>(raw);
+
+            if constexpr (!std::is_trivially_destructible_v<T>) {
+                for (size_t i = 0; i < header->count; ++i) {
+                    ptr[i].~T();
+                }
+            }
+
+            const bool uses_psram = header->uses_psram();
+            header->~AllocationHeader();
+
+            #if RF_PSRAM_AVAILABLE
+                if (uses_psram) {
+                    heap_caps_free(raw);
+                    return;
+                }
+            #endif
+
+            std::free(raw);
+        }
+
+        // Get allocation info for debugging
+        inline bool is_psram_ptr(const void* ptr) {
+            #if RF_PSRAM_AVAILABLE
+                if (!ptr) {
+                    return false;
+                }
+                constexpr size_t stride = detail::AllocationHeader::stride();
+                auto* data_bytes = reinterpret_cast<const uint8_t*>(ptr);
+                size_t offset = *(reinterpret_cast<const size_t*>(data_bytes) - 1);
+                auto* raw = data_bytes - offset - stride;
+                auto* header = reinterpret_cast<const detail::AllocationHeader*>(raw);
+                return header->uses_psram();
+            #else
+                (void)ptr;
+                return false;
+            #endif
+        }
+
+        inline size_t get_free_psram() {
+            #if RF_PSRAM_AVAILABLE
+                return heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+            #else
+                return 0;
+            #endif
+        }
+
+        inline size_t get_total_psram() {
+            #if RF_PSRAM_AVAILABLE
+                return heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+            #else
+                return 0;
+            #endif
+        }
+    }
+
     template<typename T1, typename T2>
     struct pair {
         T1 first;
@@ -68,32 +225,49 @@ namespace mcu {
         //             size_             virtual_cap    cap_
         static T MAP_DEFAULT_VALUE;
 
-        void rehash(uint8_t newCap) {
+        bool rehash(uint8_t newCap) noexcept {
             if (newCap < size_) newCap = size_;
             if (newCap > MAX_CAP) newCap = MAX_CAP;
             if (newCap == 0) newCap = INIT_CAP;
 
-            auto* oldTable = table;
-            auto* oldFlags = flags;
+            Pair* newTable = mem_alloc::allocate<Pair>(newCap);
+            if (!newTable) {
+                return false;
+            }
+
+            const size_t flagBytes = (static_cast<size_t>(newCap) * 2 + 7) / 8;
+            uint8_t* newFlags = new (std::nothrow) uint8_t[flagBytes];
+            if (!newFlags) {
+                mem_alloc::deallocate(newTable);
+                return false;
+            }
+            std::fill_n(newFlags, flagBytes, static_cast<uint8_t>(0));
+
+            Pair* oldTable = table;
+            uint8_t* oldFlags = flags;
             uint8_t oldCap = cap_;
 
-            table = new Pair[newCap];
-            slots_init(newCap);
-
+            table = newTable;
+            flags = newFlags;
+            cap_ = newCap;
             size_ = 0;
             dead_size_ = 0;
-            cap_ = newCap;
             virtual_cap = cap_to_virtual();
             step_ = calStep(newCap);
-            
-            for (uint8_t i = 0; i < oldCap; ++i) {
-                slotState s = getStateFrom(oldFlags, i);
-                if (s == slotState::Used) {
-                    insert(oldTable[i]);
+
+            if (oldTable && oldFlags) {
+                for (uint8_t i = 0; i < oldCap; ++i) {
+                    if (getStateFrom(oldFlags, i) == slotState::Used) {
+                        insert(oldTable[i]);
+                    }
                 }
             }
-            delete[] oldTable;
-            delete[] oldFlags;
+
+            if (oldFlags) {
+                delete[] oldFlags;
+            }
+            mem_alloc::deallocate(oldTable);
+            return true;
         }
         // safely convert between cap_ and virtual_cap 
         // ensure integrity after 2-way conversion
@@ -113,6 +287,9 @@ namespace mcu {
     // protected:
     public:
         int16_t getValue(V key) noexcept {
+            if (cap_ == 0 || table == nullptr) {
+                return -1;
+            }
             uint8_t index     = hashFunction(cap_, key, hashers[cap_ - 1]);
             uint8_t attempts= 0;
 
@@ -136,6 +313,9 @@ namespace mcu {
             return -1;
         }
         int16_t getValue(V key) const noexcept {
+            if (cap_ == 0 || table == nullptr) {
+                return -1;
+            }
             uint8_t index     = hashFunction(cap_, key, hashers[cap_ - 1]);
             uint8_t attempts= 0;
 
@@ -175,7 +355,7 @@ namespace mcu {
         }
         // destructor
         ~unordered_map() noexcept {
-            delete[] table;
+            mem_alloc::deallocate(table);
         }
 
         /**
@@ -190,7 +370,7 @@ namespace mcu {
             virtual_cap(other.virtual_cap),
             step_(other.step_)
         {
-            table = new Pair[cap_];
+            table = mem_alloc::allocate<Pair>(cap_);
             for (uint8_t i = 0; i < cap_; ++i) {
                 if (getState(i) == slotState::Used)
                     table[i] = other.table[i];
@@ -226,13 +406,13 @@ namespace mcu {
          */
         unordered_map& operator=(const unordered_map& other) noexcept {
             if (this != &other) {
-                delete[] table;
+                mem_alloc::deallocate(table);
                 slot_handler::operator=(other);  // copy flags & cap_
                 size_      = other.size_;
                 fullness_  = other.fullness_;
                 virtual_cap = other.virtual_cap;
                 step_      = other.step_;
-                table      = new Pair[cap_];
+                table      = mem_alloc::allocate<Pair>(cap_);
                 for (uint8_t i = 0; i < cap_; ++i) {
                     if (getState(i) == slotState::Used) {
                         table[i] = other.table[i];
@@ -249,7 +429,7 @@ namespace mcu {
          */
         unordered_map& operator=(unordered_map&& other) noexcept {
             if (this != &other) {
-                delete[] table;
+                mem_alloc::deallocate(table);
                 slot_handler::operator=(std::move(other)); // steal flags & cap_
                 size_      = other.size_;
                 dead_size_ = other.dead_size_;
@@ -344,7 +524,13 @@ namespace mcu {
                     return { end(), false };
                 uint16_t dbl = cap_ ? cap_ * 2: INIT_CAP;
                 if (dbl > MAX_CAP) dbl = MAX_CAP;
-                rehash(static_cast<uint8_t>(dbl));
+                if (!rehash(static_cast<uint8_t>(dbl))) {
+                    return { end(), false };
+                }
+            }
+
+            if (cap_ == 0 || table == nullptr) {
+                return { end(), false };
             }
 
             V key       = p.first;
@@ -409,6 +595,9 @@ namespace mcu {
          * @return true if an element was removed, false otherwise.
          */
         bool erase(V key) noexcept {
+            if (cap_ == 0 || table == nullptr) {
+                return false;
+            }
             uint8_t index = hashFunction(cap_, key, hashers[cap_ - 1]);
             uint8_t attempt = 0;
 
@@ -435,6 +624,9 @@ namespace mcu {
          * @return Iterator to the element if found, otherwise end().
          */
         iterator find(V key) noexcept {
+            if (cap_ == 0 || table == nullptr) {
+                return end();
+            }
             uint8_t index = hashFunction(cap_, key, hashers[cap_ - 1]);
             uint8_t attempt = 0;
             // Search for a cell whose is used and matched key
@@ -565,15 +757,19 @@ namespace mcu {
          */
         size_t fit() noexcept {
             if (size_ < cap_) {
-                uint8_t oldCap = cap_;
-                size_t flagBytes = (oldCap * 2 + 7) / 8;
-                
-                size_t target_buckets = std::max<uint8_t>(
+                const uint8_t oldCap = cap_;
+                const size_t oldFlagBytes = (static_cast<size_t>(oldCap) * 2 + 7) / 8;
+
+                uint8_t target_buckets = std::max<uint8_t>(
                     (size_ * 100 + fullness_ - 1) / fullness_, INIT_CAP);
-                rehash(target_buckets);
+                if (!rehash(target_buckets)) {
+                    return 0;
+                }
                 // Calculate bytes saved:
-                size_t tableSaved = (oldCap - cap_) * sizeof(Pair);
-                size_t flagsSaved = flagBytes - ((cap_ * 2 + 7) / 8);
+                size_t tableSaved = (oldCap > cap_) ?
+                    static_cast<size_t>(oldCap - cap_) * sizeof(Pair) : 0;
+                size_t flagsSaved = (oldFlagBytes > ((static_cast<size_t>(cap_) * 2 + 7) / 8)) ?
+                    oldFlagBytes - ((static_cast<size_t>(cap_) * 2 + 7) / 8) : 0;
                 return tableSaved + flagsSaved;
             }
             return 0;
@@ -584,7 +780,12 @@ namespace mcu {
          * @note Keeps the allocated memory for reuse.
          */
         void clear() noexcept {
-            memset(flags, 0, (cap_ * 2 + 7) / 8);
+            if (!flags) {
+                size_ = 0;
+                dead_size_ = 0;
+                return;
+            }
+            std::fill_n(flags, (static_cast<size_t>(cap_) * 2 + 7) / 8, static_cast<uint8_t>(0));
             size_ = 0;
             dead_size_ = 0;
         }
@@ -601,8 +802,7 @@ namespace mcu {
             if (newCap > MAX_CAP) return false;
             if (newCap < size_) newCap = size_;
             if (newCap == cap_) return true;
-            rehash(newCap);
-            return true;
+            return rehash(newCap);
         }
 
         /**
@@ -644,6 +844,22 @@ namespace mcu {
         }
 
         /**
+         * @brief Checks if the table pointer is allocated in PSRAM.
+         * @return true if table is in PSRAM, false if in DRAM or null.
+         */
+        bool is_table_in_psram() const noexcept {
+            return mem_alloc::is_psram_ptr(table);
+        }
+
+        /**
+         * @brief Gets the table pointer for debugging (returns nullptr if not allocated).
+         * @return Pointer to the internal table (may be in PSRAM or DRAM).
+         */
+        const Pair* get_table_ptr() const noexcept {
+            return table;
+        }
+
+        /**
          * @brief Swaps the contents of two maps.
          * @param other The map to swap with.
          */
@@ -676,32 +892,49 @@ namespace mcu {
         uint8_t virtual_cap = 0; // virtual capacity
         uint8_t step_ = 0;
 
-        void rehash(uint8_t newCap) {
+        bool rehash(uint8_t newCap) noexcept {
             if (newCap < size_) newCap = size_;
             if (newCap > MAX_CAP) newCap = MAX_CAP;
+            if (newCap == 0) newCap = INIT_CAP;
 
-            auto* oldTable = table;
-            auto* oldFlags = flags;
+            T* newTable = mem_alloc::allocate<T>(newCap);
+            if (!newTable) {
+                return false;
+            }
+
+            const size_t flagBytes = (static_cast<size_t>(newCap) * 2 + 7) / 8;
+            uint8_t* newFlags = new (std::nothrow) uint8_t[flagBytes];
+            if (!newFlags) {
+                mem_alloc::deallocate(newTable);
+                return false;
+            }
+            std::fill_n(newFlags, flagBytes, static_cast<uint8_t>(0));
+
+            T* oldTable = table;
+            uint8_t* oldFlags = flags;
             uint8_t oldCap = cap_;
 
-            table = new T[newCap];
-            flags = new uint8_t[(newCap * 2 + 7) / 8];
-            memset(flags, 0, (newCap * 2 + 7) / 8);
-
+            table = newTable;
+            flags = newFlags;
+            cap_ = newCap;
             size_ = 0;
             dead_size_ = 0;
-            cap_ = newCap;
             virtual_cap = cap_to_virtual();
             step_ = calStep(newCap);
 
-            for (uint8_t i = 0; i < oldCap; ++i) {
-                slotState s = getStateFrom(oldFlags, i);
-                if (s == slotState::Used) {
-                    insert(oldTable[i]);
+            if (oldTable && oldFlags) {
+                for (uint8_t i = 0; i < oldCap; ++i) {
+                    if (getStateFrom(oldFlags, i) == slotState::Used) {
+                        insert(oldTable[i]);
+                    }
                 }
             }
-            delete[] oldTable;
-            delete[] oldFlags;
+
+            if (oldFlags) {
+                delete[] oldFlags;
+            }
+            mem_alloc::deallocate(oldTable);
+            return true;
         }
         // safely convert between cap_ and virtual_cap 
         // ensure integrity after 2-way conversion
@@ -735,7 +968,7 @@ namespace mcu {
          * @brief Destructor, frees all allocated memory.
          */
         ~unordered_set() noexcept {
-            delete[] table;
+            mem_alloc::deallocate(table);
         }
 
         /**
@@ -751,7 +984,7 @@ namespace mcu {
             cap_ = other.cap_;
             size_ = other.size_;
             dead_size_ = other.dead_size_;
-            table = new T[cap_];
+            table = mem_alloc::allocate<T>(cap_);
             for (uint8_t i = 0; i < cap_; ++i) {
                 if (getState(i) == slotState::Used)
                     table[i] = other.table[i];
@@ -787,7 +1020,7 @@ namespace mcu {
          */
         unordered_set& operator=(const unordered_set& other) noexcept {
             if (this != &other) {
-                delete[] table;
+                mem_alloc::deallocate(table);
                 slot_handler::operator=(other);  // copy flags & cap_
                 fullness_ = other.fullness_;
                 virtual_cap = other.virtual_cap;
@@ -795,7 +1028,7 @@ namespace mcu {
                 cap_ = other.cap_;
                 size_ = other.size_;
                 dead_size_ = other.dead_size_;
-                table = new T[cap_];
+                table = mem_alloc::allocate<T>(cap_);
                 for (uint8_t i = 0; i < cap_; ++i) {
                     if (getState(i) == slotState::Used)
                         table[i] = other.table[i];
@@ -811,7 +1044,7 @@ namespace mcu {
          */
         unordered_set& operator=(unordered_set&& other) noexcept {
             if (this != &other) {
-                delete[] table;
+                mem_alloc::deallocate(table);
                 slot_handler::operator=(std::move(other)); // steal flags & cap_
                 size_      = other.size_;
                 dead_size_ = other.dead_size_;
@@ -920,7 +1153,13 @@ namespace mcu {
                     return false;
                 uint16_t dbl = cap_ ? cap_ * 2: INIT_CAP;
                 if (dbl > MAX_CAP) dbl = MAX_CAP;
-                rehash(static_cast<uint8_t>(dbl));
+                if (!rehash(static_cast<uint8_t>(dbl))) {
+                    return false;
+                }
+            }
+
+            if (cap_ == 0 || table == nullptr) {
+                return false;
             }
             
             uint8_t index = hashFunction(cap_, value, hashers[cap_ - 1]);
@@ -953,6 +1192,9 @@ namespace mcu {
          * @return true if an element was removed, false otherwise.
          */
         bool erase(const T& value) noexcept {
+            if (cap_ == 0 || table == nullptr) {
+                return false;
+            }
             uint8_t index = hashFunction(cap_, value, hashers[cap_ - 1]);
             uint8_t attempt = 0;
             while(getState(index) != slotState::Empty){
@@ -980,6 +1222,9 @@ namespace mcu {
          * @return Iterator to the element if found, otherwise end().
          */
         iterator find(const T& value) noexcept {
+            if (cap_ == 0 || table == nullptr) {
+                return end();
+            }
             uint8_t index = hashFunction(cap_, value, hashers[cap_ - 1]);
             uint8_t attempt = 0;
             while(getState(index) != slotState::Empty){
@@ -1079,12 +1324,17 @@ namespace mcu {
          */
         size_t fit() noexcept {
             if (size_ < cap_) {
-                uint8_t oldCap = cap_;
-                size_t flagBytes = (oldCap * 2 + 7) / 8;
-                size_t tableSaved = (oldCap - size_) * sizeof(T);
-                rehash(size_);
-                size_t newFlagBytes = (cap_ * 2 + 7) / 8;
-                return tableSaved + (flagBytes - newFlagBytes);
+                const uint8_t oldCap = cap_;
+                const size_t oldFlagBytes = (static_cast<size_t>(oldCap) * 2 + 7) / 8;
+                if (!rehash(size_)) {
+                    return 0;
+                }
+                const size_t newFlagBytes = (static_cast<size_t>(cap_) * 2 + 7) / 8;
+                const size_t tableSaved = (oldCap > cap_) ?
+                    static_cast<size_t>(oldCap - cap_) * sizeof(T) : 0;
+                const size_t flagsSaved = (oldFlagBytes > newFlagBytes) ?
+                    oldFlagBytes - newFlagBytes : 0;
+                return tableSaved + flagsSaved;
             }
             return 0;
         }
@@ -1099,8 +1349,7 @@ namespace mcu {
             if (newCap > MAX_CAP) return false;
             if (newCap < size_) newCap = size_;
             if (newCap == cap_) return true;
-            rehash(newCap);
-            return true;
+            return rehash(newCap);
         }
 
         /**
@@ -1114,8 +1363,7 @@ namespace mcu {
             if (newCap > MAX_CAP) return false;
             if (newCap < size_) newCap = size_;
             if (newCap == cap_) return true;
-            rehash(newCap);
-            return true;
+            return rehash(newCap);
         }
 
         /**
@@ -1155,7 +1403,12 @@ namespace mcu {
          * @note Keeps the allocated memory for reuse.
          */
         void clear() noexcept {
-            memset(flags, 0, (cap_ * 2 + 7) / 8);
+            if (!flags) {
+                size_ = 0;
+                dead_size_ = 0;
+                return;
+            }
+            std::fill_n(flags, (static_cast<size_t>(cap_) * 2 + 7) / 8, static_cast<uint8_t>(0));
             size_ = 0;
             dead_size_ = 0;
         }
@@ -1169,6 +1422,22 @@ namespace mcu {
             size_t table_bytes = static_cast<size_t>(cap_) * sizeof(T);
             size_t flags_bytes = (cap_ * 2 + 7) / 8;
             return sizeof(*this) + table_bytes + flags_bytes;
+        }
+
+        /**
+         * @brief Checks if the table pointer is allocated in PSRAM.
+         * @return true if table is in PSRAM, false if in DRAM or null.
+         */
+        bool is_table_in_psram() const noexcept {
+            return mem_alloc::is_psram_ptr(table);
+        }
+
+        /**
+         * @brief Gets the table pointer for debugging (returns nullptr if not allocated).
+         * @return Pointer to the internal table (may be in PSRAM or DRAM).
+         */
+        const T* get_table_ptr() const noexcept {
+            return table;
         }
 
         /**
@@ -1226,7 +1495,7 @@ namespace mcu {
                 // Need to use heap
                 using_heap = true;
                 capacity_ = size_;
-                heap_array = new T[capacity_];
+                heap_array = mem_alloc::allocate<T>(capacity_);
                 for (vector_index_type i = 0; i < size_; ++i) {
                     heap_array[i] = other[i];
                 }
@@ -1238,7 +1507,7 @@ namespace mcu {
         void assign_from_other(const b_vector<T, otherSboSize>& other) noexcept {
             // First, correctly destroy the elements in `this`
             if (using_heap) {
-                delete[] heap_array;
+                mem_alloc::deallocate(heap_array);
             } else {
                 T* p = reinterpret_cast<T*>(buffer);
                 for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
@@ -1263,7 +1532,7 @@ namespace mcu {
                 // Use heap
                 using_heap = true;
                 capacity_ = size_;
-                heap_array = new T[capacity_];
+                heap_array = mem_alloc::allocate<T>(capacity_);
                 for (vector_index_type i = 0; i < size_; ++i) {
                     heap_array[i] = other[i];
                 }
@@ -1322,10 +1591,10 @@ namespace mcu {
         void i_resize(vector_index_type newCapacity) noexcept {
             if (!using_heap || newCapacity == capacity_) return;
             if (newCapacity == 0) newCapacity = 1;
-            T* newArray = new T[newCapacity];
+            T* newArray = mem_alloc::allocate<T>(newCapacity);
             vector_index_type toCopy = (size_ < newCapacity ? size_ : newCapacity);
             customCopy(heap_array, newArray, toCopy);
-            delete[] heap_array;
+            mem_alloc::deallocate(heap_array);
             heap_array = newArray;
             capacity_ = newCapacity;
             if (size_ > capacity_) size_ = capacity_;
@@ -1336,7 +1605,7 @@ namespace mcu {
             if (using_heap) return;
             
             T* old_buffer_ptr = reinterpret_cast<T*>(buffer);
-            T* new_heap = new T[new_capacity];
+            T* new_heap = mem_alloc::allocate<T>(new_capacity);
             
             // Copy elements from buffer to heap
             customCopy(old_buffer_ptr, new_heap, size_);
@@ -1374,7 +1643,7 @@ namespace mcu {
             } else {
                 using_heap = true;
                 capacity_ = initialCapacity;
-                heap_array = new T[initialCapacity];
+                heap_array = mem_alloc::allocate<T>(initialCapacity);
                 // No need to initialize elements since size is 0
             }
         }
@@ -1391,7 +1660,7 @@ namespace mcu {
             } else {
                 using_heap = true;
                 capacity_ = initialCapacity;
-                heap_array = new T[initialCapacity];
+                heap_array = mem_alloc::allocate<T>(initialCapacity);
                 for (vector_index_type i = 0; i < size_; ++i) {
                     heap_array[i] = value;
                 }
@@ -1410,7 +1679,7 @@ namespace mcu {
             } else {
                 using_heap = true;
                 capacity_ = init.size();
-                heap_array = new T[capacity_];
+                heap_array = mem_alloc::allocate<T>(capacity_);
                 for (unsigned i = 0; i < init.size(); ++i)
                     heap_array[i] = init.data_[i];
             }
@@ -1420,7 +1689,7 @@ namespace mcu {
         b_vector(const b_vector& other) noexcept : size_(other.size_), using_heap(other.using_heap) {
             if (other.using_heap) {
                 capacity_ = other.capacity_;
-                heap_array = new T[capacity_];
+                heap_array = mem_alloc::allocate<T>(capacity_);
                 customCopy(other.heap_array, heap_array, size_);
             } else {
                 capacity_ = SBO_SIZE;
@@ -1464,7 +1733,7 @@ namespace mcu {
         // Destructor
         ~b_vector() noexcept {
             if (using_heap) {
-                delete[] heap_array;
+                mem_alloc::deallocate(heap_array);
             } else {
                 // FIX: Manually call destructor for constructed objects in buffer to prevent leaks.
                 // This assumes the flawed but consistent model of initializing the whole buffer.
@@ -1484,7 +1753,7 @@ namespace mcu {
             if (other.using_heap) {
                 // `other` is on the heap. We need to allocate a new heap buffer.
                 // To ensure safety, allocate and copy to a temporary buffer *before* modifying `this`.
-                T* new_heap = new T[other.capacity_];
+                T* new_heap = mem_alloc::allocate<T>(other.capacity_);
                 if (!new_heap) {
                     // Allocation failed. Leave `this` unmodified to maintain a valid state.
                     return *this;
@@ -1493,7 +1762,7 @@ namespace mcu {
 
                 // New data is ready. Now, safely destroy the old data.
                 if (using_heap) {
-                    delete[] heap_array;
+                    mem_alloc::deallocate(heap_array);
                 } else {
                     T* p = reinterpret_cast<T*>(buffer);
                     for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
@@ -1510,7 +1779,7 @@ namespace mcu {
                 // `other` is using SBO. `this` will also use SBO. No allocation needed.
                 if (using_heap) {
                     // `this` is on the heap, so deallocate it.
-                    delete[] heap_array;
+                    mem_alloc::deallocate(heap_array);
                     // The SBO buffer is now uninitialized, so we must use placement-new.
                     T* this_buf = reinterpret_cast<T*>(buffer);
                     const T* other_buf = reinterpret_cast<const T*>(other.buffer);
@@ -1576,7 +1845,7 @@ namespace mcu {
                 // so we copy instead
                 using_heap = true;
                 capacity_ = size_;
-                heap_array = new T[capacity_];
+                heap_array = mem_alloc::allocate<T>(capacity_);
                 for (vector_index_type i = 0; i < size_; ++i) {
                     heap_array[i] = std::move(other[i]);
                 }
@@ -1591,7 +1860,7 @@ namespace mcu {
             if (this != &other) {
                 // First, correctly destroy the elements in `this`
                 if (using_heap) {
-                    delete[] heap_array;
+                    mem_alloc::deallocate(heap_array);
                 } else {
                     T* p = reinterpret_cast<T*>(buffer);
                     for (vector_index_type i = 0; i < SBO_SIZE; ++i) p[i].~T();
@@ -1631,7 +1900,8 @@ namespace mcu {
 
             // First, correctly destroy the elements in `this`
             if (using_heap) {
-                delete[] heap_array;
+                mem_alloc::deallocate(heap_array);
+                heap_array = nullptr;
             } else {
                 T* p = reinterpret_cast<T*>(buffer);
                 for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
@@ -1656,7 +1926,7 @@ namespace mcu {
                 // Use heap
                 using_heap = true;
                 capacity_ = size_;
-                heap_array = new T[capacity_];
+                heap_array = mem_alloc::allocate<T>(capacity_);
                 for (vector_index_type i = 0; i < size_; ++i) {
                     heap_array[i] = std::move(other[i]);
                 }
@@ -1683,7 +1953,8 @@ namespace mcu {
         b_vector& operator=(const vector<T>& other) noexcept {
             // First, correctly destroy the elements in `this`
             if (using_heap) {
-                delete[] heap_array;
+                mem_alloc::deallocate(heap_array);
+                heap_array = nullptr;
             } else {
                 T* p = reinterpret_cast<T*>(buffer);
                 for (vector_index_type i = 0; i < SBO_SIZE; ++i) p[i].~T();
@@ -1703,7 +1974,7 @@ namespace mcu {
                 // Use heap
                 using_heap = true;
                 capacity_ = size_;
-                heap_array = new T[capacity_];
+                heap_array = mem_alloc::allocate<T>(capacity_);
                 for (vector_index_type i = 0; i < size_; ++i) {
                     heap_array[i] = other[i];
                 }
@@ -2183,10 +2454,10 @@ namespace mcu {
         void i_resize(size_t newCapacity) noexcept {
             if (newCapacity == capacity_) return;
             if (newCapacity == 0) newCapacity = 1;
-            T* newArray = new T[newCapacity];
+            T* newArray = mem_alloc::allocate<T>(newCapacity);
             size_t toCopy = (size_ < newCapacity ? size_ : newCapacity);
             customCopy(array, newArray, toCopy);
-            delete[] array;
+            mem_alloc::deallocate(array);
             array = newArray;
             capacity_ = newCapacity;
             if (size_ > capacity_) size_ = capacity_;
@@ -2202,11 +2473,11 @@ namespace mcu {
     public:
         // Default: allocate capacity=1
         vector() noexcept
-            : array(new T[1]), size_(0), capacity_(1) {}
+            : array(mem_alloc::allocate<T>(1)), size_(0), capacity_(1) {}
 
         // Constructor with initial capacity
         explicit vector(size_t initialCapacity) noexcept
-            : array(new T[(initialCapacity == 0) ? 1 : initialCapacity]),
+            : array(mem_alloc::allocate<T>((initialCapacity == 0) ? 1 : initialCapacity)),
             size_(initialCapacity), // Set size equal to capacity
             capacity_((initialCapacity == 0) ? 1 : initialCapacity) {
             // fix for error : access elements throgh operator[] when vector just initialized
@@ -2217,7 +2488,7 @@ namespace mcu {
 
         // Constructor with initial size and value
         explicit vector(size_t initialCapacity, const T& value) noexcept
-            : array(new T[(initialCapacity == 0) ? 1 : initialCapacity]),
+            : array(mem_alloc::allocate<T>((initialCapacity == 0) ? 1 : initialCapacity)),
             size_(initialCapacity), capacity_((initialCapacity == 0) ? 1 : initialCapacity) {
             for (size_t i = 0; i < size_; ++i) {
                 array[i] = value;
@@ -2226,14 +2497,14 @@ namespace mcu {
 
         // Constructor: from min_init_list<T>
         vector(const mcu::min_init_list<T>& init) noexcept
-            : array(new T[init.size()]), size_(init.size()), capacity_(init.size()) {
+            : array(mem_alloc::allocate<T>(init.size())), size_(init.size()), capacity_(init.size()) {
             for (unsigned i = 0; i < init.size(); ++i)
                 array[i] = init.data_[i];
         }
 
         // Copy constructor
         vector(const vector& other) noexcept
-            : array(new T[other.capacity_]),
+            : array(mem_alloc::allocate<T>(other.capacity_)),
             size_(other.size_), capacity_(other.capacity_) {
             customCopy(other.array, array, size_);
         }
@@ -2248,15 +2519,15 @@ namespace mcu {
 
         // Destructor
         ~vector() noexcept {
-            delete[] array;
+            mem_alloc::deallocate(array);
         }
 
         // Copy assignment
         vector& operator=(const vector& other) noexcept {
             if (this != &other) {
-                T* newArray = new T[other.capacity_];
+                T* newArray = mem_alloc::allocate<T>(other.capacity_);
                 customCopy(other.array, newArray, other.size_);
-                delete[] array;
+                mem_alloc::deallocate(array);
                 array    = newArray;
                 size_    = other.size_;
                 capacity_ = other.capacity_;
@@ -2267,7 +2538,7 @@ namespace mcu {
         // Move assignment
         vector& operator=(vector&& other) noexcept {
             if (this != &other) {
-                delete[] array;
+                mem_alloc::deallocate(array);
                 array      = other.array;
                 size_      = other.size_;
                 capacity_  = other.capacity_;
@@ -2293,12 +2564,12 @@ namespace mcu {
         template<size_t sboSize>
         vector& operator=(const b_vector<T, sboSize>& other) noexcept {
             // Clear current content
-            delete[] array;
+            mem_alloc::deallocate(array);
             
             // Allocate new space
             size_ = other.size();
             capacity_ = size_ > 0 ? size_ : 1;
-            array = new T[capacity_];
+            array = mem_alloc::allocate<T>(capacity_);
             
             // Copy elements
             for (size_t i = 0; i < size_; ++i) {
@@ -2679,45 +2950,83 @@ namespace mcu {
     template<uint8_t BitsPerElement>
     class PackedArray {
         static_assert(BitsPerElement > 0 && BitsPerElement <= 8, "Invalid bit size");
-        uint8_t* data = nullptr;
-        uint8_t bpv_ = BitsPerElement;  // Runtime bits per value
+    uint8_t* data = nullptr;
+    uint8_t bpv_ = BitsPerElement;  // Runtime bits per value
+    size_t capacity_bytes_ = 0;
 
     public:
         // Default constructor - creates empty array
-        PackedArray() : data(nullptr), bpv_(BitsPerElement) {}
+        PackedArray() : data(nullptr), bpv_(BitsPerElement), capacity_bytes_(0) {}
 
         // Remove count - capacity is managed by packed_vector
-        PackedArray(size_t capacity_bytes) : bpv_(BitsPerElement) {
-            if(capacity_bytes > 0) {
-                data = new uint8_t[capacity_bytes]();
+        PackedArray(size_t capacity_bytes) : bpv_(BitsPerElement), capacity_bytes_(capacity_bytes) {
+            if (capacity_bytes_ > 0) {
+                data = mem_alloc::allocate<uint8_t>(capacity_bytes_);
+                if (data) {
+                    std::fill_n(data, capacity_bytes_, static_cast<uint8_t>(0));
+                } else {
+                    capacity_bytes_ = 0;
+                }
             } else {
                 data = nullptr;
             }
         }
 
         ~PackedArray() {
-            delete[] data;
+            mem_alloc::deallocate(data);
+            capacity_bytes_ = 0;
         }
 
         // Copy constructor - requires byte size
-        PackedArray(const PackedArray& other, size_t bytes) : bpv_(other.bpv_) {
-            data = new uint8_t[bytes];
-            for (size_t i = 0; i < bytes; ++i) {
-                data[i] = other.data[i];
+        PackedArray(const PackedArray& other, size_t bytes)
+            : bpv_(other.bpv_), capacity_bytes_(bytes) {
+            if (capacity_bytes_ > 0) {
+                data = mem_alloc::allocate<uint8_t>(capacity_bytes_);
+                if (data) {
+                    if (other.data) {
+                        std::copy(other.data, other.data + capacity_bytes_, data);
+                    } else {
+                        std::fill_n(data, capacity_bytes_, static_cast<uint8_t>(0));
+                    }
+                } else {
+                    capacity_bytes_ = 0;
+                }
+            } else {
+                data = nullptr;
             }
         }
 
         // Move constructor
-        PackedArray(PackedArray&& other) noexcept : data(other.data), bpv_(other.bpv_) {
+        PackedArray(PackedArray&& other) noexcept
+            : data(other.data), bpv_(other.bpv_), capacity_bytes_(other.capacity_bytes_) {
             other.data = nullptr;
+            other.capacity_bytes_ = 0;
         }
 
         // Copy from another PackedArray with specified byte size
         void copy_from(const PackedArray& other, size_t bytes) {
-            delete[] data;
-            data = new uint8_t[bytes];
-            for (size_t i = 0; i < bytes; ++i) {
-                data[i] = other.data[i];
+            if (this == &other) {
+                bpv_ = other.bpv_;
+                capacity_bytes_ = bytes;
+                return;
+            }
+
+            mem_alloc::deallocate(data);
+            data = nullptr;
+            capacity_bytes_ = bytes;
+            if (capacity_bytes_ > 0) {
+                data = mem_alloc::allocate<uint8_t>(capacity_bytes_);
+                if (data) {
+                    if (other.data) {
+                        std::copy(other.data, other.data + capacity_bytes_, data);
+                    } else {
+                        std::fill_n(data, capacity_bytes_, static_cast<uint8_t>(0));
+                    }
+                } else {
+                    capacity_bytes_ = 0;
+                }
+            } else {
+                data = nullptr;
             }
             bpv_ = other.bpv_;
         }
@@ -2725,9 +3034,7 @@ namespace mcu {
         // Copy assignment
         PackedArray& operator=(const PackedArray& other) {
             if (this != &other) {
-                // This shouldn't be used directly - use copy_from with byte size
-                delete[] data;
-                data = nullptr;
+                copy_from(other, other.capacity_bytes_);
             }
             return *this;
         }
@@ -2735,10 +3042,12 @@ namespace mcu {
         // Move assignment
         PackedArray& operator=(PackedArray&& other) noexcept {
             if (this != &other) {
-                delete[] data;
+                mem_alloc::deallocate(data);
                 data = other.data;
                 bpv_ = other.bpv_;
+                capacity_bytes_ = other.capacity_bytes_;
                 other.data = nullptr;
+                other.capacity_bytes_ = 0;
             }
             return *this;
         }
@@ -2821,8 +3130,8 @@ namespace mcu {
         uint8_t get(size_t index) const { return get_unsafe(index); }
         
         // Get raw data pointer for bulk operations
-        uint8_t* raw_data() { return data; }
-        const uint8_t* raw_data() const { return data; }
+    uint8_t* raw_data() { return data; }
+    const uint8_t* raw_data() const { return data; }
     };
 
 
@@ -4463,29 +4772,43 @@ namespace mcu {
             // Ensure the new capacity can accommodate existing maps
             if (newChainCap < chain_size) newChainCap = chain_size;
             if (newChainCap > MAX_CAP) newChainCap = MAX_CAP;
-            
+
             // Store old resources if they exist
             unordered_map_s** oldChain = chain;
             uint8_t* oldFlags = flags;
             uint8_t oldCap = cap_;
-            
-            // Allocate new resources
-            flags = new uint8_t[(newChainCap * 2 + 7) / 8];
-            memset(flags, 0, (newChainCap * 2 + 7) / 8);     // Mark all maps as empty
-            // slots_init(newChainCap); // Initialize flags, all slots are empty
 
-            if(chain_size >= 234){
+            const size_t flagBytes = (newChainCap * 2 + 7) / 8;
+            uint8_t* newFlags = nullptr;
+            try {
+                newFlags = new uint8_t[flagBytes];
+            } catch (...) {
+                newFlags = nullptr;
+            }
+            if (!newFlags) {
+                return; // Allocation failed, keep existing resources intact
+            }
+            memset(newFlags, 0, flagBytes);
+
+            unordered_map_s** newChain = mem_alloc::allocate<unordered_map_s*>(newChainCap);
+            if (!newChain) {
+                delete[] newFlags;
+                return; // Keep existing resources if allocation fails
+            }
+            memset(newChain, 0, newChainCap * sizeof(unordered_map_s*));
+
+            if (chain_size >= 234) {
                 rangeMap.set_fullness(1.0);
             }
-            
-            chain = new unordered_map_s*[newChainCap];
-            memset(chain, 0, newChainCap * sizeof(unordered_map_s*)); // Initialize all pointers to nullptr
 
+            chain = newChain;
+            flags = newFlags;
             cap_ = static_cast<uint8_t>(newChainCap);
-            // rangeMap.resize(newChainCap);        // rangeMap change
-            
-            if (chain != nullptr) {
-                for (uint8_t i = 0; i < oldCap; i++) {
+
+            // Copy old chain data if it exists
+            if (oldChain != nullptr) {
+                const uint8_t copyLimit = (oldCap < cap_) ? oldCap : cap_;
+                for (uint8_t i = 0; i < copyLimit; i++) {
                     if (oldChain[i] != nullptr) {
                         chain[i] = oldChain[i]; // Keep existing maps
                         slotState s = getStateFrom(oldFlags, i);
@@ -4495,7 +4818,7 @@ namespace mcu {
                     }
                 }
                 // Free old resources
-                delete[] oldChain;
+                mem_alloc::deallocate(oldChain);
                 delete[] oldFlags;
             }
         }
@@ -4533,7 +4856,7 @@ namespace mcu {
             if (chain) {
                 for (uint8_t i = 0; i < cap_; ++i)
                     delete chain[i];
-                delete[] chain;
+                mem_alloc::deallocate(chain);
             }
             if (flags) {
                 slots_release();  // frees the flags buffer
@@ -4547,7 +4870,7 @@ namespace mcu {
             chain_size(o.chain_size)
         {
             this->cap_ = o.cap_; // assign base member if needed
-            chain = new unordered_map_s*[this->cap_];
+            chain = mem_alloc::allocate<unordered_map_s*>(this->cap_);
             std::memset(chain, 0, this->cap_ * sizeof(chain[0]));
             for (uint8_t i = 0; i < this->cap_; ++i) {
                 if (o.chain[i])
@@ -5223,7 +5546,7 @@ namespace mcu {
                 uint16_t newCap = std::max(static_cast<uint16_t>(INIT_CAP), static_cast<uint16_t>(activeMaps * 2));
         
                 // Create new smaller chain
-                auto* newChain = new unordered_map_s*[newCap];
+                auto* newChain = mem_alloc::allocate<unordered_map_s*>(newCap);
                 memset(newChain, 0, newCap * sizeof(unordered_map_s*));
         
                 // Create new flags array
@@ -5237,7 +5560,7 @@ namespace mcu {
                 }
         
                 // Free old arrays
-                delete[] chain;
+                mem_alloc::deallocate(chain);
                 delete[] flags;
         
                 // Update pointers
@@ -5281,6 +5604,7 @@ namespace mcu {
             // 3) reset rangeMap to default
             rangeMap.clear();   
             rangeMap.fit();
+            chain_size = 0;
         }
         bool empty() const {
             for (uint8_t i = 0; i < cap_; i++) {
@@ -5372,29 +5696,43 @@ namespace mcu {
             // Ensure the new capacity can accommodate existing maps
             if (newChainCap < chain_size) newChainCap = chain_size;
             if (newChainCap > MAX_CAP) newChainCap = MAX_CAP;
-            
+
             // Store old resources if they exist
             unordered_set_s** oldChain = chain;
             uint8_t* oldFlags = flags;
             uint8_t oldCap = cap_;
-            
-            // Allocate new resources
-            flags = new uint8_t[(newChainCap * 2 + 7) / 8];
-            memset(flags, 0, (newChainCap * 2 + 7) / 8);     // Mark all maps as empty
-            // slots_init(newChainCap); // Initialize flags, all slots are empty
 
-            if(chain_size >= 234){
+            const size_t flagBytes = (newChainCap * 2 + 7) / 8;
+            uint8_t* newFlags = nullptr;
+            try {
+                newFlags = new uint8_t[flagBytes];
+            } catch (...) {
+                newFlags = nullptr;
+            }
+            if (!newFlags) {
+                return;
+            }
+            memset(newFlags, 0, flagBytes);
+
+            unordered_set_s** newChain = mem_alloc::allocate<unordered_set_s*>(newChainCap);
+            if (!newChain) {
+                delete[] newFlags;
+                return;
+            }
+            memset(newChain, 0, newChainCap * sizeof(unordered_set_s*));
+
+            if (chain_size >= 234) {
                 rangeMap.set_fullness(1.0);
             }
-            
-            chain = new unordered_set_s*[newChainCap];
-            memset(chain, 0, newChainCap * sizeof(unordered_set_s*)); // Initialize all pointers to nullptr
 
+            chain = newChain;
+            flags = newFlags;
             cap_ = static_cast<uint8_t>(newChainCap);
-            // rangeMap.resize(newChainCap);        // rangeMap change
-            
-            if (chain != nullptr) {
-                for (uint8_t i = 0; i < oldCap; i++) {
+
+            // Copy old chain data if it exists
+            if (oldChain != nullptr) {
+                const uint8_t copyLimit = (oldCap < cap_) ? oldCap : cap_;
+                for (uint8_t i = 0; i < copyLimit; i++) {
                     if (oldChain[i] != nullptr) {
                         chain[i] = oldChain[i]; // Keep existing maps
                         slotState s = getStateFrom(oldFlags, i);
@@ -5404,7 +5742,7 @@ namespace mcu {
                     }
                 }
                 // Free old resources
-                delete[] oldChain;
+                mem_alloc::deallocate(oldChain);
                 delete[] oldFlags;
             }
         }
@@ -5443,7 +5781,7 @@ namespace mcu {
             if (chain) {
                 for (uint8_t i = 0; i < cap_; ++i)
                     delete chain[i];
-                delete[] chain;
+                mem_alloc::deallocate(chain);
             }
             if (flags) {
                 slots_release();  // frees the flags buffer
@@ -5457,7 +5795,7 @@ namespace mcu {
             rangeMap(o.rangeMap)
         {
             this->cap_ = o.cap_; // assign base member if needed
-            chain = new unordered_set_s*[this->cap_];
+            chain = mem_alloc::allocate<unordered_set_s*>(this->cap_);
             std::memset(chain, 0, this->cap_ * sizeof(chain[0]));
             for (uint8_t i = 0; i < this->cap_; ++i) {
                 if (o.chain[i])
@@ -6025,7 +6363,7 @@ namespace mcu {
                 uint16_t newCap = std::max(static_cast<uint16_t>(INIT_CAP), 
                                         static_cast<uint16_t>(activeSets * 2));
         
-                unordered_set_s** newChain = new unordered_set_s*[newCap];
+                unordered_set_s** newChain = mem_alloc::allocate<unordered_set_s*>(newCap);
                 memset(newChain, 0, newCap * sizeof(unordered_set_s*));
         
                 uint8_t* newFlags = new uint8_t[(newCap * 2 + 7) / 8];
@@ -6038,7 +6376,7 @@ namespace mcu {
                 }
         
                 // Free old arrays
-                delete[] chain;
+                mem_alloc::deallocate(chain);
                 delete[] flags;
         
                 chain = newChain;
@@ -6083,6 +6421,7 @@ namespace mcu {
             // 3) reset rangeMap to default
             rangeMap.clear();   
             rangeMap.fit();
+            chain_size = 0;
         }
 
         /**
@@ -6128,12 +6467,21 @@ namespace mcu {
 
         // Resize the stack when needed
         void resize(index_type newCapacity) {
-            if (newCapacity > STACK_MAX_CAP_) newCapacity = STACK_MAX_CAP_;  // Limit capacity if needed
-            T* newArr = new T[newCapacity];
+            if (newCapacity > STACK_MAX_CAP_) {
+                newCapacity = STACK_MAX_CAP_;
+            }
+            if (newCapacity <= capacity) {
+                return;
+            }
+            if (newCapacity == 0) {
+                newCapacity = 1;
+            }
+
+            T* newArr = mem_alloc::allocate<T>(newCapacity);
             for (index_type i = 0; i < size; i++) {
                 newArr[i] = arr[i];
             }
-            delete[] arr;
+            mem_alloc::deallocate(arr);
             arr = newArr;
             capacity = newCapacity;
         }
@@ -6141,16 +6489,16 @@ namespace mcu {
     public:
         // Constructor initializes an empty stack with capacity 1
         Stack() : capacity(1), size(0) {
-            arr = new T[capacity];
+            arr = mem_alloc::allocate<T>(capacity);
         }
         
         // Destructor frees the dynamic memory
         ~Stack() {
-            delete[] arr;
+            mem_alloc::deallocate(arr);
         }
         // Copy constructor
         Stack(const Stack& other) : capacity(other.capacity), size(other.size) {
-            arr = new T[capacity];
+            arr = mem_alloc::allocate<T>(capacity);
             for (index_type i = 0; i < size; i++) {
                 arr[i] = other.arr[i];
             }
@@ -6164,10 +6512,10 @@ namespace mcu {
         // Copy assignment operator
         Stack& operator=(const Stack& other) {
             if (this != &other) {
-                delete[] arr;
+                mem_alloc::deallocate(arr);
                 capacity = other.capacity;
                 size = other.size;
-                arr = new T[capacity];
+                arr = mem_alloc::allocate<T>(capacity);
                 for (index_type i = 0; i < size; i++) {
                     arr[i] = other.arr[i];
                 }
@@ -6177,7 +6525,7 @@ namespace mcu {
         // Move assignment operator
         Stack& operator=(Stack&& other) noexcept {
             if (this != &other) {
-                delete[] arr;
+                mem_alloc::deallocate(arr);
                 arr = other.arr;
                 capacity = other.capacity;
                 size = other.size;
@@ -6227,6 +6575,10 @@ namespace mcu {
         void clear() {
             size = 0;
         }
+
+        bool uses_psram() const noexcept {
+            return mem_alloc::is_psram_ptr(arr);
+        }
     };
     // ------------------------------------------- Queue ----------------------------------------   
     template <typename T>
@@ -6246,35 +6598,50 @@ namespace mcu {
 
         // Resize and re-order elements when the array is full
         void resize(index_type newCapacity) {
-            if (newCapacity > QUEUE_MAX_CAP_) newCapacity = QUEUE_MAX_CAP_;
-            T* newArr = new T[newCapacity];
-            // Copy elements in proper order from the circular buffer
-            for (index_type i = 0; i < size; i++) {
-                newArr[i] = arr[(head + i) % capacity];
+            if (newCapacity > QUEUE_MAX_CAP_) {
+                newCapacity = QUEUE_MAX_CAP_;
             }
-            delete[] arr;
+            if (newCapacity <= capacity) {
+                return;
+            }
+            if (newCapacity == 0) {
+                newCapacity = 1;
+            }
+
+            const index_type oldCapacity = capacity == 0 ? 1 : capacity;
+            T* newArr = mem_alloc::allocate<T>(newCapacity);
+            for (index_type i = 0; i < size; i++) {
+                newArr[i] = arr[(head + i) % oldCapacity];
+            }
+            mem_alloc::deallocate(arr);
             arr = newArr;
             capacity = newCapacity;
             head = 0;
-            tail = size;
+            tail = (size == capacity) ? 0 : size;
         }
 
     public:
         // Constructor initializes an empty queue with capacity 1
         Queue() : capacity(1), size(0), head(0), tail(0) {
-            arr = new T[capacity];
+            arr = mem_alloc::allocate<T>(capacity);
         }
         
         // Destructor to free dynamic memory
         ~Queue() {
-            delete[] arr;
+            mem_alloc::deallocate(arr);
         }
         // Copy constructor
-        Queue(const Queue& other) : capacity(other.capacity), size(other.size), head(other.head), tail(other.tail) {
-            arr = new T[capacity];
+        Queue(const Queue& other)
+            : capacity(other.capacity == 0 ? 1 : other.capacity),
+              size(other.size),
+              head(0),
+              tail(0) {
+            arr = mem_alloc::allocate<T>(capacity);
+            const index_type sourceCapacity = (other.capacity == 0) ? 1 : other.capacity;
             for (index_type i = 0; i < size; i++) {
-                arr[i] = other.arr[(other.head + i) % other.capacity];
+                arr[i] = other.arr[(other.head + i) % sourceCapacity];
             }
+            tail = (size == capacity) ? 0 : size;
         }
         // Move constructor
         Queue(Queue&& other) noexcept : arr(other.arr), capacity(other.capacity), size(other.size), head(other.head), tail(other.tail) {
@@ -6286,22 +6653,26 @@ namespace mcu {
         // Copy assignment operator   
         Queue& operator=(const Queue& other) {
             if (this != &other) {
-                delete[] arr;
-                capacity = other.capacity;
-                size = other.size;
-                head = other.head;
-                tail = other.tail;
-                arr = new T[capacity];
-                for (index_type i = 0; i < size; i++) {
-                    arr[i] = other.arr[(other.head + i) % other.capacity];
+                const index_type sourceCapacity = (other.capacity == 0) ? 1 : other.capacity;
+                if (capacity != sourceCapacity || arr == nullptr) {
+                    mem_alloc::deallocate(arr);
+                    arr = mem_alloc::allocate<T>(sourceCapacity);
+                    capacity = sourceCapacity;
                 }
+
+                size = other.size;
+                for (index_type i = 0; i < size; i++) {
+                    arr[i] = other.arr[(other.head + i) % sourceCapacity];
+                }
+                head = 0;
+                tail = (size == capacity) ? 0 : size;
             }
             return *this;
         }
         // Move assignment operator
         Queue& operator=(Queue&& other) noexcept {
             if (this != &other) {
-                delete[] arr;
+                mem_alloc::deallocate(arr);
                 arr = other.arr;
                 capacity = other.capacity;
                 size = other.size;
@@ -6359,6 +6730,10 @@ namespace mcu {
             head = 0;
             tail = 0;
         }
+
+        bool uses_psram() const noexcept {
+            return mem_alloc::is_psram_ptr(arr);
+        }
     };
 
     // ------------------------------------------- DeQueue ----------------------------------------
@@ -6378,33 +6753,49 @@ namespace mcu {
 
 
         void resize(index_type newCapacity) {
-            if (newCapacity > QUEUE_MAX_CAP_) newCapacity = QUEUE_MAX_CAP_;
-            T* newArr = new T[newCapacity];
-            for (index_type i = 0; i < size; i++) {
-                newArr[i] = arr[(head + i) % capacity];
+            if (newCapacity > QUEUE_MAX_CAP_) {
+                newCapacity = QUEUE_MAX_CAP_;
             }
-            delete[] arr;
+            if (newCapacity <= capacity) {
+                return;
+            }
+            if (newCapacity == 0) {
+                newCapacity = 1;
+            }
+
+            const index_type oldCapacity = capacity == 0 ? 1 : capacity;
+            T* newArr = mem_alloc::allocate<T>(newCapacity);
+            for (index_type i = 0; i < size; i++) {
+                newArr[i] = arr[(head + i) % oldCapacity];
+            }
+            mem_alloc::deallocate(arr);
             arr = newArr;
             capacity = newCapacity;
             head = 0;
-            tail = size;
+            tail = (size == capacity) ? 0 : size;
         }
 
     public:
         // default constructor
         DeQueue() : capacity(1), size(0), head(0), tail(0) {
-            arr = new T[capacity];
+            arr = mem_alloc::allocate<T>(capacity);
         }
 
         ~DeQueue() {
-            delete[] arr;
+            mem_alloc::deallocate(arr);
         }
         // copy constructor
-        DeQueue(const DeQueue& other) : capacity(other.capacity), size(other.size), head(other.head), tail(other.tail) {
-            arr = new T[capacity];
+        DeQueue(const DeQueue& other)
+            : capacity(other.capacity == 0 ? 1 : other.capacity),
+              size(other.size),
+              head(0),
+              tail(0) {
+            arr = mem_alloc::allocate<T>(capacity);
+            const index_type sourceCapacity = (other.capacity == 0) ? 1 : other.capacity;
             for (index_type i = 0; i < size; i++) {
-                arr[i] = other.arr[(other.head + i) % other.capacity];
+                arr[i] = other.arr[(other.head + i) % sourceCapacity];
             }
+            tail = (size == capacity) ? 0 : size;
         }
         // move constructor
         DeQueue(DeQueue&& other) noexcept : arr(other.arr), capacity(other.capacity), size(other.size), head(other.head), tail(other.tail) {
@@ -6416,22 +6807,26 @@ namespace mcu {
         // copy assignment operator
         DeQueue& operator=(const DeQueue& other) {
             if (this != &other) {
-                delete[] arr;
-                capacity = other.capacity;
-                size = other.size;
-                head = other.head;
-                tail = other.tail;
-                arr = new T[capacity];
-                for (index_type i = 0; i < size; i++) {
-                    arr[i] = other.arr[(other.head + i) % other.capacity];
+                const index_type sourceCapacity = (other.capacity == 0) ? 1 : other.capacity;
+                if (capacity != sourceCapacity || arr == nullptr) {
+                    mem_alloc::deallocate(arr);
+                    arr = mem_alloc::allocate<T>(sourceCapacity);
+                    capacity = sourceCapacity;
                 }
+
+                size = other.size;
+                for (index_type i = 0; i < size; i++) {
+                    arr[i] = other.arr[(other.head + i) % sourceCapacity];
+                }
+                head = 0;
+                tail = (size == capacity) ? 0 : size;
             }
             return *this;
         }
         // move assignment operator
         DeQueue& operator=(DeQueue&& other) noexcept {
             if (this != &other) {
-                delete[] arr;
+                mem_alloc::deallocate(arr);
                 arr = other.arr;
                 capacity = other.capacity;
                 size = other.size;
@@ -6509,6 +6904,10 @@ namespace mcu {
             size = 0;
             head = 0;
             tail = 0;
+        }
+
+        bool uses_psram() const noexcept {
+            return mem_alloc::is_psram_ptr(arr);
         }
     };
 

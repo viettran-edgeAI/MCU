@@ -22,6 +22,7 @@ A memory-optimized Standard Template Library (STL) implementation specifically d
 - Built-in memory usage monitoring
 - Container fitting and optimization functions
 - SPIFFS integration for data persistence
+- **PSRAM support** for ESP32 boards with external RAM (optional)
 
 ## Installation
 
@@ -139,6 +140,28 @@ bool loadFromBinary(const char* filename);
 ```
 
 ## Memory Usage Guidelines
+
+### PSRAM Support (ESP32 with External RAM)
+For ESP32 boards with PSRAM, you can enable automatic PSRAM allocation:
+
+```cpp
+#define RF_USE_PSRAM  // Enable before including headers
+#include "STL_MCU.h"
+
+void setup() {
+    Serial.begin(115200);
+    
+    // Check PSRAM availability
+    Serial.printf("Total PSRAM: %u bytes\n", mcu::mem_alloc::get_total_psram());
+    Serial.printf("Free PSRAM: %u bytes\n", mcu::mem_alloc::get_free_psram());
+    
+    // Containers will automatically use PSRAM when available
+    mcu::unordered_map<uint16_t, uint32_t> largeMap;
+    // ... allocations use PSRAM first, fallback to internal RAM
+}
+```
+
+**See [PSRAM_Usage.md](docs/PSRAM_Usage.md) for detailed documentation.**
 
 ### Recommendations
 - Use `mcu::vector` instead of standard arrays when dynamic sizing is needed

@@ -2,36 +2,68 @@
 
 bool rf_storage_begin() {
 #ifdef RF_USE_SDCARD
-    // Initialize SPI with custom pins
-    SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
-    
-    if (!SD.begin(SD_CS_PIN)) {
-        RF_DEBUG(0, "❌ SD Card Mount Failed!");
-        return false;
-    }
-    
-    uint8_t cardType = SD.cardType();
-    if (cardType == CARD_NONE) {
-        RF_DEBUG(0, "❌ No SD card attached!");
-        return false;
-    }
-    
-    RF_DEBUG(0, "✅ SD Card initialized successfully");
-    
-    // Print card info at debug level 1+
-    if (RF_DEBUG_LEVEL >= 1) {
-        const char* cardTypeStr = "UNKNOWN";
-        if (cardType == CARD_MMC) cardTypeStr = "MMC";
-        else if (cardType == CARD_SD) cardTypeStr = "SDSC";
-        else if (cardType == CARD_SDHC) cardTypeStr = "SDHC";
+    #ifdef RF_USE_SDMMC
+    bool mounted = SD_MMC.begin(RF_SDMMC_MOUNTPOINT, RF_SDMMC_MODE_1BIT, RF_SDMMC_FORMAT_IF_FAIL);
+        if (!mounted) {
+            RF_DEBUG(0, RF_SDMMC_FORMAT_IF_FAIL ? "❌ SD_MMC mount failed (format attempted)." : "❌ SD_MMC Mount Failed!");
+            return false;
+        }
+
+        uint8_t cardType = SD_MMC.cardType();
+        if (cardType == CARD_NONE) {
+            RF_DEBUG(0, "❌ No SD card attached!");
+            return false;
+        }
+
+        RF_DEBUG(0, "✅ SD_MMC initialized successfully");
+
+        if (RF_DEBUG_LEVEL >= 1) {
+            const char* cardTypeStr = "UNKNOWN";
+            if (cardType == CARD_MMC) cardTypeStr = "MMC";
+            else if (cardType == CARD_SD) cardTypeStr = "SDSC";
+            else if (cardType == CARD_SDHC) cardTypeStr = "SDHC";
+
+            uint64_t cardSize = SD_MMC.cardSize() / (1024 * 1024);
+            char buffer[128];
+            snprintf(buffer, sizeof(buffer), "📊 SD_MMC Type: %s, Size: %llu MB", cardTypeStr, cardSize);
+            RF_DEBUG(0, "", buffer);
+
+            RF_DEBUG(0, RF_SDMMC_MODE_1BIT ? "ℹ️ SD_MMC running in 1-bit mode" : "ℹ️ SD_MMC running in 4-bit mode");
+        }
+
+        return true;
+    #else
+        // Initialize SPI with custom pins
+        SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
         
-        uint64_t cardSize = SD.cardSize() / (1024 * 1024);
-        char buffer[128];
-        snprintf(buffer, sizeof(buffer), "📊 SD Card Type: %s, Size: %llu MB", cardTypeStr, cardSize);
-        RF_DEBUG(0, "", buffer);
-    }
-    
-    return true;
+        if (!SD.begin(SD_CS_PIN)) {
+            RF_DEBUG(0, "❌ SD Card Mount Failed!");
+            return false;
+        }
+        
+        uint8_t cardType = SD.cardType();
+        if (cardType == CARD_NONE) {
+            RF_DEBUG(0, "❌ No SD card attached!");
+            return false;
+        }
+        
+        RF_DEBUG(0, "✅ SD Card initialized successfully");
+        
+        // Print card info at debug level 1+
+        if (RF_DEBUG_LEVEL >= 1) {
+            const char* cardTypeStr = "UNKNOWN";
+            if (cardType == CARD_MMC) cardTypeStr = "MMC";
+            else if (cardType == CARD_SD) cardTypeStr = "SDSC";
+            else if (cardType == CARD_SDHC) cardTypeStr = "SDHC";
+            
+            uint64_t cardSize = SD.cardSize() / (1024 * 1024);
+            char buffer[128];
+            snprintf(buffer, sizeof(buffer), "📊 SD Card Type: %s, Size: %llu MB", cardTypeStr, cardSize);
+            RF_DEBUG(0, "", buffer);
+        }
+        
+        return true;
+    #endif
 #else
     if (!LittleFS.begin(true)) {
         RF_DEBUG(0, "❌ LittleFS Mount Failed!");
@@ -44,8 +76,13 @@ bool rf_storage_begin() {
 
 void rf_storage_end() {
 #ifdef RF_USE_SDCARD
-    SD.end();
-    RF_DEBUG(0, "✅ SD Card unmounted");
+    #ifdef RF_USE_SDMMC
+        SD_MMC.end();
+        RF_DEBUG(0, "✅ SD_MMC unmounted");
+    #else
+        SD.end();
+        RF_DEBUG(0, "✅ SD Card unmounted");
+    #endif
 #else
     LittleFS.end();
     RF_DEBUG(0, "✅ LittleFS unmounted");

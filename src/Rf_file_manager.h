@@ -5,26 +5,46 @@
 
 // Storage selection: Define RF_USE_SDCARD to use SD card, otherwise LittleFS
 #ifdef RF_USE_SDCARD
-    #include <SD.h>
-    #include <SPI.h>
-    
-    // Default SD card pins for ESP32
-    #ifndef SD_CS_PIN
-        #define SD_CS_PIN 5
+    #ifdef RF_USE_SDMMC
+        #include <SD_MMC.h>
+
+        // Default SD_MMC configuration values
+        #ifndef RF_SDMMC_MOUNTPOINT
+            #define RF_SDMMC_MOUNTPOINT "/sdcard"
+        #endif
+        #ifndef RF_SDMMC_MODE_1BIT
+            #define RF_SDMMC_MODE_1BIT false  // use 4-bit bus by default
+        #endif
+        #ifndef RF_SDMMC_FORMAT_IF_FAIL
+            #define RF_SDMMC_FORMAT_IF_FAIL false
+        #endif
+
+        // File system macros for SD_MMC interface
+        #define RF_FS SD_MMC
+        #define RF_FS_TYPE "SDMMC"
+    #else
+        #include <SD.h>
+        #include <SPI.h>
+        
+        // Default SD card pins for ESP32 (SPI mode)
+        #ifndef SD_CS_PIN
+            #define SD_CS_PIN 5
+        #endif
+        #ifndef SD_MOSI_PIN
+            #define SD_MOSI_PIN 23
+        #endif
+        #ifndef SD_MISO_PIN
+            #define SD_MISO_PIN 19
+        #endif
+        #ifndef SD_SCK_PIN
+            #define SD_SCK_PIN 18
+        #endif
+
+        // File system macros for SD card over SPI
+        #define RF_FS SD
+        #define RF_FS_TYPE "SD Card"
     #endif
-    #ifndef SD_MOSI_PIN
-        #define SD_MOSI_PIN 23
-    #endif
-    #ifndef SD_MISO_PIN
-        #define SD_MISO_PIN 19
-    #endif
-    #ifndef SD_SCK_PIN
-        #define SD_SCK_PIN 18
-    #endif
-    
-    // File system macros for SD card
-    #define RF_FS SD
-    #define RF_FS_TYPE "SD Card"
+
     #define RF_FILE_READ FILE_READ
     #define RF_FILE_WRITE FILE_WRITE
 #else

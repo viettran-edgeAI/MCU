@@ -1,10 +1,10 @@
 /*
  * ESP32 Binary File Receiver
  * Upload this sketch to ESP32, then use transfer_dataset.py to send files
- * Saves files to LittleFS with model_name/filename structure
+ * Saves files to file system with model_name/filename structure
  */
 
-#include "LittleFS.h"
+#include "Rf_file_manager.h"
 
 // Transfer timing and size configuration
 // IMPORTANT: Keep these in sync with the PC sender script (transfer_dataset.py)
@@ -17,8 +17,8 @@ uint8_t buffer[BUFFER_CHUNK];
 void setup() {
   Serial.begin(115200);
   
-  // Initialize LittleFS
-  if (!LittleFS.begin(true)) {
+  // Initialize file system
+  if (!RF_FS_BEGIN()) {
     return;
   }
 }
@@ -62,8 +62,8 @@ void receiveFile() {
   
   // Create model directory if it doesn't exist
   String modelDir = "/" + modelName;
-  if (!LittleFS.exists(modelDir)) {
-    LittleFS.mkdir(modelDir);
+  if (!RF_FS_EXISTS(modelDir.c_str())) {
+    RF_FS_MKDIR(modelDir.c_str());
   }
   
   // Receive file size
@@ -76,7 +76,7 @@ void receiveFile() {
   String filepath = modelDir + "/" + String(filename);
   
   // Open file for writing
-  File file = LittleFS.open(filepath, FILE_WRITE);
+  File file = RF_FS_OPEN(filepath, RF_FILE_WRITE);
   if (!file) {
     return;
   }
@@ -98,7 +98,7 @@ void receiveFile() {
     
     if (Serial.available() < bytes_to_read) {
       file.close();
-      LittleFS.remove(filepath);
+      RF_FS_REMOVE(filepath.c_str());
       return;
     }
     
@@ -109,7 +109,7 @@ void receiveFile() {
     size_t written = file.write(buffer, actual_read);
     if (written != actual_read) {
       file.close();
-      LittleFS.remove(filepath);
+      RF_FS_REMOVE(filepath.c_str());
       return;
     }
     
@@ -122,13 +122,13 @@ void receiveFile() {
   file.close();
   
   // Verify file was saved correctly
-  File verify_file = LittleFS.open(filepath, FILE_READ);
+  File verify_file = RF_FS_OPEN(filepath, RF_FILE_READ);
   if (verify_file && verify_file.size() == file_size) {
     verify_file.close();
     Serial.println("TRANSFER_COMPLETE");
   } else {
     if (verify_file) verify_file.close();
-    LittleFS.remove(filepath);
+    RF_FS_REMOVE(filepath.c_str());
   }
 }
 
@@ -157,8 +157,8 @@ void receiveFileV2() {
   
   // Create model directory if it doesn't exist
   String modelDir = "/" + modelName;
-  if (!LittleFS.exists(modelDir)) {
-    LittleFS.mkdir(modelDir);
+  if (!RF_FS_EXISTS(modelDir.c_str())) {
+    RF_FS_MKDIR(modelDir.c_str());
   }
 
   // Receive file size, expected file CRC, and chunk size
@@ -176,7 +176,7 @@ void receiveFileV2() {
   }
 
   String filepath = modelDir + "/" + String(filename);
-  File file = LittleFS.open(filepath, FILE_WRITE);
+  File file = RF_FS_OPEN(filepath, RF_FILE_WRITE);
   if (!file) {
     return;
   }
@@ -192,14 +192,14 @@ void receiveFileV2() {
   while (bytes_received < file_size) {
     // Header: offset (4), chunk_len (4), chunk_crc (4)
     uint32_t offset = 0, clen = 0, ccrc = 0;
-    if (Serial.readBytes((uint8_t*)&offset, 4) != 4) { file.close(); LittleFS.remove(filepath); return; }
-    if (Serial.readBytes((uint8_t*)&clen, 4) != 4)   { file.close(); LittleFS.remove(filepath); return; }
-    if (Serial.readBytes((uint8_t*)&ccrc, 4) != 4)   { file.close(); LittleFS.remove(filepath); return; }
+    if (Serial.readBytes((uint8_t*)&offset, 4) != 4) { file.close(); RF_FS_REMOVE(filepath.c_str()); return; }
+    if (Serial.readBytes((uint8_t*)&clen, 4) != 4)   { file.close(); RF_FS_REMOVE(filepath.c_str()); return; }
+    if (Serial.readBytes((uint8_t*)&ccrc, 4) != 4)   { file.close(); RF_FS_REMOVE(filepath.c_str()); return; }
 
-    if (clen > chunk_size || clen == 0) { file.close(); LittleFS.remove(filepath); return; }
+    if (clen > chunk_size || clen == 0) { file.close(); RF_FS_REMOVE(filepath.c_str()); return; }
     // Read chunk payload
     size_t got = Serial.readBytes(buffer, clen);
-    if (got != clen) { file.close(); LittleFS.remove(filepath); return; }
+    if (got != clen) { file.close(); RF_FS_REMOVE(filepath.c_str()); return; }
 
     // Compute CRC32 of the received chunk
     uint32_t calc = 0xFFFFFFFF;
@@ -223,7 +223,7 @@ void receiveFileV2() {
     // CRC matched; write to file at the correct position if needed
     // For simplicity since we receive in order, append write is okay.
     size_t written = file.write(buffer, clen);
-    if (written != clen) { file.close(); LittleFS.remove(filepath); return; }
+    if (written != clen) { file.close(); RF_FS_REMOVE(filepath.c_str()); return; }
 
     // Update running CRC for entire file (same polynomial)
     for (uint32_t i = 0; i < clen; ++i) {
@@ -262,7 +262,7 @@ void receiveFileV2() {
   if (crc == file_crc_expected && bytes_received == file_size) {
     Serial.println("TRANSFER_COMPLETE");
   } else {
-    LittleFS.remove(filepath);
+    RF_FS_REMOVE(filepath.c_str());
   }
 }
 

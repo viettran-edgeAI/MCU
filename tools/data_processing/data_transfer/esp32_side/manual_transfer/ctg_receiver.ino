@@ -1,23 +1,22 @@
-#include "Rf_categorizer.h"
+#include "Rf_component.h"
 #include "STL_MCU.h"
-#include "LittleFS.h"
 #include "Rf_file_manager.h"
 
 using namespace mcu;
 
-Rf_categorizer categorizer;
+Rf_quantizer categorizer;
 
 void setup() {
-    Serial.begin(115200);
-    delay(1000);
-    
-    // Initialize LittleFS
-    if (!LittleFS.begin(true)) {
-        Serial.println("LittleFS initialization failed!");
+    // Initialize file system
+    if (!RF_FS_BEGIN()) {
+        RF_DEBUGLN("❌ File system initialization failed!");
         return;
     }
 
-    categorizer.receiveFromSerialMonitor(); 
+    manage_files();
+    // select g - move to move into the correct folder or create a new folder (mode_name/) if it doesn't exist
+    // select e - add new file 
+    // copy and paste the content of the file into the serial monitor to receive it
 
     // testing new categorizer
     // this one is from walker_fall.csv. take another one for your specific dataset
@@ -35,18 +34,17 @@ void setup() {
         0.9776,0.97,0.97,0.97,0.97,0.985,0.9841,0.9748,0.9778,0.9874,0.9458,0.9702,0.9736,0.98,0.9427,0.9732,1.0037,0.98,
         0.9864,0.9846,0.9725,1.0088,0.9772,0.9777,0.996,1.0142,1.017,0.96,1.0105,0.9655,0.882,0.9989,0.9207,0.9057,0.9718,
         0.9017,0.9692,1.0489,1.0097,0.9887,1.0227,0.997,0.9717,1.0134,0.9219,0.9767,1.0258);
-    b_vector<uint8_t> result = categorizer.categorizeSample(test_sample);
-    Serial.print("Categorized sample: ");
+    packed_vector<8> result;
+    categorizer.quantizeFeatures(test_sample.data(), result);
+    RF_DEBUG("Categorized sample: ");
+
     for(auto value : result) {
         Serial.print(value);
         Serial.print(" ");
     }
-    categorizer.printInfo();
-
-    manageSPIFFSFiles();
 
 }
 
 void loop() {
-
+    manage_files();
 }

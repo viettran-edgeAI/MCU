@@ -1,10 +1,151 @@
 #pragma once
 
 #include <Arduino.h>
-#include <LittleFS.h>
 #include <FS.h>
 
-#define temp_base_data           "/base_data.bin"
+// Storage selection: Define RF_USE_SDCARD to use SD card, otherwise LittleFS
+#ifdef RF_USE_SDCARD
+    #include <SD.h>
+    #include <SPI.h>
+    
+    // Default SD card pins for ESP32
+    #ifndef SD_CS_PIN
+        #define SD_CS_PIN 5
+    #endif
+    #ifndef SD_MOSI_PIN
+        #define SD_MOSI_PIN 23
+    #endif
+    #ifndef SD_MISO_PIN
+        #define SD_MISO_PIN 19
+    #endif
+    #ifndef SD_SCK_PIN
+        #define SD_SCK_PIN 18
+    #endif
+    
+    // File system macros for SD card
+    #define RF_FS SD
+    #define RF_FS_TYPE "SD Card"
+    #define RF_FILE_READ FILE_READ
+    #define RF_FILE_WRITE FILE_WRITE
+#else
+    #include <LittleFS.h>
+    
+    // File system macros for LittleFS (default)
+    #define RF_FS LittleFS
+    #define RF_FS_TYPE "LittleFS"
+    #define RF_FILE_READ FILE_READ
+    #define RF_FILE_WRITE FILE_WRITE
+#endif
+
+// Unified file operation macros
+#define RF_FS_BEGIN() rf_storage_begin()
+#define RF_FS_END() rf_storage_end()
+#define RF_FS_EXISTS(path) RF_FS.exists(path)
+#define RF_FS_OPEN(path, mode) RF_FS.open(path, mode)
+#define RF_FS_REMOVE(path) RF_FS.remove(path)
+#define RF_FS_RENAME(oldPath, newPath) RF_FS.rename(oldPath, newPath)
+#define RF_FS_RMDIR(path) RF_FS.rmdir(path)
+#define RF_FS_MKDIR(path) RF_FS.mkdir(path)
+#define RF_TOTAL_BYTES() RF_FS.totalBytes()
+#define RF_USED_BYTES() RF_FS.usedBytes()
+
+// Unified input operation macros
+// These allow easy switching between Serial (Arduino), stdin (PC), or other interfaces
+#define RF_INPUT_AVAILABLE() Serial.available()
+#define RF_INPUT_READ() Serial.read()
+#define RF_INPUT_READ_LINE_UNTIL(delim) Serial.readStringUntil(delim)
+#define RF_INPUT_FLUSH() Serial.flush()
+
+/**
+ * @brief Initialize the selected storage system (LittleFS or SD card)
+ * 
+ * Automatically initializes the storage system based on compile-time configuration.
+ * For LittleFS: Uses begin(true) to format if mount fails.
+ * For SD card: Initializes SPI and mounts SD card with configured pins.
+ * 
+ * @return true if initialization successful, false otherwise
+ */
+bool rf_storage_begin();
+
+/**
+ * @brief Unmount/end the storage system
+ * 
+ * Safely unmounts the storage system. For LittleFS, calls end().
+ * For SD card, calls end() to release resources.
+ */
+void rf_storage_end();
+
+/**
+ * @brief Get the name of the currently active storage system
+ * 
+ * @return const char* "LittleFS" or "SD Card"
+ */
+inline const char* rf_storage_type() {
+    return RF_FS_TYPE;
+}
+
+#ifndef RF_DEBUG_LEVEL
+    #define RF_DEBUG_LEVEL 1
+#else
+    #if RF_DEBUG_LEVEL > 3
+        #undef RF_DEBUG_LEVEL
+        #define RF_DEBUG_LEVEL 3
+    #endif
+#endif
+
+/*
+ RF_DEBUG_LEVEL :
+    0 : silent mode - no messages
+    1 : forest messages (start, end, major events) 
+    2 : messages at components level + warnings
+    3 : all memory and event timing messages & detailed info
+ note: all errors messages (lead to failed process) will be enabled with RF_DEBUG_LEVEL >=1
+*/
+
+#if RF_DEBUG_LEVEL > 0
+    inline void rf_debug_print(const char* msg) {
+        Serial.printf("%s\n", msg);
+    }
+    template<typename T>
+    inline void rf_debug_print(const char* msg, const T& obj) {
+        Serial.printf("%s", msg);
+        if constexpr (std::is_floating_point_v<T>) {
+            Serial.println(obj, 3);  // 3 decimal places for floats/doubles
+        } else {
+            Serial.println(obj);
+        }
+    }
+
+    template<typename T1, typename T2>
+    inline void rf_debug_print_2(const char* msg1, const T1& obj1, const char* msg2, const T2& obj2) {
+        Serial.printf("%s", msg1);
+        if constexpr (std::is_floating_point_v<T1>) {
+            Serial.print(obj1, 3);
+        } else {
+            Serial.print(obj1);
+        }
+        Serial.printf(" %s", msg2);
+        if constexpr (std::is_floating_point_v<T2>) {
+            Serial.println(obj2, 3);
+        } else {
+            Serial.println(obj2);
+        }
+    }
+
+    #define RF_DEBUG(level, ...)                        \
+        do{                                              \
+            if constexpr (RF_DEBUG_LEVEL > (level)) {     \
+                rf_debug_print(__VA_ARGS__);               \
+            }                                               \
+        }while(0)
+
+    #define RF_DEBUG_2(level, msg1, obj1, msg2, obj2)          \
+        do{                                                     \
+            if constexpr (RF_DEBUG_LEVEL > (level)) {            \
+                rf_debug_print_2(msg1, obj1, msg2, obj2);         \
+            }                                                      \
+        }while(0)
+#endif
 
 /**
  * @brief Clones any file from source to destination with format-aware handling

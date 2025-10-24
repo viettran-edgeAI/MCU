@@ -26,69 +26,6 @@
     #define RF_ENABLE_TRAINING 0
 #endif
 
-#ifndef RF_DEBUG_LEVEL
-    #define RF_DEBUG_LEVEL 1
-#else
-    #if RF_DEBUG_LEVEL > 3
-        #undef RF_DEBUG_LEVEL
-        #define RF_DEBUG_LEVEL 3
-    #endif
-#endif
-
-/*
- RF_DEBUG_LEVEL :
-    0 : silent mode - no messages
-    1 : forest messages (start, end, major events) 
-    2 : messages at components level + warnings
-    3 : all memory and event timing messages & detailed info
- note: all errors messages (lead to failed process) will be enabled with RF_DEBUG_LEVEL >=1
-*/
-
-
-#if RF_DEBUG_LEVEL > 0
-    inline void rf_debug_print(const char* msg) {
-        Serial.printf("%s\n", msg);
-    }
-    template<typename T>
-    inline void rf_debug_print(const char* msg, const T& obj) {
-        Serial.printf("%s", msg);
-        if constexpr (std::is_floating_point_v<T>) {
-            Serial.println(obj, 3);  // 3 decimal places for floats/doubles
-        } else {
-            Serial.println(obj);
-        }
-    }
-
-    template<typename T1, typename T2>
-    inline void rf_debug_print_2(const char* msg1, const T1& obj1, const char* msg2, const T2& obj2) {
-        Serial.printf("%s", msg1);
-        if constexpr (std::is_floating_point_v<T1>) {
-            Serial.print(obj1, 3);
-        } else {
-            Serial.print(obj1);
-        }
-        Serial.printf(" %s", msg2);
-        if constexpr (std::is_floating_point_v<T2>) {
-            Serial.println(obj2, 3);
-        } else {
-            Serial.println(obj2);
-        }
-    }
-
-    #define RF_DEBUG(level, ...)                        \
-        do{                                              \
-            if constexpr (RF_DEBUG_LEVEL > (level)) {     \
-                rf_debug_print(__VA_ARGS__);               \
-            }                                               \
-        }while(0)
-
-    #define RF_DEBUG_2(level, msg1, obj1, msg2, obj2)          \
-        do{                                                     \
-            if constexpr (RF_DEBUG_LEVEL > (level)) {            \
-                rf_debug_print_2(msg1, obj1, msg2, obj2);         \
-            }                                                      \
-        }while(0)
-#endif
 
 static constexpr uint8_t  RF_MAX_LABEL_LENGTH    = 32;             // max label buffer length
 static constexpr uint8_t  RF_PATH_BUFFER         = 64;            // buffer for file_path(limit to 2 level of file)
@@ -230,10 +167,10 @@ namespace mcu {
             char filepath[RF_PATH_BUFFER];
             // check : base data exists (binary or csv)
             build_file_path(filepath, "_nml.bin");
-            if (!LittleFS.exists(filepath)) {
+            if (!RF_FS_EXISTS(filepath)) {
                 // try to find csv file
                 build_file_path(filepath, "_nml.csv");
-                if (LittleFS.exists(filepath)) {
+                if (RF_FS_EXISTS(filepath)) {
                     RF_DEBUG(1, "🔄 Found csv dataset, need to be converted to binary format before use.");
                     flags |= static_cast<Rf_base_flags>(BASE_DATA_IS_CSV);
                 }else{
@@ -248,7 +185,7 @@ namespace mcu {
 
             // check : quantizer file exists
             build_file_path(filepath, "_ctg.csv");
-            if (LittleFS.exists(filepath)) {
+            if (RF_FS_EXISTS(filepath)) {
                 RF_DEBUG(1, "✅ Found quantizer file: ", filepath);
                 flags |= static_cast<Rf_base_flags>(CTG_FILE_EXIST);
             } else {
@@ -259,7 +196,7 @@ namespace mcu {
             
             // check : dp file exists
             build_file_path(filepath, "_dp.csv");
-            if (LittleFS.exists(filepath)) {
+            if (RF_FS_EXISTS(filepath)) {
                 RF_DEBUG(1, "✅ Found data_params file: ", filepath);
                 flags |= static_cast<Rf_base_flags>(DP_FILE_EXIST);
             } else {
@@ -269,7 +206,7 @@ namespace mcu {
 
             // check : config file exists
             build_file_path(filepath, "_config.json");
-            if (LittleFS.exists(filepath)) {
+            if (RF_FS_EXISTS(filepath)) {
                 RF_DEBUG(1, "✅ Found config file: ", filepath);
                 flags |= static_cast<Rf_base_flags>(CONFIG_FILE_EXIST);
             } else {
@@ -279,7 +216,7 @@ namespace mcu {
             
             // check : forest file exists (unified form)
             build_file_path(filepath, "_forest.bin");
-            if (LittleFS.exists(filepath)) {
+            if (RF_FS_EXISTS(filepath)) {
                 RF_DEBUG(1, "✅ Found unified forest model file: ", filepath);
                 flags |= static_cast<Rf_base_flags>(UNIFIED_FOREST_EXIST);
             } else {
@@ -288,7 +225,7 @@ namespace mcu {
 
             // check : node predictor file exists
             build_file_path(filepath, "_node_pred.bin");
-            if (LittleFS.exists(filepath)) {
+            if (RF_FS_EXISTS(filepath)) {
                 RF_DEBUG(1, "✅ Found node predictor file: ", filepath);
                 flags |= static_cast<Rf_base_flags>(NODE_PRED_FILE_EXIST);
             } else {
@@ -409,6 +346,9 @@ namespace mcu {
 
         inline void get_memory_log_path(char* buffer, int buffer_size = RF_PATH_BUFFER ) 
                         const { build_file_path(buffer, "_memory_log.csv", buffer_size); }
+        
+        inline void get_temp_base_data_path(char* buffer, int buffer_size = RF_PATH_BUFFER)
+                        const { build_data_file_path(buffer, "cpy_data", buffer_size); }
 
         // status checkers
         inline bool ready_to_use()          const { return (model_name[0] != '\0') && (flags & SCANNED); }
@@ -435,9 +375,9 @@ namespace mcu {
                 auto rename_file = [&](const char* suffix) {
                     snprintf(old_file, RF_PATH_BUFFER, "/%s%s", old_model_name, suffix);
                     snprintf(new_file, RF_PATH_BUFFER, "/%s%s", model_name, suffix);
-                    if (LittleFS.exists(old_file)) {
+                    if (RF_FS_EXISTS(old_file)) {
                         cloneFile(old_file, new_file);
-                        LittleFS.remove(old_file);
+                        RF_FS_REMOVE(old_file);
                     }
                 };
 
@@ -456,18 +396,18 @@ namespace mcu {
                 snprintf(old_file, RF_PATH_BUFFER, "/%s_forest.bin", old_model_name);
                 snprintf(new_file, RF_PATH_BUFFER, "/%s_forest.bin", model_name);
                 
-                if (LittleFS.exists(old_file)) {
+                if (RF_FS_EXISTS(old_file)) {
                     // Handle unified model format
                     cloneFile(old_file, new_file);
-                    LittleFS.remove(old_file);
+                    RF_FS_REMOVE(old_file);
                 } else {
                     // Handle individual tree files
                     for(uint8_t i = 0; i < RF_MAX_TREES; i++) { // Max 50 trees check
                         snprintf(old_file, RF_PATH_BUFFER, "/%s_tree_%d.bin", old_model_name, i);
                         snprintf(new_file, RF_PATH_BUFFER, "/%s_tree_%d.bin", model_name, i);
-                        if (LittleFS.exists(old_file)) {
+                        if (RF_FS_EXISTS(old_file)) {
                             cloneFile(old_file, new_file);
-                            LittleFS.remove(old_file);
+                            RF_FS_REMOVE(old_file);
                         }else{
                             break; // Stop when we find a missing tree file
                         }
@@ -620,7 +560,7 @@ namespace mcu {
             base_ptr->get_base_data_path(base_file_path);
             RF_DEBUG(1, "📊 Scanning base data: ", base_file_path);
 
-            File file = LittleFS.open(base_file_path, FILE_READ);
+            File file = RF_FS_OPEN(base_file_path, RF_FILE_READ);
             if (!file) {
                 RF_DEBUG(0, "❌ Failed to open base data file for scanning: ", base_file_path);
                 return false;
@@ -824,7 +764,7 @@ namespace mcu {
                 RF_DEBUG(0, "❌ load dp file failed: ", "dp path is empty");
                 return false; 
             }
-            File file = LittleFS.open(path, "r");
+            File file = RF_FS_OPEN(path, RF_FILE_READ);
             if (!file) {
                 RF_DEBUG(0, "❌ Failed to open data_params file for reading", path);
                 return false;
@@ -905,7 +845,7 @@ namespace mcu {
             char path[RF_PATH_BUFFER];
             base_ptr->get_dp_path(path);
             if (path[0] == '\0') return false;
-            File file = LittleFS.open(path, "w");
+            File file = RF_FS_OPEN(path, RF_FILE_WRITE);
             if (!file) {
                 RF_DEBUG(0, "❌ Failed to open data_params file for writing", path);
                 return false;
@@ -935,7 +875,7 @@ namespace mcu {
         }
 
     public:
-        // Load configuration from JSON file in LittleFS
+        // Load configuration from JSON file
         bool loadConfig() {
             if (isLoaded) return true;
             if (!has_base()) {
@@ -978,7 +918,7 @@ namespace mcu {
             if(base_ptr->config_file_exists()){
                 char file_path[RF_PATH_BUFFER];
                 base_ptr->get_config_path(file_path);
-                File file = LittleFS.open(file_path, FILE_READ);
+                File file = RF_FS_OPEN(file_path, RF_FILE_READ);
                 if (file) {
                     jsonString = file.readString();
                     file.close();
@@ -1004,7 +944,7 @@ namespace mcu {
             return true;
         }
     
-        // Save configuration to JSON file in LittleFS  
+        // Save configuration to JSON file 
         bool releaseConfig() {
             if (!isLoaded || !has_base()){
                 RF_DEBUG(0, "❌ Save config failed: Config not loaded or base not ready");
@@ -1015,18 +955,18 @@ namespace mcu {
             String existingTimestamp = "";
             String existingAuthor = "Viettran";
             
-            if (LittleFS.exists(file_path)) {
-                File readFile = LittleFS.open(file_path, FILE_READ);
+            if (RF_FS_EXISTS(file_path)) {
+                File readFile = RF_FS_OPEN(file_path, RF_FILE_READ);
                 if (readFile) {
                     String jsonContent = readFile.readString();
                     readFile.close();
                     existingTimestamp = extractStringValue(jsonContent, "timestamp");
                     existingAuthor = extractStringValue(jsonContent, "author");
                 }
-                LittleFS.remove(file_path);
+                RF_FS_REMOVE(file_path);
             }
 
-            File file = LittleFS.open(file_path, FILE_WRITE);
+            File file = RF_FS_OPEN(file_path, RF_FILE_WRITE);
             if (!file) {
                 RF_DEBUG(0, "❌ Failed to create config file: ", file_path);
                 return false;
@@ -1310,6 +1250,7 @@ namespace mcu {
     */
     using sampleID_set = ID_vector<uint16_t>;       // set of unique sample IDs
 
+    // single data sample structure
     struct Rf_sample{
         packed_vector<8> features;          // features stored 
         uint8_t label;                     // label of the sample 
@@ -1338,7 +1279,7 @@ namespace mcu {
         uint16_t samplesEachChunk;                     // Maximum samples per chunk
         size_t size_;  
         uint8_t quantization_coefficient;              // Bits per feature value (1-8)
-        char file_path[RF_PATH_BUFFER] = {0};          // dataset file_path (in LittleFS)
+        char file_path[RF_PATH_BUFFER] = {0};          // dataset file_path 
 
         uint8_t num_labels_2_bpv(uint8_t num_labels) {
             if (num_labels <= 2) return 1;
@@ -1535,7 +1476,7 @@ namespace mcu {
                 isLoaded = false;
             }
             
-            File file = LittleFS.open(csvfile_path, FILE_READ);
+            File file = RF_FS_OPEN(csvfile_path, RF_FILE_READ);
             if (!file) {
                 RF_DEBUG(0, "❌ Failed to open CSV file for reading: ", csvfile_path);
                 return false;
@@ -1652,7 +1593,7 @@ namespace mcu {
             }
             file.close();
             isLoaded = true;
-            LittleFS.remove(csvfile_path);
+            RF_FS_REMOVE(csvfile_path);
             RF_DEBUG(1, "✅ CSV data loaded and file removed: ", csvfile_path);
             return true;
         }
@@ -1726,7 +1667,7 @@ namespace mcu {
         }
 
         /**
-         * @brief Save data to LittleFS in binary format and clear from RAM.
+         * @brief Save data to file system in binary format and clear from RAM.
          * @param reuse If true, keeps data in RAM after saving; if false, clears data from RAM.
          * @note: after first time rf_data created, it must be releaseData(false) to save data
          */
@@ -1734,12 +1675,12 @@ namespace mcu {
             if(!isLoaded) return false;
             
             if(!reuse){
-                RF_DEBUG(1, "💾 Saving data to LittleFS and clearing from RAM...");
+                RF_DEBUG(1, "💾 Saving data to file system and clearing from RAM...");
                 // Remove any existing file
-                if (LittleFS.exists(file_path)) {
-                    LittleFS.remove(file_path);
+                if (RF_FS_EXISTS(file_path)) {
+                    RF_FS_REMOVE(file_path);
                 }
-                File file = LittleFS.open(file_path, FILE_WRITE);
+                File file = RF_FS_OPEN(file_path, RF_FILE_WRITE);
                 if (!file) {
                     RF_DEBUG(0, "❌ Failed to open binary file for writing: ", file_path);
                     return false;
@@ -1810,11 +1751,11 @@ namespace mcu {
             if(isLoaded || !isProperlyInitialized()) return false;
             RF_DEBUG(1, "📂 Loading data from: ", file_path);
             
-            File file = LittleFS.open(file_path, FILE_READ);
+            File file = RF_FS_OPEN(file_path, RF_FILE_READ);
             if (!file) {
                 RF_DEBUG(0, "❌ Failed to open data file: ", file_path);
-                if(LittleFS.exists(file_path)) {
-                    LittleFS.remove(file_path);
+                if(RF_FS_EXISTS(file_path)) {
+                    RF_FS_REMOVE(file_path);
                 }
                 return false;
             }
@@ -1858,7 +1799,7 @@ namespace mcu {
                 if (remaining == 0) break;
             }
 
-            // Batch read to reduce LittleFS overhead
+            // Batch read to reduce file I/O calls
             const size_t MAX_BATCH_BYTES = 2048; // conservative for MCU
             uint8_t* ioBuf = (uint8_t*)malloc(MAX_BATCH_BYTES);
             if (!ioBuf) {
@@ -1999,7 +1940,7 @@ namespace mcu {
             file.close();
             if(!re_use) {
                 RF_DEBUG(1, "♻️ Single-load mode: removing file after loading: ", file_path);
-                LittleFS.remove(file_path); // Remove file after loading in single mode
+                RF_FS_REMOVE(file_path); // Remove file after loading in single mode
             }
             RF_DEBUG_2(1, "✅ Data loaded(", sampleChunks.size(), "chunks): ", file_path);
             return true;
@@ -2013,13 +1954,13 @@ namespace mcu {
          * @note: The state of the source data will be automatically restored, no need to reload.
          */
         bool loadData(Rf_data& source, const sampleID_set& sample_IDs, bool save_ram = true) {
-            // Only the source must exist on LittleFS; destination can be an in-memory buffer
-            if (!LittleFS.exists(source.file_path)) {
+            // Only the source must exist on file system; destination can be an in-memory buffer
+            if (!RF_FS_EXISTS(source.file_path)) {
                 RF_DEBUG(0, "❌ Source file does not exist: ", source.file_path);
                 return false;
             }
 
-            File file = LittleFS.open(source.file_path, FILE_READ);
+            File file = RF_FS_OPEN(source.file_path, RF_FILE_READ);
             if (!file) {
                 RF_DEBUG(0, "❌ Failed to open source file: ", source.file_path);
                 return false;
@@ -2173,14 +2114,14 @@ namespace mcu {
         }
 
         /**
-         *@brief: copy assignment (but not copy file_path to avoid LittleFS over-writing)
+         *@brief: copy assignment (but not copy file_path to avoid file system over-writing)
          *@note : Rf_data will be put into release state. loadData() to reload into RAM if needed.
         */
         Rf_data& operator=(const Rf_data& other) {
             purgeData(); // Clear existing data safely
             if (this != &other) {
-                if (LittleFS.exists(other.file_path)) {
-                    File testFile = LittleFS.open(other.file_path, FILE_READ);
+                if (RF_FS_EXISTS(other.file_path)) {
+                    File testFile = RF_FS_OPEN(other.file_path, RF_FILE_READ);
                     if (testFile) {
                         uint32_t testNumSamples;
                         uint16_t testNumFeatures;
@@ -2212,7 +2153,7 @@ namespace mcu {
             return *this;   
         }
 
-        // Clear data at both memory and LittleFS
+        // Clear data at both memory and file system
         void purgeData() {
             // Clear in-memory structures first
             sampleChunks.clear();
@@ -2224,9 +2165,9 @@ namespace mcu {
             bitsPerSample = 0;
             samplesEachChunk = 0;
 
-            // Then remove the LittleFS file if one was specified
-            if (LittleFS.exists(file_path)) {
-                LittleFS.remove(file_path);
+            // Then remove the file system file if one was specified
+            if (RF_FS_EXISTS(file_path)) {
+                RF_FS_REMOVE(file_path);
                 RF_DEBUG(1, "🗑️ Deleted file: ", file_path);
             }
         }
@@ -2237,7 +2178,7 @@ namespace mcu {
          * @param extend If false, keeps file size same (overwrites old data from start); 
          *               if true, appends new data while respecting size limits
          * @return : deleted labels
-         * @note Directly writes to LittleFS file to save RAM. File must exist and be properly initialized.
+         * @note Directly writes to file system file to save RAM. File must exist and be properly initialized.
          */
         b_vector<uint8_t> addNewData(const b_vector<Rf_sample>& samples, bool extend = true) {
             b_vector<uint8_t> deletedLabels;
@@ -2246,7 +2187,7 @@ namespace mcu {
                 RF_DEBUG(0, "❌ Rf_data not properly initialized. Cannot add new data.");
                 return deletedLabels;
             }
-            if (!LittleFS.exists(file_path)) {
+            if (!RF_FS_EXISTS(file_path)) {
                 RF_DEBUG(0, "⚠️ File does not exist for adding new data: ", file_path);
                 return deletedLabels;
             }
@@ -2256,7 +2197,7 @@ namespace mcu {
             }
 
             // Read current file header to get existing info
-            File file = LittleFS.open(file_path, FILE_READ);
+            File file = RF_FS_OPEN(file_path, RF_FILE_READ);
             if (!file) {
                 RF_DEBUG(0, "❌ Failed to open file for adding new data: ", file_path);
                 return deletedLabels;
@@ -2322,7 +2263,7 @@ namespace mcu {
             RF_DEBUG_2(2, "📊 Dataset info: current=", currentNumSamples, ", new_total=", newNumSamples);
 
             // Open file for writing (r+ mode to update existing file)
-            file = LittleFS.open(file_path, "r+");
+            file = RF_FS_OPEN(file_path, "r+");
             if (!file) {
                 RF_DEBUG(0, "❌ Failed to open file for writing: ", file_path);
                 return deletedLabels;
@@ -2598,7 +2539,7 @@ namespace mcu {
             return getTreeDepthRecursive(0);
         }
 
-        // Save tree to LittleFS for ESP32
+        // Save tree to file system for ESP32
         bool releaseTree(const char* path, bool re_use = false) {
             if(!re_use){
                 if (index > RF_MAX_TREES || nodes.empty()) {
@@ -2609,14 +2550,14 @@ namespace mcu {
                     RF_DEBUG(0, "❌ save tree failed, invalid path: ", path);
                     return false;
                 }
-                if (LittleFS.exists(path)) {
+                if (RF_FS_EXISTS(path)) {
                     // delete existing file to avoid conflicts
-                    if (!LittleFS.remove(path)) {
+                    if (!RF_FS_REMOVE(path)) {
                         RF_DEBUG(0, "❌ Failed to remove existing tree file: ", path);
                         return false;
                     }
                 }
-                File file = LittleFS.open(path, FILE_WRITE);
+                File file = RF_FS_OPEN(path, FILE_WRITE);
                 if (!file) {
                     RF_DEBUG(0, "❌ Failed to open tree file for writing: ", path);
                     return false;
@@ -2649,7 +2590,7 @@ namespace mcu {
                         free(buffer);
                         
                         if(written != totalSize) {
-                            RF_DEBUG(1, "⚠️ Incomplete tree write to LittleFS");
+                            RF_DEBUG(1, "⚠️ Incomplete tree write to file system");
                         }
                     } else {
                         // Fallback to individual writes if malloc fails
@@ -2663,11 +2604,11 @@ namespace mcu {
             nodes.clear();
             nodes.fit(); 
             isLoaded = false;
-            RF_DEBUG(2, "✅ Tree saved to LittleFS: ", index);
+            RF_DEBUG(2, "✅ Tree saved to file system: ", index);
             return true;
         }
 
-        // Load tree from LittleFS into RAM for ESP32
+        // Load tree from file system into RAM for ESP32
         bool loadTree(const char* path, bool re_use = false) {
             if (isLoaded) return true;
             
@@ -2679,11 +2620,11 @@ namespace mcu {
                 RF_DEBUG(0, "❌ Invalid path for loading tree: ", path);
                 return false;
             }
-            if (!LittleFS.exists(path)) {
+            if (!RF_FS_EXISTS(path)) {
                 RF_DEBUG(0, "❌ Tree file does not exist: ", path);
                 return false;
             }
-            File file = LittleFS.open(path, FILE_READ);
+            File file = RF_FS_OPEN(path, RF_FILE_READ);
             if (!file) {
                 RF_DEBUG(2, "❌ Failed to open tree file: ", path);
                 return false;
@@ -2735,7 +2676,7 @@ namespace mcu {
 
             if (!re_use) { 
                 RF_DEBUG(2, "♻️ Single-load mode: removing tree file after loading; ", path); 
-                LittleFS.remove(path); // Remove file after loading in single mode
+                RF_FS_REMOVE(path); // Remove file after loading in single mode
             }
             return true;
         }
@@ -2785,8 +2726,8 @@ namespace mcu {
             nodes.clear();
             nodes.fit(); // Release excess memory
             if(rmf && index < RF_MAX_TREES) {
-                if (LittleFS.exists(path)) {
-                    LittleFS.remove(path);
+                if (RF_FS_EXISTS(path)) {
+                    RF_FS_REMOVE(path);
                     RF_DEBUG(2, "🗑️ Tree file removed: ", path);
                 } 
             }
@@ -2984,7 +2925,7 @@ namespace mcu {
             labelStorage.push_back('\0');
             return true;
         }
-
+        
         // Optimized feature categorization - hot path, force inline
         __attribute__((always_inline)) inline uint8_t quantizeFeature(uint16_t featureIdx, float value) const {
             // Fast path: assume valid input during prediction (bounds checked during loading)
@@ -3079,12 +3020,12 @@ namespace mcu {
 
             char file_path[RF_PATH_BUFFER];
             base_ptr->get_ctg_path(file_path);
-            if (!LittleFS.exists(file_path)) {
+            if (!RF_FS_EXISTS(file_path)) {
                 RF_DEBUG(0, "❌ Quantizer file not found: ", file_path);
                 return false;
             }
 
-            File file = LittleFS.open(file_path, "r");
+            File file = RF_FS_OPEN(file_path, "r");
             if (!file) {
                 RF_DEBUG(0, "❌ Failed to open Quantizer file: ", file_path);
                 return false;
@@ -3584,8 +3525,8 @@ namespace mcu {
                 base_ptr->get_node_log_path(node_predictor_log);
             }
             // check if node_log file exists, if not create with header
-            if (node_predictor_log[0] != '\0' && !LittleFS.exists(node_predictor_log)) {
-                File logFile = LittleFS.open(node_predictor_log, FILE_WRITE);
+            if (node_predictor_log[0] != '\0' && !RF_FS_EXISTS(node_predictor_log)) {
+                File logFile = RF_FS_OPEN(node_predictor_log, FILE_WRITE);
                 if (logFile) {
                     logFile.println("min_split,max_depth,total_nodes");
                     logFile.close();
@@ -3593,7 +3534,7 @@ namespace mcu {
             }
         }
         
-        // Load trained model from LittleFS (updated format without version)
+        // Load trained model from file system (updated format without version)
         bool loadPredictor() {
             if (!has_base()){
                 RF_DEBUG(0, "❌ Load Predictor failed: base pointer not ready");
@@ -3603,12 +3544,12 @@ namespace mcu {
             base_ptr->get_node_pred_path(file_path);
             RF_DEBUG(2, "🔍 Loading node predictor from file: ", file_path);
             if(is_trained) return true;
-            if (!LittleFS.exists(file_path)) {
+            if (!RF_FS_EXISTS(file_path)) {
                 RF_DEBUG(1, "⚠️  No predictor file found, using default predictor.");
                 return false;
             }
             
-            File file = LittleFS.open(file_path, FILE_READ);
+            File file = RF_FS_OPEN(file_path, RF_FILE_READ);
             if (!file) {
                 RF_DEBUG(0, "❌ Failed to open predictor file: ", file_path);
                 return false;
@@ -3675,7 +3616,7 @@ namespace mcu {
             return file_is_trained;
         }
         
-        // Save trained predictor to LittleFS
+        // Save trained predictor to file system
         bool releasePredictor() {
             if (!has_base()){
                 RF_DEBUG(0, "❌ Release Predictor failed: base pointer not ready");
@@ -3687,9 +3628,9 @@ namespace mcu {
             }
             char file_path[RF_PATH_BUFFER];
             base_ptr->get_node_pred_path(file_path);
-            if (LittleFS.exists(file_path)) LittleFS.remove(file_path);
+            if (RF_FS_EXISTS(file_path)) RF_FS_REMOVE(file_path);
 
-            File file = LittleFS.open(file_path, FILE_WRITE);
+            File file = RF_FS_OPEN(file_path, FILE_WRITE);
             if (!file) {
                 RF_DEBUG(0, "❌ Failed to create predictor file: ", file_path);
                 return false;
@@ -3747,7 +3688,7 @@ namespace mcu {
             char node_predictor_log[RF_PATH_BUFFER];
             base_ptr->get_node_log_path(node_predictor_log);
             RF_DEBUG(2, "🔂 Starting retraining of node predictor...");
-            File file = LittleFS.open(node_predictor_log, FILE_READ);
+            File file = RF_FS_OPEN(node_predictor_log, RF_FILE_READ);
             if (!file) {
                 RF_DEBUG(1, "❌ Failed to open node_predictor log file: ", node_predictor_log);
                 return false;
@@ -3991,7 +3932,7 @@ namespace mcu {
             if (buffer.size() == 0) return;
             // Read all existing lines
             b_vector<String> lines;
-            File file = LittleFS.open(node_predictor_log, FILE_READ);
+            File file = RF_FS_OPEN(node_predictor_log, RF_FILE_READ);
             if (file) {
                 while (file.available()) {
                     String line = file.readStringUntil('\n');
@@ -4021,8 +3962,8 @@ namespace mcu {
                 data_lines.pop_back();
             }
             // Write back to file
-            LittleFS.remove(node_predictor_log);
-            file = LittleFS.open(node_predictor_log, FILE_WRITE);
+            RF_FS_REMOVE(node_predictor_log);
+            file = RF_FS_OPEN(node_predictor_log, FILE_WRITE);
             if (file) {
                 file.println(header);
                 for (const auto& row : data_lines) {
@@ -4039,11 +3980,11 @@ namespace mcu {
             }
             char node_predictor_log[RF_PATH_BUFFER];
             base_ptr->get_node_log_path(node_predictor_log);
-            if (!LittleFS.exists(node_predictor_log)) {
+            if (!RF_FS_EXISTS(node_predictor_log)) {
                 RF_DEBUG(2, "❌ No log file found for retraining.");
                 return false;
             }
-            File file = LittleFS.open(node_predictor_log, FILE_READ);
+            File file = RF_FS_OPEN(node_predictor_log, RF_FILE_READ);
             bool result = file && file.size() > 0;
             // only retrain if log file has more 4 samples (excluding header)
             if (result) {
@@ -4439,7 +4380,7 @@ namespace mcu {
             const Rf_config* config_ptr = nullptr;
             char tree_path_buffer[RF_PATH_BUFFER] = {0}; // Buffer for tree file paths
 
-            vector<Rf_tree> trees;        // b_vector storing root nodes of trees (now manages LittleFS file_paths)
+            vector<Rf_tree> trees;        // b_vector storing root nodes of trees (now manages file system file_paths)
             size_t   total_depths;       // store total depth of all trees
             size_t   total_nodes;        // store total nodes of all trees
             size_t   total_leaves;       // store total leaves of all trees
@@ -4476,7 +4417,7 @@ namespace mcu {
             }
 
             ~Rf_tree_container(){
-                // save to LittleFS in unified form 
+                // save to file system in unified form 
                 releaseForest();
                 trees.clear();
                 base_ptr = nullptr;
@@ -4505,8 +4446,8 @@ namespace mcu {
                 // Remove old forest file to ensure clean slate
                 char oldForestFile[RF_PATH_BUFFER];
                 base_ptr->get_forest_path(oldForestFile);
-                if(LittleFS.exists(oldForestFile)) {
-                    LittleFS.remove(oldForestFile);
+                if(RF_FS_EXISTS(oldForestFile)) {
+                    RF_FS_REMOVE(oldForestFile);
                     RF_DEBUG(2, "🗑️ Removed old forest file: ", oldForestFile);
                 }
                 is_unified = false; // Now in individual form
@@ -4680,13 +4621,13 @@ namespace mcu {
             bool loadForestUnified() {
                 char unifiedfile_path[RF_PATH_BUFFER];
                 base_ptr->get_forest_path(unifiedfile_path);
-                if(unifiedfile_path[0] == '\0' || !LittleFS.exists(unifiedfile_path)) {
+                if(unifiedfile_path[0] == '\0' || !RF_FS_EXISTS(unifiedfile_path)) {
                     RF_DEBUG(0, "❌ Unified forest file not found: ", unifiedfile_path);
                     return false;
                 }
                 
                 // Load from unified file (optimized format)
-                File file = LittleFS.open(unifiedfile_path, FILE_READ);
+                File file = RF_FS_OPEN(unifiedfile_path, RF_FILE_READ);
                 if (!file) {
                     RF_DEBUG(0, "❌ Failed to open unified forest file: ", unifiedfile_path);
                     return false;
@@ -4851,14 +4792,14 @@ namespace mcu {
                     return false;
                 }
                 
-                // Check available LittleFS space before writing
-                size_t totalFS = LittleFS.totalBytes();
-                size_t usedFS = LittleFS.usedBytes();
+                // Check available file system space before writing
+                size_t totalFS = RF_TOTAL_BYTES();
+                size_t usedFS = RF_USED_BYTES();
                 size_t freeFS = totalFS - usedFS;
                 size_t estimatedSize = totalNodes * sizeof(uint32_t) + 100; // nodes + headers
                 
                 if(freeFS < estimatedSize) {
-                    RF_DEBUG_2(1, "❌ Insufficient LittleFS space to release forest (need ~", 
+                    RF_DEBUG_2(1, "❌ Insufficient file system space to release forest (need ~", 
                                 estimatedSize, "bytes, have", freeFS);
                     return false;
                 }
@@ -4872,7 +4813,7 @@ namespace mcu {
                 }
                 
                 unsigned long fileStart = GET_CURRENT_TIME_IN_MILLISECONDS;
-                File file = LittleFS.open(unifiedfile_path, FILE_WRITE);
+                File file = RF_FS_OPEN(unifiedfile_path, FILE_WRITE);
                 if (!file) {
                     RF_DEBUG(0, "❌ Failed to create unified forest file: ", unifiedfile_path);
                     return false;
@@ -4883,14 +4824,14 @@ namespace mcu {
                 if(file.write((uint8_t*)&magic, sizeof(magic)) != sizeof(magic)) {
                     RF_DEBUG(0, "❌ Failed to write magic number to: ", unifiedfile_path);
                     file.close();
-                    LittleFS.remove(unifiedfile_path);
+                    RF_FS_REMOVE(unifiedfile_path);
                     return false;
                 }
                 
                 if(file.write((uint8_t*)&loadedCount, sizeof(loadedCount)) != sizeof(loadedCount)) {
                     RF_DEBUG(0, "❌ Failed to write tree count to: ", unifiedfile_path);
                     file.close();
-                    LittleFS.remove(unifiedfile_path);
+                    RF_FS_REMOVE(unifiedfile_path);
                     return false;
                 }
                 
@@ -4944,7 +4885,7 @@ namespace mcu {
                 // Verify file was written correctly
                 if(savedCount != loadedCount) {
                     RF_DEBUG_2(1, "❌ Save incomplete: ", savedCount, "/", loadedCount);
-                    LittleFS.remove(unifiedfile_path);
+                    RF_FS_REMOVE(unifiedfile_path);
                     return false;
                 }
                 
@@ -5177,12 +5118,12 @@ namespace mcu {
                 RF_DEBUG(1, "❌ Cannot write to inference log: no base reference for file management");
                 return false;
             }
-            bool file_exists = LittleFS.exists(infer_log_path);
+            bool file_exists = RF_FS_EXISTS(infer_log_path);
             uint32_t current_prediction_count = 0;
             
             // If file exists, read current prediction count from header
             if(file_exists) {
-                File read_file = LittleFS.open(infer_log_path, FILE_READ);
+                File read_file = RF_FS_OPEN(infer_log_path, RF_FILE_READ);
                 if(read_file && read_file.size() >= 8) {
                     uint8_t magic_bytes[4];
                     read_file.read(magic_bytes, 4);
@@ -5195,7 +5136,7 @@ namespace mcu {
                 read_file.close();
             }
             
-            File file = LittleFS.open(infer_log_path, file_exists ? FILE_APPEND : FILE_WRITE);
+            File file = RF_FS_OPEN(infer_log_path, file_exists ? FILE_APPEND : FILE_WRITE);
             if(!file) {
                 RF_DEBUG(1, "❌ Failed to open inference log file: ", infer_log_path);
                 return false;
@@ -5248,7 +5189,7 @@ namespace mcu {
                 file.close();
                 
                 // Update prediction count in header - read entire file and rewrite
-                File read_file = LittleFS.open(infer_log_path, FILE_READ);
+                File read_file = RF_FS_OPEN(infer_log_path, RF_FILE_READ);
                 if(read_file) {
                     size_t file_size = read_file.size();
                     b_vector<uint8_t> file_data(file_size);
@@ -5260,7 +5201,7 @@ namespace mcu {
                     memcpy(&file_data[4], &updated_count, 4);
                     
                     // Write back the entire file
-                    File write_file = LittleFS.open(infer_log_path, FILE_WRITE);
+                    File write_file = RF_FS_OPEN(infer_log_path, FILE_WRITE);
                     if(write_file) {
                         write_file.write(file_data.data(), file_data.size());
                         write_file.flush();
@@ -5291,9 +5232,9 @@ namespace mcu {
     private:
         // trim log file if it exceeds max size (MAX_INFER_LOGFILE_SIZE)
         bool trim_log_file(const char* infer_log_path) {
-            if(!LittleFS.exists(infer_log_path)) return false;
+            if(!RF_FS_EXISTS(infer_log_path)) return false;
             
-            File file = LittleFS.open(infer_log_path, FILE_READ);
+            File file = RF_FS_OPEN(infer_log_path, RF_FILE_READ);
             if(!file) return false;
             
             size_t file_size = file.size();
@@ -5302,7 +5243,7 @@ namespace mcu {
             if(file_size <= MAX_INFER_LOGFILE_SIZE) return true; // No trimming needed;
             
             // File is too large, trim from the beginning (keep most recent data)
-            file = LittleFS.open(infer_log_path, FILE_READ);
+            file = RF_FS_OPEN(infer_log_path, RF_FILE_READ);
             if(!file) return false;
             
             // Read and verify header
@@ -5356,7 +5297,7 @@ namespace mcu {
             }
             
             // Rewrite file with header and trimmed data
-            file = LittleFS.open(infer_log_path, FILE_WRITE);
+            file = RF_FS_OPEN(infer_log_path, FILE_WRITE);
             if(!file) {
                 RF_DEBUG(1, "❌ Failed to reopen log file for writing: ", infer_log_path);
                 return false;
@@ -5428,11 +5369,11 @@ namespace mcu {
             }
 
             if(!keep_old_file){
-                if(LittleFS.exists(time_log_path)){
-                    LittleFS.remove(time_log_path); 
+                if(RF_FS_EXISTS(time_log_path)){
+                    RF_FS_REMOVE(time_log_path); 
                 }
                 // write header to time log file
-                File logFile = LittleFS.open(time_log_path, FILE_WRITE);
+                File logFile = RF_FS_OPEN(time_log_path, FILE_WRITE);
                 if (logFile) {
                     logFile.println("Event,\t\tTime(ms),duration,Unit");
                     logFile.close();
@@ -5441,12 +5382,12 @@ namespace mcu {
             t_log("init tracker"); // Initial log without printing
 
             if(!keep_old_file){                
-                // clear LittleFS log file if it exists
-                if(LittleFS.exists(memory_log_path)){
-                    LittleFS.remove(memory_log_path); 
+                // clear file system log file if it exists
+                if(RF_FS_EXISTS(memory_log_path)){
+                    RF_FS_REMOVE(memory_log_path); 
                 }
                 // write header to log file
-                File logFile = LittleFS.open(memory_log_path, FILE_WRITE);
+                File logFile = RF_FS_OPEN(memory_log_path, FILE_WRITE);
                 if (logFile) {
                     logFile.println("Time(s),FreeHeap,Largest_Block,FreeDisk");
                     logFile.close();
@@ -5457,7 +5398,7 @@ namespace mcu {
 
         void m_log(const char* msg, bool log = true){
             freeHeap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-            freeDisk = LittleFS.totalBytes() - LittleFS.usedBytes();
+            freeDisk = RF_TOTAL_BYTES() - RF_USED_BYTES();
 
             if(freeHeap < lowest_ram) lowest_ram = freeHeap;
             if(freeDisk < lowest_rom) lowest_rom = freeDisk;
@@ -5468,7 +5409,7 @@ namespace mcu {
             // Log to file with timestamp
             if(log) {        
                 log_time = (GET_CURRENT_TIME_IN_MILLISECONDS - starting_time)/1000.0f; 
-                File logFile = LittleFS.open(memory_log_path, FILE_APPEND);
+                File logFile = RF_FS_OPEN(memory_log_path, FILE_APPEND);
                 if (logFile) {
                     logFile.printf("%.2f,\t%u,\t%u,\t%u",
                                     log_time, freeHeap, largestBlock, freeDisk);
@@ -5521,7 +5462,7 @@ namespace mcu {
             float elapsed = (end_time - begin_time)/ratio;
 
             // Log to file with timestamp      ; 
-            File logFile = LittleFS.open(time_log_path, FILE_APPEND);
+            File logFile = RF_FS_OPEN(time_log_path, FILE_APPEND);
             if (logFile) {
                 if(msg && strlen(msg) > 0){
                     logFile.printf("%s,\t%.1f,\t%.2f,\t%s\n", msg, begin_time/1000.0f, elapsed, unit);     // time always in s
@@ -5566,7 +5507,7 @@ namespace mcu {
             long unsigned current_time = GET_CURRENT_TIME_IN_MILLISECONDS - starting_time;
 
             // Log to file with timestamp
-            File logFile = LittleFS.open(time_log_path, FILE_APPEND);
+            File logFile = RF_FS_OPEN(time_log_path, FILE_APPEND);
             if (logFile) {
                 if(msg && strlen(msg) > 0){
                     logFile.printf("%s,\t%.1f,\t_,\tms\n", msg, current_time/1000.0f); // time always in s
@@ -5586,18 +5527,17 @@ namespace mcu {
                 RF_DEBUG(1, "❌ Cannot print memory log: log file path not set correctly");
                 return;
             }
-            if(!LittleFS.exists(memory_log_path)){
+            if(!RF_FS_EXISTS(memory_log_path)){
                 RF_DEBUG(1, "❌ Cannot print memory log: log file does not exist");
                 return;
             }
-            File file = LittleFS.open(memory_log_path, FILE_READ);
+            File file = RF_FS_OPEN(memory_log_path, RF_FILE_READ);
             if(!file){
                 RF_DEBUG(1, "❌ Cannot open memory log file for reading: ", memory_log_path);
                 return;
             }
             String line;
             while(file.available()){
-                // Serial.println(file.readStringUntil('\n'));
                 line = file.readStringUntil('\n');
                 RF_DEBUG(0, line.c_str());
             }
@@ -5610,18 +5550,17 @@ namespace mcu {
                 RF_DEBUG(1, "❌ Cannot print time log: log file path not set correctly");
                 return;
             }
-            if(!LittleFS.exists(time_log_path)){
+            if(!RF_FS_EXISTS(time_log_path)){
                 RF_DEBUG(1, "❌ Cannot print time log: log file does not exist");
                 return;
             }
-            File file = LittleFS.open(time_log_path, FILE_READ);
+            File file = RF_FS_OPEN(time_log_path, RF_FILE_READ);
             if(!file){
                 RF_DEBUG(1, "❌ Cannot open time log file for reading: ", time_log_path);
                 return;
             }
             String line;
             while(file.available()){
-                // Serial.println(file.readStringUntil('\n'));
                 line = file.readStringUntil('\n');
                 RF_DEBUG(0, line.c_str());
             }

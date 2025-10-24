@@ -186,8 +186,10 @@ namespace mcu{
             //clone temp data back to base data after add new samples
             // if temp_base_data file size > original base_data file size, replace original file
             char base_path[RF_PATH_BUFFER];
-            base.get_base_data_path(base_path, sizeof(base_path));
-            File tempFile = LittleFS.open(temp_base_data, FILE_READ);
+            char cpy_data_path[RF_PATH_BUFFER];
+            base.get_base_data_path(base_path);
+            base.get_temp_base_data_path(cpy_data_path);
+            File tempFile = LittleFS.open(cpy_data_path, FILE_READ);
 
             size_t tempSize = tempFile ? tempFile.size() : 0;
             tempFile.close();
@@ -197,7 +199,7 @@ namespace mcu{
 
             if(tempSize > baseSize && config.enable_retrain){
                 remove(base_path);
-                cloneFile(temp_base_data, base_path);
+                cloneFile(cpy_data_path, base_path);
             }
 
             // Purge all Rf_data to free resources
@@ -320,9 +322,11 @@ namespace mcu{
 
             // clone base_data to temp_base_data to avoid modifying original data
             char base_path[RF_PATH_BUFFER];
-            base.get_base_data_path(base_path, sizeof(base_path));
-            cloneFile(base_path, temp_base_data);
-            if(!ctx->base_data.init(temp_base_data, config)){
+            char cpy_data_path[RF_PATH_BUFFER];
+            base.get_base_data_path(base_path);
+            base.get_temp_base_data_path(cpy_data_path);
+            cloneFile(base_path, cpy_data_path);
+            if(!ctx->base_data.init(cpy_data_path, config)){
                 RF_DEBUG(0, "❌ Error initializing base data");
                 return false;
             }
@@ -1170,7 +1174,7 @@ namespace mcu{
             char path[RF_PATH_BUFFER];
             Rf_data old_base_data;
             if(config.training_score == Rf_training_score::K_FOLD_SCORE){
-                base.build_data_file_path(path, "temp_base_data");
+                base.build_data_file_path(path, "temp_data");
                 old_base_data.init(path, config);
                 old_base_data = ctx->base_data; // backup
                 ctx->base_data = ctx->train_data; 

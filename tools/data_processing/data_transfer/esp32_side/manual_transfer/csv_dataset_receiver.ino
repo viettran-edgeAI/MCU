@@ -1,6 +1,5 @@
 #include "STL_MCU.h"
-#include "FS.h"
-#include "LittleFS.h"
+#include "Rf_component.h"
 #include "Rf_file_manager.h"
 
 using namespace  mcu;
@@ -10,14 +9,9 @@ const uint16_t NUMBER_OF_COLUMNS = 234; // Number of columns in the CSV dataset,
 
 
 void setup() {
-    Serial.begin(BAUD_RATE);  
-    while (!Serial);       // <-- Waits for Serial monitor to connect (important for USB CDC)
-    delay(2000);
-
-    // 1. Mount LittleFS
-    if (!LittleFS.begin(true)) {
-      Serial.println("❌ LittleFS Mount Failed!");
-      while (true) { delay(1000); }
+    if (!RF_FS_BEGIN()) {
+        RF_DEBUGLN("❌ File system initialization failed!");
+        return;
     }
     // this will delete all lines that do not have the exact columns number equal to NUM_OF_COLUMNS
     String csv_path = reception_data(NUMBER_OF_COLUMNS);    
@@ -26,25 +20,11 @@ void setup() {
     // reception_data();  // default , no exact column count, print file after reception.
 
     // after reception, convert csv file to binary format
-    if(csv_path.length() > 0) {
-        Rf_data dataset;
-        const char* base_name = csv_path.c_str();
-        if (csv_path.endsWith(".csv")) {
-            base_name = csv_path.substring(0, csv_path.length() - 4).c_str();
-        }
-        dataset.flag = Rf_data_flags::BASE_DATA; // set flag for base data
-        dataset.filename = String(base_name) + ".bin"; // save to binary format with
-        dataset.loadCSVData(csv_path, NUMBER_OF_COLUMNS - 1); // -1 because first column is label
-        dataset.releaseData(); // save to binary format
-        Serial.println("✅ CSV data loaded and saved to binary format.");
-    } else {
-        Serial.println("❌ No valid file received.");
-    }
-
-
+    Rf_data new_data;
+    data.convertCSVtoBinary(csv_path.c_str());
 }
 
 void loop() {
-  // nothing to do here
+  manage_files();
 }
 

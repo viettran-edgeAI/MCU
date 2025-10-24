@@ -1,5 +1,57 @@
 #include "Rf_file_manager.h"
 
+bool rf_storage_begin() {
+#ifdef RF_USE_SDCARD
+    // Initialize SPI with custom pins
+    SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
+    
+    if (!SD.begin(SD_CS_PIN)) {
+        RF_DEBUG(0, "❌ SD Card Mount Failed!");
+        return false;
+    }
+    
+    uint8_t cardType = SD.cardType();
+    if (cardType == CARD_NONE) {
+        RF_DEBUG(0, "❌ No SD card attached!");
+        return false;
+    }
+    
+    RF_DEBUG(0, "✅ SD Card initialized successfully");
+    
+    // Print card info at debug level 1+
+    if (RF_DEBUG_LEVEL >= 1) {
+        const char* cardTypeStr = "UNKNOWN";
+        if (cardType == CARD_MMC) cardTypeStr = "MMC";
+        else if (cardType == CARD_SD) cardTypeStr = "SDSC";
+        else if (cardType == CARD_SDHC) cardTypeStr = "SDHC";
+        
+        uint64_t cardSize = SD.cardSize() / (1024 * 1024);
+        char buffer[128];
+        snprintf(buffer, sizeof(buffer), "📊 SD Card Type: %s, Size: %llu MB", cardTypeStr, cardSize);
+        RF_DEBUG(0, "", buffer);
+    }
+    
+    return true;
+#else
+    if (!LittleFS.begin(true)) {
+        RF_DEBUG(0, "❌ LittleFS Mount Failed!");
+        return false;
+    }
+    RF_DEBUG(0, "✅ LittleFS initialized successfully");
+    return true;
+#endif
+}
+
+void rf_storage_end() {
+#ifdef RF_USE_SDCARD
+    SD.end();
+    RF_DEBUG(0, "✅ SD Card unmounted");
+#else
+    LittleFS.end();
+    RF_DEBUG(0, "✅ LittleFS unmounted");
+#endif
+}
+
 // Helper function to normalize file paths
 // Ensures path starts with '/' and is properly formatted
 String normalizePath(const String& input, const String& currentDir) {
@@ -30,9 +82,8 @@ String normalizePath(const String& input, const String& currentDir) {
 }
 
 bool cloneFile(const String& src, const String& dest) {
-    if(LittleFS.exists(src) == false) {
-        Serial.print("❌ Source file does not exist: ");
-        Serial.println(src);
+    if(RF_FS_EXISTS(src) == false) {
+        RF_DEBUG(0, "❌ Source file does not exist: ", src);
         return false;
     }
 
@@ -48,20 +99,18 @@ bool cloneFile(const String& src, const String& dest) {
         } else {
             actualDest = src + "_cpy";
         }
-        Serial.printf("🔄 Auto-generated destination: %s\n", actualDest.c_str());
+        RF_DEBUG(0, "🔄 Auto-generated destination: ", actualDest);
     }
 
-    File sourceFile = LittleFS.open(src, FILE_READ);
+    File sourceFile = RF_FS_OPEN(src, RF_FILE_READ);
     if (!sourceFile) {
-        Serial.print("❌ Failed to open source file: ");
-        Serial.println(src);
+        RF_DEBUG(0, "❌ Failed to open source file: ", src);
         return false;
     }
 
-    File destFile = LittleFS.open(actualDest, FILE_WRITE);
+    File destFile = RF_FS_OPEN(actualDest, RF_FILE_WRITE);
     if (!destFile) {
-        Serial.print("❌ Failed to create destination file: ");
-        Serial.println(actualDest);
+        RF_DEBUG(0, "❌ Failed to create destination file: ", actualDest);
         sourceFile.close();
         return false;
     }
@@ -91,10 +140,7 @@ bool cloneFile(const String& src, const String& dest) {
     sourceFile.close();
     destFile.close();
 
-    Serial.print("✅ File cloned from ");
-    Serial.print(src);
-    Serial.print(" ➝ ");
-    Serial.println(actualDest);
+    RF_DEBUG_2(0, "✅ File cloned from ", src, "➝ ", actualDest);
     return true;
 }
 
@@ -113,31 +159,23 @@ bool cloneFile(const String& src) {
 
 bool renameFile(const String& oldPath, const String& newPath) {
     // Check if source file exists
-    if (!LittleFS.exists(oldPath)) {
-        Serial.print("❌ Source file does not exist: ");
-        Serial.println(oldPath);
+    if (!RF_FS_EXISTS(oldPath)) {
+        RF_DEBUG(0, "❌ Source file does not exist: ", oldPath);
         return false;
     }
 
     // Check if destination already exists
-    if (LittleFS.exists(newPath)) {
-        Serial.print("❌ Destination file already exists: ");
-        Serial.println(newPath);
+    if (RF_FS_EXISTS(newPath)) {
+        RF_DEBUG(0, "❌ Destination file already exists: ", newPath);
         return false;
     }
 
     // Perform the rename operation
-    if (LittleFS.rename(oldPath, newPath)) {
-        Serial.print("✅ File renamed from ");
-        Serial.print(oldPath);
-        Serial.print(" ➝ ");
-        Serial.println(newPath);
+    if (RF_FS_RENAME(oldPath, newPath)) {
+        RF_DEBUG_2(0, "✅ File renamed from ", oldPath, "➝ ", newPath);
         return true;
     } else {
-        Serial.print("❌ Failed to rename file from ");
-        Serial.print(oldPath);
-        Serial.print(" to ");
-        Serial.println(newPath);
+        RF_DEBUG_2(0, "❌ Failed to rename file from ", oldPath, "to ", newPath);
         return false;
     }
 }
@@ -148,15 +186,12 @@ bool renameFile(const char* oldPath, const char* newPath) {
 }
 
 void printFile(String filename) {
-    File file = LittleFS.open(filename.c_str(), FILE_READ);
+    File file = RF_FS_OPEN(filename.c_str(), RF_FILE_READ);
     if (!file) {
-        Serial.print("❌ Failed to open ");
-        Serial.println(filename);
+        RF_DEBUG(0, "❌ Failed to open file: ", filename);
         return;
     }
-
-    Serial.print("📄 ");
-    Serial.println(filename);
+    RF_DEBUG(0, "📄 Printing file: ", filename);
 
     // Get file extension to determine file type
     String filenameLower = filename;
@@ -167,9 +202,9 @@ void printFile(String filename) {
 
     if (!isTextFile) {
         // Handle binary files - just show basic info
-        size_t fileSize = file.size();
-        Serial.printf("📊 Binary file size: %d bytes\n", fileSize);
-        Serial.println("⚠️ Binary content not displayed");
+        size_t fileSize = file.size();;
+        RF_DEBUG(0, "📊 Binary file size (bytes): ", fileSize);
+        RF_DEBUG(0, "⚠️ Binary content not displayed");
         file.close();
         return;
     }
@@ -183,7 +218,7 @@ void printFile(String filename) {
         line.trim();
         if (line.length() == 0) continue;
 
-        Serial.println(line);
+        RF_DEBUG(0, "", line);
         ++rowCount;
 
         // Only count columns for CSV files
@@ -199,29 +234,34 @@ void printFile(String filename) {
 
     file.close();
 
-    Serial.println("📊 Summary:");
-    Serial.printf("🧾 Lines: %u\n", rowCount);
+    RF_DEBUG(0, "📊 Summary:");
+    RF_DEBUG(0, "🧾 Lines: ", rowCount);
+
     if (isCSV) {
-        Serial.printf("📐 Columns: %u\n", columnCount);
+        RF_DEBUG(0, "📐 Columns: ", columnCount);
     }
 }
 
 
 void manage_files() {
-    if (!LittleFS.begin(true)) {
-        Serial.println("❌ LittleFS Mount Failed!");
+    if (!RF_FS_BEGIN()) {
+        char buffer[64];
+        snprintf(buffer, sizeof(buffer), "❌ %s Mount Failed!", RF_FS_TYPE);
+        RF_DEBUG(0, "", buffer);
         return;
     }
 
     String currentDir = "/";  // Start at root
 
     while (true) {
-        Serial.println("\n====== 📂 LittleFS File Manager ======");
-        Serial.printf("📍 Current Directory: %s\n", currentDir.c_str());
+        char header[64];
+        snprintf(header, sizeof(header), "\n====== 📂 %s File Manager ======", RF_FS_TYPE);
+        RF_DEBUG(0, "", header);
+        RF_DEBUG(0, "📍 Current Directory: ", currentDir);
         
-        File dir = LittleFS.open(currentDir);
+        File dir = RF_FS_OPEN(currentDir, RF_FILE_READ);
         if (!dir || !dir.isDirectory()) {
-            Serial.println("❌ Failed to open directory!");
+            RF_DEBUG(0, "❌ Failed to open directory: ", currentDir);
             currentDir = "/";  // Reset to root
             continue;
         }
@@ -234,8 +274,8 @@ void manage_files() {
         int fileCount = 0;
         int folderCount = 0;
 
-        Serial.printf("📦 LittleFS Free Space: %d / %d bytes available\n", 
-                     LittleFS.totalBytes() - LittleFS.usedBytes(), LittleFS.totalBytes());
+        RF_DEBUG_2(0, "📦 Free Space: ", 
+                    RF_TOTAL_BYTES() - RF_USED_BYTES(), "/", RF_TOTAL_BYTES());
 
         // List directories first, then files
         File entry = dir.openNextFile();
@@ -270,12 +310,16 @@ void manage_files() {
             
             if (entry.isDirectory()) {
                 folderList[folderCount] = fullPath;
-                Serial.printf("📁 %2d: %s/\n", folderCount + 1, displayName.c_str());
+                char buffer[64];
+                snprintf(buffer, sizeof(buffer), "📁 %2d: %s/", folderCount + 1, displayName.c_str());
+                RF_DEBUG(0, "", buffer);
                 folderCount++;
             } else {
                 fileList[fileCount] = fullPath;
                 size_t fileSize = entry.size();
-                Serial.printf("📄 %2d: %-30s (%d bytes)\n", fileCount + 1, displayName.c_str(), fileSize);
+                char buffer[80];
+                snprintf(buffer, sizeof(buffer), "📄 %2d: %-30s (%d bytes)", fileCount + 1, displayName.c_str(), fileSize);
+                RF_DEBUG(0, "", buffer);
                 fileCount++;
             }
             
@@ -285,25 +329,25 @@ void manage_files() {
         dir.close();
 
         if (fileCount == 0 && folderCount == 0) {
-            Serial.println("⚠️ Directory is empty.");
+            RF_DEBUG(0, "⚠️ Directory is empty.");
         }
 
-        Serial.println("\n📋 Operations:");
+        RF_DEBUG(0, "\n📋 Operations:");
         if (currentDir != "/") {
-            Serial.println("..: ⬆️  Go to parent directory");
+            RF_DEBUG(0, "..: ⬆️  Go to parent directory");
         }
-        Serial.println("g: 📂 Go into folder (1-" + String(folderCount) + ")");
-        Serial.println("a: 📄 Print file content");
-        Serial.println("b: 📋 Clone file");
-        Serial.println("c: ✏️  Rename file");
-        Serial.println("d: 🗑️  Delete file/folder");
-        Serial.println("e: ➕ Add new file");
-        Serial.println("Type operation letter, or 'exit' to quit:");
+        RF_DEBUG(0, "g: 📂 Go into folder (1-", String(folderCount) + ")");
+        RF_DEBUG(0, "a: 📄 Print file content");
+        RF_DEBUG(0, "b: 📋 Clone file");
+        RF_DEBUG(0, "c: ✏️  Rename file");
+        RF_DEBUG(0, "d: 🗑️  Delete file/folder");
+        RF_DEBUG(0, "e: ➕ Add new file");
+        RF_DEBUG(0, "Type operation letter, or 'exit' to quit:");
 
         String operation = "";
         while (operation.length() == 0) {
-            if (Serial.available()) {
-                operation = Serial.readStringUntil('\n');
+            if (RF_INPUT_AVAILABLE()) {
+                operation = RF_INPUT_READ_LINE_UNTIL('\n');
                 operation.trim();
                 operation.toLowerCase();
             }
@@ -311,7 +355,7 @@ void manage_files() {
         }
 
         if (operation.equals("exit")) {
-            Serial.println("🔚 Exiting file manager.");
+            RF_DEBUG(0, "🔚 Exiting file manager.");
             break;
         }
 
@@ -324,9 +368,11 @@ void manage_files() {
                 } else {
                     currentDir = "/";
                 }
-                Serial.printf("⬆️ Moving to parent: %s\n", currentDir.c_str());
+                char buffer[128];
+                snprintf(buffer, sizeof(buffer), "⬆️ Moving to parent: %s", currentDir.c_str());
+                RF_DEBUG(0, "", buffer);
             } else {
-                Serial.println("⚠️ Already at root directory.");
+                RF_DEBUG(0, "⚠️ Already at root directory.");
             }
             continue;
         }
@@ -334,15 +380,17 @@ void manage_files() {
         // Go into folder
         if (operation.equals("g")) {
             if (folderCount == 0) {
-                Serial.println("⚠️ No folders in current directory.");
+                RF_DEBUG(0, "⚠️ No folders in current directory.");
                 continue;
             }
             
-            Serial.printf("Enter folder number (1-%d): ", folderCount);
+            char buffer[64];
+            snprintf(buffer, sizeof(buffer), "Enter folder number (1-%d): ", folderCount);
+            RF_DEBUG(0, "", buffer);
             String input = "";
             while (input.length() == 0) {
-                if (Serial.available()) {
-                    input = Serial.readStringUntil('\n');
+                if (RF_INPUT_AVAILABLE()) {
+                    input = RF_INPUT_READ_LINE_UNTIL('\n');
                     input.trim();
                 }
                 delay(10);
@@ -362,34 +410,38 @@ void manage_files() {
                     currentDir += "/";
                 }
                 
-                Serial.printf("📂 Entering folder: %s\n", currentDir.c_str());
+                char msg[128];
+                snprintf(msg, sizeof(msg), "📂 Entering folder: %s", currentDir.c_str());
+                RF_DEBUG(0, "", msg);
             } else {
-                Serial.println("⚠️ Invalid folder number.");
+                RF_DEBUG(0, "⚠️ Invalid folder number.");
             }
             continue;
         }
 
         if (operation.equals("a")) {
             // Print file operation - isolated space
-            Serial.println("\n========== 📄 PRINT FILE MODE ==========");
+            RF_DEBUG(0, "\n========== 📄 PRINT FILE MODE ==========");
             while (true) {
-                Serial.println("\n📂 Available files:");
+                RF_DEBUG(0, "\n📂 Available files:");
                 for (int i = 0; i < fileCount; i++) {
-                    Serial.printf("%2d: %s\n", i + 1, fileList[i].c_str());
+                    char buffer[80];
+                    snprintf(buffer, sizeof(buffer), "%2d: %s", i + 1, fileList[i].c_str());
+                    RF_DEBUG(0, "", buffer);
                 }
-                Serial.println("\nEnter file number to print, or 'end' to return to main menu:");
+                RF_DEBUG(0, "\nEnter file number to print, or 'end' to return to main menu:");
                 
                 String input = "";
                 while (input.length() == 0) {
-                    if (Serial.available()) {
-                        input = Serial.readStringUntil('\n');
+                    if (RF_INPUT_AVAILABLE()) {
+                        input = RF_INPUT_READ_LINE_UNTIL('\n');
                         input.trim();
                     }
                     delay(10);
                 }
                 
                 if (input.equalsIgnoreCase("end")) {
-                    Serial.println("🔙 Returning to main menu...");
+                    RF_DEBUG(0, "🔙 Returning to main menu...");
                     break;
                 }
                 
@@ -397,41 +449,43 @@ void manage_files() {
                 if (index >= 1 && index <= fileCount) {
                     printFile(fileList[index - 1]);
                 } else {
-                    Serial.println("⚠️ Invalid file number.");
+                    RF_DEBUG(0, "⚠️ Invalid file number.");
                 }
             }
         }
         else if (operation.equals("b")) {
             // Clone file operation - isolated space
-            Serial.println("\n========== 📋 CLONE FILE MODE ==========");
+            RF_DEBUG(0, "\n========== 📋 CLONE FILE MODE ==========");
             while (true) {
-                Serial.println("\n📂 Available files:");
+                RF_DEBUG(0, "\n📂 Available files:");
                 for (int i = 0; i < fileCount; i++) {
-                    Serial.printf("%2d: %s\n", i + 1, fileList[i].c_str());
+                    char buffer[80];
+                    snprintf(buffer, sizeof(buffer), "%2d: %s", i + 1, fileList[i].c_str());
+                    RF_DEBUG(0, "", buffer);
                 }
-                Serial.println("\nEnter source file number to clone, or 'end' to return to main menu:");
+                RF_DEBUG(0, "\nEnter source file number to clone, or 'end' to return to main menu:");
                 
                 String input = "";
                 while (input.length() == 0) {
-                    if (Serial.available()) {
-                        input = Serial.readStringUntil('\n');
+                    if (RF_INPUT_AVAILABLE()) {
+                        input = RF_INPUT_READ_LINE_UNTIL('\n');
                         input.trim();
                     }
                     delay(10);
                 }
                 
                 if (input.equalsIgnoreCase("end")) {
-                    Serial.println("🔙 Returning to main menu...");
+                    RF_DEBUG(0, "🔙 Returning to main menu...");
                     break;
                 }
                 
                 int index = input.toInt();
                 if (index >= 1 && index <= fileCount) {
-                    Serial.println("Enter destination filename or path (or press Enter for auto-name):");
+                    RF_DEBUG(0, "Enter destination filename or path (or press Enter for auto-name):");
                     String dest = "";
                     while (dest.length() == 0) {
-                        if (Serial.available()) {
-                            dest = Serial.readStringUntil('\n');
+                        if (RF_INPUT_AVAILABLE()) {
+                            dest = RF_INPUT_READ_LINE_UNTIL('\n');
                             dest.trim();
                             break;
                         }
@@ -444,41 +498,43 @@ void manage_files() {
                     cloneFile(fileList[index - 1], dest);
                     delay(100); // Short delay to avoid flooding the output
                 } else {
-                    Serial.println("⚠️ Invalid file number.");
+                    RF_DEBUG(0, "⚠️ Invalid file number.");
                 }
             }
         }
         else if (operation.equals("c")) {
             // Rename file operation - isolated space
-            Serial.println("\n========== ✏️ RENAME FILE MODE ==========");
+            RF_DEBUG(0, "\n========== ✏️ RENAME FILE MODE ==========");
             while (true) {
-                Serial.println("\n📂 Available files:");
+                RF_DEBUG(0, "\n📂 Available files:");
                 for (int i = 0; i < fileCount; i++) {
-                    Serial.printf("%2d: %s\n", i + 1, fileList[i].c_str());
+                    char buffer[80];
+                    snprintf(buffer, sizeof(buffer), "%2d: %s", i + 1, fileList[i].c_str());
+                    RF_DEBUG(0, "", buffer);
                 }
-                Serial.println("\nEnter file number to rename, or 'end' to return to main menu:");
+                RF_DEBUG(0, "\nEnter file number to rename, or 'end' to return to main menu:");
                 
                 String input = "";
                 while (input.length() == 0) {
-                    if (Serial.available()) {
-                        input = Serial.readStringUntil('\n');
+                    if (RF_INPUT_AVAILABLE()) {
+                        input = RF_INPUT_READ_LINE_UNTIL('\n');
                         input.trim();
                     }
                     delay(10);
                 }
                 
                 if (input.equalsIgnoreCase("end")) {
-                    Serial.println("🔙 Returning to main menu...");
+                    RF_DEBUG(0, "🔙 Returning to main menu...");
                     break;
                 }
                 
                 int index = input.toInt();
                 if (index >= 1 && index <= fileCount) {
-                    Serial.println("Enter new filename or path:");
+                    RF_DEBUG(0, "Enter new filename or path:");
                     String newPath = "";
                     while (newPath.length() == 0) {
-                        if (Serial.available()) {
-                            newPath = Serial.readStringUntil('\n');
+                        if (RF_INPUT_AVAILABLE()) {
+                            newPath = RF_INPUT_READ_LINE_UNTIL('\n');
                             newPath.trim();
                         }
                         delay(10);
@@ -487,24 +543,24 @@ void manage_files() {
                         // Normalize the path
                         newPath = normalizePath(newPath, currentDir);
                         if (renameFile(fileList[index - 1], newPath)) {
-                            Serial.println("✅ File renamed successfully! You can rename more files or type 'end' to exit.");
+                            RF_DEBUG(0, "✅ File renamed successfully! You can rename more files or type 'end' to exit.");
                             // Update the specific file in the list for immediate reflection
                             fileList[index - 1] = newPath;
                         }
                     }
                 } else {
-                    Serial.println("⚠️ Invalid file number.");
+                    RF_DEBUG(0, "⚠️ Invalid file number.");
                 }
             }
         }
         else if (operation.equals("d")) {
             // Delete file/folder operation - isolated space with multiple item support
-            Serial.println("\n========== 🗑️ DELETE MODE ==========");
+            RF_DEBUG(0, "\n========== 🗑️ DELETE MODE ==========");
             while (true) {
                 // Refresh file and folder list each time to show current state
                 File refreshDir = LittleFS.open(currentDir);
                 if (!refreshDir || !refreshDir.isDirectory()) {
-                    Serial.println("❌ Failed to refresh directory!");
+                    RF_DEBUG(0, "❌ Failed to refresh directory!");
                     break;
                 }
                 
@@ -555,91 +611,103 @@ void manage_files() {
                 }
                 refreshDir.close();
                 
-                Serial.println("\n📂 Available folders:");
+                RF_DEBUG(0, "\n📂 Available folders:");
                 if (refreshFolderCount == 0) {
-                    Serial.println("  (none)");
+                    RF_DEBUG(0, "  (none)");
                 } else {
                     for (int i = 0; i < refreshFolderCount; i++) {
                         int lastSlash = refreshFolderList[i].lastIndexOf('/');
                         String displayName = (lastSlash >= 0) ? refreshFolderList[i].substring(lastSlash + 1) : refreshFolderList[i];
-                        Serial.printf("  F%d: %s/\n", i + 1, displayName.c_str());
+                        char buffer[80];
+                        snprintf(buffer, sizeof(buffer), "  F%d: %s/", i + 1, displayName.c_str());
+                        RF_DEBUG(0, "", buffer);
                     }
                 }
                 
-                Serial.println("\n� Available files:");
+                RF_DEBUG(0, "\n📄 Available files:");
                 if (refreshFileCount == 0) {
-                    Serial.println("  (none)");
+                    RF_DEBUG(0, "  (none)");
                 } else {
                     for (int i = 0; i < refreshFileCount; i++) {
                         int lastSlash = refreshFileList[i].lastIndexOf('/');
                         String displayName = (lastSlash >= 0) ? refreshFileList[i].substring(lastSlash + 1) : refreshFileList[i];
-                        Serial.printf("  %d: %s\n", i + 1, displayName.c_str());
+                        char buffer[80];
+                        snprintf(buffer, sizeof(buffer), "  %d: %s", i + 1, displayName.c_str());
+                        RF_DEBUG(0, "", buffer);
                     }
                 }
                 
                 if (refreshFileCount == 0 && refreshFolderCount == 0) {
-                    Serial.println("⚠️ No files or folders to delete. Returning to main menu...");
+                    RF_DEBUG(0, "⚠️ No files or folders to delete. Returning to main menu...");
                     break;
                 }
                 
-                Serial.println("\nEnter item(s) to delete:");
-                Serial.println("  - Single file: '3'");
-                Serial.println("  - Single folder: 'F1'");
-                Serial.println("  - Multiple items: '1 3 5 F2' or '1,3,5,F2'");
-                Serial.println("  - 'all' to delete everything");
-                Serial.println("  - 'end' to return:");
+                RF_DEBUG(0, "\nEnter item(s) to delete:");
+                RF_DEBUG(0, "  - Single file: '3'");
+                RF_DEBUG(0, "  - Single folder: 'F1'");
+                RF_DEBUG(0, "  - Multiple items: '1 3 5 F2' or '1,3,5,F2'");
+                RF_DEBUG(0, "  - 'all' to delete everything");
+                RF_DEBUG(0, "  - 'end' to return:");
                 
                 String input = "";
                 while (input.length() == 0) {
-                    if (Serial.available()) {
-                        input = Serial.readStringUntil('\n');
+                    if (RF_INPUT_AVAILABLE()) {
+                        input = RF_INPUT_READ_LINE_UNTIL('\n');
                         input.trim();
                     }
                     delay(10);
                 }
                 
                 if (input.equalsIgnoreCase("end")) {
-                    Serial.println("🔙 Returning to main menu...");
+                    RF_DEBUG(0, "🔙 Returning to main menu...");
                     break;
                 }
                 
                 if (input.equalsIgnoreCase("all")) {
-                    Serial.println("⚠️ WARNING: This will delete ALL files and folders in current directory!");
-                    Serial.println("Type 'CONFIRM' to proceed or anything else to cancel:");
+                    RF_DEBUG(0, "⚠️ WARNING: This will delete ALL files and folders in current directory!");
+                    RF_DEBUG(0, "Type 'CONFIRM' to proceed or anything else to cancel:");
                     String confirm = "";
                     while (confirm.length() == 0) {
-                        if (Serial.available()) {
-                            confirm = Serial.readStringUntil('\n');
+                        if (RF_INPUT_AVAILABLE()) {
+                            confirm = RF_INPUT_READ_LINE_UNTIL('\n');
                             confirm.trim();
                         }
                         delay(10);
                     }
                     if (confirm.equals("CONFIRM")) {
-                        Serial.println("🗑️ Deleting all items...");
+                        RF_DEBUG(0, "🗑️ Deleting all items...");
                         
                         // Delete all files first
                         for (int i = 0; i < refreshFileCount; i++) {
-                            if (LittleFS.remove(refreshFileList[i])) {
-                                Serial.printf("✅ Deleted file: %s\n", refreshFileList[i].c_str());
+                            if (RF_FS_REMOVE(refreshFileList[i])) {
+                                char buffer[128];
+                                snprintf(buffer, sizeof(buffer), "✅ Deleted file: %s", refreshFileList[i].c_str());
+                                RF_DEBUG(0, "", buffer);
                             } else {
-                                Serial.printf("❌ Failed to delete file: %s\n", refreshFileList[i].c_str());
+                                char buffer[128];
+                                snprintf(buffer, sizeof(buffer), "❌ Failed to delete file: %s", refreshFileList[i].c_str());
+                                RF_DEBUG(0, "", buffer);
                             }
                             delay(50);
                         }
                         
                         // Then delete all folders
                         for (int i = 0; i < refreshFolderCount; i++) {
-                            if (LittleFS.rmdir(refreshFolderList[i])) {
-                                Serial.printf("✅ Deleted folder: %s\n", refreshFolderList[i].c_str());
+                            if (RF_FS_RMDIR(refreshFolderList[i])) {
+                                char buffer[128];
+                                snprintf(buffer, sizeof(buffer), "✅ Deleted folder: %s", refreshFolderList[i].c_str());
+                                RF_DEBUG(0, "", buffer);
                             } else {
-                                Serial.printf("❌ Failed to delete folder (may not be empty): %s\n", refreshFolderList[i].c_str());
+                                char buffer[128];
+                                snprintf(buffer, sizeof(buffer), "❌ Failed to delete folder (may not be empty): %s", refreshFolderList[i].c_str());
+                                RF_DEBUG(0, "", buffer);
                             }
                             delay(50);
                         }
                         
-                        Serial.println("✅ Cleanup complete!");
+                        RF_DEBUG(0, "✅ Cleanup complete!");
                     } else {
-                        Serial.println("❎ Delete all operation canceled.");
+                        RF_DEBUG(0, "❎ Delete all operation canceled.");
                     }
                     continue;
                 }
@@ -678,14 +746,14 @@ void manage_files() {
                             if (folderIdx >= 1 && folderIdx <= refreshFolderCount) {
                                 itemCount++;
                             } else {
-                                Serial.printf("⚠️ Invalid folder number: %s\n", token.c_str());
+                                RF_DEBUG(0, "⚠️ Invalid folder number: ", token);
                             }
                         } else {
                             int fileIdx = token.toInt();
                             if (fileIdx >= 1 && fileIdx <= refreshFileCount) {
                                 itemCount++;
                             } else {
-                                Serial.printf("⚠️ Invalid file number: %s\n", token.c_str());
+                                RF_DEBUG(0, "⚠️ Invalid file number: ", token);
                             }
                         }
                     }
@@ -694,12 +762,14 @@ void manage_files() {
                 }
                 
                 if (itemCount == 0) {
-                    Serial.println("⚠️ No valid items to delete.");
+                    RF_DEBUG(0, "⚠️ No valid items to delete.");
                     continue;
                 }
                 
                 // Second pass: show items and confirm
-                Serial.printf("\n📋 Items to delete (%d):\n", itemCount);
+                char summaryBuffer[64];
+                snprintf(summaryBuffer, sizeof(summaryBuffer), "\n📋 Items to delete (%d):", itemCount);
+                RF_DEBUG(0, "", summaryBuffer);
                 startPos = 0;
                 while (startPos < input.length()) {
                     // Skip whitespace
@@ -724,14 +794,18 @@ void manage_files() {
                             if (folderIdx >= 1 && folderIdx <= refreshFolderCount) {
                                 int lastSlash = refreshFolderList[folderIdx - 1].lastIndexOf('/');
                                 String displayName = (lastSlash >= 0) ? refreshFolderList[folderIdx - 1].substring(lastSlash + 1) : refreshFolderList[folderIdx - 1];
-                                Serial.printf("  F%d: %s/\n", folderIdx, displayName.c_str());
+                                char buffer[80];
+                                snprintf(buffer, sizeof(buffer), "  F%d: %s/", folderIdx, displayName.c_str());
+                                RF_DEBUG(0, "", buffer);
                             }
                         } else {
                             int fileIdx = token.toInt();
                             if (fileIdx >= 1 && fileIdx <= refreshFileCount) {
                                 int lastSlash = refreshFileList[fileIdx - 1].lastIndexOf('/');
                                 String displayName = (lastSlash >= 0) ? refreshFileList[fileIdx - 1].substring(lastSlash + 1) : refreshFileList[fileIdx - 1];
-                                Serial.printf("  %d: %s\n", fileIdx, displayName.c_str());
+                                char buffer[80];
+                                snprintf(buffer, sizeof(buffer), "  %d: %s", fileIdx, displayName.c_str());
+                                RF_DEBUG(0, "", buffer);
                             }
                         }
                     }
@@ -739,18 +813,18 @@ void manage_files() {
                     startPos = endPos + 1;
                 }
                 
-                Serial.println("\nType 'OK' to confirm deletion:");
+                RF_DEBUG(0, "\nType 'OK' to confirm deletion:");
                 String confirm = "";
                 while (confirm.length() == 0) {
-                    if (Serial.available()) {
-                        confirm = Serial.readStringUntil('\n');
+                    if (RF_INPUT_AVAILABLE()) {
+                        confirm = RF_INPUT_READ_LINE_UNTIL('\n');
                         confirm.trim();
                     }
                     delay(10);
                 }
                 
                 if (confirm.equalsIgnoreCase("OK")) {
-                    Serial.println("🗑️ Deleting items...");
+                    RF_DEBUG(0, "🗑️ Deleting items...");
                     int successCount = 0;
                     int failCount = 0;
                     
@@ -777,22 +851,30 @@ void manage_files() {
                             if (token.charAt(0) == 'F' || token.charAt(0) == 'f') {
                                 int folderIdx = token.substring(1).toInt();
                                 if (folderIdx >= 1 && folderIdx <= refreshFolderCount) {
-                                    if (LittleFS.rmdir(refreshFolderList[folderIdx - 1])) {
-                                        Serial.printf("✅ Deleted folder: %s\n", refreshFolderList[folderIdx - 1].c_str());
+                                    if (RF_FS_RMDIR(refreshFolderList[folderIdx - 1])) {
+                                        char buffer[128];
+                                        snprintf(buffer, sizeof(buffer), "✅ Deleted folder: %s", refreshFolderList[folderIdx - 1].c_str());
+                                        RF_DEBUG(0, "", buffer);
                                         successCount++;
                                     } else {
-                                        Serial.printf("❌ Failed to delete folder (may not be empty): %s\n", refreshFolderList[folderIdx - 1].c_str());
+                                        char buffer[128];
+                                        snprintf(buffer, sizeof(buffer), "❌ Failed to delete folder (may not be empty): %s", refreshFolderList[folderIdx - 1].c_str());
+                                        RF_DEBUG(0, "", buffer);
                                         failCount++;
                                     }
                                 }
                             } else {
                                 int fileIdx = token.toInt();
                                 if (fileIdx >= 1 && fileIdx <= refreshFileCount) {
-                                    if (LittleFS.remove(refreshFileList[fileIdx - 1])) {
-                                        Serial.printf("✅ Deleted file: %s\n", refreshFileList[fileIdx - 1].c_str());
+                                    if (RF_FS_REMOVE(refreshFileList[fileIdx - 1])) {
+                                        char buffer[128];
+                                        snprintf(buffer, sizeof(buffer), "✅ Deleted file: %s", refreshFileList[fileIdx - 1].c_str());
+                                        RF_DEBUG(0, "", buffer);
                                         successCount++;
                                     } else {
-                                        Serial.printf("❌ Failed to delete file: %s\n", refreshFileList[fileIdx - 1].c_str());
+                                        char buffer[128];
+                                        snprintf(buffer, sizeof(buffer), "❌ Failed to delete file: %s", refreshFileList[fileIdx - 1].c_str());
+                                        RF_DEBUG(0, "", buffer);
                                         failCount++;
                                     }
                                 }
@@ -803,42 +885,52 @@ void manage_files() {
                         startPos = endPos + 1;
                     }
                     
-                    Serial.printf("📊 Summary: %d deleted, %d failed\n", successCount, failCount);
+                    char resultBuffer[80];
+                    snprintf(resultBuffer, sizeof(resultBuffer), "📊 Summary: %d deleted, %d failed", successCount, failCount);
+                    RF_DEBUG(0, "", resultBuffer);
                     if (failCount > 0) {
-                        Serial.println("💡 Tip: Folders must be empty before deletion.");
+                        RF_DEBUG(0, "💡 Tip: Folders must be empty before deletion.");
                     }
                 } else {
-                    Serial.println("❎ Deletion canceled.");
+                    RF_DEBUG(0, "❎ Deletion canceled.");
                 }
             }
         }
         else if (operation.equals("e")) {
             // Add new file operation - isolated space
-            Serial.println("\n========== ➕ ADD NEW FILE MODE ==========");
-            Serial.printf("📍 Current directory: %s\n", currentDir.c_str());
-            Serial.println("You can create .csv, .txt, .log, .json.");
-            Serial.println("Enter filename or full path:");
+            RF_DEBUG(0, "\n========== ➕ ADD NEW FILE MODE ==========");
+            char buffer[128];
+            snprintf(buffer, sizeof(buffer), "📍 Current directory: %s", currentDir.c_str());
+            RF_DEBUG(0, "", buffer);
+            RF_DEBUG(0, "You can create .csv, .txt, .log, .json.");
+            RF_DEBUG(0, "Enter filename or full path:");
             String newFile = reception_data(0, true, currentDir);
             if (newFile.length() > 0) {
-                Serial.printf("✅ File created: %s\n", newFile.c_str());
+                char msg[128];
+                snprintf(msg, sizeof(msg), "✅ File created: %s", newFile.c_str());
+                RF_DEBUG(0, "", msg);
             }
-            Serial.println("🔙 Returning to main menu...");
+            RF_DEBUG(0, "🔙 Returning to main menu...");
         }
         else {
-            Serial.println("⚠️ Invalid operation. Use a, b, c, d, e, or 'exit'.");
+            RF_DEBUG(0, "⚠️ Invalid operation. Use a, b, c, d, e, or 'exit'.");
         }
     }
 }
 
 void deleteAllLittleFSFiles() {
-    if (!LittleFS.begin(true)) {
-        Serial.println("❌ LittleFS Mount Failed!");
+    if (!RF_FS_BEGIN()) {
+        char buffer[64];
+        snprintf(buffer, sizeof(buffer), "❌ %s Mount Failed!", RF_FS_TYPE);
+        RF_DEBUG(0, "", buffer);
         return;
     }
 
-    Serial.println("🚮 Scanning and deleting all files from LittleFS...");
+    char msg[64];
+    snprintf(msg, sizeof(msg), "🚮 Scanning and deleting all files from %s...", RF_FS_TYPE);
+    RF_DEBUG(0, "", msg);
 
-    File root = LittleFS.open("/");
+    File root = RF_FS_OPEN("/", RF_FILE_READ);
     File file = root.openNextFile();
     int deleted = 0, failed = 0;
 
@@ -846,11 +938,15 @@ void deleteAllLittleFSFiles() {
         String path = file.name();
         file.close(); // must close before delete
 
-        if (LittleFS.remove(path)) {
-            Serial.printf("✅ Deleted: %s\n", path.c_str());
+        if (RF_FS_REMOVE(path)) {
+            char buffer[128];
+            snprintf(buffer, sizeof(buffer), "✅ Deleted: %s", path.c_str());
+            RF_DEBUG(0, "", buffer);
             deleted++;
         } else {
-            Serial.printf("❌ Failed:  %s\n", path.c_str());
+            char buffer[128];
+            snprintf(buffer, sizeof(buffer), "❌ Failed:  %s", path.c_str());
+            RF_DEBUG(0, "", buffer);
             failed++;
         }
 
@@ -858,25 +954,27 @@ void deleteAllLittleFSFiles() {
         file = root.openNextFile();
     }
 
-    Serial.printf("🧹 Cleanup complete. Deleted: %d, Failed: %d\n", deleted, failed);
+    char summaryBuffer[80];
+    snprintf(summaryBuffer, sizeof(summaryBuffer), "🧹 Cleanup complete. Deleted: %d, Failed: %d", deleted, failed);
+    RF_DEBUG(0, "", summaryBuffer);
 }
 
 String reception_data(int exact_columns, bool print_file, String currentDir) {
     // Clear any residual input
-    while (Serial.available()) {
-        Serial.read();
+    while (RF_INPUT_AVAILABLE()) {
+        RF_INPUT_READ();
     }
     delay(100); // Wait for any previous input to clear
-    while (Serial.available()) {
-        Serial.read();
+    while (RF_INPUT_AVAILABLE()) {
+        RF_INPUT_READ();
     }
 
     String fullPath = "";
 
     // Read filename/path from user
     while (fullPath.length() == 0) {
-        if (Serial.available()) {
-            fullPath = Serial.readStringUntil('\n');
+        if (RF_INPUT_AVAILABLE()) {
+            fullPath = RF_INPUT_READ_LINE_UNTIL('\n');
             fullPath.trim();
         }
         delay(10);
@@ -884,13 +982,13 @@ String reception_data(int exact_columns, bool print_file, String currentDir) {
 
     // Normalize the path using common function
     fullPath = normalizePath(fullPath, currentDir);
-    Serial.printf("ℹ️  Resolved to: %s\n", fullPath.c_str());
+    RF_DEBUG(0, "ℹ️  Resolved to: ", fullPath);
 
     // Ensure an extension exists; if not, default to .csv for backward compatibility
     int lastDot = fullPath.lastIndexOf('.');
     if (lastDot <= 0 || lastDot == (int)fullPath.length() - 1) {
         fullPath += ".csv";
-        Serial.printf("ℹ️  No valid extension provided. Defaulting to .csv → %s\n", fullPath.c_str());
+        RF_DEBUG(0, "ℹ️  No valid extension provided. Defaulting to .csv → ", fullPath);
     }
 
     // Determine file type
@@ -898,32 +996,32 @@ String reception_data(int exact_columns, bool print_file, String currentDir) {
     bool isCSV = lower.endsWith(".csv");
     bool isTextFile = isCSV || lower.endsWith(".txt") || lower.endsWith(".log") || lower.endsWith(".json");
 
-    Serial.printf("📁 Will save to: %s\n", fullPath.c_str());
+    RF_DEBUG(0, "📁 Will save to: ", fullPath);
 
-    File file = LittleFS.open(fullPath, FILE_WRITE);
+    File file = RF_FS_OPEN(fullPath, RF_FILE_WRITE);
     if (!file) {
-        Serial.println("❌ Failed to open file for writing");
+        RF_DEBUG(0, "❌ Failed to open file for writing: ", fullPath);
         return fullPath;
     }
 
     if (isCSV) {
-        Serial.println("📥 Enter CSV rows (separated by space or newline). Type END to finish.");
+        RF_DEBUG(0, "📥 Enter CSV rows (separated by space or newline). Type END to finish.");
     } else if (isTextFile) {
-        Serial.println("📥 Enter text lines. Press Enter for new line. Type END on its own line to finish.");
+        RF_DEBUG(0, "📥 Enter text lines. Type END to finish.");
     } else {
-        Serial.println("⚠️ Non-text extension detected. Input will be stored as plain text lines. Type END to finish.");
+        RF_DEBUG(0, "📥 Enter lines. Type END to finish.");
     }
 
     String buffer = "";
     int total_rows = 0;
 
     while (true) {
-        if (Serial.available()) {
-            String input = Serial.readStringUntil('\n');
+        if (RF_INPUT_AVAILABLE()) {
+            String input = RF_INPUT_READ_LINE_UNTIL('\n');
             input.trim();
 
             if (input.equalsIgnoreCase("END")) {
-                Serial.println("🔚 END received, closing file.");
+                RF_DEBUG(0, "🔚 END received, closing file.");
                 break;
             }
 
@@ -952,7 +1050,7 @@ String reception_data(int exact_columns, bool print_file, String currentDir) {
                         }
 
                         file.println(row);
-                        Serial.printf("✅ Saved (%d elements): %s\n", count > 234 ? 234 : count, row.c_str());
+                        RF_DEBUG_2(0, "✅ Saved (", count > 234 ? 234 : count, " elements): ", row);
                         total_rows++;
                     }
 
@@ -976,23 +1074,22 @@ String reception_data(int exact_columns, bool print_file, String currentDir) {
     }
     if (print_file) printFile(fullPath);
 
-    Serial.printf("📄 Total lines written: %d\n", total_rows);
+    RF_DEBUG(0, "📄 Total lines written: ", total_rows);
 
     return fullPath; // Return the full path of the created file
 }
 
 void cleanMalformedRows(const String& filename, int exact_columns) {
-    File file = LittleFS.open(filename, FILE_READ);
+    File file = RF_FS_OPEN(filename, RF_FILE_READ);
     if (!file) {
-        Serial.print("❌ Failed to open ");
-        Serial.println(filename);
+        RF_DEBUG(0, "❌ Failed to open ", filename);
         return;
     }
 
     String tempName = filename + ".tmp";
-    File temp = LittleFS.open(tempName, FILE_WRITE);
+    File temp = RF_FS_OPEN(tempName, RF_FILE_WRITE);
     if (!temp) {
-        Serial.println("❌ Failed to open temp file for writing");
+        RF_DEBUG(0, "❌ Failed to open temp file for writing: ", tempName); 
         file.close();
         return;
     }
@@ -1021,9 +1118,11 @@ void cleanMalformedRows(const String& filename, int exact_columns) {
     file.close();
     temp.close();
 
-    LittleFS.remove(filename);
-    LittleFS.rename(tempName, filename);
+    RF_FS_REMOVE(filename);
+    RF_FS_RENAME(tempName, filename);
 
-    Serial.printf("✅ Cleaned %s: %u rows kept, %u rows removed (not exactly %u elements).\n",
-                  filename.c_str(), kept, removed, exact_columns);
+    char buffer[128];
+    snprintf(buffer, sizeof(buffer), "✅ Cleaned %s: %u rows kept, %u rows removed (not exactly %u elements).",
+             filename.c_str(), kept, removed, exact_columns);
+    RF_DEBUG(0, "", buffer);
 }

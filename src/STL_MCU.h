@@ -19,7 +19,7 @@
 // PSRAM Configuration
 // Users can define RF_USE_PSRAM before including this header to enable PSRAM allocation
 // Example: #define RF_USE_PSRAM
-#if defined(RF_USE_PSRAM) && defined(ESP32)
+#if defined(RF_USE_PSRAM) && (defined(ESP32) || defined(ARDUINO_ARCH_ESP32))
     #include "esp_heap_caps.h"
     #define RF_PSRAM_AVAILABLE 1
 #else
@@ -284,8 +284,7 @@ namespace mcu {
         }
         template<typename U, typename R> friend class ChainedUnorderedMap;
         template<typename U> friend class ChainedUnorderedSet;
-    // protected:
-    public:
+    protected:
         int16_t getValue(V key) noexcept {
             if (cap_ == 0 || table == nullptr) {
                 return -1;

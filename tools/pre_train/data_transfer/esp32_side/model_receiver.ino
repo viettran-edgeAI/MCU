@@ -2,7 +2,7 @@
  * Pre-trained Model Receiver for ESP32
  * 
  * This sketch receives pre-trained random forest model files from a PC
- * and saves them to LittleFS with /model_name/filename structure.
+ * and saves them to file system with /model_name/filename structure.
  * 
  * Files received:
  * - {model_name}_config.json (model configuration)
@@ -21,9 +21,7 @@
  * Designed to work with 'transfer_model.py' script.
  */
 
-#include "Arduino.h"
-#include "FS.h"
-#include "LittleFS.h"
+#include "Rf_file_manager.h"
 
 // --- Protocol Constants ---
 // Must match the Python sender script
@@ -118,11 +116,11 @@ bool safeDeleteFile(const char* filename) {
     }
     
     // Try to delete the file multiple times if needed
-    if (LittleFS.exists(filename)) {
+    if (RF_FS_EXISTS(filename)) {
         for (int attempt = 0; attempt < 3; attempt++) {
-            if (LittleFS.remove(filename)) {
+            if (RF_FS_REMOVE(filename)) {
                 // Verify it's actually deleted
-                if (!LittleFS.exists(filename)) {
+                if (!RF_FS_EXISTS(filename)) {
                     return true;
                 }
             }
@@ -134,17 +132,18 @@ bool safeDeleteFile(const char* filename) {
 }
 
 void printStorageInfo() {
-    size_t totalBytes = LittleFS.totalBytes();
-    size_t usedBytes = LittleFS.usedBytes();
-    Serial.println("📊 LittleFS Storage Info:");
+    size_t totalBytes = RF_TOTAL_BYTES();
+    size_t usedBytes = RF_USED_BYTES();
+    Serial.println("📊 file system Storage Info:");
     Serial.printf("   Total: %u bytes (%.1f KB)\n", totalBytes, totalBytes/1024.0);
     Serial.printf("   Used:  %u bytes (%.1f KB)\n", usedBytes, usedBytes/1024.0);
     Serial.printf("   Free:  %u bytes (%.1f KB)\n", totalBytes-usedBytes, (totalBytes-usedBytes)/1024.0);
 }
 
 void listReceivedFiles() {
-    Serial.println("\n📁 Model files in LittleFS:");
-    File root = LittleFS.open("/");
+    Serial.println("\n📁 Model files in file system:");
+    File root = RF_FS_OPEN("/", RF_FILE_READ);
+    
     if (!root) {
         Serial.println("   ❌ Failed to open root directory");
         return;
@@ -233,11 +232,11 @@ void setup() {
     Serial.println("    Ready to receive Random Forest model files");
     Serial.println("=================================================");
 
-    // Initialize LittleFS
-    Serial.print("💾 Initializing LittleFS... ");
-    if (!LittleFS.begin(true)) {
+    // Initialize file system
+    Serial.print("💾 Initializing file system... ");
+    if (!RF_FS_BEGIN()) {
         Serial.println("❌ FAILED!");
-        Serial.println("⚠️  LittleFS initialization failed. Cannot continue.");
+        Serial.println("⚠️  file system initialization failed. Cannot continue.");
         currentState = State::ERROR_STATE;
         return;
     }
@@ -353,8 +352,8 @@ void handleStartSession() {
     // Create model directory if it doesn't exist
     char modelDir[80];
     snprintf(modelDir, sizeof(modelDir), "/%s", receivedModelName);
-    if (!LittleFS.exists(modelDir)) {
-        if (LittleFS.mkdir(modelDir)) {
+    if (!RF_FS_EXISTS(modelDir)) {
+        if (RF_FS_MKDIR(modelDir)) {
             Serial.printf("✅ Created model directory: %s\n", modelDir);
         } else {
             Serial.printf("⚠️  Warning: Could not create directory %s\n", modelDir);
@@ -460,7 +459,7 @@ void handleFileInfo() {
     
     Serial.printf("📥 Receiving %s: %s (%u bytes)\n", fileType.c_str(), baseFileName, receivedFileSize);
     
-    currentFile = LittleFS.open(receivedFileName, FILE_WRITE);
+    currentFile = RF_FS_OPEN(receivedFileName, RF_FILE_WRITE);
     if (!currentFile) {
         currentState = State::ERROR_STATE;
         Serial.print(RESP_ERROR);
@@ -600,7 +599,7 @@ void handleFileChunk() {
             currentState = State::WAITING_FOR_COMMAND;
         } else {
             // CRC mismatch, remove file
-            LittleFS.remove(receivedFileName);
+            RF_FS_REMOVE(receivedFileName);
             Serial.printf("❌ CRC mismatch for %s - file removed\n", receivedFileName);
             currentState = State::ERROR_STATE;
             Serial.print(RESP_ERROR);

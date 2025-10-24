@@ -2,15 +2,11 @@
  * Unified Data Receiver for ESP32
  * 
  * This sketch receives a complete dataset (quantizer, parameters, and binary data)
- * from a PC in a single, coordinated session and saves the files to LittleFS.
+ * from a PC in a single, coordinated session and saves the files to file system
  * Files are saved to /model_name/file_path structure.
  * 
  * It is designed to work with the 'unified_transfer.py' script.
  */
-
-#include "Arduino.h"
-#include "FS.h"
-#include "LittleFS.h"
 #include "Rf_file_manager.h"
 
 // --- Protocol Constants ---
@@ -101,11 +97,11 @@ bool safeDeleteFile(const char* filename) {
     }
     
     // Try to delete the file multiple times if needed
-    if (LittleFS.exists(filename)) {
+    if (RF_FS_EXISTS(filename)) {
         for (int attempt = 0; attempt < 3; attempt++) {
-            if (LittleFS.remove(filename)) {
+            if (RF_FS_REMOVE(filename)) {
                 // Verify it's actually deleted
-                if (!LittleFS.exists(filename)) {
+                if (!RF_FS_EXISTS(filename)) {
                     return true;
                 }
             }
@@ -140,7 +136,7 @@ void setup() {
     Serial.begin(115200);
     Serial.setTimeout(SERIAL_TIMEOUT_MS);
 
-    if (!LittleFS.begin(true)) {
+    if (!RF_FS_BEGIN()) {
         currentState = State::ERROR_STATE;
         return;
     }
@@ -226,8 +222,8 @@ void handleStartSession() {
     // Create model directory if it doesn't exist (basename is the model name)
     char modelDir[80];
     snprintf(modelDir, sizeof(modelDir), "/%s", receivedBaseName);
-    if (!LittleFS.exists(modelDir)) {
-        LittleFS.mkdir(modelDir);
+    if (!RF_FS_EXISTS(modelDir)) {
+        RF_FS_MKDIR(modelDir);
     }
 
     // Delete any existing files with this basename before starting new transfer
@@ -312,7 +308,7 @@ void handleFileInfo() {
     }
     
     // Create new file
-    currentFile = LittleFS.open(receivedFileName, FILE_WRITE, true); // Force create
+    currentFile = RF_FS_OPEN(receivedFileName, RF_FILE_WRITE); // Force create
     if (!currentFile) {
         currentState = State::ERROR_STATE;
         Serial.print(RESP_ERROR);
@@ -450,7 +446,7 @@ void handleFileChunk() {
             currentState = State::WAITING_FOR_COMMAND;
         } else {
             // CRC mismatch, remove file
-            LittleFS.remove(receivedFileName);
+            RF_FS_REMOVE(receivedFileName);
             currentState = State::ERROR_STATE;
             Serial.print(RESP_ERROR);
             Serial.flush();

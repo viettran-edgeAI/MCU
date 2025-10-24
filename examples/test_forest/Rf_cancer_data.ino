@@ -1,18 +1,32 @@
 /*
- * Cancer Detection Example
+ * Cancer Detection Example with microSD Card Support
  * 
  * This example demonstrates breast cancer classification using a Random Forest
- * model trained on the Wisconsin Breast Cancer dataset.
+ * model trained on the Wisconsin Breast Cancer dataset, with data stored on microSD card.
  * 
  * Features:
  * - Trains and evaluates Random Forest model for binary classification
  * - Performs predictions on 10 sample feature vectors (30 features each)
  * - Distinguishes between malignant (1) and benign (0) tumors
  * - Calculates accuracy and timing metrics
+ * - Supports microSD card via SDIO 4-bit interface (SD_MMC) or SPI
  * 
- * Hardware: ESP32 or compatible microcontroller with LittleFS support
+ * Hardware: ESP32-CAM or ESP32 with external microSD card module
+ * 
+ * For SDIO 4-bit mode (recommended for ESP32-CAM):
+ *   - Define: RF_USE_SDCARD and RF_USE_SDMMC (before including random_forest_mcu.h)
+ *   - Pins: CLK→GPIO14, CMD→GPIO15, D0→GPIO2, D1→GPIO4, D2→GPIO12, D3→GPIO13
+ * 
+ * For SPI mode (if 4-bit unavailable):
+ *   - Define: RF_USE_SDCARD (without RF_USE_SDMMC)
+ *   - Pins: CS→GPIO5, MOSI→GPIO23, MISO→GPIO19, CLK→GPIO18
+ * 
  * Dataset: Breast cancer features (radius, texture, perimeter, area, etc.)
  */
+
+// Storage configuration - uncomment for microSD card support
+#define RF_USE_SDCARD           // Enable SD card support
+#define RF_USE_SDMMC            // Use SDIO 4-bit mode (comment out for SPI mode)
 
 #define DEV_STAGE    
 #define RF_DEBUG_LEVEL 2
@@ -31,13 +45,29 @@ void setup() {
     
     delay(1000);
 
-    // Initialize filesystem
-    Serial.print("Initializing LittleFS... ");
-    if (!LittleFS.begin(true)) {
-        Serial.println("❌ FAILED");
-        return;
-    }
-    Serial.println("✅ OK");
+    // Initialize storage (microSD or LittleFS)
+    Serial.print("Initializing storage... ");
+    #ifdef RF_USE_SDCARD
+        #ifdef RF_USE_SDMMC
+            Serial.println();
+            Serial.println("📍 Using SDIO 4-bit mode (SD_MMC)");
+            Serial.println("   Pins: CLK→GPIO14, CMD→GPIO15, D0→GPIO2, D1→GPIO4, D2→GPIO12, D3→GPIO13");
+        #else
+            Serial.println();
+            Serial.println("📍 Using SPI mode");
+            Serial.println("   Pins: CS→GPIO5, MOSI→GPIO23, MISO→GPIO19, CLK→GPIO18");
+        #endif
+        if (!rf_storage_begin()) {
+            Serial.println("❌ microSD Mount Failed!");
+            return;
+        }
+    #else
+        if (!LittleFS.begin(true)) {
+            Serial.println("❌ LittleFS Mount Failed!");
+            return;
+        }
+    #endif
+    Serial.println("✅ Storage initialized");
     
     manage_files();
     delay(500);

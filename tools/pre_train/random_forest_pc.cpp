@@ -4,7 +4,6 @@
 #include <fstream>
 #include <sstream>
 #include <iomanip>
-#include <vector>
 #include <cmath>
 #include <set>
 #include <sys/stat.h>
@@ -196,12 +195,12 @@ public:
         };
 
         ConsensusResult computeConsensus(const Rf_sample& sample, const b_vector<uint16_t>* tree_indices = nullptr);
-        std::vector<EvaluationSample> collectOOBSamples(uint16_t min_votes_required, std::vector<uint16_t>* vote_histogram = nullptr);
-        std::vector<EvaluationSample> collectValidationSamples(const Rf_data& dataset);
-        std::vector<EvaluationSample> collectCrossValidationSamples(float& avg_nodes_out);
-        MetricsSummary computeMetricsForThreshold(const std::vector<EvaluationSample>& samples, float threshold);
-        float computeObjectiveScore(const MetricsSummary& metrics, Rf_metric_scores flags);
-        ThresholdSearchResult findBestThreshold(const std::vector<EvaluationSample>& samples, Rf_metric_scores flags);
+    vector<EvaluationSample> collectOOBSamples(uint16_t min_votes_required, vector<uint16_t>* vote_histogram = nullptr);
+    vector<EvaluationSample> collectValidationSamples(const Rf_data& dataset);
+    vector<EvaluationSample> collectCrossValidationSamples(float& avg_nodes_out);
+    MetricsSummary computeMetricsForThreshold(const vector<EvaluationSample>& samples, float threshold);
+    float computeObjectiveScore(const MetricsSummary& metrics, Rf_metric_scores flags);
+    ThresholdSearchResult findBestThreshold(const vector<EvaluationSample>& samples, Rf_metric_scores flags);
 
         std::string buildMetadataPath() const {
             if (config.data_path.empty()) {
@@ -482,7 +481,7 @@ public:
         if (totalSamples < 2) return bestSplit;
 
         // Base label counts
-        std::vector<uint16_t> baseLabelCounts(numLabels, 0);
+    vector<uint16_t> baseLabelCounts(numLabels, 0);
         for (uint16_t k = begin; k < end; ++k) {
             uint16_t sid = indices[k];
             if (sid < train_data.allSamples.size()) {
@@ -510,7 +509,7 @@ public:
         }
 
         uint8_t quantBits = config.quantization_coefficient;
-        std::vector<uint16_t> thresholdCandidates;
+    vector<uint16_t> thresholdCandidates;
         QuantizationHelper::buildThresholdCandidates(quantBits, thresholdCandidates);
         if (thresholdCandidates.empty()) {
             return bestSplit;
@@ -906,7 +905,7 @@ public:
 
                 float avg_nodes = 0.0f;
                 bool best_forest_saved = false;
-                std::vector<EvaluationSample> aggregated_samples;
+                vector<EvaluationSample> aggregated_samples;
                 aggregated_samples.reserve(train_data.allSamples.size());
                 ThresholdSearchResult aggregated_result;
                 aggregated_result.score = -1.0f;
@@ -943,7 +942,7 @@ public:
                         ClonesData();
                         MakeForest();
 
-                        std::vector<EvaluationSample> run_samples;
+                        vector<EvaluationSample> run_samples;
                         if (config.training_score == "valid_score") {
                             run_samples = collectValidationSamples(validation_data);
                         } else {
@@ -1022,7 +1021,7 @@ public:
         MakeForest();
 
         uint16_t min_votes_required = std::max<uint16_t>(1, static_cast<uint16_t>(std::ceil(config.num_trees * 0.15f)));
-        std::vector<EvaluationSample> final_samples;
+    vector<EvaluationSample> final_samples;
         if (config.training_score == "valid_score") {
             final_samples = collectValidationSamples(validation_data);
         } else {
@@ -1318,7 +1317,7 @@ RandomForest::ConsensusResult RandomForest::computeConsensus(const Rf_sample& sa
         return result;
     }
 
-    std::vector<uint16_t> vote_counts(config.num_labels, 0);
+    vector<uint16_t> vote_counts(config.num_labels, 0);
 
     auto tally_tree = [&](uint16_t tree_index) {
         if (tree_index >= root.size()) {
@@ -1356,8 +1355,8 @@ RandomForest::ConsensusResult RandomForest::computeConsensus(const Rf_sample& sa
     return result;
 }
 
-std::vector<RandomForest::EvaluationSample> RandomForest::collectOOBSamples(uint16_t min_votes_required, std::vector<uint16_t>* vote_histogram) {
-    std::vector<EvaluationSample> samples;
+vector<RandomForest::EvaluationSample> RandomForest::collectOOBSamples(uint16_t min_votes_required, vector<uint16_t>* vote_histogram) {
+    vector<EvaluationSample> samples;
     samples.reserve(train_data.allSamples.size());
 
     if (vote_histogram) {
@@ -1401,8 +1400,8 @@ std::vector<RandomForest::EvaluationSample> RandomForest::collectOOBSamples(uint
     return samples;
 }
 
-std::vector<RandomForest::EvaluationSample> RandomForest::collectValidationSamples(const Rf_data& dataset) {
-    std::vector<EvaluationSample> samples;
+vector<RandomForest::EvaluationSample> RandomForest::collectValidationSamples(const Rf_data& dataset) {
+    vector<EvaluationSample> samples;
     samples.reserve(dataset.allSamples.size());
 
     for (const auto& sample : dataset.allSamples) {
@@ -1422,8 +1421,8 @@ std::vector<RandomForest::EvaluationSample> RandomForest::collectValidationSampl
     return samples;
 }
 
-std::vector<RandomForest::EvaluationSample> RandomForest::collectCrossValidationSamples(float& avg_nodes_out) {
-    std::vector<EvaluationSample> aggregated;
+vector<RandomForest::EvaluationSample> RandomForest::collectCrossValidationSamples(float& avg_nodes_out) {
+    vector<EvaluationSample> aggregated;
     aggregated.reserve(train_data.allSamples.size());
     avg_nodes_out = 0.0f;
 
@@ -1494,7 +1493,11 @@ std::vector<RandomForest::EvaluationSample> RandomForest::collectCrossValidation
                     cv_tree_dataset.push_back(cv_train_indices[idx_in_cv_train]);
                 }
             } else {
-                std::vector<uint16_t> indices_copy(cv_train_indices.begin(), cv_train_indices.end());
+                vector<uint16_t> indices_copy;
+                indices_copy.reserve(cv_train_indices.size());
+                for (uint16_t idx_value : cv_train_indices) {
+                    indices_copy.push_back(idx_value);
+                }
                 for (uint16_t t = 0; t < bootstrap_sample_size; ++t) {
                     uint16_t j = static_cast<uint16_t>(t + tree_rng.bounded(cv_train_size - t));
                     std::swap(indices_copy[t], indices_copy[j]);
@@ -1546,15 +1549,15 @@ std::vector<RandomForest::EvaluationSample> RandomForest::collectCrossValidation
     return aggregated;
 }
 
-RandomForest::MetricsSummary RandomForest::computeMetricsForThreshold(const std::vector<EvaluationSample>& samples, float threshold) {
+RandomForest::MetricsSummary RandomForest::computeMetricsForThreshold(const vector<EvaluationSample>& samples, float threshold) {
     MetricsSummary metrics;
     if (samples.empty()) {
         return metrics;
     }
 
-    std::vector<uint32_t> tp(config.num_labels, 0);
-    std::vector<uint32_t> fp(config.num_labels, 0);
-    std::vector<uint32_t> fn(config.num_labels, 0);
+    vector<uint32_t> tp(config.num_labels, 0);
+    vector<uint32_t> fp(config.num_labels, 0);
+    vector<uint32_t> fn(config.num_labels, 0);
 
     uint32_t correct = 0;
 
@@ -1663,7 +1666,7 @@ float RandomForest::computeObjectiveScore(const MetricsSummary& metrics, Rf_metr
     return total / count;
 }
 
-RandomForest::ThresholdSearchResult RandomForest::findBestThreshold(const std::vector<EvaluationSample>& samples, Rf_metric_scores flags) {
+RandomForest::ThresholdSearchResult RandomForest::findBestThreshold(const vector<EvaluationSample>& samples, Rf_metric_scores flags) {
     ThresholdSearchResult result;
     result.threshold = 0.5f;
     result.score = -1.0f;

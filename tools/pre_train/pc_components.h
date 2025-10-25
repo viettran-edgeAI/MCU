@@ -7,7 +7,6 @@
 #include <fstream>
 #include <sstream>
 #include <iomanip>
-#include <vector>
 #include <cmath>
 #include <sys/stat.h>
 #include <ctime>
@@ -38,7 +37,7 @@ struct QuantizationHelper {
         return static_cast<uint8_t>(bits);
     }
 
-    static void buildThresholdCandidates(uint8_t bits, std::vector<uint16_t>& out) {
+    static void buildThresholdCandidates(uint8_t bits, vector<uint16_t>& out) {
         out.clear();
         uint8_t sanitized = sanitizeBits(bits);
         if (sanitized <= 1) {
@@ -78,7 +77,7 @@ struct QuantizationHelper {
     }
 
     static uint16_t thresholdFromSlot(uint8_t bits, uint8_t slot) {
-        std::vector<uint16_t> candidates;
+    vector<uint16_t> candidates;
         buildThresholdCandidates(bits, candidates);
         if (candidates.empty()) {
             return 0;
@@ -90,7 +89,7 @@ struct QuantizationHelper {
     }
 
     static uint8_t slotCount(uint8_t bits) {
-        std::vector<uint16_t> candidates;
+    vector<uint16_t> candidates;
         buildThresholdCandidates(bits, candidates);
         return static_cast<uint8_t>(candidates.size());
     }
@@ -294,7 +293,7 @@ class Rf_tree {
     uint16_t predictSample(const Rf_sample& sample, uint8_t quant_bits) const {
         if (nodes.empty()) return 0;
         uint8_t sanitizedBits = QuantizationHelper::sanitizeBits(quant_bits);
-        std::vector<uint16_t> cachedThresholds;
+    vector<uint16_t> cachedThresholds;
         QuantizationHelper::buildThresholdCandidates(sanitizedBits, cachedThresholds);
         if (cachedThresholds.empty()) {
             cachedThresholds.push_back(0);
@@ -501,7 +500,7 @@ std::string criterionToString(bool use_gini) {
 
 // Helper functions to convert between flag enum and string representation
 std::string flagsToString(uint16_t flags) {
-    std::vector<std::string> flag_names;
+    vector<std::string> flag_names;
     
     if (flags & ACCURACY) flag_names.push_back("ACCURACY");
     if (flags & PRECISION) flag_names.push_back("PRECISION");
@@ -1359,7 +1358,7 @@ struct node_data {
 
 class node_predictor {
 public:
-    std::vector<node_data> training_data;
+    vector<node_data> training_data;
     
     // Regression coefficients for the prediction formula
     // Formula: nodes = a0 + a1*min_split + a2*max_depth
@@ -1382,8 +1381,8 @@ public:
         
         // Dynamically analyze the data patterns
         // Collect all unique min_split and max_depth values
-        std::vector<uint16_t> unique_min_splits;
-        std::vector<uint16_t> unique_max_depths;
+    vector<uint16_t> unique_min_splits;
+    vector<uint16_t> unique_max_depths;
         
         for (const auto& sample : training_data) {
             // Add unique min_split values
@@ -1400,8 +1399,8 @@ public:
         std::sort(unique_max_depths.begin(), unique_max_depths.end());
         
         // Calculate average nodes for each min_split value
-        std::vector<float> avg_nodes_by_split(unique_min_splits.size(), 0.0f);
-        std::vector<int> count_by_split(unique_min_splits.size(), 0);
+    vector<float> avg_nodes_by_split(unique_min_splits.size(), 0.0f);
+    vector<int> count_by_split(unique_min_splits.size(), 0);
         
         for (const auto& sample : training_data) {
             auto it = std::find(unique_min_splits.begin(), unique_min_splits.end(), sample.min_split);
@@ -1419,8 +1418,8 @@ public:
         }
         
         // Calculate average nodes for each max_depth value
-        std::vector<float> avg_nodes_by_depth(unique_max_depths.size(), 0.0f);
-        std::vector<int> count_by_depth(unique_max_depths.size(), 0);
+    vector<float> avg_nodes_by_depth(unique_max_depths.size(), 0.0f);
+    vector<int> count_by_depth(unique_max_depths.size(), 0);
         
         for (const auto& sample : training_data) {
             auto it = std::find(unique_max_depths.begin(), unique_max_depths.end(), sample.max_depth);

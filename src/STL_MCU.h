@@ -2351,6 +2351,15 @@ namespace mcu {
             // Case 3: newSize == size_ - do nothing
         }
 
+        void assign(vector_index_type count, const T& value) noexcept {
+            if (count > VECTOR_MAX_CAP) {
+                count = VECTOR_MAX_CAP;
+            }
+            clear();
+            reserve(count);
+            resize(count, value);
+        }
+
         // Accessors
         vector_index_type size() const noexcept { return size_; }
         vector_index_type capacity() const noexcept { return capacity_; }
@@ -2912,6 +2921,15 @@ namespace mcu {
                 size_ = newSize;
             }
             // If newSize == size_, do nothing
+        }
+
+        void assign(size_t count, const T& value) noexcept {
+            if (count > VECTOR_MAX_CAP) {
+                count = VECTOR_MAX_CAP;
+            }
+            clear();
+            reserve(count);
+            resize(count, value);
         }
 
         // Accessors

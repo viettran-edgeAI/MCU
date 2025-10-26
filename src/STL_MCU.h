@@ -7,6 +7,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
+#include <limits>
 #include <new>
 #include "hash_kernel.h"
 #include "initializer_list.h"
@@ -175,34 +177,73 @@ namespace mcu {
         T1 first;
         T2 second;
 
-        // trivial default, copy and move
-        constexpr pair() noexcept = default;
-        constexpr pair(const T1& a, const T2& b) noexcept
-        : first(a), second(b) {}
-        constexpr pair(T1&& a, T2&& b) noexcept
-        : first(std::move(a)), second(std::move(b)) {}
-        constexpr pair(const pair&) noexcept = default;
-        constexpr pair(pair&&) noexcept = default;
+        // Trivial default, copy and move
+        [[gnu::always_inline]] constexpr pair() noexcept = default;
+        [[gnu::always_inline]] constexpr pair(const T1& a, const T2& b) noexcept : first(a), second(b) {}
+        [[gnu::always_inline]] constexpr pair(T1&& a, T2&& b) noexcept : first(std::move(a)), second(std::move(b)) {}
 
-        constexpr pair& operator=(const pair&) noexcept = default;
-        constexpr pair& operator=(pair&&) noexcept = default;
+        // Allow initialization from different pair types
+        template<typename U1, typename U2>
+        [[gnu::always_inline]] constexpr pair(const pair<U1, U2>& p) noexcept : first(p.first), second(p.second) {}
 
-        // comparisons
-        constexpr bool operator==(const pair& o) const noexcept {
+        template<typename U1, typename U2>
+        [[gnu::always_inline]] constexpr pair(pair<U1, U2>&& p) noexcept : first(std::move(p.first)), second(std::move(p.second)) {}
+
+        [[gnu::always_inline]] constexpr pair(const pair&) noexcept = default;
+        [[gnu::always_inline]] constexpr pair(pair&&) noexcept = default;
+
+        [[gnu::always_inline]] constexpr pair& operator=(const pair&) noexcept = default;
+        [[gnu::always_inline]] constexpr pair& operator=(pair&&) noexcept = default;
+
+        // Allow assignment from different pair types
+        template<typename U1, typename U2>
+        [[gnu::always_inline]] constexpr pair& operator=(const pair<U1, U2>& p) noexcept {
+            first = p.first;
+            second = p.second;
+            return *this;
+        }
+
+        template<typename U1, typename U2>
+        [[gnu::always_inline]] constexpr pair& operator=(pair<U1, U2>&& p) noexcept {
+            first = std::move(p.first);
+            second = std::move(p.second);
+            return *this;
+        }
+
+        // Comparisons - marked [[nodiscard]] and [[gnu::pure]]
+        [[nodiscard, gnu::pure]] constexpr bool operator==(const pair& o) const noexcept {
             return first == o.first && second == o.second;
         }
-        constexpr bool operator!=(const pair& o) const noexcept {
+        [[nodiscard, gnu::pure]] constexpr bool operator!=(const pair& o) const noexcept {
             return !(*this == o);
         }
-        static constexpr pair<T1,T2> make_pair(const T1& a, const T2& b) noexcept {
-            return pair<T1,T2>(a, b);
+
+        // Optimized ordering comparisons
+        [[nodiscard, gnu::pure]] constexpr bool operator<(const pair& o) const noexcept {
+            return first < o.first || (!(o.first < first) && second < o.second);
         }
-        static constexpr pair<T1,T2> make_pair(T1&& a, T2&& b) noexcept {
-            return pair<T1,T2>(std::move(a), std::move(b));
+        [[nodiscard, gnu::pure]] constexpr bool operator<=(const pair& o) const noexcept {
+            return !(o < *this);
+        }
+        [[nodiscard, gnu::pure]] constexpr bool operator>(const pair& o) const noexcept {
+            return o < *this;
+        }
+        [[nodiscard, gnu::pure]] constexpr bool operator>=(const pair& o) const noexcept {
+            return !(*this < o);
+        }
+
+        // In-class make_pair for better locality and potential inlining
+        [[gnu::always_inline]] static inline constexpr pair<T1, T2> make_pair(const T1& a, const T2& b) noexcept {
+            return pair<T1, T2>(a, b);
+        }
+        [[gnu::always_inline]] static inline constexpr pair<T1, T2> make_pair(T1&& a, T2&& b) noexcept {
+            return pair<T1, T2>(std::move(a), std::move(b));
         }
     };
+
+    // Global make_pair for API compatibility
     template<typename T1, typename T2>
-    constexpr pair<std::decay_t<T1>, std::decay_t<T2>> make_pair(T1&& a, T2&& b) noexcept {
+    [[gnu::always_inline]] inline constexpr pair<std::decay_t<T1>, std::decay_t<T2>> make_pair(T1&& a, T2&& b) noexcept {
         return pair<std::decay_t<T1>, std::decay_t<T2>>(std::forward<T1>(a), std::forward<T2>(b));
     }
 
@@ -2964,7 +3005,50 @@ namespace mcu {
     ------------------------------------------------- PACKED VECTOR ---------------------------------------------------
     -------------------------------------------------------------------------------------------------------------------
     */
-    
+    template<typename>
+    struct dependent_false : std::false_type {};
+
+    template<typename T, typename Enable = void>
+    struct packed_value_traits {
+        static uint32_t to_bits(const T&) {
+            static_assert(dependent_false<T>::value, "packed_value_traits specialization required for this type");
+            return 0;
+        }
+
+        static T from_bits(uint32_t) {
+            static_assert(dependent_false<T>::value, "packed_value_traits specialization required for this type");
+            return T{};
+        }
+    };
+
+    template<typename T>
+    struct packed_value_traits<T, std::enable_if_t<std::is_integral_v<T> || std::is_enum_v<T>>> {
+        static constexpr uint32_t to_bits(T value) noexcept {
+            return static_cast<uint32_t>(value);
+        }
+
+        static constexpr T from_bits(uint32_t bits) noexcept {
+            return static_cast<T>(bits);
+        }
+    };
+
+    template<typename T>
+    struct packed_value_traits<T, std::enable_if_t<!std::is_integral_v<T> && !std::is_enum_v<T> &&
+                                                  std::is_trivially_copyable_v<T> &&
+                                                  (sizeof(T) <= sizeof(uint32_t))>> {
+        static uint32_t to_bits(const T& value) noexcept {
+            uint32_t bits = 0;
+            std::memcpy(&bits, &value, sizeof(T));
+            return bits;
+        }
+
+        static T from_bits(uint32_t bits) noexcept {
+            T value{};
+            std::memcpy(&value, &bits, sizeof(T));
+            return value;
+        }
+    };
+
     template<uint8_t BitsPerElement>
     class PackedArray {
         static_assert(BitsPerElement > 0 && BitsPerElement <= 32, "Invalid bit size");
@@ -3169,13 +3253,14 @@ namespace mcu {
     };
 
 
-    template<uint8_t BitsPerElement>
+    template<uint8_t BitsPerElement, typename ValueType = uint32_t>
     class packed_vector {
         static_assert(BitsPerElement > 0 && BitsPerElement <= 32, "Invalid bit size");
 
     public:
-        using value_type = uint32_t;
+        using value_type = ValueType;
         using size_type = size_t;
+        using traits_type = packed_value_traits<value_type>;
 
     private:
         PackedArray<BitsPerElement> packed_data;
@@ -3187,30 +3272,45 @@ namespace mcu {
                 ? (std::numeric_limits<size_type>::max() / 2)
                 : static_cast<size_type>(1);
 
-        static constexpr value_type COMPILED_MAX =
+        static constexpr uint32_t COMPILED_MAX_BITS =
             (BitsPerElement >= 32)
-                ? std::numeric_limits<value_type>::max()
-                : static_cast<value_type>((uint32_t{1} << BitsPerElement) - 1ull);
+                ? std::numeric_limits<uint32_t>::max()
+                : ((uint32_t{1} << BitsPerElement) - 1u);
 
         static inline size_t calc_words_for_bpv(size_type capacity, uint8_t bpv) {
             const size_t bits = capacity * static_cast<size_t>(bpv);
             return (bits + 31u) >> 5;
         }
 
-        static inline value_type runtime_max_value(uint8_t bpv) {
+        static inline uint32_t runtime_mask(uint8_t bpv) {
             if (bpv >= 32) {
-                return std::numeric_limits<value_type>::max();
+                return std::numeric_limits<uint32_t>::max();
             }
-            return static_cast<value_type>((uint32_t{1} << bpv) - 1ull);
+            return (uint32_t{1} << bpv) - 1u;
         }
 
-        value_type clamp_value(uint32_t value) const {
-            const uint8_t bpv = packed_data.get_bpv();
-            if (bpv >= 32) {
-                return static_cast<value_type>(value & std::numeric_limits<value_type>::max());
-            }
-            const uint32_t mask = (uint32_t{1} << bpv) - 1ull;
-            return static_cast<value_type>(value & mask);
+        __attribute__((always_inline)) inline uint32_t mask_bits(uint32_t bits, uint8_t bpv) const {
+            return bits & runtime_mask(bpv);
+        }
+
+        __attribute__((always_inline)) inline uint32_t mask_bits(uint32_t bits) const {
+            return mask_bits(bits, packed_data.get_bpv());
+        }
+
+        __attribute__((always_inline)) inline uint32_t to_storage_bits(const value_type& value, uint8_t bpv) const {
+            return mask_bits(traits_type::to_bits(value), bpv);
+        }
+
+        __attribute__((always_inline)) inline uint32_t to_storage_bits(const value_type& value) const {
+            return to_storage_bits(value, packed_data.get_bpv());
+        }
+
+        __attribute__((always_inline)) inline value_type from_storage_bits(uint32_t bits, uint8_t bpv) const {
+            return traits_type::from_bits(mask_bits(bits, bpv));
+        }
+
+        __attribute__((always_inline)) inline value_type from_storage_bits(uint32_t bits) const {
+            return from_storage_bits(bits, packed_data.get_bpv());
         }
 
         template<typename T>
@@ -3228,9 +3328,9 @@ namespace mcu {
             }
 
             bool drop_header = false;
-            if (static_cast<uint32_t>(view.data[0]) == active_bpv && view.count > 1) {
+            if (packed_value_traits<T>::to_bits(view.data[0]) == static_cast<uint32_t>(active_bpv) && view.count > 1) {
                 for (size_t i = 1; i < view.count; ++i) {
-                    if (static_cast<uint32_t>(view.data[i]) > active_bpv) {
+                    if (packed_value_traits<T>::to_bits(view.data[i]) > static_cast<uint32_t>(active_bpv)) {
                         drop_header = true;
                         break;
                     }
@@ -3277,8 +3377,11 @@ namespace mcu {
             packed_data.set_bpv(active_bpv);
 
             for (size_type i = 0; i < size_; ++i) {
-                const auto value = static_cast<uint32_t>(source[start_index + i]);
-                packed_data.set_unsafe(i, clamp_value(value));
+                using SourceValue = typename SourceVector::value_type;
+                using SourceTraits = packed_value_traits<SourceValue>;
+                const uint32_t source_bits = SourceTraits::to_bits(source[start_index + i]);
+                const value_type converted = traits_type::from_bits(source_bits);
+                packed_data.set_unsafe(i, mask_bits(traits_type::to_bits(converted), active_bpv));
             }
         }
 
@@ -3327,11 +3430,12 @@ namespace mcu {
               size_(0),
               capacity_((initialCapacity == 0) ? 1 : initialCapacity) {}
 
-        packed_vector(size_type initialSize, value_type value)
+        packed_vector(size_type initialSize, const value_type& value)
             : packed_data(calc_words_for_bpv((initialSize == 0) ? 1 : initialSize, BitsPerElement)),
               size_(initialSize),
               capacity_((initialSize == 0) ? 1 : initialSize) {
-            const value_type clamped = clamp_value(value);
+            const uint8_t active_bpv = packed_data.get_bpv();
+            const uint32_t clamped = to_storage_bits(value, active_bpv);
             for (size_type i = 0; i < size_; ++i) {
                 packed_data.set_unsafe(i, clamped);
             }
@@ -3383,8 +3487,8 @@ namespace mcu {
             initialize_from_range(source, start_index, end_index);
         }
 
-        template<uint8_t SourceBitsPerElement>
-        packed_vector(const packed_vector<SourceBitsPerElement>& source, size_t start_index, size_t end_index) {
+    template<uint8_t SourceBitsPerElement, typename SourceValue>
+    packed_vector(const packed_vector<SourceBitsPerElement, SourceValue>& source, size_t start_index, size_t end_index) {
             initialize_from_range(source, start_index, end_index);
         }
 
@@ -3394,45 +3498,45 @@ namespace mcu {
 
         value_type operator[](size_type index) const {
             if (size_ == 0) {
-                return 0;
+                return value_type{};
             }
             if (index >= size_) {
-                return packed_data.get_unsafe(size_ - 1);
+                return from_storage_bits(packed_data.get_unsafe(size_ - 1));
             }
-            return packed_data.get_unsafe(index);
+            return from_storage_bits(packed_data.get_unsafe(index));
         }
 
         value_type at(size_type index) const {
             if (index >= size_) {
                 throw std::out_of_range("packed_vector::at");
             }
-            return packed_data.get_unsafe(index);
+            return from_storage_bits(packed_data.get_unsafe(index));
         }
 
-        void set(size_type index, value_type value) {
-            packed_data.set_unsafe(index, clamp_value(value));
+        void set(size_type index, const value_type& value) {
+            packed_data.set_unsafe(index, to_storage_bits(value));
         }
 
-        void set_unsafe(size_type index, value_type value) {
-            packed_data.set_unsafe(index, clamp_value(value));
+        void set_unsafe(size_type index, const value_type& value) {
+            packed_data.set_unsafe(index, to_storage_bits(value));
         }
 
         value_type get(size_type index) const {
-            return (index < size_) ? packed_data.get_unsafe(index) : 0;
+            return (index < size_) ? from_storage_bits(packed_data.get_unsafe(index)) : value_type{};
         }
 
         value_type front() const {
             if (size_ == 0) {
                 throw std::out_of_range("packed_vector::front");
             }
-            return packed_data.get_unsafe(0);
+            return from_storage_bits(packed_data.get_unsafe(0));
         }
 
         value_type back() const {
-            return (size_ > 0) ? packed_data.get_unsafe(size_ - 1) : 0;
+            return (size_ > 0) ? from_storage_bits(packed_data.get_unsafe(size_ - 1)) : value_type{};
         }
 
-        void push_back(value_type value) {
+        void push_back(const value_type& value) {
             if (size_ == capacity_) {
                 size_type new_capacity = (capacity_ == 0) ? 1 : capacity_ * 2;
                 if (new_capacity > VECTOR_MAX_CAP) {
@@ -3441,7 +3545,7 @@ namespace mcu {
                 ensure_capacity(new_capacity);
             }
             if (size_ < capacity_) {
-                packed_data.set_unsafe(size_, clamp_value(value));
+                packed_data.set_unsafe(size_, to_storage_bits(value));
                 ++size_;
             }
         }
@@ -3452,22 +3556,24 @@ namespace mcu {
             }
         }
 
-        void fill(value_type value) {
+        void fill(const value_type& value) {
             if (size_ == 0) {
                 return;
             }
-            const value_type clamped = clamp_value(value);
+            const uint8_t active_bpv = packed_data.get_bpv();
+            const uint32_t clamped = to_storage_bits(value, active_bpv);
             for (size_type i = 0; i < size_; ++i) {
                 packed_data.set_unsafe(i, clamped);
             }
         }
 
-        void resize(size_type newSize, value_type value = 0) {
+        void resize(size_type newSize, const value_type& value = value_type{}) {
             if (newSize > capacity_) {
                 ensure_capacity(newSize);
             }
             if (newSize > size_) {
-                const value_type clamped = clamp_value(value);
+                const uint8_t active_bpv = packed_data.get_bpv();
+                const uint32_t clamped = to_storage_bits(value, active_bpv);
                 for (size_type i = size_; i < newSize; ++i) {
                     packed_data.set_unsafe(i, clamped);
                 }
@@ -3479,13 +3585,14 @@ namespace mcu {
             ensure_capacity(newCapacity);
         }
 
-        void assign(size_type count, value_type value) {
+        void assign(size_type count, const value_type& value) {
             clear();
             if (count == 0) {
                 return;
             }
             ensure_capacity(count);
-            const value_type clamped = clamp_value(value);
+            const uint8_t active_bpv = packed_data.get_bpv();
+            const uint32_t clamped = to_storage_bits(value, active_bpv);
             for (size_type i = 0; i < count; ++i) {
                 packed_data.set_unsafe(i, clamped);
             }
@@ -3500,16 +3607,20 @@ namespace mcu {
                 return;
             }
             ensure_capacity(view.count);
+            const uint8_t active_bpv = packed_data.get_bpv();
             for (size_type i = 0; i < view.count; ++i) {
-                packed_data.set_unsafe(i, clamp_value(static_cast<uint32_t>(view.data[i])));
+                const uint32_t bits = packed_value_traits<T>::to_bits(view.data[i]);
+                const value_type converted = traits_type::from_bits(bits);
+                packed_data.set_unsafe(i, mask_bits(traits_type::to_bits(converted), active_bpv));
             }
             size_ = view.count;
         }
 
         void clear() { size_ = 0; }
 
-        static constexpr value_type max_value() { return COMPILED_MAX; }
+        static value_type max_value() { return packed_value_traits<value_type>::from_bits(COMPILED_MAX_BITS); }
         static constexpr uint8_t bits_per_element() { return BitsPerElement; }
+        static constexpr uint32_t max_bits_value() { return COMPILED_MAX_BITS; }
 
         uint8_t get_bits_per_value() const { return packed_data.get_bpv(); }
 
@@ -3553,29 +3664,31 @@ namespace mcu {
 
         class iterator {
         private:
-            PackedArray<BitsPerElement>* data_ptr;
-            size_type index;
+            packed_vector* parent = nullptr;
+            size_type index = 0;
 
         public:
             friend class const_iterator;
 
-            iterator(PackedArray<BitsPerElement>* ptr, size_type idx)
-                : data_ptr(ptr), index(idx) {}
+            iterator() = default;
 
-            uint32_t operator*() const { return data_ptr->get_unsafe(index); }
+            iterator(packed_vector* p, size_type idx)
+                : parent(p), index(idx) {}
+
+            value_type operator*() const { return parent->from_storage_bits(parent->packed_data.get_unsafe(index)); }
 
             iterator& operator++() { ++index; return *this; }
             iterator operator++(int) { iterator tmp = *this; ++index; return tmp; }
             iterator& operator--() { --index; return *this; }
             iterator operator--(int) { iterator tmp = *this; --index; return tmp; }
 
-            iterator operator+(size_type n) const { return iterator(data_ptr, index + n); }
-            iterator operator-(size_type n) const { return iterator(data_ptr, index - n); }
+            iterator operator+(size_type n) const { return iterator(parent, index + n); }
+            iterator operator-(size_type n) const { return iterator(parent, index - n); }
             iterator& operator+=(size_type n) { index += n; return *this; }
             iterator& operator-=(size_type n) { index -= n; return *this; }
 
-            bool operator==(const iterator& other) const { return index == other.index; }
-            bool operator!=(const iterator& other) const { return index != other.index; }
+            bool operator==(const iterator& other) const { return index == other.index && parent == other.parent; }
+            bool operator!=(const iterator& other) const { return !(*this == other); }
             bool operator<(const iterator& other) const { return index < other.index; }
             bool operator>(const iterator& other) const { return index > other.index; }
             bool operator<=(const iterator& other) const { return index <= other.index; }
@@ -3590,30 +3703,32 @@ namespace mcu {
 
         class const_iterator {
         private:
-            const PackedArray<BitsPerElement>* data_ptr;
-            size_type index;
+            const packed_vector* parent = nullptr;
+            size_type index = 0;
 
         public:
-            const_iterator(const PackedArray<BitsPerElement>* ptr, size_type idx)
-                : data_ptr(ptr), index(idx) {}
+            const_iterator() = default;
+
+            const_iterator(const packed_vector* p, size_type idx)
+                : parent(p), index(idx) {}
 
             const_iterator(const iterator& it)
-                : data_ptr(it.data_ptr), index(it.get_index()) {}
+                : parent(it.parent), index(it.index) {}
 
-            uint32_t operator*() const { return data_ptr->get_unsafe(index); }
+            value_type operator*() const { return parent->from_storage_bits(parent->packed_data.get_unsafe(index)); }
 
             const_iterator& operator++() { ++index; return *this; }
             const_iterator operator++(int) { const_iterator tmp = *this; ++index; return tmp; }
             const_iterator& operator--() { --index; return *this; }
             const_iterator operator--(int) { const_iterator tmp = *this; --index; return tmp; }
 
-            const_iterator operator+(size_type n) const { return const_iterator(data_ptr, index + n); }
-            const_iterator operator-(size_type n) const { return const_iterator(data_ptr, index - n); }
+            const_iterator operator+(size_type n) const { return const_iterator(parent, index + n); }
+            const_iterator operator-(size_type n) const { return const_iterator(parent, index - n); }
             const_iterator& operator+=(size_type n) { index += n; return *this; }
             const_iterator& operator-=(size_type n) { index -= n; return *this; }
 
-            bool operator==(const const_iterator& other) const { return index == other.index; }
-            bool operator!=(const const_iterator& other) const { return index != other.index; }
+            bool operator==(const const_iterator& other) const { return index == other.index && parent == other.parent; }
+            bool operator!=(const const_iterator& other) const { return !(*this == other); }
             bool operator<(const const_iterator& other) const { return index < other.index; }
             bool operator>(const const_iterator& other) const { return index > other.index; }
             bool operator<=(const const_iterator& other) const { return index <= other.index; }
@@ -3626,12 +3741,12 @@ namespace mcu {
             size_type get_index() const { return index; }
         };
 
-        iterator begin() { return iterator(&packed_data, 0); }
-        iterator end() { return iterator(&packed_data, size_); }
-        const_iterator begin() const { return const_iterator(&packed_data, 0); }
-        const_iterator end() const { return const_iterator(&packed_data, size_); }
-        const_iterator cbegin() const { return const_iterator(&packed_data, 0); }
-        const_iterator cend() const { return const_iterator(&packed_data, size_); }
+        iterator begin() { return iterator(this, 0); }
+        iterator end() { return iterator(this, size_); }
+        const_iterator begin() const { return const_iterator(this, 0); }
+        const_iterator end() const { return const_iterator(this, size_); }
+        const_iterator cbegin() const { return const_iterator(this, 0); }
+        const_iterator cend() const { return const_iterator(this, size_); }
 
         const uint32_t* data() const { return packed_data.raw_data(); }
         uint32_t* data() { return packed_data.raw_data(); }

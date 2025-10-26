@@ -8,9 +8,6 @@ using namespace mcu;
 using packed_vector_1bit = packed_vector<1>;
 using packed_vector_2bit = packed_vector<2>;
 using packed_vector_4bit = packed_vector<4>;
-using packed_vector_1bit_tiny = packed_vector<1, mcu::TINY>;
-using packed_vector_2bit_tiny = packed_vector<2, mcu::TINY>;
-using packed_vector_4bit_tiny = packed_vector<4, mcu::TINY>;
 
 // Test counter
 int total_tests = 0;
@@ -257,92 +254,44 @@ void test_fill_method() {
     } END_TEST
 }
 
-void test_tiny_mode() {
-    std::cout << "------------- TINY Mode Test -------------\n";
-    
-    TEST("TINY default constructor") {
-        packed_vector<2, mcu::TINY> tiny_vec;
-        EXPECT(tiny_vec.size() == 0);
-        EXPECT(tiny_vec.capacity() >= 0);
+void test_wide_bit_operations() {
+    std::cout << "------------- Wide Bit Operations Test -------------\n";
+
+    TEST("16-bit storage and retrieval") {
+        packed_vector<16> vec16;
+        vec16.push_back(65535);
+        vec16.push_back(12345);
+        EXPECT(vec16.size() == 2);
+        EXPECT(vec16[0] == 65535 && vec16[1] == 12345);
     } END_TEST
 
-    TEST("TINY constructor with capacity") {
-        packed_vector<3, mcu::TINY> tiny_vec2(8);
-        EXPECT(tiny_vec2.size() == 0);
-        EXPECT(tiny_vec2.capacity() >= 8);
+    TEST("Initializer list with 12-bit values") {
+        auto init_list = MAKE_UINT16_LIST(1023, 2047, 4095, 2048, 0);
+        packed_vector<12> vec12(init_list);
+        EXPECT(vec12.size() == 5);
+        EXPECT(vec12[0] == 1023 && vec12[2] == 4095);
     } END_TEST
 
-    TEST("TINY constructor with size and value") {
-        packed_vector<2, mcu::TINY> tiny_vec3(5, 3);
-        EXPECT(tiny_vec3.size() == 5);
-        EXPECT(tiny_vec3[0] == 3 && tiny_vec3[4] == 3);
+    TEST("Clamping values beyond 16-bit range") {
+        packed_vector<16> vec16;
+        vec16.push_back(70000);  // exceeds 16-bit max
+        EXPECT(vec16.size() == 1);
+        EXPECT(vec16[0] == (70000 & 0xFFFF));
     } END_TEST
 
-    TEST("TINY type aliases") {
-        packed_vector_2bit_tiny tiny_alias(4, 2);
-        EXPECT(tiny_alias.size() == 4);
-        EXPECT(tiny_alias[0] == 2 && tiny_alias[3] == 2);
+    TEST("Runtime bpv expansion above 8 bits") {
+        packed_vector<16> vecRuntime;
+        vecRuntime.set_bits_per_value(12);
+        vecRuntime.push_back(4095);
+        vecRuntime.push_back(5000);  // clamps to 4095 with 12-bit limit
+    EXPECT(vecRuntime.size() == 2);
+    EXPECT(vecRuntime[0] == 4095 && vecRuntime[1] == (5000 & ((1 << 12) - 1)));
     } END_TEST
 
-    TEST("TINY push_back operations") {
-        packed_vector<1, mcu::TINY> tiny_vec4;
-        for (int i = 0; i < 12; ++i) {
-            tiny_vec4.push_back(i % 2);
-        }
-        EXPECT(tiny_vec4.size() == 12);
-    } END_TEST
-
-    TEST("TINY vs MEDIUM memory comparison") {
-        packed_vector<4, mcu::TINY> tiny_4bit(10, 15);
-        packed_vector<4, mcu::MEDIUM> medium_4bit(10, 15);
-        EXPECT(sizeof(tiny_4bit) <= sizeof(medium_4bit));
-    } END_TEST
-
-    TEST("TINY copy and move operations") {
-        packed_vector<3, mcu::TINY> tiny_original(6, 5);
-        packed_vector<3, mcu::TINY> tiny_copy(tiny_original);
-        packed_vector<3, mcu::TINY> tiny_moved(std::move(tiny_original));
-        EXPECT(tiny_copy.size() == 6);
-        EXPECT(tiny_moved.size() == 6);
-        EXPECT(tiny_original.size() == 0);
-    } END_TEST
-
-    TEST("TINY resize operations") {
-        packed_vector<2, mcu::TINY> tiny_resize(3, 1);
-        tiny_resize.resize(8, 2);
-        EXPECT(tiny_resize.size() == 8);
-        EXPECT(tiny_resize[2] == 1 && tiny_resize[7] == 2);
-    } END_TEST
-
-    TEST("TINY maximum capacity test") {
-        packed_vector<1, mcu::TINY> tiny_max;
-        for (int i = 0; i < 20; ++i) {
-            tiny_max.push_back(1);
-            if (tiny_max.capacity() >= 15) break;
-        }
-        EXPECT(tiny_max.capacity() <= 15);
-    } END_TEST
-
-    TEST("TINY initializer list") {
-        auto tiny_init = mcu::min_init_list<uint8_t>((const uint8_t[]){1, 0, 1, 1, 0}, 5);
-        packed_vector<1, mcu::TINY> tiny_from_list(tiny_init);
-        EXPECT(tiny_from_list.size() == 5);
-        EXPECT(tiny_from_list[0] == 1 && tiny_from_list[4] == 0);
-    } END_TEST
-
-    TEST("TINY fill operation") {
-        packed_vector<3, mcu::TINY> tiny_fill(7, 0);
-        tiny_fill.fill(6);
-        EXPECT(tiny_fill.size() == 7);
-        EXPECT(tiny_fill[0] == 6 && tiny_fill[6] == 6);
-    } END_TEST
-
-    TEST("TINY vector comparison") {
-        packed_vector<2, mcu::TINY> tiny_a(4, 3);
-        packed_vector<2, mcu::TINY> tiny_b(4, 3);
-        packed_vector<2, mcu::TINY> tiny_c(4, 2);
-        EXPECT(tiny_a == tiny_b);
-        EXPECT(!(tiny_a == tiny_c));
+    TEST("Memory usage scales with wider bits") {
+        packed_vector<16> wide_vec(10, 0xFFFF);
+        packed_vector<4> narrow_vec(10, 0xF);
+        EXPECT(wide_vec.memory_usage() >= narrow_vec.memory_usage());
     } END_TEST
 }
 
@@ -520,12 +469,6 @@ void test_range_constructor() {
         EXPECT(range4bit.size() == 4);
     } END_TEST
 
-    TEST("TINY mode range constructor") {
-        packed_vector<2, mcu::TINY> tiny_source = MAKE_UINT8_LIST(2, 3, 2, 1, 0, 3, 2, 1, 0);
-        packed_vector<2, mcu::TINY> tiny_range(tiny_source, 2, 6);
-        EXPECT(tiny_range.size() == 4);
-    } END_TEST
-
     TEST("Range constructor with operations") {
         packed_vector<3> source = MAKE_UINT8_LIST(3, 0, 1, 2, 3, 4, 5, 6, 7);
         packed_vector<3> range_ops(source, 1, 4);  // Copy elements 1,2,3
@@ -544,18 +487,6 @@ void test_range_constructor() {
         packed_vector<2> source2to4 = MAKE_UINT8_LIST(3, 2, 1, 0, 3, 2, 1);
         packed_vector<4> range2to4(source2to4, 2, 6);  // Copy indices 2-5
         EXPECT(range2to4.size() == 4);
-    } END_TEST
-
-    TEST("Cross-size-flag range constructor") {
-        // TINY to MEDIUM
-        packed_vector<2, mcu::TINY> tiny_source_cross = MAKE_UINT8_LIST(3, 2, 1, 0, 3);
-        packed_vector<2, mcu::MEDIUM> medium_from_tiny(tiny_source_cross, 1, 4);
-        EXPECT(medium_from_tiny.size() == 3);
-        
-        // SMALL to LARGE
-        packed_vector<3, mcu::SMALL> small_source = MAKE_UINT8_LIST(7, 6, 5, 4, 3, 2, 1, 0);
-        packed_vector<3, mcu::LARGE> large_from_small(small_source, 1, 5);
-        EXPECT(large_from_small.size() == 4);
     } END_TEST
 
     TEST("Range comparison") {
@@ -620,25 +551,17 @@ void test_dynamic_bits_per_value() {
         EXPECT(v2.size() == 0);  // data cleared
     } END_TEST
 
-    TEST("TINY mode with dynamic bpv") {
-        packed_vector<4, mcu::TINY> v3;
-        EXPECT(v3.get_bits_per_value() == 4);
-        v3.push_back(15);
-        v3.push_back(10);
-        v3.set_bits_per_value(3);
-        v3.push_back(7);  // max for 3 bits
-        v3.push_back(4);
-        EXPECT(v3.size() == 2);  // only new values after bpv change
-    } END_TEST
-
     TEST("Invalid bpv values ignored") {
-        packed_vector<3> v4;
-        v4.push_back(7);
-        v4.set_bits_per_value(0);  // Invalid
-        EXPECT(v4.get_bits_per_value() == 3);  // unchanged
-        
-        v4.set_bits_per_value(9);  // Invalid
-        EXPECT(v4.get_bits_per_value() == 3);  // unchanged
+        packed_vector<12> v4;
+        v4.push_back(11);
+        v4.set_bits_per_value(0);  // invalid
+        EXPECT(v4.get_bits_per_value() == 12);
+
+        v4.set_bits_per_value(10);  // valid reduction
+        EXPECT(v4.get_bits_per_value() == 10);
+
+    v4.set_bits_per_value(40);  // exceeds supported range, ignored
+    EXPECT(v4.get_bits_per_value() == 10);
     } END_TEST
 
     TEST("Memory efficiency with dynamic bpv") {
@@ -749,7 +672,7 @@ int main(){
     test_packed_vector();
     test_constructors_and_assignments();
     test_fill_method();
-    test_tiny_mode();
+    test_wide_bit_operations();
     test_iterators();
     test_range_constructor();
     test_dynamic_bits_per_value();

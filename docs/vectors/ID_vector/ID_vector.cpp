@@ -1,151 +1,360 @@
 
 #include <iostream>
 #include <stdexcept>
-#include "../../src/initializer_list.h"
+#include "../../../src/initializer_list.h"
 #include <type_traits>
 #include <cassert>
 #include <utility>
 #include <cstddef>
 #include <cstdint>
+#include <algorithm>
+#include <array>
 
 using namespace mcu;
 
+    // Memory allocation helpers - automatically use PSRAM when enabled
+    namespace mem_alloc {
+        namespace detail {
+            constexpr uint8_t FLAG_PSRAM = 0x1;
+            constexpr size_t header_payload = sizeof(size_t) + sizeof(uint8_t);
+            constexpr size_t header_padding = (alignof(std::max_align_t) - (header_payload % alignof(std::max_align_t))) % alignof(std::max_align_t);
+
+            struct alignas(std::max_align_t) AllocationHeader {
+                size_t count;
+                uint8_t flags;
+                std::array<uint8_t, header_padding> padding{};
+
+                AllocationHeader(size_t c, uint8_t f) noexcept : count(c), flags(f) {}
+
+                static constexpr size_t stride() noexcept { return sizeof(AllocationHeader); }
+                bool uses_psram() const noexcept { return (flags & FLAG_PSRAM) != 0; }
+            };
+        }
+
+        template<typename T>
+        inline T* allocate(size_t count) {
+            const size_t recorded_count = count;
+            const size_t actual_count = (count == 0) ? 1 : count;
+            if (actual_count == 0) {
+                return nullptr;
+            }
+
+            constexpr size_t stride = detail::AllocationHeader::stride();
+            const size_t alignment = std::max<size_t>(alignof(T), alignof(size_t));
+            const size_t total_bytes = stride + actual_count * sizeof(T) + alignment + sizeof(size_t);
+
+            uint8_t flags = 0;
+            void* raw = nullptr;
+
+            #if RF_PSRAM_AVAILABLE
+                raw = heap_caps_malloc(total_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                if (raw) {
+                    flags = detail::FLAG_PSRAM;
+                }
+            #endif
+
+            if (!raw) {
+                raw = std::malloc(total_bytes);
+                if (!raw) {
+                    return nullptr;
+                }
+            }
+
+            auto* base = static_cast<uint8_t*>(raw);
+            auto* header = new(raw) detail::AllocationHeader(recorded_count, flags);
+
+            uint8_t* data_start = base + stride;
+            uintptr_t aligned_addr = (reinterpret_cast<uintptr_t>(data_start) + alignment - 1) & ~(alignment - 1);
+            size_t offset = aligned_addr - reinterpret_cast<uintptr_t>(data_start);
+            while (offset < sizeof(size_t)) {
+                aligned_addr += alignment;
+                offset += alignment;
+            }
+
+            auto* aligned_data = reinterpret_cast<uint8_t*>(aligned_addr);
+            auto* offset_slot = reinterpret_cast<size_t*>(aligned_data) - 1;
+            *offset_slot = offset;
+
+            auto* data = reinterpret_cast<T*>(aligned_data);
+
+            if constexpr (!std::is_trivially_default_constructible_v<T>) {
+                for (size_t i = 0; i < recorded_count; ++i) {
+                    new (data + i) T();
+                }
+            }
+
+            return data;
+        }
+
+        template<typename T>
+        inline void deallocate(T* ptr) {
+            if (!ptr) {
+                return;
+            }
+
+            constexpr size_t stride = detail::AllocationHeader::stride();
+            auto* data_bytes = reinterpret_cast<uint8_t*>(ptr);
+            size_t offset = *(reinterpret_cast<const size_t*>(data_bytes) - 1);
+            auto* raw = data_bytes - offset - stride;
+            auto* header = reinterpret_cast<detail::AllocationHeader*>(raw);
+
+            if constexpr (!std::is_trivially_destructible_v<T>) {
+                for (size_t i = 0; i < header->count; ++i) {
+                    ptr[i].~T();
+                }
+            }
+
+            const bool uses_psram = header->uses_psram();
+            header->~AllocationHeader();
+
+            #if RF_PSRAM_AVAILABLE
+                if (uses_psram) {
+                    heap_caps_free(raw);
+                    return;
+                }
+            #endif
+
+            std::free(raw);
+        }
+
+        // Get allocation info for debugging
+        inline bool is_psram_ptr(const void* ptr) {
+            #if RF_PSRAM_AVAILABLE
+                if (!ptr) {
+                    return false;
+                }
+                constexpr size_t stride = detail::AllocationHeader::stride();
+                auto* data_bytes = reinterpret_cast<const uint8_t*>(ptr);
+                size_t offset = *(reinterpret_cast<const size_t*>(data_bytes) - 1);
+                auto* raw = data_bytes - offset - stride;
+                auto* header = reinterpret_cast<const detail::AllocationHeader*>(raw);
+                return header->uses_psram();
+            #else
+                (void)ptr;
+                return false;
+            #endif
+        }
+
+        inline size_t get_free_psram() {
+            #if RF_PSRAM_AVAILABLE
+                return heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+            #else
+                return 0;
+            #endif
+        }
+
+        inline size_t get_total_psram() {
+            #if RF_PSRAM_AVAILABLE
+                return heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+            #else
+                return 0;
+            #endif
+        }
+    }
+
+    
     template<uint8_t BitsPerElement>
     class PackedArray {
-        static_assert(BitsPerElement > 0 && BitsPerElement <= 8, "Invalid bit size");
-        uint8_t* data = nullptr;
+        static_assert(BitsPerElement > 0 && BitsPerElement <= 32, "Invalid bit size");
+
+        uint32_t* data = nullptr;
+        uint8_t bpv_ = BitsPerElement;
+        size_t capacity_words_ = 0;
 
     public:
-        // Default constructor - creates empty array
-        PackedArray() : data(nullptr) {}
+        PackedArray() = default;
 
-        // Remove count - capacity is managed by packed_vector
-        PackedArray(size_t capacity_bytes) {
-            if(capacity_bytes > 0) {
-                data = new uint8_t[capacity_bytes]();
-            } else {
-                data = nullptr;
+        explicit PackedArray(size_t capacity_words)
+            : bpv_(BitsPerElement), capacity_words_(capacity_words) {
+            if (capacity_words_ > 0) {
+                data = mem_alloc::allocate<uint32_t>(capacity_words_);
+                if (data) {
+                    std::fill_n(data, capacity_words_, static_cast<uint32_t>(0));
+                } else {
+                    capacity_words_ = 0;
+                }
             }
         }
 
         ~PackedArray() {
-            delete[] data;
+            mem_alloc::deallocate(data);
+            data = nullptr;
+            capacity_words_ = 0;
         }
 
-        // Copy constructor - requires byte size
-        PackedArray(const PackedArray& other, size_t bytes) {
-            data = new uint8_t[bytes];
-            for (size_t i = 0; i < bytes; ++i) {
-                data[i] = other.data[i];
+        PackedArray(const PackedArray& other, size_t words)
+            : bpv_(other.bpv_), capacity_words_(words) {
+            if (capacity_words_ > 0) {
+                data = mem_alloc::allocate<uint32_t>(capacity_words_);
+                if (data) {
+                    if (other.data) {
+                        std::copy(other.data, other.data + capacity_words_, data);
+                    } else {
+                        std::fill_n(data, capacity_words_, static_cast<uint32_t>(0));
+                    }
+                } else {
+                    capacity_words_ = 0;
+                }
             }
         }
 
-        // Move constructor
-        PackedArray(PackedArray&& other) noexcept : data(other.data) {
+        PackedArray(PackedArray&& other) noexcept
+            : data(other.data), bpv_(other.bpv_), capacity_words_(other.capacity_words_) {
             other.data = nullptr;
+            other.capacity_words_ = 0;
         }
 
-        // Copy from another PackedArray with specified byte size
-        void copy_from(const PackedArray& other, size_t bytes) {
-            delete[] data;
-            data = new uint8_t[bytes];
-            for (size_t i = 0; i < bytes; ++i) {
-                data[i] = other.data[i];
+        void copy_from(const PackedArray& other, size_t words) {
+            if (this == &other) {
+                bpv_ = other.bpv_;
+                capacity_words_ = words;
+                return;
             }
+
+            mem_alloc::deallocate(data);
+            data = nullptr;
+            capacity_words_ = words;
+
+            if (capacity_words_ > 0) {
+                data = mem_alloc::allocate<uint32_t>(capacity_words_);
+                if (data) {
+                    if (other.data) {
+                        std::copy(other.data, other.data + capacity_words_, data);
+                    } else {
+                        std::fill_n(data, capacity_words_, static_cast<uint32_t>(0));
+                    }
+                } else {
+                    capacity_words_ = 0;
+                }
+            }
+            bpv_ = other.bpv_;
         }
 
-        // Copy assignment
         PackedArray& operator=(const PackedArray& other) {
             if (this != &other) {
-                // This shouldn't be used directly - use copy_from with byte size
-                delete[] data;
-                data = nullptr;
+                copy_from(other, other.capacity_words_);
             }
             return *this;
         }
 
-        // Move assignment
         PackedArray& operator=(PackedArray&& other) noexcept {
             if (this != &other) {
-                delete[] data;
+                mem_alloc::deallocate(data);
                 data = other.data;
+                bpv_ = other.bpv_;
+                capacity_words_ = other.capacity_words_;
                 other.data = nullptr;
+                other.capacity_words_ = 0;
             }
             return *this;
         }
 
-        // Fast bit manipulation without bounds checking
-        inline void set_unsafe(size_t index, uint8_t value) {
-            if(data == nullptr) return; // Safety check
-            
-            value &= (1 << BitsPerElement) - 1;
-            size_t bitPos = index * BitsPerElement;
-            size_t byteIdx = bitPos >> 3;  // Faster than /8
-            size_t bitOff = bitPos & 7;    // Faster than %8
-            
-            if (bitOff + BitsPerElement <= 8) {
-                uint8_t mask = ((1 << BitsPerElement) - 1) << bitOff;
-                data[byteIdx] = (data[byteIdx] & ~mask) | (value << bitOff);
-            } else {
-                uint8_t bitsInFirstByte = 8 - bitOff;
-                uint8_t bitsInSecondByte = BitsPerElement - bitsInFirstByte;
-                
-                uint8_t mask1 = ((1 << bitsInFirstByte) - 1) << bitOff;
-                uint8_t mask2 = (1 << bitsInSecondByte) - 1;
-                
-                data[byteIdx] = (data[byteIdx] & ~mask1) | ((value & ((1 << bitsInFirstByte) - 1)) << bitOff);
-                data[byteIdx + 1] = (data[byteIdx + 1] & ~mask2) | (value >> bitsInFirstByte);
+        uint8_t get_bpv() const { return bpv_; }
+
+        void set_bpv(uint8_t new_bpv) {
+            if (new_bpv > 0 && new_bpv <= 32) {
+                bpv_ = new_bpv;
             }
         }
 
-        inline uint8_t get_unsafe(size_t index) const {
-            if(data == nullptr) return 0; // Safety check
-            
-            size_t bitPos = index * BitsPerElement;
-            size_t byteIdx = bitPos >> 3;  // Faster than /8
-            size_t bitOff = bitPos & 7;    // Faster than %8
-            
-            if (bitOff + BitsPerElement <= 8) {
-                return (data[byteIdx] >> bitOff) & ((1 << BitsPerElement) - 1);
-            } else {
-                uint8_t bitsInFirstByte = 8 - bitOff;
-                uint8_t bitsInSecondByte = BitsPerElement - bitsInFirstByte;
-                
-                uint8_t firstPart = (data[byteIdx] >> bitOff) & ((1 << bitsInFirstByte) - 1);
-                uint8_t secondPart = (data[byteIdx + 1] & ((1 << bitsInSecondByte) - 1)) << bitsInFirstByte;
-                
-                return firstPart | secondPart;
+        __attribute__((always_inline)) inline void set_unsafe(size_t index, uint32_t value) {
+            if (!data) {
+                return;
+            }
+
+            const uint8_t active_bpv = bpv_;
+            const uint32_t mask = (active_bpv >= 32)
+                ? static_cast<uint32_t>(std::numeric_limits<uint32_t>::max())
+                : ((uint32_t{1} << active_bpv) - 1ull);
+            const uint32_t clamped = static_cast<uint32_t>(value) & mask;
+
+            const size_t bitPos = index * active_bpv;
+            const size_t wordIdx = bitPos >> 5;
+            if (wordIdx >= capacity_words_) {
+                return;
+            }
+
+            const size_t bitOff = bitPos & 31;
+            uint32_t* word = data + wordIdx;
+            const size_t firstBits = std::min<size_t>(32 - bitOff, active_bpv);
+            const uint32_t firstMask = (firstBits == 32)
+                ? std::numeric_limits<uint32_t>::max()
+                : ((uint32_t{1} << firstBits) - 1u);
+
+            *word = (*word & ~(firstMask << bitOff)) | ((clamped & firstMask) << bitOff);
+
+            if (firstBits < active_bpv) {
+                const size_t secondBits = active_bpv - firstBits;
+                if ((wordIdx + 1) >= capacity_words_) {
+                    return;
+                }
+                uint32_t* nextWord = data + wordIdx + 1;
+                const uint32_t secondMask = (secondBits == 32)
+                    ? std::numeric_limits<uint32_t>::max()
+                    : ((uint32_t{1} << secondBits) - 1u);
+                const uint32_t secondPart = clamped >> firstBits;
+                *nextWord = (*nextWord & ~secondMask) | (secondPart & secondMask);
             }
         }
 
-        // Fast memory copy for resize operations
+        __attribute__((always_inline)) inline uint32_t get_unsafe(size_t index) const {
+            if (!data) {
+                return 0;
+            }
+
+            const uint8_t active_bpv = bpv_;
+            const size_t bitPos = index * active_bpv;
+            const size_t wordIdx = bitPos >> 5;
+            if (wordIdx >= capacity_words_) {
+                return 0;
+            }
+
+            const size_t bitOff = bitPos & 31;
+            const uint32_t firstWord = data[wordIdx];
+            const size_t firstBits = std::min<size_t>(32 - bitOff, active_bpv);
+            const uint32_t firstMask = (firstBits == 32)
+                ? std::numeric_limits<uint32_t>::max()
+                : ((uint32_t{1} << firstBits) - 1u);
+            uint32_t value = (firstWord >> bitOff) & firstMask;
+
+            if (firstBits < active_bpv) {
+                if ((wordIdx + 1) >= capacity_words_) {
+                    return static_cast<uint32_t>(value);
+                }
+                const size_t secondBits = active_bpv - firstBits;
+                const uint32_t secondWord = data[wordIdx + 1];
+                const uint32_t secondMask = (secondBits == 32)
+                    ? std::numeric_limits<uint32_t>::max()
+                    : ((uint32_t{1} << secondBits) - 1u);
+                value |= (secondWord & secondMask) << firstBits;
+            }
+
+            return static_cast<uint32_t>(value);
+        }
+
         void copy_elements(const PackedArray& src, size_t element_count) {
-            if (element_count == 0) return;
-            size_t bits = element_count * BitsPerElement;
-            size_t full_bytes = bits >> 3;  // Full bytes to copy
-            size_t remaining_bits = bits & 7;  // Remaining bits
-            
-            // Copy full bytes
-            for (size_t i = 0; i < full_bytes; ++i) {
-                data[i] = src.data[i];
+            if (!data || !src.data) {
+                return;
             }
-            
-            // Copy remaining bits if any
-            if (remaining_bits > 0) {
-                uint8_t mask = (1 << remaining_bits) - 1;
-                data[full_bytes] = (data[full_bytes] & ~mask) | (src.data[full_bytes] & mask);
+
+            for (size_t i = 0; i < element_count; ++i) {
+                set_unsafe(i, src.get_unsafe(i));
+            }
+
+            const size_t bits_used = element_count * bpv_;
+            const size_t first_unused_word = (bits_used + 31) >> 5;
+            for (size_t i = first_unused_word; i < capacity_words_; ++i) {
+                data[i] = 0;
             }
         }
 
-        // Compatibility methods for existing code
-        void set(size_t index, uint8_t value) { set_unsafe(index, value); }
-        uint8_t get(size_t index) const { return get_unsafe(index); }
-        
-        // Get raw data pointer for bulk operations
-        uint8_t* raw_data() { return data; }
-        const uint8_t* raw_data() const { return data; }
-    };
+        void set(size_t index, uint32_t value) { set_unsafe(index, value); }
+        uint32_t get(size_t index) const { return get_unsafe(index); }
 
+        uint32_t* raw_data() { return data; }
+        const uint32_t* raw_data() const { return data; }
+        size_t words() const { return capacity_words_; }
+    };
 
     template <typename T,  uint8_t BitsPerValue = 1>
     class ID_vector{
@@ -171,13 +380,10 @@ using namespace mcu;
         // Size type that can handle total count considering BitsPerValue
         // When BitsPerValue > 1, total size can exceed index_type capacity
         using size_type = typename conditional_t<
-            (sizeof(index_type) == 1), uint32_t,   // uint8_t -> uint32_t (4 bytes)
+            (sizeof(index_type) <= 1), uint32_t,
             typename conditional_t<
-                (sizeof(index_type) == 2), uint64_t,   // uint16_t -> uint64_t (8 bytes)
-                typename conditional_t<
-                    (sizeof(index_type) == 4), size_t,     // uint32_t -> size_t
-                    size_t  // Default to size_t for larger types
-                >::type
+                (sizeof(index_type) == 2), uint64_t,
+                size_t
             >::type
         >::type;
         
@@ -200,13 +406,13 @@ using namespace mcu;
             
         constexpr static count_type MAX_COUNT = (1 << BitsPerValue) - 1; // maximum count per ID
 
-        static constexpr size_t bits_to_bytes(size_t bits){ return (bits + 7) >> 3; }
+        static constexpr size_t bits_to_words(size_t bits){ return (bits + 31) >> 5; }
 
         void allocate_bits(){
-            size_t range = (size_t)max_id_ - (size_t)min_id_ + 1; // number of IDs in range (use size_t to avoid overflow)
-            size_t total_bits = range * BitsPerValue; // multiply by bits per value
-            size_t bytes = bits_to_bytes(total_bits);
-            id_array = PackedArray<BitsPerValue>(bytes);
+            const size_t range = static_cast<size_t>(max_id_) - static_cast<size_t>(min_id_) + 1; // number of IDs in range
+            const size_t total_bits = range * BitsPerValue; // multiply by bits per value
+            const size_t words = bits_to_words(total_bits);
+            id_array = PackedArray<BitsPerValue>(words);
         }
 
         // Convert external ID to internal array index
@@ -245,11 +451,9 @@ using namespace mcu;
                 
                 // Save current data
                 index_type old_max_id = max_id_;
-                size_t old_range = (size_t)max_id_ - (size_t)min_id_ + 1; // Use size_t to avoid overflow
-                size_t old_total_bits = old_range * BitsPerValue;
-                size_t old_bytes = bits_to_bytes(old_total_bits);
-                PackedArray<BitsPerValue> old_array(old_bytes);
-                old_array.copy_from(id_array, old_bytes);
+                const size_t old_words = id_array.words();
+                PackedArray<BitsPerValue> old_array(old_words);
+                old_array.copy_from(id_array, old_words);
                 
                 // Update max_id and allocate new memory
                 max_id_ = new_max_id;
@@ -272,7 +476,6 @@ using namespace mcu;
                 throw std::out_of_range("Cannot set max_id below existing elements. Current largest element is " + std::to_string(current_max_element));
             }
         }
-
         // Set minimum ID that can be stored and allocate memory accordingly
         void set_minID(index_type new_min_id) {
             if(new_min_id > MAX_RF_ID){
@@ -298,11 +501,9 @@ using namespace mcu;
                 
                 // Save current data
                 index_type old_min_id = min_id_;
-                size_t old_range = (size_t)max_id_ - (size_t)min_id_ + 1; // Use size_t to avoid overflow
-                size_t old_total_bits = old_range * BitsPerValue;
-                size_t old_bytes = bits_to_bytes(old_total_bits);
-                PackedArray<BitsPerValue> old_array(old_bytes);
-                old_array.copy_from(id_array, old_bytes);
+                const size_t old_words = id_array.words();
+                PackedArray<BitsPerValue> old_array(old_words);
+                old_array.copy_from(id_array, old_words);
                 
                 // Update min_id and allocate new memory
                 min_id_ = new_min_id;
@@ -354,11 +555,9 @@ using namespace mcu;
                 // Save current data
                 index_type old_min_id = min_id_;
                 index_type old_max_id = max_id_;
-                size_t old_range = (size_t)max_id_ - (size_t)min_id_ + 1; // Use size_t to avoid overflow
-                size_t old_total_bits = old_range * BitsPerValue;
-                size_t old_bytes = bits_to_bytes(old_total_bits);
-                PackedArray<BitsPerValue> old_array(old_bytes);
-                old_array.copy_from(id_array, old_bytes);
+                const size_t old_words = id_array.words();
+                PackedArray<BitsPerValue> old_array(old_words);
+                old_array.copy_from(id_array, old_words);
                 
                 // Update range and allocate new memory
                 min_id_ = new_min_id;
@@ -385,46 +584,6 @@ using namespace mcu;
             }
         }
 
-        // Get current minimum ID that can be stored
-        index_type get_minID() const {
-            return min_id_;
-        }
-
-        // Get current maximum ID that can be stored  
-        index_type get_maxID() const {
-            return max_id_;
-        }
-
-        // get the smallest ID currently stored in the vector
-        index_type minID(){
-            if(size_ == 0) {
-                throw std::out_of_range("ID_vector is empty");
-            }
-            // Find the lowest ID with count > 0
-            for(index_type id = min_id_; id <= max_id_; ++id) {
-                if(id_array.get(id_to_index(id)) > 0) {
-                    return id;  
-                }
-            }
-            throw std::out_of_range("ID_vector::minID() internal error");
-        }
-
-        // get the largest ID currently stored in the vector
-        index_type maxID(){
-            if(size_ == 0) {
-                throw std::out_of_range("ID_vector is empty");
-            }
-            // Find the highest ID with count > 0
-            // Use a safer loop to avoid unsigned underflow issues
-            for(index_type id = max_id_; ; --id) {
-                if(id_array.get(id_to_index(id)) > 0) {
-                    return id;  
-                }
-                if(id == min_id_) break; // Avoid underflow
-            }
-            throw std::out_of_range("ID_vector::maxID() internal error");
-        }
-
         // default constructor (default max ID 127, min ID 0 -> 128 bits -> 16 bytes)
         ID_vector(){
             set_maxID(DEFAULT_MAX_ID);
@@ -443,11 +602,48 @@ using namespace mcu;
         // Copy constructor
         ID_vector(const ID_vector& other) 
             : id_array(), max_id_(other.max_id_), min_id_(other.min_id_), size_(other.size_) {
-            size_t range = (size_t)max_id_ - (size_t)min_id_ + 1; // Use size_t to avoid overflow
-            size_t total_bits = range * BitsPerValue;
-            size_t bytes = bits_to_bytes(total_bits);
-            id_array = PackedArray<BitsPerValue>(bytes);
-            id_array.copy_from(other.id_array, bytes);
+            const size_t words = other.id_array.words();
+            id_array = PackedArray<BitsPerValue>(words);
+            id_array.copy_from(other.id_array, words);
+        }
+
+        // constructor with b_vector of IDs (uint8_t, uint16_t, uint32_t, size_t)
+        template<typename Y>
+        ID_vector(const b_vector<Y>& ids,
+                  typename std::enable_if<std::is_same<Y, uint8_t>::value || 
+                                         std::is_same<Y, uint16_t>::value || 
+                                         std::is_same<Y, uint32_t>::value ||
+                                         std::is_same<Y, size_t>::value >::type* = nullptr) {
+            if(ids.empty()){
+                set_maxID(DEFAULT_MAX_ID);
+                return;
+            }
+            ids.sort();
+            index_type min_id = static_cast<size_t>(ids.front());
+            index_type max_id = static_cast<size_t>(ids.back());
+            set_ID_range(min_id, max_id);
+            for(const Y& id : ids){
+                push_back(static_cast<size_t>(id));
+            }
+        }
+        // constructor with vector of IDs (uint8_t, uint16_t, uint32_t, size_t)
+        template<typename Y>
+        ID_vector(const vector<Y>& ids,
+                  typename std::enable_if<std::is_same<Y, uint8_t>::value || 
+                                         std::is_same<Y, uint16_t>::value || 
+                                         std::is_same<Y, uint32_t>::value ||
+                                         std::is_same<Y, size_t>::value >::type* = nullptr) {
+            if(ids.empty()){
+                set_maxID(DEFAULT_MAX_ID);
+                return;
+            }
+            ids.sort();
+            index_type min_id = static_cast<size_t>(ids.front());
+            index_type max_id = static_cast<size_t>(ids.back());
+            set_ID_range(min_id, max_id);
+            for(const Y& id : ids){
+                push_back(static_cast<size_t>(id));
+            }
         }
 
         // Move constructor
@@ -466,11 +662,9 @@ using namespace mcu;
                 max_id_ = other.max_id_;
                 size_ = other.size_;
                 
-                size_t range = (size_t)max_id_ - (size_t)min_id_ + 1; // Use size_t to avoid overflow
-                size_t total_bits = range * BitsPerValue;
-                size_t bytes = bits_to_bytes(total_bits);
-                id_array = PackedArray<BitsPerValue>(bytes);
-                id_array.copy_from(other.id_array, bytes);
+                const size_t words = other.id_array.words();
+                id_array = PackedArray<BitsPerValue>(words);
+                id_array.copy_from(other.id_array, words);
             }
             return *this;
         }
@@ -493,9 +687,6 @@ using namespace mcu;
         // Destructor (default is fine since PackedArray handles its own cleanup)
         ~ID_vector() = default;
 
-        // number of stored IDs
-        size_type size() const { return size_; }
-        bool empty() const { return size_ == 0; }
 
         // check presence
         bool contains(index_type id) const {
@@ -544,19 +735,6 @@ using namespace mcu;
             return false;
         }
 
-        // remove all instances of specific ID (if exists)
-        bool erase_all(index_type id){
-            if(id < min_id_ || id > max_id_) return false;
-            index_type index = id_to_index(id);
-            count_type current_count = id_array.get(index);
-            if(current_count > 0){
-                id_array.set(index, 0);
-                size_ -= current_count; // subtract all instances
-                return true;
-            }
-            return false;
-        }
-
         // largest ID in the vector (if empty, throws)
         index_type back() const {
             if(size_ == 0) throw std::out_of_range("ID_vector is empty");
@@ -590,29 +768,54 @@ using namespace mcu;
             }
         }
 
-        void clear(){
-            if(size_ == 0) return; // Already empty
+        T front() const {
+            if(size_ == 0) throw std::out_of_range("ID_vector is empty");
             
-            size_t range = (size_t)max_id_ - (size_t)min_id_ + 1; // Use size_t to avoid overflow
-            size_t total_bits = range * BitsPerValue;
-            size_t bytes = bits_to_bytes(total_bits);
-            uint8_t* data = id_array.raw_data();
-            if(data != nullptr) {
-                for(size_t i=0;i<bytes;++i) data[i] = 0;
+            // Find the lowest ID with count > 0
+            for(T id = min_id_; id <= max_id_; ++id) {
+                if(id_array.get(id_to_index(id)) > 0) {
+                    return id;  
+                }
             }
-            size_ = 0;
+            throw std::out_of_range("ID_vector::front() internal error");
         }
-        void fit() {
-            // Fit the ID_vector to the current range and size
-            if(size_ == 0) {
-                // Empty vector - nothing to fit
-                return;
+
+        void pop_front() {
+            if(size_ == 0) return; // empty
+
+            // Find the lowest ID with count > 0 and decrement
+            for(index_type id = min_id_; id <= max_id_; ++id) {
+                index_type index = id_to_index(id);
+                count_type current_count = id_array.get(index);
+                if(current_count > 0) {
+                    id_array.set(index, current_count - 1);
+                    --size_;
+                    return;
+                }
             }
-            index_type new_min_id = minID();
-            index_type new_max_id = maxID();
-            if(new_min_id != min_id_ || new_max_id != max_id_) {
-                set_ID_range(new_min_id, new_max_id);
+        }
+
+        void reserve(index_type new_max_id){
+            if(new_max_id >= MAX_RF_ID){
+                throw std::out_of_range("Max RF ID exceeds limit");
             }
+            if(new_max_id < min_id_){
+                throw std::out_of_range("Max ID cannot be less than min ID");
+            }
+            if(new_max_id > max_id_){
+                set_maxID(new_max_id);
+            }
+        }
+
+        // get number of unique IDs stored (if bitspervalue=1, this is same as size())
+        size_type unique_size() const {
+            if(BitsPerValue == 1) return size_;
+            size_type unique_count = 0;
+            index_type range = (size_t)max_id_  -  (size_t)min_id_ + 1;
+            for(index_type i = 0; i < range; ++i){
+                if(id_array.get(i) > 0) ++unique_count;
+            }
+            return unique_count;
         }
 
         // nth element (0-based) among all ID instances (in ascending order)
@@ -837,6 +1040,18 @@ using namespace mcu;
                 }
             }
         }
+        // remove all instances of specific ID (if exists)
+        bool erase_all(index_type id){
+            if(id < min_id_ || id > max_id_) return false;
+            index_type index = id_to_index(id);
+            count_type current_count = id_array.get(index);
+            if(current_count > 0){
+                id_array.set(index, 0);
+                size_ -= current_count; // subtract all instances
+                return true;
+            }
+            return false;
+        }
 
         // Erase all instances of IDs in range [start, end] (inclusive)
         // Does NOT change the vector's min_id_/max_id_ range
@@ -961,6 +1176,87 @@ using namespace mcu;
                 }
             }
             return *this;
+        }
+
+       // number of stored IDs
+        size_type size() const { return size_; }
+        bool empty() const { return size_ == 0; }
+
+        void clear(){
+            if(size_ == 0) return; // Already empty
+            
+            uint32_t* data = id_array.raw_data();
+            if(data != nullptr) {
+                const size_t words = id_array.words();
+                std::fill(data, data + words, 0u);
+            }
+            size_ = 0;
+        }
+        void fit() {    
+            // Fit the ID_vector to the current range and size
+            if(size_ == 0) {
+                // Empty vector - nothing to fit
+                return;
+            }
+            index_type new_min_id = minID();
+            index_type new_max_id = maxID();
+            if(new_min_id != min_id_ || new_max_id != max_id_) {
+                set_ID_range(new_min_id, new_max_id);
+            }
+        }
+
+
+        // Get current minimum ID that can be stored
+        index_type get_minID() const {
+            return min_id_;
+        }
+
+        // Get current maximum ID that can be stored  
+        index_type get_maxID() const {
+            return max_id_;
+        }
+
+        // get the smallest ID currently stored in the vector
+        T minID(){
+            if(size_ == 0) {
+                throw std::out_of_range("ID_vector is empty");
+            }
+            // Find the lowest ID with count > 0
+            for(T id = min_id_; id <= max_id_; ++id) {
+                if(id_array.get(id_to_index(id)) > 0) {
+                    return id;  
+                }
+            }
+            throw std::out_of_range("ID_vector::minID() internal error");
+        }
+
+        // get the largest ID currently stored in the vector
+        index_type maxID(){
+            if(size_ == 0) {
+                throw std::out_of_range("ID_vector is empty");
+            }
+            // Find the highest ID with count > 0
+            // Use a safer loop to avoid unsigned underflow issues
+            for(index_type id = max_id_; ; --id) {
+                if(id_array.get(id_to_index(id)) > 0) {
+                    return id;  
+                }
+                if(id == min_id_) break; // Avoid underflow
+            }
+            throw std::out_of_range("ID_vector::maxID() internal error");
+        }
+
+        size_t capacity() const {
+            index_type range = (size_t)max_id_  -  (size_t)min_id_ + 1;
+            return range;
+        }
+
+        size_t memory_usage() const {
+            const size_t range = static_cast<size_t>(max_id_) - static_cast<size_t>(min_id_) + 1;
+            const size_t total_bits = range * BitsPerValue;
+            const size_t words = bits_to_words(total_bits);
+            const size_t bytes = words * sizeof(uint32_t);
+            return sizeof(ID_vector) + bytes;
         }
 
         // takeout normalized vector of IDs (ascending order, no repetitions)

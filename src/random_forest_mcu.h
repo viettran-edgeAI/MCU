@@ -13,7 +13,6 @@ namespace mcu{
             Rf_data test_data;
             Rf_data validation_data;
             Rf_random random_generator;
-            Rf_node_predictor node_pred;
             vector<ID_vector<uint16_t,2>> dataList;
             bool build_model;
             bool data_prepared;
@@ -28,6 +27,7 @@ namespace mcu{
         Rf_config config;
         Rf_logger logger;
         Rf_quantizer quantizer;
+        Rf_node_predictor node_pred;
         Rf_tree_container forest_container;
 
         Rf_pending_data* pending_data = nullptr;
@@ -42,7 +42,6 @@ namespace mcu{
             if(!training_ctx){
                 release_base_data_stub();
                 training_ctx = new TrainingContext();
-                training_ctx->node_pred.init(&base);
                 training_ctx->random_generator.seed(config.random_seed);
             }
             return training_ctx;
@@ -122,10 +121,11 @@ namespace mcu{
             logger.init(&base);
             config.init(&base);
             quantizer.init(&base);
-            forest_container.init(&base, &config);               
+            node_pred.init(&base);
 
             // load resources
             config.loadConfig();
+            forest_container.init(&base, &config, &node_pred);
             quantizer.loadQuantizer();  // Load quantizer first to get quantization_coefficient
             
             // Synchronize quantization_coefficient from quantizer to config if not already set
@@ -212,9 +212,9 @@ namespace mcu{
 
             // re_train node predictor after training session
             if(!training_ctx->build_model){
-                training_ctx->node_pred.re_train(); 
+                node_pred.re_train(); 
             }else{
-                training_ctx->node_pred.flush_buffer();
+                node_pred.flush_buffer();
             }
 #endif
         }
@@ -280,8 +280,8 @@ namespace mcu{
             forest_container.clearForest();
             logger.m_log("start building forest");
 
-            uint16_t estimated_nodes = ctx->node_pred.estimate_nodes(config);
-            uint16_t peak_nodes = ctx->node_pred.queue_peak_size(config);
+            uint16_t estimated_nodes = node_pred.estimate_nodes(config);
+            uint16_t peak_nodes = node_pred.queue_peak_size(config);
             auto& queue_nodes = forest_container.getQueueNodes();
             queue_nodes.clear();
             queue_nodes.reserve(peak_nodes); // Conservative estimate
@@ -294,7 +294,8 @@ namespace mcu{
             logger.m_log("load train_data");
             for(uint8_t i = 0; i < config.num_trees; i++){
                 Rf_tree tree(i);
-                tree.nodes.reserve(estimated_nodes); // Reserve memory for nodes based on prediction
+                tree.set_layout(forest_container.layout_ptr(), true);
+                tree.reset_node_storage(estimated_nodes);
                 queue_nodes.clear();                // Clear queue for each tree
                 buildTree(tree, ctx->dataList[i], queue_nodes);
                 tree.isLoaded = true;
@@ -304,7 +305,7 @@ namespace mcu{
             ctx->train_data.releaseData(); 
             forest_container.is_loaded = false;
             // forest_container.set_to_individual_form();
-            ctx->node_pred.add_new_samples(config.min_split, config.max_depth, forest_container.avg_nodes());
+            node_pred.add_new_samples(config.min_split, config.max_depth, forest_container.avg_nodes());
 
             RF_DEBUG_2(0, "🌲 Forest built successfully: ", forest_container.get_total_nodes(), "nodes","");
             RF_DEBUG_2(1, "Min split: ", config.min_split, "- Max depth: ", config.max_depth);
@@ -740,45 +741,65 @@ namespace mcu{
             if(!ctx){
                 return;
             }
-            tree.nodes.clear();
+
+            node_layout* layout = tree.layout;
+            node_layout* containerLayout = forest_container.layout_ptr();
+            if (!layout || layout != containerLayout) {
+                tree.set_layout(containerLayout ? containerLayout : layout);
+                layout = tree.layout;
+            }
+            if (!layout) {
+                RF_DEBUG(0, "❌ Tree layout not configured. Abort building tree.");
+                return;
+            }
+
+            size_t reservedCapacity = tree.nodes.capacity();
+            if (tree.nodes.get_bits_per_value() != layout->bits_per_node()) {
+                tree.reset_node_storage(reservedCapacity);
+            } else {
+                tree.nodes.clear();
+                if (reservedCapacity > 0) {
+                    tree.nodes.reserve(reservedCapacity);
+                }
+            }
+
             if (sampleIDs.empty()) {
                 RF_DEBUG(1, "⚠️ Warning: sub_data is empty. Ignoring.. !");
                 return;
             }
-        
-            // Create root node and initial sample index list once per tree
+
             Tree_node rootNode;
             tree.nodes.push_back(rootNode);
 
-            // Build a single contiguous index array for this tree
             b_vector<uint16_t, 8> indices;
             indices.reserve(sampleIDs.size());
-            for (const auto& sid : sampleIDs) indices.push_back(sid);
-            
-            // Root covers the whole slice
+            for (const auto& sid : sampleIDs) {
+                indices.push_back(sid);
+            }
+
             queue_nodes.push_back(NodeToBuild(0, 0, static_cast<uint16_t>(indices.size()), 0));
-            bool prinnted = false;
-            // Process nodes breadth-first with minimal allocations
+
             while (!queue_nodes.empty()) {
                 NodeToBuild current = std::move(queue_nodes.front());
                 queue_nodes.erase(0);
-                
-                // Analyze node samples over the slice
+
                 NodeStats stats(config.num_labels);
                 stats.analyzeSamples(indices, current.begin, current.end, config.num_labels, ctx->train_data);
 
                 if(current.nodeIndex >= RF_MAX_NODES){
                     RF_DEBUG(2, "⚠️ Warning: Exceeded maximum node limit. Forcing leaf node 🌿.");
                     uint8_t leafLabel = stats.majorityLabel;
-                    tree.nodes[current.nodeIndex].setIsLeaf(true);
-                    tree.nodes[current.nodeIndex].setLabel(leafLabel);
-                    tree.nodes[current.nodeIndex].setFeatureID(0);
+                    Tree_node nodeValue = tree.nodes.get(current.nodeIndex);
+                    nodeValue.setIsLeaf(true);
+                    nodeValue.setLabel(leafLabel, layout->label_layout);
+                    nodeValue.setFeatureID(0, layout->featureID_layout);
+                    tree.nodes.set(current.nodeIndex, nodeValue);
                     continue;
                 }
 
                 bool shouldBeLeaf = false;
                 uint8_t leafLabel = stats.majorityLabel;
-                
+
                 if (stats.labels.size() == 1) {
                     shouldBeLeaf = true;
                     leafLabel = *stats.labels.begin();
@@ -786,13 +807,14 @@ namespace mcu{
                     shouldBeLeaf = true;
                 }
                 if (shouldBeLeaf) {
-                    tree.nodes[current.nodeIndex].setIsLeaf(true);
-                    tree.nodes[current.nodeIndex].setLabel(leafLabel);
-                    tree.nodes[current.nodeIndex].setFeatureID(0);
+                    Tree_node nodeValue = tree.nodes.get(current.nodeIndex);
+                    nodeValue.setIsLeaf(true);
+                    nodeValue.setLabel(leafLabel, layout->label_layout);
+                    nodeValue.setFeatureID(0, layout->featureID_layout);
+                    tree.nodes.set(current.nodeIndex, nodeValue);
                     continue;
                 }
-                
-                // Random feature subset
+
                 uint8_t num_selected_features = static_cast<uint8_t>(sqrt(config.num_features));
                 if (num_selected_features == 0) num_selected_features = 1;
                 unordered_set<uint16_t> selectedFeatures;
@@ -804,28 +826,29 @@ namespace mcu{
                     if (selectedFeatures.find(t) == selectedFeatures.end()) selectedFeatures.insert(t);
                     else selectedFeatures.insert(j);
                 }
-                
-                // Find best split on the slice
+
                 SplitInfo bestSplit = findBestSplit(indices, current.begin, current.end,
                                                 selectedFeatures, config.use_gini, config.num_labels);
-                
+
                 if (bestSplit.gain <= config.impurity_threshold) {
-                    tree.nodes[current.nodeIndex].setIsLeaf(true);
-                    tree.nodes[current.nodeIndex].setLabel(leafLabel);
-                    tree.nodes[current.nodeIndex].setFeatureID(0);
+                    Tree_node nodeValue = tree.nodes.get(current.nodeIndex);
+                    nodeValue.setIsLeaf(true);
+                    nodeValue.setLabel(leafLabel, layout->label_layout);
+                    nodeValue.setFeatureID(0, layout->featureID_layout);
+                    tree.nodes.set(current.nodeIndex, nodeValue);
                     continue;
                 }
-                
-                // Configure as internal node
-                tree.nodes[current.nodeIndex].setFeatureID(bestSplit.featureID);
-                tree.nodes[current.nodeIndex].setThresholdSlot(bestSplit.thresholdSlot);
-                tree.nodes[current.nodeIndex].setIsLeaf(false);
-                
-                // In-place partition of indices[current.begin, current.end) using actual threshold value
+
+                Tree_node splitNode = tree.nodes.get(current.nodeIndex);
+                splitNode.setFeatureID(bestSplit.featureID, layout->featureID_layout);
+                splitNode.setThresholdSlot(bestSplit.thresholdSlot);
+                splitNode.setIsLeaf(false);
+                tree.nodes.set(current.nodeIndex, splitNode);
+
                 uint16_t iLeft = current.begin;
                 for (uint16_t k = current.begin; k < current.end; ++k) {
                     uint16_t sid = indices[k];
-                    if (sid < ctx->train_data.size() && 
+                    if (sid < ctx->train_data.size() &&
                         ctx->train_data.getFeature(sid, bestSplit.featureID) <= bestSplit.thresholdValue) {
                         if (k != iLeft) {
                             uint16_t tmp = indices[iLeft];
@@ -839,27 +862,36 @@ namespace mcu{
                 uint16_t leftEnd = iLeft;
                 uint16_t rightBegin = iLeft;
                 uint16_t rightEnd = current.end;
-                
-                uint16_t leftChildIndex = tree.nodes.size();
-                uint16_t rightChildIndex = leftChildIndex + 1;
-                tree.nodes[current.nodeIndex].setLeftChildIndex(leftChildIndex);
-                
-                Tree_node leftChild; tree.nodes.push_back(leftChild);
-                Tree_node rightChild; tree.nodes.push_back(rightChild);
-                
+
+                uint16_t leftChildIndex = static_cast<uint16_t>(tree.nodes.size());
+                uint16_t rightChildIndex = static_cast<uint16_t>(leftChildIndex + 1);
+
+                Tree_node parentNode = tree.nodes.get(current.nodeIndex);
+                parentNode.setLeftChildIndex(leftChildIndex, layout->left_child_layout);
+                tree.nodes.set(current.nodeIndex, parentNode);
+
+                Tree_node leftChild;
+                Tree_node rightChild;
+                tree.nodes.push_back(leftChild);
+                tree.nodes.push_back(rightChild);
+
                 if (leftEnd > leftBegin) {
                     queue_nodes.push_back(NodeToBuild(leftChildIndex, leftBegin, leftEnd, current.depth + 1));
                 } else {
-                    tree.nodes[leftChildIndex].setIsLeaf(true);
-                    tree.nodes[leftChildIndex].setLabel(leafLabel);
-                    tree.nodes[leftChildIndex].setFeatureID(0);
+                    Tree_node leafNode = tree.nodes.get(leftChildIndex);
+                    leafNode.setIsLeaf(true);
+                    leafNode.setLabel(leafLabel, layout->label_layout);
+                    leafNode.setFeatureID(0, layout->featureID_layout);
+                    tree.nodes.set(leftChildIndex, leafNode);
                 }
                 if (rightEnd > rightBegin) {
                     queue_nodes.push_back(NodeToBuild(rightChildIndex, rightBegin, rightEnd, current.depth + 1));
                 } else {
-                    tree.nodes[rightChildIndex].setIsLeaf(true);
-                    tree.nodes[rightChildIndex].setLabel(leafLabel);
-                    tree.nodes[rightChildIndex].setFeatureID(0);
+                    Tree_node leafNode = tree.nodes.get(rightChildIndex);
+                    leafNode.setIsLeaf(true);
+                    leafNode.setLabel(leafLabel, layout->label_layout);
+                    leafNode.setFeatureID(0, layout->featureID_layout);
+                    tree.nodes.set(rightChildIndex, leafNode);
                 }
             }
             tree.nodes.fit();
@@ -977,7 +1009,7 @@ namespace mcu{
                 RF_DEBUG(1, "❌ Validation not enabled in config");
                 return 0.0f;
             }
-            // Load forest into memory for evaluation
+
             if(!forest_container.loadForest()){
                 RF_DEBUG(0,"❌ Failed to load forest for validation evaluation!");
                 return 0.0f;
@@ -1252,6 +1284,18 @@ namespace mcu{
             char label[RF_MAX_LABEL_LENGTH] = {'\0'};
             size_t prediction_time;
         } rf_predict_result_t;
+
+        /**
+         * @brief: Warmup prediction to initialize internal caches and structures.
+         * The first inference will initialize the cache and load necessary resources, so it will take quite a while (~8-12ms)
+         * Call this function if you want to ensure that the first inferences are not delayed.
+         */
+        void warmup_prediction(){
+            rf_predict_result_t result;
+            b_vector<float, RF_MAX_FEATURES> dummy_features(config.num_features, 0.0f);
+            predict(dummy_features, result);
+            predict(dummy_features, result);
+        }
 
         // Public API: predict() fills the provided label buffer with the predicted label
         template<typename T>
@@ -1666,6 +1710,19 @@ namespace mcu{
         // get tree which has maximum depth
         uint16_t max_depth_tree() const {
             return forest_container.max_depth_tree();
+        }
+
+        uint8_t bits_per_node() const {
+            return forest_container.bits_per_node();
+        }
+
+        // size of model in ram (bytes)
+        size_t model_size_in_ram() const {
+            return forest_container.size_in_ram();
+        }
+
+        size_t core_model_size_in_ram() const {
+            return forest_container.core_model_size_in_ram();
         }
         
         // get number of inference saved in log (which has actual label feedback)

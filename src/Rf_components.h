@@ -708,6 +708,7 @@ namespace mcu {
             }
             RF_DEBUG(1, "⚙️ Setting impurity_threshold to ", impurity_threshold);
         }
+        
         // setup config manually (when no config file)
         void auto_config(){
             // set metric_score based on dataset balance
@@ -939,6 +940,9 @@ namespace mcu {
                 RF_DEBUG(1, "🔧 Auto-config enabled: generating settings from dataset parameters");
                 auto_config();
             } 
+            if (!extend_base_data){
+                enable_auto_config = false; // disable auto config if not extending base dataset
+            }
             if constexpr (RF_DEBUG_LEVEL >1) print_config();
             isLoaded = true;
             return true;
@@ -1252,14 +1256,14 @@ namespace mcu {
 
     // single data sample structure
     struct Rf_sample{
-        packed_vector<8> features;          // features stored 
+    packed_vector<8> features;          // features stored 
         uint8_t label;                     // label of the sample 
 
         Rf_sample() : features(), label(0) {}
         
         // construct from parent packed_vector in Rf_data
         template<uint8_t bpv>
-        Rf_sample(uint8_t label, const packed_vector<bpv, LARGE>& source, size_t start, size_t end){
+        Rf_sample(uint8_t label, const packed_vector<bpv>& source, size_t start, size_t end){
             this->label = label;
             features = packed_vector<8>(source, start, end);
         }
@@ -1273,8 +1277,8 @@ namespace mcu {
         static constexpr size_t MAX_CHUNKS_SIZE = 8192; // max bytes per chunk (8kB)
 
         // Chunked packed storage - eliminates both heap overhead per sample and large contiguous allocations
-        vector<packed_vector<8, LARGE>> sampleChunks;  // Multiple chunks of packed features (up to 8 bits per value)
-        packed_vector<8> allLabels;                  // Labels storage 
+    vector<packed_vector<8>> sampleChunks;  // Multiple chunks of packed features (up to 8 bits per value)
+    packed_vector<8> allLabels;                  // Labels storage 
         uint16_t bitsPerSample;                        // Number of bits per sample (numFeatures * quantization_coefficient)
         uint16_t samplesEachChunk;                     // Maximum samples per chunk
         size_t size_;  
@@ -1387,7 +1391,7 @@ namespace mcu {
         void ensureChunkCapacity(size_t totalSamples) {
             size_t requiredChunks = (totalSamples + samplesEachChunk - 1) / samplesEachChunk;
             while (sampleChunks.size() < requiredChunks) {
-                packed_vector<8, LARGE> newChunk;
+                packed_vector<8> newChunk;
                 // Reserve space for elements (each element uses quantization_coefficient bits)
                 size_t elementsPerSample = bitsPerSample / quantization_coefficient;  // numFeatures
                 newChunk.set_bits_per_value(quantization_coefficient);
@@ -2384,7 +2388,7 @@ namespace mcu {
             size_t total = sizeof(Rf_data);
             total += allLabels.capacity() * sizeof(uint8_t);
             for (const auto& chunk : sampleChunks) {
-                total += sizeof(packed_vector<8, LARGE>);
+                total += sizeof(packed_vector<8>);
                 total += chunk.capacity() * sizeof(uint8_t); // stored in bytes regardless of bpv
             }
             return total;
@@ -2397,151 +2401,185 @@ namespace mcu {
     ---------------------------------------------------- RF_TREE -----------------------------------------------------
     ------------------------------------------------------------------------------------------------------------------
     */
+    struct node_layout{
+        pair<uint8_t, uint8_t> featureID_layout; // start bit, length in bits
+        pair<uint8_t, uint8_t> label_layout;     // start bit, length in bits
+        pair<uint8_t, uint8_t> left_child_layout; // start bit, length in bits
+
+        //default constructor
+        node_layout() {
+            featureID_layout  = make_pair(4, 10);       // 10 bits for featureID - max 1024 features
+            label_layout      = make_pair(14, 8);       // 8 bits for label - max 256 classes
+            left_child_layout = make_pair(22, 10);      // 10 bits for left child index - max 1024 nodes
+        }
+        // constructor
+        node_layout(uint8_t feature_bits, uint8_t label_bits, uint8_t child_index_bits) {
+            set_layout(feature_bits, label_bits, child_index_bits);
+        }
+
+        void set_layout(uint8_t feature_bits, uint8_t label_bits, uint8_t child_index_bits) {
+            featureID_layout = make_pair(4, feature_bits);
+            label_layout = make_pair(featureID_layout.first + featureID_layout.second, label_bits);
+            left_child_layout = make_pair(label_layout.first + label_layout.second, child_index_bits);
+        }
+        uint8_t bits_per_node() const{
+            return 1 + 3 + featureID_layout.second + label_layout.second + left_child_layout.second;
+        }
+    };
+
     struct Tree_node{
         uint32_t packed_data; 
         
         /** Bit layout optimized for breadth-first tree building:
-            * Bits 0-9  :  featureID        (10 bits)     -> 0 - 1023 features
-            * Bits 10-17:  label            (8 bits)      -> 0 - 255 classes  
-            * Bits 18-20:  threshold slot   (3 bits)      -> 0 - 7 (maps to actual thresholds)
-            * Bit 21    :  is_leaf          (1 bit)       -> 0/1 
-            * Bits 22-31:  left child index (10 bits)     -> 0 - 1023 nodes
+            * bit   0      : is_leaf        
+            * bits  1-3    : threshold slot
+            * bits  4-o1   : featureID    (o1 - offset_1 = 4 + feature_bits)
+            * bits  s1-o2  : label        (s1 - start_1 = o1 + 1, o2 - offset_2 = s1 + label_bits)
+            * bits  s2-o3  : left child index   (s2 - start_2 = o2 + 1, o3 - offset_3 = s2 + child_index_bits)
         @note: right child index = left child index + 1 
         */
 
-        // Constructor
         Tree_node() : packed_data(0) {}
 
-        // Getter methods for packed data
-        uint16_t getFeatureID() const {
-            return packed_data & 0x3FF;  // Bits 0-9 (10 bits)
+        inline bool getIsLeaf() const {
+            return (packed_data >> 0) & 0x01;  // Bit 0
+        }
+        inline uint8_t getThresholdSlot() const {
+            return (packed_data >> 1) & 0x07;  // Bits 1-3 (3 bits)
+        }
+        inline uint16_t getFeatureID(const pair<uint8_t, uint8_t>& layout) const noexcept{
+            return (packed_data >> layout.first) & ((1 << layout.second) - 1);  
         }
         
-        uint8_t getLabel() const {
-            return (packed_data >> 10) & 0xFF;  // Bits 10-17 (8 bits)
+        inline uint8_t getLabel(const pair<uint8_t, uint8_t>& layout) const noexcept{
+            return (packed_data >> layout.first) & ((1 << layout.second) - 1);  
+        }
+
+        inline uint16_t getLeftChildIndex(const pair<uint8_t, uint8_t>& layout) const noexcept{
+            return (packed_data >> layout.first) & ((1 << layout.second) - 1);  
         }
         
-        uint8_t getThresholdSlot() const {
-            return (packed_data >> 18) & 0x07;  // Bits 18-20 (3 bits)
-        }
-        
-        bool getIsLeaf() const {
-            return (packed_data >> 21) & 0x01;  // Bit 21
-        }
-        
-        uint16_t getLeftChildIndex() const {
-            return (packed_data >> 22) & 0x3FF;  // Bits 22-31 (10 bits)
-        }
-        
-        uint16_t getRightChildIndex() const {
-            return getLeftChildIndex() + 1;  // Breadth-first property: right = left + 1
+        inline uint16_t getRightChildIndex(const pair<uint8_t, uint8_t>& layout) const noexcept{
+            return getLeftChildIndex(layout) + 1;  // Breadth-first property: right = left + 1
         }
         
         // Setter methods for packed data
-        void setFeatureID(uint16_t featureID) {
-            packed_data = (packed_data & 0xFFFFFC00) | (featureID & 0x3FF);  // Bits 0-9
+        inline void setIsLeaf(bool isLeaf) {
+            packed_data &= ~(0x01); // Clear bit 0
+            packed_data |= (isLeaf ? 1 : 0) << 0; // Set bit 0
         }
-        
-        void setLabel(uint8_t label) {
-            packed_data = (packed_data & 0xFFFC03FF) | ((uint32_t)(label & 0xFF) << 10);  // Bits 10-17
+        inline void setThresholdSlot(uint8_t slot) {
+            packed_data &= ~(0x07 << 1); // Clear bits 1-3
+            packed_data |= (slot & 0x07) << 1; // Set bits 1-3
         }
-        
-        void setThresholdSlot(uint8_t slot) {
-            packed_data = (packed_data & 0xFFE3FFFF) | ((uint32_t)(slot & 0x07) << 18);  // Bits 18-20
+        inline void setFeatureID(uint16_t featureID, const pair<uint8_t, uint8_t>& layout) noexcept{
+            packed_data &= ~(((1 << layout.second) - 1) << layout.first); // Clear featureID bits
+            packed_data |= (featureID & ((1 << layout.second) - 1)) << layout.first; // Set featureID bits
         }
-        
-        void setIsLeaf(bool isLeaf) {
-            packed_data = (packed_data & 0xFFDFFFFF) | ((uint32_t)(isLeaf ? 1 : 0) << 21);  // Bit 21
+        inline void setLabel(uint8_t label, const pair<uint8_t, uint8_t>& layout) noexcept{
+            packed_data &= ~(((1 << layout.second) - 1) << layout.first); // Clear label bits
+            packed_data |= (label & ((1 << layout.second) - 1)) << layout.first; // Set label bits
         }
-        
-        void setLeftChildIndex(uint16_t index) {
-            packed_data = (packed_data & 0x003FFFFF) | ((uint32_t)(index & 0x3FF) << 22);  // Bits 22-31
+        inline void setLeftChildIndex(uint16_t index, const pair<uint8_t, uint8_t>& layout) noexcept{
+            packed_data &= ~(((1 << layout.second) - 1) << layout.first); // Clear left child index bits
+            packed_data |= (index & ((1 << layout.second) - 1)) << layout.first; // Set left child index bits
         }
     };
 
-    struct NodeToBuild {
-        uint16_t nodeIndex;
-        uint16_t begin;   // inclusive
-        uint16_t end;     // exclusive
-        uint8_t depth;
-        
-        NodeToBuild() : nodeIndex(0), begin(0), end(0), depth(0) {}
-        NodeToBuild(uint16_t idx, uint16_t b, uint16_t e, uint8_t d) 
-            : nodeIndex(idx), begin(b), end(e), depth(d) {}
-    };
 
     class Rf_tree {
     public:
-        vector<Tree_node> nodes;  // Vector-based tree storage
+        packed_vector<32, Tree_node> nodes;
+        node_layout* layout = nullptr;
         uint8_t index;
         bool isLoaded;
 
-        Rf_tree() : index(255), isLoaded(false) {}
-        
-        Rf_tree(uint8_t idx) : index(idx), isLoaded(false) {}
+        Rf_tree() : nodes(), layout(nullptr), index(255), isLoaded(false) {}
 
-        // Copy constructor
-        Rf_tree(const Rf_tree& other) 
-            : nodes(other.nodes), index(other.index), isLoaded(other.isLoaded) {}
+        explicit Rf_tree(uint8_t idx) : nodes(), layout(nullptr), index(idx), isLoaded(false) {}
 
-        // Copy assignment operator
+        Rf_tree(const Rf_tree& other)
+            : nodes(other.nodes), layout(other.layout), index(other.index), isLoaded(other.isLoaded) {}
+
         Rf_tree& operator=(const Rf_tree& other) {
             if (this != &other) {
                 nodes = other.nodes;
+                layout = other.layout;
                 index = other.index;
                 isLoaded = other.isLoaded;
             }
             return *this;
         }
 
-        // Move constructor
-        Rf_tree(Rf_tree&& other) noexcept 
-            : nodes(std::move(other.nodes)), index(other.index), isLoaded(other.isLoaded) {
+        Rf_tree(Rf_tree&& other) noexcept
+            : nodes(std::move(other.nodes)),
+              layout(other.layout),
+              index(other.index),
+              isLoaded(other.isLoaded) {
+            other.layout = nullptr;
             other.index = 255;
             other.isLoaded = false;
         }
 
-        // Move assignment operator
         Rf_tree& operator=(Rf_tree&& other) noexcept {
             if (this != &other) {
                 nodes = std::move(other.nodes);
+                layout = other.layout;
                 index = other.index;
                 isLoaded = other.isLoaded;
+                other.layout = nullptr;
                 other.index = 255;
                 other.isLoaded = false;
             }
             return *this;
         }
 
-        // Count total number of nodes in the tree (including leaf nodes)
+        void set_layout(node_layout* layout_ptr, bool reset_storage = false) {
+            layout = layout_ptr;
+            if (reset_storage) {
+                reset_node_storage();
+            }
+        }
+
+        void reset_node_storage(size_t reserveCount = 0) {
+            const uint8_t desired = desired_bits_per_node();
+            if (nodes.get_bits_per_value() != desired) {
+                nodes.set_bits_per_value(desired);
+            } else {
+                nodes.clear();
+            }
+            if (reserveCount > 0) {
+                nodes.reserve(reserveCount);
+            }
+        }
+
         uint32_t countNodes() const {
-            return nodes.size();
+            return static_cast<uint32_t>(nodes.size());
         }
 
         size_t memory_usage() const {
-            return nodes.size() * 4 + sizeof(*this);
+            return nodes.memory_usage() + sizeof(*this);
         }
 
-        // Count leaf nodes in the tree
         uint32_t countLeafNodes() const {
             uint32_t leafCount = 0;
-            for (const auto& node : nodes) {
-                if (node.getIsLeaf()) {
-                    leafCount++;
+            for (size_t i = 0; i < nodes.size(); ++i) {
+                if (nodes.get(i).getIsLeaf()) {
+                    ++leafCount;
                 }
             }
             return leafCount;
         }
 
-        // Get tree depth
         uint16_t getTreeDepth() const {
-            if (nodes.empty()) return 0;
+            if (nodes.empty() || !layout) {
+                return 0;
+            }
             return getTreeDepthRecursive(0);
         }
 
-        // Save tree to file system for ESP32
         bool releaseTree(const char* path, bool re_use = false) {
-            if(!re_use){
+            if (!re_use) {
                 if (index > RF_MAX_TREES || nodes.empty()) {
                     RF_DEBUG(0, "❌ save tree failed, invalid tree index: ", index);
                     return false;
@@ -2551,7 +2589,6 @@ namespace mcu {
                     return false;
                 }
                 if (RF_FS_EXISTS(path)) {
-                    // delete existing file to avoid conflicts
                     if (!RF_FS_REMOVE(path)) {
                         RF_DEBUG(0, "❌ Failed to remove existing tree file: ", path);
                         return false;
@@ -2562,56 +2599,50 @@ namespace mcu {
                     RF_DEBUG(0, "❌ Failed to open tree file for writing: ", path);
                     return false;
                 }
-                
-                // Write header - magic number for validation
-                uint32_t magic = 0x54524545; // "TREE" in hex
-                file.write((uint8_t*)&magic, sizeof(magic));
-                
-                // Write number of nodes
-                uint32_t nodeCount = nodes.size();
-                file.write((uint8_t*)&nodeCount, sizeof(nodeCount));
-                
-                // Batch write all nodes for better performance
-                if(nodeCount > 0) {
-                    // Calculate total size needed
-                    size_t totalSize = nodeCount * sizeof(nodes[0].packed_data);
-                    
-                    // Create buffer for batch write
-                    uint8_t* buffer = (uint8_t*)malloc(totalSize);
-                    if(buffer) {
-                        // Copy all packed_data to buffer
-                        for(uint32_t i = 0; i < nodeCount; i++) {
-                            memcpy(buffer + (i * sizeof(nodes[0].packed_data)), 
-                                   &nodes[i].packed_data, sizeof(nodes[0].packed_data));
+
+                uint32_t magic = 0x54524545; // "TREE"
+                file.write(reinterpret_cast<uint8_t*>(&magic), sizeof(magic));
+
+                uint32_t nodeCount = static_cast<uint32_t>(nodes.size());
+                file.write(reinterpret_cast<uint8_t*>(&nodeCount), sizeof(nodeCount));
+
+                if (nodeCount > 0) {
+                    const size_t totalSize = nodeCount * sizeof(uint32_t);
+                    uint8_t* buffer = static_cast<uint8_t*>(malloc(totalSize));
+                    if (buffer) {
+                        for (uint32_t i = 0; i < nodeCount; ++i) {
+                            const Tree_node node = nodes.get(i);
+                            memcpy(buffer + (i * sizeof(uint32_t)),
+                                   &node.packed_data,
+                                   sizeof(uint32_t));
                         }
-                        
-                        // Single write operation
                         size_t written = file.write(buffer, totalSize);
                         free(buffer);
-                        
-                        if(written != totalSize) {
+                        if (written != totalSize) {
                             RF_DEBUG(1, "⚠️ Incomplete tree write to file system");
                         }
                     } else {
-                        // Fallback to individual writes if malloc fails
-                        for (const auto& node : nodes) {
-                            file.write((uint8_t*)&node.packed_data, sizeof(node.packed_data));
+                        for (uint32_t i = 0; i < nodeCount; ++i) {
+                            const Tree_node node = nodes.get(i);
+                            file.write(reinterpret_cast<const uint8_t*>(&node.packed_data),
+                                       sizeof(node.packed_data));
                         }
                     }
-                }    
+                }
                 file.close();
-            }  
+            }
             nodes.clear();
-            nodes.fit(); 
+            nodes.fit();
             isLoaded = false;
             RF_DEBUG(2, "✅ Tree saved to file system: ", index);
             return true;
         }
 
-        // Load tree from file system into RAM for ESP32
         bool loadTree(const char* path, bool re_use = false) {
-            if (isLoaded) return true;
-            
+            if (isLoaded) {
+                return true;
+            }
+
             if (index >= RF_MAX_TREES) {
                 RF_DEBUG(0, "❌ Invalid tree index: ", index);
                 return false;
@@ -2629,125 +2660,134 @@ namespace mcu {
                 RF_DEBUG(2, "❌ Failed to open tree file: ", path);
                 return false;
             }
-            
-            // Read and verify magic number
+
             uint32_t magic;
-            if (file.read((uint8_t*)&magic, sizeof(magic)) != sizeof(magic) || magic != 0x54524545) {
+            if (file.read(reinterpret_cast<uint8_t*>(&magic), sizeof(magic)) != sizeof(magic) ||
+                magic != 0x54524545) {
                 RF_DEBUG(0, "❌ Invalid tree file format: ", path);
                 file.close();
                 return false;
             }
-            
-            // Read number of nodes
+
             uint32_t nodeCount;
-            if (file.read((uint8_t*)&nodeCount, sizeof(nodeCount)) != sizeof(nodeCount)) {
+            if (file.read(reinterpret_cast<uint8_t*>(&nodeCount), sizeof(nodeCount)) != sizeof(nodeCount)) {
                 RF_DEBUG(0, "❌ Failed to read node count: ", path);
                 file.close();
                 return false;
             }
-            
-            if (nodeCount == 0 || nodeCount > 2047) { // 11-bit limit for child indices
+
+            if (nodeCount == 0 || nodeCount > 2047) {
                 RF_DEBUG(1, "❌ Invalid node count in tree file");
                 file.close();
                 return false;
             }
-            
-            // Clear existing nodes and reserve space
-            nodes.clear();
-            nodes.reserve(nodeCount);
-            
-            // Load all nodes
-            for (uint32_t i = 0; i < nodeCount; i++) {
+
+            reset_node_storage(nodeCount);
+            for (uint32_t i = 0; i < nodeCount; ++i) {
                 Tree_node node;
-                if (file.read((uint8_t*)&node.packed_data, sizeof(node.packed_data)) != sizeof(node.packed_data)) {
-                    RF_DEBUG(0, "❌ Faile to read node data");
+                if (file.read(reinterpret_cast<uint8_t*>(&node.packed_data), sizeof(node.packed_data))
+                    != sizeof(node.packed_data)) {
+                    RF_DEBUG(0, "❌ Failed to read node data");
                     nodes.clear();
                     file.close();
                     return false;
                 }
                 nodes.push_back(node);
             }
-            
+
             file.close();
-            
-            // Update state
+
             isLoaded = true;
             RF_DEBUG_2(2, "✅ Tree loaded (", nodeCount, "nodes): ", path);
 
-            if (!re_use) { 
-                RF_DEBUG(2, "♻️ Single-load mode: removing tree file after loading; ", path); 
-                RF_FS_REMOVE(path); // Remove file after loading in single mode
+            if (!re_use) {
+                RF_DEBUG(2, "♻️ Single-load mode: removing tree file after loading; ", path);
+                RF_FS_REMOVE(path);
             }
             return true;
         }
 
-        // predict single (normalized)sample - packed features - hot path optimized
-        // Optimized version: uses pre-computed threshold cache
-        __attribute__((always_inline)) inline uint8_t predict_features(const packed_vector<8>& packed_features, const b_vector<uint16_t>& thresholds) const {
-            // Fast path: assume tree is loaded and valid
-            uint16_t currentIndex = 0;  // Start from root
-            const Tree_node* node_data = nodes.data();
-            const uint16_t node_count = nodes.size();
-            
-            // Main traversal loop - inline everything
-            while (__builtin_expect(currentIndex < node_count, 1)) {
-                uint32_t packed = node_data[currentIndex].packed_data;
-                
-                // Check if leaf (bit 21)
-                if (__builtin_expect((packed >> 21) & 0x01, 0)) {
-                    // It's a leaf - return label (bits 10-17)
-                    return (packed >> 10) & 0xFF;
-                }
-                
-                // Internal node - extract and traverse
-                uint16_t featureID = packed & 0x3FF;  // bits 0-9
-                uint8_t thresholdSlot = (packed >> 18) & 0x07;  // bits 18-20 (3 bits)
-                
-                // Map slot to actual threshold value
-                uint16_t threshold = (thresholdSlot < thresholds.size()) ? thresholds[thresholdSlot] : thresholds.back();
-                
-                uint16_t featureValue = packed_features[featureID];
-                
-                // Navigate: left child = bits 22-31, right = left + 1
-                const uint16_t leftChild = (packed >> 22) & 0x3FF;
-                currentIndex = (featureValue <= threshold) ? leftChild : (leftChild + 1);
+        __attribute__((always_inline)) inline uint8_t predict_features(
+            const packed_vector<8>& packed_features,
+            const b_vector<uint16_t>& thresholds) const {
+            if (!layout || nodes.empty()) {
+                return 255;
             }
-            return 255; // invalid label - Should not reach here in valid tree
+
+            const auto& featureLayout = layout->featureID_layout;
+            const auto& labelLayout = layout->label_layout;
+            const auto& childLayout = layout->left_child_layout;
+
+            uint16_t currentIndex = 0;
+            const uint16_t nodeCount = static_cast<uint16_t>(nodes.size());
+
+            while (__builtin_expect(currentIndex < nodeCount, 1)) {
+                const Tree_node node = nodes.get(currentIndex);
+
+                if (__builtin_expect(node.getIsLeaf(), 0)) {
+                    return node.getLabel(labelLayout);
+                }
+
+                const uint16_t featureID = node.getFeatureID(featureLayout);
+                const uint8_t thresholdSlot = node.getThresholdSlot();
+                const uint16_t threshold = (!thresholds.empty() && thresholdSlot < thresholds.size())
+                                               ? thresholds[thresholdSlot]
+                                               : (!thresholds.empty() ? thresholds.back() : 0);
+
+                const uint16_t featureValue = static_cast<uint16_t>(packed_features[featureID]);
+                const uint16_t leftChild = node.getLeftChildIndex(childLayout);
+                currentIndex = (featureValue <= threshold)
+                                   ? leftChild
+                                   : node.getRightChildIndex(childLayout);
+            }
+            return 255;
         }
 
         void clearTree(bool freeMemory = false) {
+            (void)freeMemory;
             nodes.clear();
             nodes.fit();
-            if(freeMemory) nodes.fit(); // Release excess memory
             isLoaded = false;
         }
 
         void purgeTree(const char* path, bool rmf = true) {
             nodes.clear();
-            nodes.fit(); // Release excess memory
-            if(rmf && index < RF_MAX_TREES) {
+            nodes.fit();
+            if (rmf && index < RF_MAX_TREES) {
                 if (RF_FS_EXISTS(path)) {
                     RF_FS_REMOVE(path);
                     RF_DEBUG(2, "🗑️ Tree file removed: ", path);
-                } 
+                }
             }
             index = 255;
             isLoaded = false;
         }
 
     private:
-        // Recursive helper to get tree depth
+        inline uint8_t desired_bits_per_node() const noexcept {
+            uint8_t bits = layout ? layout->bits_per_node() : static_cast<uint8_t>(32);
+            if (bits == 0 || bits > 32) {
+                bits = 32;
+            }
+            return bits;
+        }
+
         uint16_t getTreeDepthRecursive(uint16_t nodeIndex) const {
-            if (nodeIndex >= nodes.size()) return 0;
-            if (nodes[nodeIndex].getIsLeaf()) return 1;
-            
-            uint16_t leftIndex = nodes[nodeIndex].getLeftChildIndex();
-            uint16_t rightIndex = nodes[nodeIndex].getRightChildIndex();
-            
-            uint16_t leftDepth = getTreeDepthRecursive(leftIndex);
-            uint16_t rightDepth = getTreeDepthRecursive(rightIndex);
-            
-            return 1 + (leftDepth > rightDepth ? leftDepth : rightDepth);
+            if (!layout || nodeIndex >= nodes.size()) {
+                return 0;
+            }
+            const Tree_node node = nodes.get(nodeIndex);
+            if (node.getIsLeaf()) {
+                return 1;
+            }
+
+            const uint16_t leftIndex = node.getLeftChildIndex(layout->left_child_layout);
+            const uint16_t rightIndex = node.getRightChildIndex(layout->left_child_layout);
+
+            const uint16_t leftDepth = getTreeDepthRecursive(leftIndex);
+            const uint16_t rightDepth = getTreeDepthRecursive(rightIndex);
+
+            return static_cast<uint16_t>(1 + (leftDepth > rightDepth ? leftDepth : rightDepth));
         }
     };
      
@@ -3366,8 +3406,13 @@ namespace mcu {
             *outData = data;
             if (outLength) {
                 uint16_t cached = (normalizedLabel < labelLengths.size()) ? labelLengths[normalizedLabel] : 0;
+                // Fallback: if cache is empty (0), compute length once and update cache for future calls
                 if (cached == 0) {
                     cached = static_cast<uint16_t>(strlen(data));
+                    // Update cache if within bounds to avoid repeated strlen calls
+                    if (normalizedLabel < labelLengths.size() && labelLengths[normalizedLabel] == 0) {
+                        const_cast<b_vector<uint16_t>&>(labelLengths)[normalizedLabel] = cached;
+                    }
                 }
                 *outLength = cached;
             }
@@ -3894,7 +3939,7 @@ namespace mcu {
             return estimate < RF_MAX_NODES ? estimate : 512;       // 2kB RAM
         }
 
-        uint16_t estimate_nodes(Rf_config& config) {
+        uint16_t estimate_nodes(const Rf_config& config) {
             uint8_t min_split = config.min_split;
             uint16_t max_depth = config.max_depth;
             float raw_est = raw_estimate(min_split, max_depth);
@@ -3910,7 +3955,7 @@ namespace mcu {
             return min(120, estimate_nodes(min_split, max_depth) * peak_percent / 100);
         }
 
-        uint16_t queue_peak_size(Rf_config& config) {
+        uint16_t queue_peak_size(const Rf_config& config) {
             uint16_t est_nodes = estimate_nodes(config);
             if(config.training_score == K_FOLD_SCORE){
                 est_nodes = est_nodes * config.k_folds / (config.k_folds + 1);
@@ -3920,6 +3965,7 @@ namespace mcu {
             uint16_t min_peak_theory = 30;
             if (est_nodes > max_peak_theory) return max_peak_theory;
             if (est_nodes < min_peak_theory) return min_peak_theory;
+            return est_nodes;
         }
 
         void flush_buffer() {
@@ -4373,6 +4419,18 @@ namespace mcu {
     ------------------------------------------------------------------------------------------------------------------------------
     */
 
+    struct NodeToBuild {
+        uint16_t nodeIndex;
+        uint16_t begin;   // inclusive
+        uint16_t end;     // exclusive
+        uint8_t depth;
+        
+        NodeToBuild() : nodeIndex(0), begin(0), end(0), depth(0) {}
+        NodeToBuild(uint16_t idx, uint16_t b, uint16_t e, uint8_t d) 
+            : nodeIndex(idx), begin(b), end(e), depth(d) {}
+    };
+
+
     class Rf_tree_container{
         private:
             // String model_name;
@@ -4381,6 +4439,8 @@ namespace mcu {
             char tree_path_buffer[RF_PATH_BUFFER] = {0}; // Buffer for tree file paths
 
             vector<Rf_tree> trees;        // b_vector storing root nodes of trees (now manages file system file_paths)
+            node_layout layout;
+            Rf_node_predictor* node_pred_ptr = nullptr;
             size_t   total_depths;       // store total depth of all trees
             size_t   total_nodes;        // store total nodes of all trees
             size_t   total_leaves;       // store total leaves of all trees
@@ -4390,29 +4450,113 @@ namespace mcu {
 
             bool is_unified = true;  // Default to unified form (used at the end of training and inference)
 
+            void rebuild_tree_slots(uint8_t count, bool reset_storage = true) {
+                trees.clear();
+                trees.reserve(count);
+                for (uint8_t i = 0; i < count; ++i) {
+                    Rf_tree tree(i);
+                    tree.set_layout(&layout, reset_storage);
+                    trees.push_back(std::move(tree));
+                }
+            }
+
+            void ensure_tree_slot(uint8_t index) {
+                if (index < trees.size()) {
+                    if (trees[index].layout != &layout) {
+                        trees[index].set_layout(&layout);
+                    }
+                    if (trees[index].index == 255) {
+                        trees[index].index = index;
+                    }
+                    return;
+                }
+                const size_t desired = static_cast<size_t>(index) + 1;
+                trees.reserve(desired);
+                while (trees.size() < desired) {
+                    uint8_t new_index = static_cast<uint8_t>(trees.size());
+                    Rf_tree tree(new_index);
+                    tree.set_layout(&layout, true);
+                    trees.push_back(std::move(tree));
+                }
+            }
+
+            void sync_tree_layouts(bool reset_storage = false) {
+                for (size_t i = 0; i < trees.size(); ++i) {
+                    trees[i].index = static_cast<uint8_t>(i);
+                    trees[i].set_layout(&layout, reset_storage);
+                }
+            }
+
             inline bool has_base() const { 
                 return config_ptr!= nullptr && base_ptr != nullptr && base_ptr->ready_to_use(); 
+            }
+
+            uint8_t bits_required(uint32_t max_value) {
+                uint8_t bits = 0;
+                do {
+                    ++bits;
+                    max_value >>= 1;
+                } while (max_value != 0 && bits < 32);
+                return (bits == 0) ? static_cast<uint8_t>(1) : bits;
+            }
+
+            void calculate_layout(uint8_t num_label, uint16_t num_feature, uint16_t max_node){
+                const uint32_t fallback_node_index = (RF_MAX_NODES > 0)
+                    ? static_cast<uint32_t>(RF_MAX_NODES - 1)
+                    : static_cast<uint32_t>(0);
+
+                const uint32_t max_label_id   = (num_label  > 0) ? static_cast<uint32_t>(num_label  - 1) : 0;
+                const uint32_t max_feature_id = (num_feature > 0) ? static_cast<uint32_t>(num_feature - 1) : 0;
+
+                uint32_t max_node_index = (max_node   > 0) ? static_cast<uint32_t>(max_node   - 1) : 0;
+                if (max_node_index > fallback_node_index) {
+                    max_node_index = fallback_node_index;
+                }
+
+                uint8_t label_bits       = bits_required(max_label_id);
+                uint8_t feature_bits     = bits_required(max_feature_id);
+                uint8_t child_index_bits = bits_required(max_node_index);
+
+                if (label_bits > 8) {
+                    label_bits = 8;
+                }
+                if (feature_bits > 10) {
+                    feature_bits = 10;
+                }
+                if (child_index_bits > 10) {
+                    child_index_bits = 10;
+                }
+
+                layout.set_layout(feature_bits, label_bits, child_index_bits);
             }
             
         public:
             bool is_loaded = false;
 
             Rf_tree_container(){};
-            Rf_tree_container(Rf_base* base, Rf_config* config){
-                init(base, config);
+            Rf_tree_container(Rf_base* base, Rf_config* config, Rf_node_predictor* node_pred){
+                init(base, config, node_pred);
             }
 
-            void init(Rf_base* base, Rf_config* config){
+            void init(Rf_base* base, Rf_config* config, Rf_node_predictor* node_pred){
                 base_ptr = base;
                 config_ptr = config;
-                trees.clear();
-                trees.reserve(config_ptr->num_trees);
-                for(uint8_t i=0; i < config_ptr->num_trees; i++){
-                    Rf_tree empty_tree;
-                    empty_tree.index = i; 
-                    trees.push_back(std::move(empty_tree));
+                node_pred_ptr = node_pred;
+                if (!config_ptr) {
+                    trees.clear();
+                    return;
                 }
+
+                uint16_t est_nodes = node_pred_ptr
+                    ? node_pred_ptr->estimate_nodes(*config_ptr)
+                    : static_cast<uint16_t>(RF_MAX_NODES);
+                calculate_layout(config_ptr->num_labels, config_ptr->num_features, est_nodes);
+                rebuild_tree_slots(config_ptr->num_trees, true);
                 predictClass.reserve(config_ptr->num_trees);
+                queue_nodes.clear();
+                total_depths = 0;
+                total_nodes = 0;
+                total_leaves = 0;
                 is_loaded = false; // Initially in individual form
             }
 
@@ -4422,6 +4566,7 @@ namespace mcu {
                 trees.clear();
                 base_ptr = nullptr;
                 config_ptr = nullptr;
+                node_pred_ptr = nullptr;
             }
 
 
@@ -4439,9 +4584,13 @@ namespace mcu {
                     yield();        
                     delay(10);
                 }
-                trees.clear();
-                // Reserve space for the expected number of trees but don't pre-size
-                trees.reserve(config_ptr->num_trees);
+                if (config_ptr) {
+                    uint16_t est_nodes = node_pred_ptr
+                        ? node_pred_ptr->estimate_nodes(*config_ptr)
+                        : static_cast<uint16_t>(RF_MAX_NODES);
+                    calculate_layout(config_ptr->num_labels, config_ptr->num_features, est_nodes);
+                }
+                rebuild_tree_slots(config_ptr->num_trees, true);
                 is_loaded = false;
                 // Remove old forest file to ensure clean slate
                 char oldForestFile[RF_PATH_BUFFER];
@@ -4459,15 +4608,13 @@ namespace mcu {
             bool add_tree(Rf_tree&& tree){
                 if(!tree.isLoaded) RF_DEBUG(2, "🟡 Warning: Adding an unloaded tree to the container.");
                 if(tree.index != 255 && tree.index < config_ptr->num_trees) {
-                    // Resize vector if needed to accommodate this tree's index
-                    if(trees.size() <= tree.index) {
-                        trees.resize(tree.index + 1);
-                    }
-                    // Check if slot is already occupied
-                    if(trees[tree.index].isLoaded || trees[tree.index].index != 255) {
+                    tree.set_layout(&layout);
+                    ensure_tree_slot(tree.index);
+                    auto& slot = trees[tree.index];
+                    if(slot.isLoaded || slot.index != 255) {
                         RF_DEBUG(2, "⚠️ Warning: Overwriting tree index: ", tree.index);
                         base_ptr->build_tree_file_path(tree_path_buffer, tree.index);
-                        trees[tree.index].purgeTree(tree_path_buffer); // Remove old tree file if exists
+                        slot.purgeTree(tree_path_buffer);
                     }
                     uint16_t d = tree.getTreeDepth();
                     uint16_t n = tree.countNodes();
@@ -4479,7 +4626,8 @@ namespace mcu {
 
                     base_ptr->build_tree_file_path(tree_path_buffer, tree.index);
                     tree.releaseTree(tree_path_buffer); // Release tree nodes from memory after adding to container
-                    trees[tree.index] = std::move(tree);
+                    slot = std::move(tree);
+                    slot.set_layout(&layout);
                 } else {
                     RF_DEBUG(0, "❌ Invalid tree index: ",tree.index);
                     return false;
@@ -4489,10 +4637,19 @@ namespace mcu {
 
             // Finalize container after all trees are added - ensure proper sizing
             void finalizeContainer() {
-                if(config_ptr && trees.size() != config_ptr->num_trees) {
-                    trees.resize(config_ptr->num_trees);
-                    RF_DEBUG(2, "🔧 Finalized container size to ", config_ptr->num_trees);
+                if(!config_ptr) {
+                    return;
                 }
+                if(trees.size() < config_ptr->num_trees) {
+                    if(config_ptr->num_trees > 0) {
+                        ensure_tree_slot(static_cast<uint8_t>(config_ptr->num_trees - 1));
+                    }
+                    RF_DEBUG(2, "🔧 Finalized container size to ", config_ptr->num_trees);
+                } else if(trees.size() > config_ptr->num_trees) {
+                    trees.resize(config_ptr->num_trees);
+                    RF_DEBUG(2, "🔧 Trimmed container size to ", config_ptr->num_trees);
+                }
+                sync_tree_layouts();
             }
 
             uint8_t predict_features(const packed_vector<8>& features, const b_vector<uint16_t>& thresholds) {
@@ -4501,30 +4658,55 @@ namespace mcu {
                     return 255; // Unknown class
                 }
                 
-                // Use fixed array for vote counting - much faster than unordered_map
                 const uint8_t numLabels = config_ptr->num_labels;
-                uint8_t votes[RF_MAX_LABELS] = {0};  // Stack allocation, zero-initialized
                 
-                // Collect votes from all trees
-                const uint16_t numTrees = trees.size();
-                for(uint16_t t = 0; t < numTrees; ++t) {
-                    uint8_t predict = trees[t].predict_features(features, thresholds);
-                    if(__builtin_expect(predict < numLabels, 1)) {
-                        votes[predict]++;
+                // Use stack array only for small label sets to avoid stack overflow
+                // For larger label sets, use heap-allocated map
+                if(__builtin_expect(numLabels <= 32, 1)) {
+                    // Fast path: small label count - use stack array (32 bytes max)
+                    uint8_t votes[32] = {0};
+                    
+                    const uint16_t numTrees = trees.size();
+                    for(uint16_t t = 0; t < numTrees; ++t) {
+                        uint8_t predict = trees[t].predict_features(features, thresholds);
+                        if(__builtin_expect(predict < numLabels, 1)) {
+                            votes[predict]++;
+                        }
                     }
-                }
-                
-                // Find majority vote - single pass
-                uint8_t maxVotes = 0;
-                uint8_t mostPredict = 0;
-                for(uint8_t label = 0; label < numLabels; ++label) {
-                    if(votes[label] > maxVotes) {
-                        maxVotes = votes[label];
-                        mostPredict = label;
+                    
+                    uint8_t maxVotes = 0;
+                    uint8_t mostPredict = 0;
+                    for(uint8_t label = 0; label < numLabels; ++label) {
+                        if(votes[label] > maxVotes) {
+                            maxVotes = votes[label];
+                            mostPredict = label;
+                        }
                     }
+                    
+                    return (maxVotes > 0) ? mostPredict : 255;
+                } else {
+                    // Slow path: large label count - use map to avoid stack overflow
+                    predictClass.clear();
+                    
+                    const uint16_t numTrees = trees.size();
+                    for(uint16_t t = 0; t < numTrees; ++t) {
+                        uint8_t predict = trees[t].predict_features(features, thresholds);
+                        if(__builtin_expect(predict < numLabels, 1)) {
+                            predictClass[predict]++;
+                        }
+                    }
+                    
+                    uint16_t maxVotes = 0;
+                    uint8_t mostPredict = 0;
+                    for(const auto& entry : predictClass) {
+                        if(entry.second > maxVotes) {
+                            maxVotes = entry.second;
+                            mostPredict = entry.first;
+                        }
+                    }
+                    
+                    return (maxVotes > 0) ? mostPredict : 255;
                 }
-                
-                return (maxVotes > 0) ? mostPredict : 255;
             }
 
             class iterator {
@@ -4574,7 +4756,11 @@ namespace mcu {
                 // Ensure container is properly sized before loading
                 if(trees.size() != config_ptr->num_trees) {
                     RF_DEBUG_2(2, "🔧 Adjusting container size from", trees.size(), "to", config_ptr->num_trees);
-                    trees.resize(config_ptr->num_trees);
+                    if(config_ptr->num_trees > 0) {
+                        ensure_tree_slot(static_cast<uint8_t>(config_ptr->num_trees - 1));
+                    } else {
+                        trees.clear();
+                    }
                 }
                 // Memory safety check
                 size_t freeMemory = ESP.getFreeHeap();
@@ -4690,50 +4876,42 @@ namespace mcu {
                         continue;
                     }
                     
-                    // Find the corresponding tree in trees vector
-                    bool treeFound = false;
-                    for(size_t treeIdx = 0; treeIdx < trees.capacity(); treeIdx++) {
-                        auto& tree = trees[treeIdx];
-                        if(tree.index == treeIndex) {
-                            tree.nodes.clear();
-                            tree.nodes.reserve(nodeCount);
-                            
-                            // Read all nodes for this tree with error checking
-                            bool nodeReadSuccess = true;
-                            for(uint32_t j = 0; j < nodeCount; j++) {
-                                Tree_node node;
-                                if(file.read((uint8_t*)&node.packed_data, sizeof(node.packed_data)) != sizeof(node.packed_data)) {
-                                    RF_DEBUG_2(1, "❌ Failed to read node", j, "in tree_", treeIndex);
-                                    nodeReadSuccess = false;
-                                    break;
-                                }
-                                tree.nodes.push_back(node);
-                            }
-                            
-                            if(nodeReadSuccess) {
-                                tree.nodes.fit();
-                                tree.isLoaded = true;
-                                successfullyLoaded++;
-                                
-                                // Update metadata vectors with actual values after loading
-                                total_depths += tree.getTreeDepth();
-                                total_nodes += tree.countNodes();
-                                total_leaves += tree.countLeafNodes();
-                            } else {
-                                // Clean up failed tree
-                                tree.nodes.clear();
-                                tree.nodes.fit();
-                                tree.isLoaded = false;
-                            }
-                            treeFound = true;
+                    ensure_tree_slot(treeIndex);
+                    auto& tree = trees[treeIndex];
+                    tree.set_layout(&layout);
+                    tree.reset_node_storage(nodeCount);
+
+                    bool nodeReadSuccess = true;
+                    uint32_t nodesRead = 0;
+                    for(uint32_t j = 0; j < nodeCount; j++) {
+                        Tree_node node;
+                        if(file.read(reinterpret_cast<uint8_t*>(&node.packed_data), sizeof(node.packed_data)) != sizeof(node.packed_data)) {
+                            RF_DEBUG_2(1, "❌ Failed to read node", j, "in tree_", treeIndex);
+                            nodeReadSuccess = false;
                             break;
                         }
+                        tree.nodes.push_back(node);
+                        ++nodesRead;
                     }
-                    
-                    if(!treeFound) {
-                        RF_DEBUG(1, "⚠️ Skipping tree not found in forest structure: ", treeIndex);
-                        // Skip the node data for this tree
-                        file.seek(file.position() + nodeCount * sizeof(uint32_t));
+
+                    if(nodeReadSuccess) {
+                        tree.nodes.fit();
+                        tree.isLoaded = true;
+                        successfullyLoaded++;
+
+                        total_depths += tree.getTreeDepth();
+                        total_nodes += tree.countNodes();
+                        total_leaves += tree.countLeafNodes();
+                    } else {
+                        const size_t remaining = (nodesRead < nodeCount)
+                            ? static_cast<size_t>(nodeCount - nodesRead) * sizeof(uint32_t)
+                            : 0;
+                        if(remaining > 0) {
+                            file.seek(file.position() + remaining);
+                        }
+                        tree.nodes.clear();
+                        tree.nodes.fit();
+                        tree.isLoaded = false;
                     }
                 }
                 
@@ -4752,6 +4930,7 @@ namespace mcu {
                 for (auto& tree : trees) {
                     if (!tree.isLoaded) {
                         try {
+                            tree.set_layout(&layout);
                             // Construct tree file path
                             base_ptr->build_tree_file_path(tree_path_buffer, tree.index);
                             tree.loadTree(tree_path_buffer);
@@ -4841,6 +5020,7 @@ namespace mcu {
                 uint8_t savedCount = 0;
                 for(auto& tree : trees) {
                     if (tree.isLoaded && tree.index != 255 && !tree.nodes.empty()) {
+                        tree.set_layout(&layout);
                         // Write tree header
                         if(file.write((uint8_t*)&tree.index, sizeof(tree.index)) != sizeof(tree.index)) {
                             RF_DEBUG(1, "❌ Failed to write tree index: ", tree.index);
@@ -4856,8 +5036,8 @@ namespace mcu {
                         // Write all nodes with progress tracking
                         bool writeSuccess = true;
                         for (uint32_t i = 0; i < tree.nodes.size(); i++) {
-                            const auto& node = tree.nodes[i];
-                            if(file.write((uint8_t*)&node.packed_data, sizeof(node.packed_data)) != sizeof(node.packed_data)) {
+                            const Tree_node node = tree.nodes.get(i);
+                            if(file.write(reinterpret_cast<const uint8_t*>(&node.packed_data), sizeof(node.packed_data)) != sizeof(node.packed_data)) {
                                 RF_DEBUG_2(1, "❌ Failed to write node ", i, "for tree ", tree.index);
                                 writeSuccess = false;
                                 break;
@@ -4912,6 +5092,18 @@ namespace mcu {
                 return trees[index];
             }
 
+            node_layout* layout_ptr() {
+                return &layout;
+            }
+
+            const node_layout* layout_ptr() const {
+                return &layout;
+            }
+
+            const node_layout& get_layout() const {
+                return layout;
+            }
+
             size_t get_total_nodes() const {
                 return total_nodes;
             }
@@ -4939,6 +5131,32 @@ namespace mcu {
                 }else{
                     return trees.size();
                 }
+            }
+
+            uint8_t bits_per_node() const {
+                return layout.bits_per_node();
+            }
+
+            //  model size in ram 
+            size_t size_in_ram() const {
+                if(!config_ptr) {
+                    RF_DEBUG(1, "⚠️ size_in_ram() called with null config_ptr");
+                    return 0;
+                }
+                
+                size_t size = 0;
+                size += sizeof(*this);                           // Container overhead
+                size += config_ptr->num_trees * sizeof(Rf_tree);     // Tree slots allocated
+                size += (total_nodes * layout.bits_per_node() + 7) / 8;  // Packed node data
+                size += queue_nodes.capacity() * sizeof(NodeToBuild);    // Queue buffer
+                size += predictClass.size() * (sizeof(uint8_t) + sizeof(uint16_t));  // HashMap nodes
+                size += RF_PATH_BUFFER;                         // Path buffer
+                return size;
+            }
+
+            size_t core_model_size_in_ram() const {
+                size_t size = (total_nodes * layout.bits_per_node() + 7) / 8;  // Packed node data
+                return size;
             }
 
             // Check if container is empty

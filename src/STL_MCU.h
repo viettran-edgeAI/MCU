@@ -7,31 +7,33 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <cstring>
 #include <limits>
 #include <new>
-#include "hash_kernel.h"
-#include "initializer_list.h"
 #include <type_traits>
 #include <cassert>
 #include <utility>
+
+#include "hash_kernel.h"
+#include "initializer_list.h"
 
 #define hashers best_hashers_16 // change to best_hashers_8 to save 255 bytes of disk space, but more collisions
 
 // PSRAM Configuration
 // Users can define RF_USE_PSRAM before including this header to enable PSRAM allocation
 // Example: #define RF_USE_PSRAM
-#if defined(RF_USE_PSRAM) && (defined(ESP32) || defined(ARDUINO_ARCH_ESP32))
+#if defined(RF_USE_PSRAM) && ( \
+    defined(CONFIG_SPIRAM_SUPPORT)        /* For ESP-IDF builds */ || \
+    defined(BOARD_HAS_PSRAM)              /* Arduino core defines this for PSRAM boards */ || \
+    defined(ESP32S3) || defined(ESP32WROVER) || defined(ESP32WROVER_E) || \
+    defined(ESP32_PICO) /* optional fallback if your target uses it */ )
+
     #include "esp_heap_caps.h"
     #define RF_PSRAM_AVAILABLE 1
 #else
     #define RF_PSRAM_AVAILABLE 0
 #endif
 
-// #include <cstring>
-// #include <iostream>
 namespace mcu {
-
     // Memory allocation helpers - automatically use PSRAM when enabled
     namespace mem_alloc {
         namespace detail {
@@ -3978,9 +3980,8 @@ namespace mcu {
                 
             } else {
                 // Potentially unsafe case: new range doesn't encompass all existing elements
-                // This would cause data loss, so we throw an exception
-                std::string error_msg = "Cannot set ID range that excludes existing elements. ";
-                error_msg += "Current elements range: [" + std::to_string(current_min_element) + ", " + std::to_string(current_max_element) + "]";
+                char error_msg[128];
+                snprintf(error_msg, sizeof(error_msg), "Cannot set ID range that excludes existing elements. Current elements range: [%llu, %llu]", static_cast<unsigned long long>(current_min_element), static_cast<unsigned long long>(current_max_element));
                 throw std::out_of_range(error_msg);
             }
         }

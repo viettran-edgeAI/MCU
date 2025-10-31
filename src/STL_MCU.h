@@ -21,14 +21,18 @@
 // PSRAM Configuration
 // Users can define RF_USE_PSRAM before including this header to enable PSRAM allocation
 // Example: #define RF_USE_PSRAM
-#if defined(RF_USE_PSRAM) && ( \
-    defined(CONFIG_SPIRAM_SUPPORT)        /* For ESP-IDF builds */ || \
-    defined(BOARD_HAS_PSRAM)              /* Arduino core defines this for PSRAM boards */ || \
-    defined(ESP32S3) || defined(ESP32WROVER) || defined(ESP32WROVER_E) || \
-    defined(ESP32_PICO) /* optional fallback if your target uses it */ )
+#if defined(RF_USE_PSRAM)
+    #if defined(CONFIG_SPIRAM_SUPPORT)        /* For ESP-IDF builds */ || \
+        defined(BOARD_HAS_PSRAM)              /* Arduino core defines this for PSRAM boards */ || \
+        defined(ESP32S3) || defined(ESP32WROVER) || defined(ESP32WROVER_E) || \
+        defined(ESP32_PICO) /* optional fallback if your target uses it */
 
-    #include "esp_heap_caps.h"
-    #define RF_PSRAM_AVAILABLE 1
+        #include "esp_heap_caps.h"
+        #define RF_PSRAM_AVAILABLE 1
+    #else
+        #warning "RF_USE_PSRAM is defined but board does not support PSRAM. Using regular DRAM instead."
+        #define RF_PSRAM_AVAILABLE 0
+    #endif
 #else
     #define RF_PSRAM_AVAILABLE 0
 #endif

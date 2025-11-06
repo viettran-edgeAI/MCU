@@ -1,7 +1,7 @@
 {
     "data_path": {
         "value": "../data_processing/data/result/digit_data_nml.csv",
-        "description": "Path to the normalized csv dataset."
+        "description": "Path to the normalized cv dataset."
     },
     "random_seed": {
         "value": 37,

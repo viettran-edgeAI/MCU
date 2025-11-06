@@ -4,6 +4,14 @@ All notable changes to the STL_MCU library will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **Critical Stack Overflow Fix**
+  - Fixed stack canary watchpoint crash when loading forest directly without `build_model()`
+  - Replaced 255-byte stack allocation with adaptive approach in `predict_features()`
+  - Fast path: stack array for ≤32 labels (32 bytes)
+  - Slow path: heap-allocated map for >32 labels
+  - See `docs/Stack_Overflow_Fix.md` for technical details
+
 ### Added
 - **PSRAM Support for ESP32 boards with external RAM**
   - Added `RF_USE_PSRAM` macro to enable PSRAM allocation

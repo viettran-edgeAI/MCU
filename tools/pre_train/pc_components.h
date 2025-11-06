@@ -12,6 +12,7 @@
 #include <ctime>
 #include <chrono>
 #include <filesystem>
+#include <type_traits>
 #ifdef _WIN32
 #include <direct.h>
 #define mkdir _mkdir
@@ -95,7 +96,7 @@ struct QuantizationHelper {
     }
 };
 
-using sampleID_set = ID_vector<uint16_t>; // Sample ID set type
+using sampleID_set = ID_vector<uint32_t>; // Sample ID set type - supports large datasets
 using sample_set = b_vector<Rf_sample>; // set of samples
 
 
@@ -378,8 +379,6 @@ public:
             return;
         }
 
-        std::cout << "📊 Loading CSV: " << csvFilename << " (expecting " << (int)numFeatures << " features per sample)" << std::endl;
-
         uint8_t activeBits = QuantizationHelper::sanitizeBits(feature_bits);
         if (activeBits != feature_bits) {
             std::cout << "⚠️  Adjusting feature bit-width from " << (int)feature_bits
@@ -389,19 +388,16 @@ public:
         uint16_t maxFeatureValue = (activeBits >= 8)
                                        ? static_cast<uint16_t>(255)
                                        : static_cast<uint16_t>((1u << activeBits) - 1);
-        std::cout << "   Active quantization bits: " << (int)activeBits
-                  << " (max allowed feature value " << (int)maxFeatureValue << ")" << std::endl;
-
         uint16_t highestObservedValue = 0;
         
-        uint16_t sampleID = 0;
-        uint16_t linesProcessed = 0;
-        uint16_t emptyLines = 0;
-        uint16_t validSamples = 0;
-        uint16_t invalidSamples = 0;
+        uint32_t sampleID = 0;
+        uint32_t linesProcessed = 0;
+        uint32_t emptyLines = 0;
+        uint32_t validSamples = 0;
+        uint32_t invalidSamples = 0;
         
         std::string line;
-        while (std::getline(file, line) && sampleID < 10000) {
+        while (std::getline(file, line)) {
             linesProcessed++;
             
             // Trim whitespace
@@ -479,7 +475,6 @@ public:
         std::cout << "   Valid samples: " << validSamples << std::endl;
         std::cout << "   Invalid samples: " << invalidSamples << std::endl;
         std::cout << "   Total samples in memory: " << allSamples.size() << std::endl;
-        std::cout << "   Highest feature value observed: " << (int)highestObservedValue << std::endl;
         
         file.close();
         std::cout << "✅ CSV data loaded successfully." << std::endl;
@@ -539,7 +534,7 @@ struct Rf_config{
     uint16_t k_folds; 
     uint16_t min_split; 
     uint16_t max_depth;
-    uint16_t num_samples;  // number of samples in the base data
+    uint32_t num_samples;  // number of samples in the base data - changed to uint32_t for large datasets
     uint32_t random_seed = 42; // random seed for Rf_random class
     size_t RAM_usage = 0;
     int epochs = 20;    // number of epochs for inner training
@@ -933,12 +928,12 @@ public:
             return;
         }
 
-    unordered_map<uint16_t, uint16_t> labelCounts;
-    unordered_set<uint16_t> featureValues;
+        unordered_map<uint16_t, uint32_t> labelCounts;
+        unordered_set<uint16_t> featureValues;
 
-        uint16_t numSamples = 0;
+        uint32_t numSamples = 0;
         uint16_t maxFeatures = 0;
-    uint16_t datasetMaxValue = 0;
+        uint16_t datasetMaxValue = 0;
 
         std::string line;
         while (std::getline(file, line)) {
@@ -979,7 +974,6 @@ public:
 
             if (!malformed) {
                 numSamples++;
-                if (numSamples >= 10000) break;
             }
         }
 
@@ -1018,8 +1012,6 @@ public:
         std::cout << "  Total samples: " << numSamples << "\n";
         std::cout << "  Total features: " << maxFeatures << "\n";
         std::cout << "  Unique labels: " << labelCounts.size() << "\n";
-        std::cout << "  Maximum feature value: " << datasetMaxValue
-                  << " (dataset needs " << static_cast<int>(datasetBits) << " bits)\n";
         std::cout << "  Active quantization bits: " << static_cast<int>(quantization_coefficient) << "\n";
 
         // Automatic ratio configuration based on dataset size and training method
@@ -1100,11 +1092,11 @@ public:
 
         // Analyze label distribution and set appropriate training flags
         if (labelCounts.size() > 0) {
-            uint16_t minorityCount = numSamples;
-            uint16_t majorityCount = 0;
+            uint32_t minorityCount = numSamples;
+            uint32_t majorityCount = 0;
 
             for (auto& it : labelCounts) {
-                uint16_t count = it.second;
+                uint32_t count = it.second;
                 if (count > majorityCount) {
                     majorityCount = count;
                 }
@@ -1236,9 +1228,6 @@ public:
         if (max_depth_range.empty()) {
             max_depth_range.push_back(max_depth);
         }
-
-        std::cout << "Setting minSplit to " << (int)min_split
-                  << " and maxDepth to " << (int)max_depth << " based on dataset size.\n";
         
         // Debug: Show range sizes
         std::cout << "📊 Training ranges: min_split_range has " << min_split_range.size() 
@@ -1540,14 +1529,12 @@ public:
         }
         
         file.close();
-        std::cout << "📊 Loaded " << training_data.size() << " training samples from CSV" << std::endl;
         return !training_data.empty();
     }
 
     
     // Train the predictor using loaded data
     void train() {
-        std::cout << "🎯 Training node predictor..." << std::endl;
         compute_coefficients();
         b_vector<int> percent_count{10};
         for(auto peak : peak_nodes) {
@@ -1576,7 +1563,7 @@ public:
         if (!peak_found) { // If no percentage < 10%, use a reasonable default
             peak_percent = 30;
         }
-        std::cout << "✅ Successful create node_predictor formula !" << std::endl;
+        // std::cout << "✅ Successful create node_predictor formula !" << std::endl;
     }
     
     // Predict number of nodes for given parameters
@@ -1617,7 +1604,6 @@ public:
         file.write(reinterpret_cast<const char*>(coefficients), sizeof(float) * 3);
         
         file.close();
-        std::cout << "💾 Model saved to " << bin_file_path << std::endl;
         return true;
     }
 
@@ -1810,28 +1796,31 @@ public:
         }
         return h;
     }
-    static inline uint64_t hashBytes(const uint16_t* data, size_t len) {
+    static inline uint64_t hashBytes(const uint8_t* data, size_t len) {
         uint64_t h = FNV_OFFSET;
-        for (size_t i = 0; i < len; ++i) { 
-            h ^= data[i]; 
-            h *= FNV_PRIME; 
+        for (size_t i = 0; i < len; ++i) {
+            h ^= static_cast<uint64_t>(data[i]);
+            h *= FNV_PRIME;
         }
         return h;
     }
+
     template <class IdVec>
     static uint64_t hashIDVector(const IdVec& ids) {
         uint64_t h = FNV_OFFSET;
-        for (size_t i = 0; i < ids.size(); ++i) {
-            uint16_t v = ids[i];
-            h ^= static_cast<uint64_t>(v & 0xFF);
-            h *= FNV_PRIME;
-            h ^= static_cast<uint64_t>((v >> 8) & 0xFF);
+        for (const auto& v : ids) {
+            using ValueT = std::decay_t<decltype(v)>;
+            ValueT value = v;
+            for (size_t byte = 0; byte < sizeof(ValueT); ++byte) {
+                h ^= (static_cast<uint64_t>(value) >> (byte * 8)) & 0xFFULL;
+                h *= FNV_PRIME;
+            }
+        }
+        size_t sz = ids.size();
+        for (size_t byte = 0; byte < sizeof(sz); ++byte) {
+            h ^= (static_cast<uint64_t>(sz) >> (byte * 8)) & 0xFFULL;
             h *= FNV_PRIME;
         }
-        h ^= static_cast<uint64_t>(ids.size() & 0xFF);
-        h *= FNV_PRIME;
-        h ^= static_cast<uint64_t>((ids.size() >> 8) & 0xFF);
-        h *= FNV_PRIME;
         return h;
     }
 };

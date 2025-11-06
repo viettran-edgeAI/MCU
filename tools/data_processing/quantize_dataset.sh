@@ -45,13 +45,15 @@ show_usage() {
     echo "  $0 -p data/iris_data.csv --header yes              # Skip first line (has header)"
     echo "  $0 -p data/iris_data.csv -f 512                    # Limit to 512 features max"
     echo "  $0 -p data/iris_data.csv -nv                       # Skip visualization"
-    echo "  $0 -p data/iris_data.csv -q 3                     # Quantize with 3 bits per feature"
+    echo "  $0 -p data/iris_data.csv -q 3                      # Quantize with 3 bits per feature"
     echo "  $0 -p data/iris_data.csv --header yes -f 256       # Skip header + 256 features + visualize (default)"
     echo ""
     echo -e "${YELLOW}Note: Header detection analyzes first two rows to determine if dataset has headers${NC}"
     echo -e "${YELLOW}      --header yes: Skip first line (treat as header)${NC}"
     echo -e "${YELLOW}      --header no:  Process all lines (no header present)${NC}"
     echo -e "${YELLOW}      (no --header): Automatically detect header presence${NC}"
+    echo ""
+    echo -e "${GREEN}ℹ️  No sample count limits - process datasets of any size!${NC}"
 }
 
 # Parse command line arguments

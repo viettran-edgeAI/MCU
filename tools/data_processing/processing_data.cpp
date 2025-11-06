@@ -12,17 +12,14 @@
 #include <cstring>
 #include <cerrno>
 #include <filesystem>
+#include <cstdint>
 
 using u8 = uint8_t;
-
-// Function declarations
-int truncate_csv(const char *in_path);
 
 static uint8_t quantization_coefficient = 2; // Coefficient for quantization (bits per feature value)
 
 static const int MAX_LABELS = 256; // Maximum number of unique labels supporte 
 static const int MAX_FEATURES = 1023;
-static const int MAX_NUM_SAMPLES = 65535; // Maximum number of samples supported
 
 // Helper functions to calculate derived values from quantization coefficient
 static uint16_t getGroupsPerFeature() {
@@ -84,11 +81,10 @@ struct FeatureStats {
     bool isDiscrete = false;
 };
 
-// Structure for building CTG v2 format with pattern sharing and optimization
+// Structure for building CTG3 format with pattern sharing and optimization
 class Rf_quantizer{
     uint16_t numFeatures = 0;
     uint16_t groupsPerFeature = 0;
-    uint32_t scaleFactor = 50000; // Scaling factor for uint16_t conversion
     
     // Feature type definitions
     enum FeatureType { FT_DF = 0, FT_DC = 1, FT_CS = 2, FT_CU = 3 };
@@ -99,13 +95,9 @@ class Rf_quantizer{
         uint16_t patternId;
         
         SharedPattern() : patternId(0) {} // Default constructor
-        
-        SharedPattern(const mcu::vector<float>& edges, uint32_t scale, uint16_t id) : patternId(id) {
-            scaledEdges.reserve(edges.size());
-            for (float edge : edges) {
-                scaledEdges.push_back(static_cast<uint16_t>(edge * scale + 0.5f));
-            }
-        }
+
+        SharedPattern(const mcu::vector<uint16_t>& edges, uint16_t id)
+            : scaledEdges(edges), patternId(id) {}
         
         std::string getKey() const {
             std::string key;
@@ -121,9 +113,11 @@ class Rf_quantizer{
         FeatureType type;
         mcu::vector<uint8_t> discreteValues;  // For FT_DC
         mcu::vector<uint16_t> uniqueEdges;    // For FT_CU 
+        int64_t baselineScaled;               // Baseline offset (scaled)
+        uint64_t scaleFactor;                 // Per-feature scaling factor
         uint16_t patternId;                   // For FT_CS
         
-        FeatureInfo() : type(FT_DF), patternId(0) {}
+        FeatureInfo() : type(FT_DF), baselineScaled(0), scaleFactor(1), patternId(0) {}
     };
     
     mcu::vector<FeatureInfo> features;
@@ -131,85 +125,141 @@ class Rf_quantizer{
     mcu::unordered_map<std::string, uint16_t> patternMap; // key -> patternId
     mcu::vector<mcu::pair<std::string, uint8_t>> labelMapping;
 
+    static int64_t scaleFloatToInt64(double value, uint64_t scale) {
+        long double scaled = static_cast<long double>(value) * static_cast<long double>(scale);
+        if (scaled >= static_cast<long double>(std::numeric_limits<int64_t>::max())) {
+            return std::numeric_limits<int64_t>::max();
+        }
+        if (scaled <= static_cast<long double>(std::numeric_limits<int64_t>::min())) {
+            return std::numeric_limits<int64_t>::min();
+        }
+        if (scaled >= 0.0L) {
+            scaled += 0.5L;
+        } else {
+            scaled -= 0.5L;
+        }
+        return static_cast<int64_t>(scaled);
+    }
+
 public:
     // Default constructor
     Rf_quantizer() = default;
     
     // Constructor for building quantizer
-    Rf_quantizer(uint16_t numFeatures, uint16_t gpf, uint32_t scale = 50000)
-        : numFeatures(numFeatures), groupsPerFeature(gpf), scaleFactor(scale) {
-        features.reserve(numFeatures);
-        for (uint16_t i = 0; i < numFeatures; ++i) {
-            features.push_back(FeatureInfo());
-        }
+    Rf_quantizer(uint16_t featureCount, uint16_t gpf)
+        : numFeatures(featureCount), groupsPerFeature(gpf) {
+        features.resize(numFeatures);
     }
     
     // Constructor with label mapping
-    Rf_quantizer(uint16_t numFeatures, uint16_t gpf, const mcu::vector<mcu::pair<std::string, uint8_t>>& labelMap, uint32_t scale = 50000)
-        : numFeatures(numFeatures), groupsPerFeature(gpf), scaleFactor(scale), labelMapping(labelMap) {
-        features.reserve(numFeatures);
-        for (uint16_t i = 0; i < numFeatures; ++i) {
-            features.push_back(FeatureInfo());
-        }
+    Rf_quantizer(uint16_t featureCount, uint16_t gpf, const mcu::vector<mcu::pair<std::string, uint8_t>>& labelMap)
+        : numFeatures(featureCount), groupsPerFeature(gpf), labelMapping(labelMap) {
+        features.resize(numFeatures);
     }
     
     // Set feature as discrete full range (0..groupsPerFeature-1)
     void setDiscreteFullFeature(uint16_t featureIdx) {
         if (featureIdx < numFeatures) {
-            features[featureIdx].type = FT_DF;
+            FeatureInfo& info = features[featureIdx];
+            info.type = FT_DF;
+            info.baselineScaled = 0;
+            info.scaleFactor = 1;
+            info.discreteValues.clear();
+            info.uniqueEdges.clear();
         }
     }
     
     // Set feature as discrete with custom values
     void setDiscreteCustomFeature(uint16_t featureIdx, const mcu::vector<float>& values) {
         if (featureIdx < numFeatures) {
-            features[featureIdx].type = FT_DC;
-            features[featureIdx].discreteValues.clear();
-            features[featureIdx].discreteValues.reserve(values.size());
+            FeatureInfo& info = features[featureIdx];
+            info.type = FT_DC;
+            info.baselineScaled = 0;
+            info.scaleFactor = 1;
+            info.uniqueEdges.clear();
+            info.discreteValues.clear();
+            info.discreteValues.reserve(values.size());
             for (float val : values) {
-                features[featureIdx].discreteValues.push_back(static_cast<uint8_t>(val));
+                info.discreteValues.push_back(static_cast<uint8_t>(val));
             }
         }
     }
     
     // Set feature as continuous with quantile edges
-    void setContinuousFeature(uint16_t featureIdx, const mcu::vector<float>& edges) {
+    void setContinuousFeature(uint16_t featureIdx, const mcu::vector<float>& edges, float minValue, float maxValue) {
         if (featureIdx >= numFeatures) return;
-        
-        // Try to find or create shared pattern
+
+        FeatureInfo& info = features[featureIdx];
+        info.discreteValues.clear();
+
+        const double baselineValue = static_cast<double>(minValue);
+        double range = static_cast<double>(maxValue) - baselineValue;
+        if (!std::isfinite(range) || range < 0.0) {
+            range = 0.0;
+        }
+
+        long double rawScale = 1.0L;
+        if (range > 0.0) {
+            rawScale = static_cast<long double>(std::numeric_limits<uint16_t>::max()) / static_cast<long double>(range);
+        }
+        if (rawScale < 1.0L) {
+            rawScale = 1.0L;
+        }
+        if (rawScale > static_cast<long double>(std::numeric_limits<uint64_t>::max())) {
+            rawScale = static_cast<long double>(std::numeric_limits<uint64_t>::max());
+        }
+        uint64_t scaleValue = static_cast<uint64_t>(rawScale);
+        if (scaleValue == 0) {
+            scaleValue = 1;
+        }
+
+        info.scaleFactor = scaleValue;
+        info.baselineScaled = scaleFloatToInt64(baselineValue, scaleValue);
+
+        // Create scaled edge representation relative to baseline
         mcu::vector<uint16_t> scaledEdges;
         scaledEdges.reserve(edges.size());
         for (float edge : edges) {
-            scaledEdges.push_back(static_cast<uint16_t>(edge * scaleFactor + 0.5f));
+            double diff = static_cast<double>(edge) - baselineValue;
+            if (diff < 0.0) {
+                diff = 0.0;
+            }
+            long double scaledEdge = static_cast<long double>(diff) * static_cast<long double>(scaleValue);
+            if (scaledEdge >= static_cast<long double>(std::numeric_limits<uint16_t>::max())) {
+                scaledEdge = static_cast<long double>(std::numeric_limits<uint16_t>::max());
+            }
+            if (scaledEdge < 0.0L) {
+                scaledEdge = 0.0L;
+            }
+            scaledEdges.push_back(static_cast<uint16_t>(scaledEdge + 0.5L));
         }
-        
+
         // Create pattern key
         std::string key;
         for (size_t i = 0; i < scaledEdges.size(); ++i) {
             if (i > 0) key += ":";
             key += std::to_string(scaledEdges[i]);
         }
-        
+
         // Check if pattern already exists
         auto it = patternMap.find(key);
         if (it != patternMap.end()) {
-            // Use existing shared pattern
-            features[featureIdx].type = FT_CS;
-            features[featureIdx].patternId = it->second;
+            info.type = FT_CS;
+            info.patternId = it->second;
+            info.uniqueEdges.clear();
         } else {
-            // Decide between shared pattern or unique edges
-            if (sharedPatterns.size() < 60) { // Leave room for more patterns
-                // Create new shared pattern
+            if (sharedPatterns.size() < 60) {
                 uint16_t patternId = static_cast<uint16_t>(sharedPatterns.size());
-                sharedPatterns.push_back(SharedPattern(edges, scaleFactor, patternId));
+                sharedPatterns.push_back(SharedPattern(scaledEdges, patternId));
                 patternMap[key] = patternId;
-                
-                features[featureIdx].type = FT_CS;
-                features[featureIdx].patternId = patternId;
+
+                info.type = FT_CS;
+                info.patternId = patternId;
+                info.uniqueEdges.clear();
             } else {
-                // Use unique edges
-                features[featureIdx].type = FT_CU;
-                features[featureIdx].uniqueEdges = scaledEdges;
+                info.type = FT_CU;
+                info.patternId = 0;
+                info.uniqueEdges = scaledEdges;
             }
         }
     }
@@ -224,12 +274,18 @@ public:
         if (featureIdx >= numFeatures) return 0;
         
         const FeatureInfo& info = features[featureIdx];
-        uint32_t scaledValue = static_cast<uint32_t>(value * scaleFactor + 0.5f);
-        
         switch (info.type) {
             case FT_DF:
                 // Full discrete range: assume value is already quantized 0..groupsPerFeature-1
-                return static_cast<uint8_t>(std::min(static_cast<int>(value), static_cast<int>(groupsPerFeature - 1)));
+                {
+                    int intValue = static_cast<int>(value);
+                    if (intValue < 0) {
+                        intValue = 0;
+                    } else if (intValue >= static_cast<int>(groupsPerFeature)) {
+                        intValue = static_cast<int>(groupsPerFeature - 1);
+                    }
+                    return static_cast<uint8_t>(intValue);
+                }
                 
             case FT_DC:
                 // Discrete custom values
@@ -243,24 +299,40 @@ public:
             case FT_CS:
                 // Continuous shared pattern
                 if (info.patternId < sharedPatterns.size()) {
+                    int64_t scaledValue = scaleFloatToInt64(static_cast<double>(value), info.scaleFactor);
+                    int64_t adjusted = scaledValue - info.baselineScaled;
+                    if (adjusted <= 0) {
+                        return 0;
+                    }
                     const auto& pattern = sharedPatterns[info.patternId];
-                    for (uint8_t bin = 0; bin < pattern.scaledEdges.size(); ++bin) {
-                        if (scaledValue < pattern.scaledEdges[bin]) {
+                    const uint32_t limited = static_cast<uint32_t>(std::min<int64_t>(adjusted, std::numeric_limits<uint32_t>::max()));
+                    const uint8_t limit = static_cast<uint8_t>(pattern.scaledEdges.size());
+                    for (uint8_t bin = 0; bin < limit; ++bin) {
+                        if (limited < pattern.scaledEdges[bin]) {
                             return bin;
                         }
                     }
-                    return static_cast<uint8_t>(pattern.scaledEdges.size());
+                    return limit;
                 }
                 return 0;
                 
             case FT_CU:
                 // Continuous unique edges
-                for (uint8_t bin = 0; bin < info.uniqueEdges.size(); ++bin) {
-                    if (scaledValue < info.uniqueEdges[bin]) {
-                        return bin;
+                {
+                    int64_t scaledValue = scaleFloatToInt64(static_cast<double>(value), info.scaleFactor);
+                    int64_t adjusted = scaledValue - info.baselineScaled;
+                    if (adjusted <= 0) {
+                        return 0;
                     }
+                    const uint32_t limited = static_cast<uint32_t>(std::min<int64_t>(adjusted, std::numeric_limits<uint32_t>::max()));
+                    const uint8_t edgeCount = static_cast<uint8_t>(info.uniqueEdges.size());
+                    for (uint8_t bin = 0; bin < edgeCount; ++bin) {
+                        if (limited < info.uniqueEdges[bin]) {
+                            return bin;
+                        }
+                    }
+                    return edgeCount;
                 }
-                return static_cast<uint8_t>(info.uniqueEdges.size());
         }
         return 0;
     }
@@ -277,17 +349,16 @@ public:
         return result;
     }
     
-    // Save quantizer to CTG v2 format for ESP32 transfer
+    // Save quantizer to CTG3 format for ESP32 transfer
     void saveQuantizer(const char* filename) const {
         std::ofstream fout(filename);
         if (!fout) {
-            throw std::runtime_error(std::string("Cannot open CTG2 file: ") + filename);
+            throw std::runtime_error(std::string("Cannot open CTG3 file: ") + filename);
         }
         
-        // Header: CTG2,numFeatures,groupsPerFeature,numLabels,numSharedPatterns,scaleFactor
-        fout << "CTG2," << numFeatures << "," << static_cast<int>(groupsPerFeature) 
-             << "," << labelMapping.size() << "," << sharedPatterns.size() 
-             << "," << scaleFactor << "\n";
+       // Header: CTG3,numFeatures,groupsPerFeature,numLabels,numSharedPatterns
+       fout << "CTG3," << numFeatures << "," << static_cast<int>(groupsPerFeature) 
+           << "," << labelMapping.size() << "," << sharedPatterns.size() << "\n";
         
         // Label mappings (optional, can be disabled with compile flag)
         for (const auto& mapping : labelMapping) {
@@ -309,7 +380,7 @@ public:
             
             switch (info.type) {
                 case FT_DF:
-                    fout << "DF\n";
+                    fout << "DF," << info.baselineScaled << "," << info.scaleFactor << "\n";
                     break;
                     
                 case FT_DC:
@@ -317,11 +388,11 @@ public:
                     for (uint8_t val : info.discreteValues) {
                         fout << "," << static_cast<int>(val);
                     }
-                    fout << "\n";
+                    fout << "," << info.baselineScaled << "," << info.scaleFactor << "\n";
                     break;
                     
                 case FT_CS:
-                    fout << "CS," << info.patternId << "\n";
+                    fout << "CS," << info.patternId << "," << info.baselineScaled << "," << info.scaleFactor << "\n";
                     break;
                     
                 case FT_CU:
@@ -329,7 +400,7 @@ public:
                     for (uint16_t edge : info.uniqueEdges) {
                         fout << "," << edge;
                     }
-                    fout << "\n";
+                    fout << "," << info.baselineScaled << "," << info.scaleFactor << "\n";
                     break;
             }
         }
@@ -339,24 +410,29 @@ public:
     
     // Legacy CSV format (keep for backward compatibility if needed)
     void saveToCSV(const char* filename) const {
-        saveQuantizer(filename); // Default to CTG2 format
+        saveQuantizer(filename); // Default to CTG3 format
     }
     
     // Accessors
     uint16_t getNumFeatures() const { return numFeatures; }
     uint16_t getGroupsPerFeature() const { return groupsPerFeature; }
-    uint32_t getScaleFactor() const { return scaleFactor; }
     const mcu::vector<mcu::pair<std::string, uint8_t>>& getLabelMapping() const { return labelMapping; }
     
-    // Estimate memory usage for CTG2 format
-    size_t estimateCTG2MemoryUsage() const {
+    // Estimate memory usage for CTG3 format
+    size_t estimateCTG3MemoryUsage() const {
         size_t usage = 0;
         
         // Basic header data
-        usage += sizeof(numFeatures) + sizeof(groupsPerFeature) + sizeof(scaleFactor);
+        usage += sizeof(numFeatures) + sizeof(groupsPerFeature);
         
         // Feature references (packed into uint16_t each)
         usage += numFeatures * sizeof(uint16_t);
+
+        // Baseline offsets per feature
+        usage += numFeatures * sizeof(int64_t);
+
+        // Scale factors per feature
+        usage += numFeatures * sizeof(uint64_t);
         
         // Shared patterns
         for (const auto& pattern : sharedPatterns) {
@@ -442,8 +518,14 @@ mcu::vector<float> computeQuantileBinEdges(mcu::vector<float> values, int numBin
 
 // Replace both instances of std::set usage with this helper function
 // Helper function to collect unique values using mcu::vector
-mcu::vector<float> collectUniqueValues(const mcu::vector<mcu::vector<float>>& data, int featureIdx, int numSamples) {
+mcu::vector<float> collectUniqueValues(const mcu::vector<mcu::vector<float>>& data,
+                                      int featureIdx,
+                                      int numSamples,
+                                      size_t maxValues = 0) {
     mcu::vector<float> unique;
+    if (maxValues > 0) {
+        unique.reserve(maxValues + 1);
+    }
     
     for (int i = 0; i < numSamples; ++i) {
         float value = data[i][featureIdx];
@@ -460,6 +542,9 @@ mcu::vector<float> collectUniqueValues(const mcu::vector<mcu::vector<float>>& da
         // Add value if not found
         if (!found) {
             unique.push_back(value);
+            if (maxValues > 0 && unique.size() > maxValues) {
+                return unique;
+            }
         }
     }
     
@@ -688,7 +773,7 @@ Rf_quantizer quantizeCSVFeatures(const char* inputFilePath, const char* outputFi
     
     // Initial check for discrete features to avoid clipping them
     for (int j = 0; j < n_feats; ++j) {
-        mcu::vector<float> distinct = collectUniqueValues(data, j, n_samples);
+        mcu::vector<float> distinct = collectUniqueValues(data, j, n_samples, static_cast<size_t>(groupsPerFeature));
         if (distinct.size() <= static_cast<size_t>(groupsPerFeature)) {
             featureStats[j].isDiscrete = true;
         }
@@ -709,29 +794,28 @@ Rf_quantizer quantizeCSVFeatures(const char* inputFilePath, const char* outputFi
         }
     }
 
-    // Calculate optimal scale factor based on data range
-    float maxEdgeValue = 0.0f;
+    // Update feature min/max values after clipping
     for (int j = 0; j < n_feats; ++j) {
-        if (!featureStats[j].isDiscrete) {
-            mcu::vector<float> values;
-            values.reserve(n_samples);
-            for (int i = 0; i < n_samples; ++i) {
-                values.push_back(data[i][j]);
+        float updatedMin = std::numeric_limits<float>::infinity();
+        float updatedMax = -std::numeric_limits<float>::infinity();
+        for (int i = 0; i < n_samples; ++i) {
+            float v = data[i][j];
+            if (v < updatedMin) {
+                updatedMin = v;
             }
-            mcu::vector<float> edges = computeQuantileBinEdges(values, static_cast<int>(groupsPerFeature));
-            for (float edge : edges) {
-                maxEdgeValue = std::max(maxEdgeValue, edge);
+            if (v > updatedMax) {
+                updatedMax = v;
             }
         }
+        featureStats[j].min = updatedMin;
+        featureStats[j].max = updatedMax;
     }
-    
-    uint32_t scaleFactor = maxEdgeValue > 0 ? std::min(65535.0f / maxEdgeValue, 50000.0f) : 50000;
 
-    // Setup quantizer with CTG v2 format
-    Rf_quantizer ctg(n_feats, groupsPerFeature, labelMapping, scaleFactor);
+    // Setup quantizer with CTG3 format
+    Rf_quantizer ctg(n_feats, groupsPerFeature, labelMapping);
     
     for (int j = 0; j < n_feats; ++j) {
-        mcu::vector<float> distinct_after_clip = collectUniqueValues(data, j, n_samples);
+    mcu::vector<float> distinct_after_clip = collectUniqueValues(data, j, n_samples, static_cast<size_t>(groupsPerFeature));
         
         if (distinct_after_clip.size() <= static_cast<size_t>(groupsPerFeature)) {
             // Check if it's a full discrete range (0..groupsPerFeature-1)
@@ -759,7 +843,7 @@ Rf_quantizer quantizeCSVFeatures(const char* inputFilePath, const char* outputFi
                 values.push_back(data[i][j]);
             }
             mcu::vector<float> edges = computeQuantileBinEdges(values, static_cast<int>(groupsPerFeature));
-            ctg.setContinuousFeature(j, edges);
+            ctg.setContinuousFeature(j, edges, featureStats[j].min, featureStats[j].max);
         }
     }
     
@@ -795,12 +879,10 @@ struct DatasetInfo {
     int numFeatures;
     int numSamples;
     mcu::vector<mcu::pair<std::string, uint8_t>> labelMapping; // original -> normalized
-    bool needsTruncation;
     bool needsHorizontalTruncation;
-    bool needsVerticalTruncation;
     
-    DatasetInfo() : numFeatures(0), numSamples(0), needsTruncation(false), 
-                   needsHorizontalTruncation(false), needsVerticalTruncation(false) {}
+    DatasetInfo() : numFeatures(0), numSamples(0), 
+                   needsHorizontalTruncation(false) {}
 };
 
 // Scan dataset to get info and create label mapping
@@ -872,8 +954,6 @@ DatasetInfo scanDataset(const char* inputFilePath) {
     
     fin.close();
     info.numSamples = lineCount;
-    info.needsVerticalTruncation = (info.numSamples > MAX_NUM_SAMPLES);
-    info.needsTruncation = info.needsHorizontalTruncation || info.needsVerticalTruncation;
     uniqueLabels.sort(); // Sort labels for consistent mapping
     
     // Create label mapping: original label -> normalized index (0, 1, 2, ...)
@@ -883,8 +963,8 @@ DatasetInfo scanDataset(const char* inputFilePath) {
     }
     
     std::cout << "Dataset scan results:\n";
-    std::cout << "  � Header: " << (hasHeader ? "Detected and skipped" : "Not detected") << "\n";
-    std::cout << "  �📊 Samples: " << info.numSamples << "\n";
+    std::cout << "  📄 Header: " << (hasHeader ? "Detected and skipped" : "Not detected") << "\n";
+    std::cout << "  📊 Samples: " << info.numSamples << "\n";
     std::cout << "  🔢 Features: " << info.numFeatures << "\n";
     std::cout << "  🏷️  Labels: " << uniqueLabels.size() << " unique\n";
     std::cout << "  📝 Label mapping:\n";
@@ -895,11 +975,6 @@ DatasetInfo scanDataset(const char* inputFilePath) {
     if (info.needsHorizontalTruncation) {
         std::cout << "  ⚠️  Feature count (" << info.numFeatures << ") exceeds num_features (" 
                   << num_features << "). Horizontal truncation needed.\n";
-    }
-    
-    if (info.needsVerticalTruncation) {
-        std::cout << "  ⚠️  Sample count (" << info.numSamples << ") exceeds MAX_NUM_SAMPLES (" 
-                  << MAX_NUM_SAMPLES << "). Vertical truncation needed.\n";
     }
     
     return info;
@@ -913,107 +988,6 @@ uint8_t getNormalizedLabel(const std::string& originalLabel, const mcu::vector<m
         }
     }
     return 0; // Default if not found (shouldn't happen after scanning)
-}
-
-// CSV truncation function to limit number of features (horizontal) and samples (vertical)
-int truncate_csv(const char *in_path) {
-    // Determine output directory and filename
-    std::string input_path(in_path);
-    size_t slash = input_path.find_last_of("/\\");
-    std::string input_dir = ".";
-    std::string input_name = input_path;
-    if (slash != std::string::npos) {
-        input_dir = input_path.substr(0, slash);
-        input_name = input_path.substr(slash + 1);
-    }
-    size_t dot = input_name.find_last_of('.');
-    std::string base_name = input_name;
-    if (dot != std::string::npos) base_name = input_name.substr(0, dot);
-    std::string result_dir = input_dir + "/result";
-    if (!std::filesystem::exists(result_dir)) {
-        std::filesystem::create_directories(result_dir);
-    }
-    std::string out_path_str = result_dir + "/" + base_name + "_truncated.csv";
-    const char* out_path = out_path_str.c_str();
-
-    // First, read the file line by line to apply both horizontal and vertical truncation
-    std::ifstream fin(in_path);
-    if (!fin) return -errno;
-    std::ofstream fout(out_path);
-    if (!fout) { 
-        fin.close(); 
-        return -errno; 
-    }
-
-    std::string line;
-    int row_count = 0;
-    bool needsHorizontalTruncation = false;
-    bool needsVerticalTruncation = false;
-    
-    // Check if we need any truncation by reading the first line to get column count
-    if (std::getline(fin, line)) {
-        auto firstLineCols = split(line);
-        int n_cols = (int)firstLineCols.size();
-        
-        needsHorizontalTruncation = (n_cols > num_features + 1); // +1 for label column
-        
-        // Reset file to beginning for actual processing
-        fin.clear();
-        fin.seekg(0, std::ios::beg);
-        
-        std::cout << "🔧 Truncation Analysis:\n";
-        std::cout << "   Original features: " << (n_cols - 1) << " (max allowed: " << num_features << ")\n";
-        std::cout << "   Horizontal truncation needed: " << (needsHorizontalTruncation ? "YES" : "NO") << "\n";
-    }
-
-    // Process the file with both horizontal and vertical truncation
-    while (std::getline(fin, line) && row_count < MAX_NUM_SAMPLES) {
-        if (line.empty()) continue;
-        
-        if (needsHorizontalTruncation) {
-            // Apply horizontal truncation (limit features)
-            auto cols = split(line);
-            if (!cols.empty()) {
-                // Write label (first column)
-                fout << cols[0];
-                
-                // Write features up to num_features
-                int features_written = 0;
-                for (size_t i = 1; i < cols.size() && features_written < num_features; ++i) {
-                    fout << "," << cols[i];
-                    features_written++;
-                }
-                fout << "\n";
-            }
-        } else {
-            // No horizontal truncation needed, write the line as-is
-            fout << line << "\n";
-        }
-        
-        row_count++;
-    }
-    
-    // Check if vertical truncation was needed
-    std::string remaining_line;
-    if (std::getline(fin, remaining_line)) {
-        needsVerticalTruncation = true;
-    }
-    
-    fin.close();
-    fout.close();
-    
-    std::cout << "   Original samples: " << (needsVerticalTruncation ? ">" + std::to_string(MAX_NUM_SAMPLES) : std::to_string(row_count));
-    std::cout << " (max allowed: " << MAX_NUM_SAMPLES << ")\n";
-    std::cout << "   Vertical truncation needed: " << (needsVerticalTruncation ? "YES" : "NO") << "\n";
-    std::cout << "   Final samples written: " << row_count << "\n";
-    
-    if (needsHorizontalTruncation || needsVerticalTruncation) {
-        std::cout << "✅ Truncated dataset saved: " << out_path << "\n";
-    } else {
-        std::cout << "ℹ️  No truncation needed, but truncated copy created: " << out_path << "\n";
-    }
-    
-    return 0;
 }
 
 // Dataset parameter synthesis for ESP32 transfer
@@ -1173,12 +1147,6 @@ mcu::vector<ESP32_Sample> loadCSVForBinary(const std::string& csvFilename, uint1
             
             samples.push_back(sample);
             validSamples++;
-            
-            // ESP32 sample limit check
-            if (validSamples >= 10000) {
-                std::cout << "⚠️  Reached ESP32 sample limit (10000), stopping." << std::endl;
-                break;
-            }
             
         } catch (const std::exception& e) {
             errorCount++;
@@ -1396,8 +1364,6 @@ int main(int argc, char* argv[]) {
             std::cerr << "Use -h or --help for usage information.\n";
             return 1;
         }
-        
-        const char* workingFile = inputFile.c_str(); // File to work with (may be truncated)
 
         // Generate output file names based on inputFile
         std::string inputName(inputFile);
@@ -1418,8 +1384,7 @@ int main(int argc, char* argv[]) {
         std::string quantizerFile = resultDir + "/" + baseName + "_ctg.csv";
         std::string dataParamsFile = resultDir + "/" + baseName + "_dp.csv";
         std::string normalizedFile = resultDir + "/" + baseName + "_nml.csv";
-        std::string truncatedFile = resultDir + "/" + baseName + "_truncated.csv";
-        std::string binaryFile = resultDir + "/" + baseName + "_nml.bin";  // Add binary output file
+        std::string binaryFile = resultDir + "/" + baseName + "_nml.bin";
 
         // Step 1: Scan dataset to get info and create label mapping
                 std::cout << "=== Dataset Analysis ===\n";
@@ -1441,48 +1406,20 @@ int main(int argc, char* argv[]) {
                       << (skipHeader ? "yes (header will be skipped)" : "no (all lines will be processed)") << "\n";
         }
 
-        // Step 2: Handle dataset truncation if needed
-        if (datasetInfo.needsTruncation) {
-            std::cout << "\n=== Dataset Truncation ===\n";
-            
-            if (datasetInfo.needsHorizontalTruncation) {
-                std::cout << "🔧 Horizontal truncation: " << datasetInfo.numFeatures << " → " << num_features << " features\n";
-            }
-            
-            if (datasetInfo.needsVerticalTruncation) {
-                std::cout << "🔧 Vertical truncation: " << datasetInfo.numSamples << " → " << MAX_NUM_SAMPLES << " samples\n";
-            }
-
-            int result = truncate_csv(inputFile.c_str());
-            if (result != 0) {
-                throw std::runtime_error("Failed to truncate CSV file");
-            }
-
-            // Update working file to the truncated version
-            workingFile = truncatedFile.c_str();
-        }
-
-        // Step 3: Quantize features with the (possibly truncated) dataset
+        // Step 2: Quantize features with the dataset
         std::cout << "\n=== Feature Categorization ===\n";
-        Rf_quantizer test_ctg = quantizeCSVFeatures(workingFile, normalizedFile.c_str(), getGroupsPerFeature(), datasetInfo.labelMapping, skipHeader);
+        Rf_quantizer test_ctg = quantizeCSVFeatures(inputFile.c_str(), normalizedFile.c_str(), getGroupsPerFeature(), datasetInfo.labelMapping, skipHeader);
         std::cout << "Categorization completed successfully.\n";
 
         // Save quantizer for ESP32 transfer
         test_ctg.saveQuantizer(quantizerFile.c_str());
         std::cout << "Quantizer saved to " << quantizerFile << " for ESP32 transfer.\n";
 
-        // Step 4: CSV dataset generation completed
-        std::cout << "\n=== CSV Dataset Generation Complete ===\n";
-        std::cout << "✅ Normalized CSV dataset saved: " << normalizedFile << "\n";
-        std::cout << "   📊 Features per sample: " << test_ctg.getNumFeatures() << "\n";
-        std::cout << "   🔢 Feature values: 0-" << static_cast<int>(getMaxFeatureValue()) << " (" << static_cast<int>(quantization_coefficient) << "-bit quantization)\n";
-        std::cout << "   � Ready for binary conversion using csv_to_binary tool\n";
-
-        // Step 5: Generate dataset parameters CSV for ESP32 transfer
+        // Step 3: Generate dataset parameters CSV for ESP32 transfer
         std::cout << "\n=== Dataset Parameters Generation ===\n";
         generateDatasetParamsCSV(normalizedFile, datasetInfo, dataParamsFile.c_str());
 
-        // Step 6: Convert CSV to binary format
+        // Step 4: Convert CSV to binary format
         convertCSVToBinary(normalizedFile, binaryFile, test_ctg.getNumFeatures());
 
         std::cout << "\n=== Processing Complete ===\n";

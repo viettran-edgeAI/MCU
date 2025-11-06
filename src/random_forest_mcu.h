@@ -2,6 +2,7 @@
 
 #include "Rf_components.h"
 #include <cstdio>
+#include <cmath>
 
 namespace mcu{
 
@@ -14,10 +15,11 @@ namespace mcu{
             Rf_data validation_data;
             Rf_random random_generator;
             vector<ID_vector<sample_type,2>> dataList;
+            TrainChunkAccessor* chunk_accessor; // For partial loading mode
             bool build_model;
             bool data_prepared;
 
-            TrainingContext() : data_prepared(false), build_model(true) {}
+            TrainingContext() : data_prepared(false), build_model(true), chunk_accessor(nullptr) {}
         };
 
         TrainingContext* training_ctx = nullptr;
@@ -50,6 +52,11 @@ namespace mcu{
 
         inline void destroy_training_context(){
             if(training_ctx){
+                if(training_ctx->chunk_accessor){
+                    training_ctx->chunk_accessor->close();
+                    delete training_ctx->chunk_accessor;
+                    training_ctx->chunk_accessor = nullptr;
+                }
                 delete training_ctx;
                 training_ctx = nullptr;
             }
@@ -183,6 +190,11 @@ namespace mcu{
 
             RF_DEBUG(0, "🧹 Cleaning up training session... ");
 
+            // Flush chunk accessor cache if it exists
+            if(training_ctx->chunk_accessor){
+                training_ctx->chunk_accessor->flush();
+            }
+
             // remove copy of base data
             base.get_temp_base_data_path(path_buffer);
             RF_FS.remove(path_buffer);
@@ -275,24 +287,86 @@ namespace mcu{
             RF_DEBUG(1, "🌳 Estimated nodes per tree: ", estimated_nodes);
             RF_DEBUG(2, "🌳 Peak queue size: ", peak_nodes);
 
-            if(!ctx->train_data.loadData()){
-                RF_DEBUG(0, "❌ Error loading training data");
-                return false;
+            // Determine if partial loading should be used
+            size_t train_size = static_cast<size_t>(ctx->train_data.size()) * 
+                                    (config.num_features * config.quantization_coefficient / 8 + 1);
+            #if defined(ESP32)
+            size_t available_ram = ESP.getFreeHeap();
+            if (available_ram < train_size + 12000){
+                config.enable_partial_loading = true;
+                RF_DEBUG_2(1, "🔄 Auto-enabling partial loading: train_data=", train_size, "bytes, RAM=", available_ram);
+            }else{
+                config.enable_partial_loading = false;
             }
-            logger.m_log("load train_data");
-            for(uint8_t i = 0; i < config.num_trees; i++){
-                Rf_tree tree(i);
-                tree.set_layout(forest_container.layout_ptr(), true);
-                tree.reset_node_storage(estimated_nodes);
-                queue_nodes.clear();                // Clear queue for each tree
-                buildTree(tree, ctx->dataList[i], queue_nodes);
-                tree.isLoaded = true;
-                forest_container.add_tree(std::move(tree));
-                logger.m_log("tree creation");
+            #endif
+
+            if (config.enable_partial_loading) {
+                // Partial loading path: use chunk accessor
+                RF_DEBUG(1, "📦 Using partial loading mode (chunked training)");
+                
+                // Initialize chunk accessor if not already done
+                if (!ctx->chunk_accessor) {
+                    ctx->chunk_accessor = new TrainChunkAccessor();
+                    
+                    // Get train_data file path
+                    char train_path[RF_PATH_BUFFER];
+                    ctx->train_data.getFilePath(train_path);
+                    
+                    // Initialize accessor with train_data parameters
+                    if (!ctx->chunk_accessor->init(
+                        train_path,
+                        ctx->train_data.size(),
+                        config.num_features,
+                        config.quantization_coefficient,
+                        ctx->train_data.samplesPerChunk()
+                    )) {
+                        RF_DEBUG(0, "❌ Failed to initialize chunk accessor");
+                        delete ctx->chunk_accessor;
+                        ctx->chunk_accessor = nullptr;
+                        return false;
+                    }
+                }
+                
+                // Build trees using chunk accessor (no full train_data load)
+                for(uint8_t i = 0; i < config.num_trees; i++){
+                    Rf_tree tree(i);
+                    tree.set_layout(forest_container.layout_ptr(), true);
+                    tree.reset_node_storage(estimated_nodes);
+                    queue_nodes.clear();
+                    buildTree(tree, ctx->dataList[i], queue_nodes, ctx->chunk_accessor);
+                    tree.isLoaded = true;
+                    forest_container.add_tree(std::move(tree));
+                    logger.m_log("tree creation (chunked)");
+                }
+                
+                // Print accessor stats and flush cache
+                ctx->chunk_accessor->print_stats();
+                ctx->chunk_accessor->flush();
+            } else {
+                // Standard path: load full train_data into RAM
+                RF_DEBUG(1, "💾 Using standard mode (full dataset in RAM)");
+                
+                if(!ctx->train_data.loadData()){
+                    RF_DEBUG(0, "❌ Error loading training data");
+                    return false;
+                }
+                logger.m_log("load train_data");
+                
+                for(uint8_t i = 0; i < config.num_trees; i++){
+                    Rf_tree tree(i);
+                    tree.set_layout(forest_container.layout_ptr(), true);
+                    tree.reset_node_storage(estimated_nodes);
+                    queue_nodes.clear();
+                    buildTree(tree, ctx->dataList[i], queue_nodes);
+                    tree.isLoaded = true;
+                    forest_container.add_tree(std::move(tree));
+                    logger.m_log("tree creation");
+                }
+                
+                ctx->train_data.releaseData();
             }
-            ctx->train_data.releaseData(); 
+            
             forest_container.is_loaded = false;
-            // forest_container.set_to_individual_form();
             node_pred.add_new_samples(config.min_split, config.max_depth, forest_container.avg_nodes());
 
             RF_DEBUG_2(0, "🌲 Forest built successfully: ", forest_container.get_total_nodes(), "nodes","");
@@ -424,6 +498,7 @@ namespace mcu{
             for (uint8_t i = 0; i < config.num_trees; i++) {
                 // Create a new ID_vector for this tree with proper range [0, numSample-1]
                 ID_vector<sample_type,2> sub_data;
+                RF_DEBUG(1, "Creating dataset for tree ", i);
                 
                 // CRITICAL: Set the ID range to match the sample IDs (0 to numSample-1)
                 if(numSample > 1){
@@ -450,9 +525,8 @@ namespace mcu{
                     } else {
                         // Sample without replacement using partial Fisher-Yates
                         // Build an index array 0..numSample-1 (small sample_type)
-                        vector<sample_type> arr(numSample,0); 
-                        arr.clear();
-                        for (sample_type t = 0; t < numSample; ++t) arr[t] = t;
+                        vector<sample_type> arr(numSample);
+                        for (sample_type t = 0; t < numSample; ++t) arr[t] = t; // keep indices valid; avoid clearing as custom vector shrinks size
                         for (sample_type t = 0; t < numSubSample; ++t) {
                             sample_type j = static_cast<sample_type>(t + tree_rng.bounded(numSample - t));
                             sample_type tmp = arr[t];
@@ -518,7 +592,7 @@ namespace mcu{
                 labelCounts.resize(numLabels, static_cast<sample_type>(0));
             }
             
-            // analyze a slice [begin,end) over a shared indices array
+            // analyze a slice [begin,end) over a shared indices array (standard path with loaded data)
             void analyzeSamples(const b_vector<sample_type, 8>& indices, sample_type begin, sample_type end,
                                     label_type numLabels, const Rf_data& data) {
                 totalSamples = (begin < end) ? (end - begin) : 0;
@@ -534,6 +608,29 @@ namespace mcu{
                                 maxCount = labelCounts[label];
                                 majorityLabel = label;
                             }
+                        }
+                    }
+                }
+            }
+
+            // analyze a slice [begin,end) using chunk accessor (partial loading path)
+            void analyzeSamples(const b_vector<sample_type, 8>& indices, sample_type begin, sample_type end,
+                                    label_type numLabels, TrainChunkAccessor* accessor) {
+                totalSamples = (begin < end) ? (end - begin) : 0;
+                sample_type maxCount = 0;
+                
+                // OPTIMIZATION: Batch extract all labels at once
+                b_vector<label_type> batch_labels;
+                accessor->batch_extract_labels(indices, begin, end, batch_labels);
+                
+                for (sample_type k = 0; k < totalSamples; ++k) {
+                    label_type label = batch_labels[k];
+                    labels.insert(label);
+                    if (label < numLabels && label < RF_MAX_LABELS) {
+                        labelCounts[label]++;
+                        if (labelCounts[label] > maxCount) {
+                            maxCount = labelCounts[label];
+                            majorityLabel = label;
                         }
                     }
                 }
@@ -725,6 +822,252 @@ namespace mcu{
             return bestSplit;
         }
 
+        // Overloaded findBestSplit using chunk accessor for partial loading
+        SplitInfo findBestSplit(const b_vector<sample_type, 8>& indices, sample_type begin, sample_type end,
+                                    const unordered_set<uint16_t>& selectedFeatures, bool use_Gini, label_type numLabels,
+                                    TrainChunkAccessor* accessor) {
+            SplitInfo bestSplit;
+            if(!accessor){
+                return bestSplit;
+            }
+            sample_type totalSamples = (begin < end) ? (end - begin) : 0;
+            if (totalSamples < 2) return bestSplit;
+
+            // Get quantization info
+            uint8_t quant_bits = config.quantization_coefficient;
+            uint16_t maxFeatureValue = (quant_bits >= 8) ? 255 : ((1u << quant_bits) - 1);
+            uint8_t numCandidates = static_cast<uint8_t>(threshold_cache.size());
+
+            // OPTIMIZATION: Batch extract labels once for all features
+            b_vector<label_type> sample_labels;
+            accessor->batch_extract_labels(indices, begin, end, sample_labels);
+            
+            b_vector<sample_type> baseLabelCounts(numLabels, 0);
+            for (sample_type k = 0; k < totalSamples; ++k) {
+                label_type lbl = sample_labels[k];
+                if (lbl < numLabels) baseLabelCounts[lbl]++;
+            }
+
+            float baseImpurity;
+            if (use_Gini) {
+                baseImpurity = 1.0f;
+                for (label_type i = 0; i < numLabels; i++) {
+                    if (baseLabelCounts[i] > 0) {
+                        float p = static_cast<float>(baseLabelCounts[i]) / totalSamples;
+                        baseImpurity -= p * p;
+                    }
+                }
+            } else {
+                baseImpurity = 0.0f;
+                for (label_type i = 0; i < numLabels; i++) {
+                    if (baseLabelCounts[i] > 0) {
+                        float p = static_cast<float>(baseLabelCounts[i]) / totalSamples;
+                        baseImpurity -= p * log2f(p);
+                    }
+                }
+            }
+
+            // Pre-allocate count arrays
+            const uint16_t numPossibleValues = maxFeatureValue + 1;
+            b_vector<sample_type> counts;
+            counts.resize(numPossibleValues * numLabels, 0);
+            
+            // OPTIMIZATION: Pre-allocate buffer for batch feature extraction
+            b_vector<uint16_t> feature_values;
+            feature_values.reserve(totalSamples);
+            
+            // Fast path for 1-bit quantization
+            if (quant_bits == 1) {
+                for (const auto& featureID : selectedFeatures) {
+                    // Reset counts
+                    for (size_t i = 0; i < counts.size(); i++) counts[i] = 0;
+                    
+                    // OPTIMIZATION: Batch extract features for all samples at once
+                    accessor->batch_extract_feature(indices, begin, end, featureID, feature_values);
+                    
+                    for (sample_type k = 0; k < totalSamples; ++k) {
+                        label_type lbl = sample_labels[k];
+                        if (lbl < numLabels) {
+                            uint16_t fv = feature_values[k];
+                            if (fv <= 1) {
+                                counts[fv * numLabels + lbl]++;
+                            }
+                        }
+                    }
+                    
+                    // Single threshold: 0 (left) vs 1 (right)
+                    uint32_t leftTotal = 0, rightTotal = 0;
+                    b_vector<sample_type> leftCounts(numLabels, 0), rightCounts(numLabels, 0);
+                    
+                    for (label_type label = 0; label < numLabels; label++) {
+                        leftCounts[label] = counts[label];
+                        leftTotal += leftCounts[label];
+                        rightCounts[label] = counts[numLabels + label];
+                        rightTotal += rightCounts[label];
+                    }
+                    
+                    if (leftTotal == 0 || rightTotal == 0) continue;
+                    
+                    // Calculate impurity and gain
+                    float leftImpurity = 0.0f, rightImpurity = 0.0f;
+                    if (use_Gini) {
+                        leftImpurity = 1.0f; rightImpurity = 1.0f;
+                        for (label_type i = 0; i < numLabels; i++) {
+                            if (leftCounts[i] > 0) { float p = static_cast<float>(leftCounts[i]) / leftTotal; leftImpurity -= p * p; }
+                            if (rightCounts[i] > 0) { float p = static_cast<float>(rightCounts[i]) / rightTotal; rightImpurity -= p * p; }
+                        }
+                    } else {
+                        for (label_type i = 0; i < numLabels; i++) {
+                            if (leftCounts[i] > 0) { float p = static_cast<float>(leftCounts[i]) / leftTotal; leftImpurity -= p * log2f(p); }
+                            if (rightCounts[i] > 0) { float p = static_cast<float>(rightCounts[i]) / rightTotal; rightImpurity -= p * log2f(p); }
+                        }
+                    }
+                    
+                    float weightedImpurity = (static_cast<float>(leftTotal) / totalSamples) * leftImpurity + 
+                                            (static_cast<float>(rightTotal) / totalSamples) * rightImpurity;
+                    float gain = baseImpurity - weightedImpurity;
+                    
+                    if (gain > bestSplit.gain) {
+                        bestSplit.gain = gain;
+                        bestSplit.featureID = featureID;
+                        bestSplit.thresholdSlot = 0;
+                        bestSplit.thresholdValue = 0;
+                    }
+                }
+            } else {
+                // General case: multi-bit quantization
+                for (const auto& featureID : selectedFeatures) {
+                    // Reset counts
+                    for (size_t i = 0; i < counts.size(); i++) counts[i] = 0;
+                    
+                    b_vector<uint32_t> value_totals(numPossibleValues, 0);
+
+                    // OPTIMIZATION: Batch extract features for all samples at once
+                    accessor->batch_extract_feature(indices, begin, end, featureID, feature_values);
+                    
+                    for (sample_type k = 0; k < totalSamples; ++k) {
+                        label_type lbl = sample_labels[k];
+                        if (lbl < numLabels) {
+                            uint16_t fv = feature_values[k];
+                            if (fv <= maxFeatureValue) {
+                                counts[fv * numLabels + lbl]++;
+                                value_totals[fv]++;
+                            }
+                        }
+                    }
+
+                    // Try each threshold candidate
+                    for (uint8_t slot = 0; slot < numCandidates; slot++) {
+                        uint16_t threshold = threshold_cache[slot];
+                        
+                        uint32_t leftTotal = 0, rightTotal = 0;
+                        b_vector<sample_type> leftCounts(numLabels, 0), rightCounts(numLabels, 0);
+                        
+                        for (uint16_t value = 0; value <= maxFeatureValue; value++) {
+                            for (label_type label = 0; label < numLabels; label++) {
+                                sample_type count = counts[value * numLabels + label];
+                                if (value <= threshold) {
+                                    leftCounts[label] += count;
+                                    leftTotal += count;
+                                } else {
+                                    rightCounts[label] += count;
+                                    rightTotal += count;
+                                }
+                            }
+                        }
+                        
+                        if (leftTotal == 0 || rightTotal == 0) continue;
+
+                        float leftImpurity = 0.0f, rightImpurity = 0.0f;
+                        if (use_Gini) {
+                            leftImpurity = 1.0f; rightImpurity = 1.0f;
+                            for (label_type i = 0; i < numLabels; i++) {
+                                if (leftCounts[i] > 0) { float p = static_cast<float>(leftCounts[i]) / leftTotal; leftImpurity -= p * p; }
+                                if (rightCounts[i] > 0) { float p = static_cast<float>(rightCounts[i]) / rightTotal; rightImpurity -= p * p; }
+                            }
+                        } else {
+                            for (label_type i = 0; i < numLabels; i++) {
+                                if (leftCounts[i] > 0) { float p = static_cast<float>(leftCounts[i]) / leftTotal; leftImpurity -= p * log2f(p); }
+                                if (rightCounts[i] > 0) { float p = static_cast<float>(rightCounts[i]) / rightTotal; rightImpurity -= p * log2f(p); }
+                            }
+                        }
+                        
+                        float weightedImpurity = (static_cast<float>(leftTotal) / totalSamples) * leftImpurity + 
+                                                (static_cast<float>(rightTotal) / totalSamples) * rightImpurity;
+                        float gain = baseImpurity - weightedImpurity;
+                        
+                        if (gain > bestSplit.gain) {
+                            bestSplit.gain = gain;
+                            bestSplit.featureID = featureID;
+                            bestSplit.thresholdSlot = slot;
+                            bestSplit.thresholdValue = threshold;
+                        }
+                    }
+                }
+            }
+            return bestSplit;
+        }
+
+        /**
+         * @brief Sort indices by chunk_idx to reduce cache thrashing in partial loading mode
+         * Uses lightweight counting sort - stable within each chunk
+         */
+        void sortIndicesByChunk(b_vector<sample_type, 8>& indices, sample_type begin, sample_type end, sample_type samples_per_chunk) {
+            if (begin >= end || samples_per_chunk == 0) return;
+            
+            sample_type count = end - begin;
+            if (count < 2) return;
+            
+            // Determine chunk range
+            sample_type first_chunk = indices[begin] / samples_per_chunk;
+            sample_type last_chunk = indices[begin] / samples_per_chunk;
+            for (sample_type i = begin; i < end; ++i) {
+                sample_type chunk = indices[i] / samples_per_chunk;
+                if (chunk < first_chunk) first_chunk = chunk;
+                if (chunk > last_chunk) last_chunk = chunk;
+            }
+            
+            size_t num_chunks = last_chunk - first_chunk + 1;
+            if (num_chunks <= 1) return; // All in same chunk, no need to sort
+            
+            // Count samples per chunk
+            b_vector<sample_type> chunk_counts(num_chunks, 0);
+            for (sample_type i = begin; i < end; ++i) {
+                sample_type chunk = indices[i] / samples_per_chunk;
+                chunk_counts[chunk - first_chunk]++;
+            }
+            
+            // Calculate chunk start positions
+            b_vector<sample_type> chunk_starts(num_chunks, 0);
+            sample_type pos = begin;
+            for (size_t c = 0; c < num_chunks; ++c) {
+                chunk_starts[c] = pos;
+                pos += chunk_counts[c];
+            }
+            
+            // Create temporary buffer and redistribute
+            b_vector<sample_type, 8> temp;
+            temp.reserve(count);
+            for (sample_type i = begin; i < end; ++i) {
+                temp.push_back(indices[i]);
+            }
+            
+            // Reset counts for writing
+            for (size_t c = 0; c < num_chunks; ++c) {
+                chunk_counts[c] = 0;
+            }
+            
+            // Write back in chunk order (stable within chunks)
+            for (sample_type i = 0; i < count; ++i) {
+                sample_type sid = temp[i];
+                sample_type chunk = sid / samples_per_chunk;
+                size_t chunk_idx = chunk - first_chunk;
+                sample_type write_pos = chunk_starts[chunk_idx] + chunk_counts[chunk_idx];
+                indices[write_pos] = sid;
+                chunk_counts[chunk_idx]++;
+            }
+        }
+
         // Breadth-first tree building for optimal node layout - MEMORY OPTIMIZED
         void buildTree(Rf_tree& tree, ID_vector<sample_type,2>& sampleIDs, b_vector<NodeToBuild>& queue_nodes) {
             auto* ctx = training_ctx;
@@ -819,7 +1162,19 @@ namespace mcu{
                 SplitInfo bestSplit = findBestSplit(indices, current.begin, current.end,
                                                 selectedFeatures, config.use_gini, config.num_labels);
 
-                if (bestSplit.gain <= config.impurity_threshold) {
+                float adaptive_threshold = config.impurity_threshold;
+                if (adaptive_threshold > 0.0f && stats.totalSamples > config.min_split) {
+                    double scale = 1.0 / (1.0 + std::log2(static_cast<double>(stats.totalSamples) + 1.0));
+                    if (!(scale > 0.0) || !std::isfinite(scale)) {
+                        scale = 1.0;
+                    }
+                    adaptive_threshold = static_cast<float>(adaptive_threshold * scale);
+                    if (adaptive_threshold < 0.0001f) {
+                        adaptive_threshold = 0.0001f;
+                    }
+                }
+
+                if (bestSplit.gain <= adaptive_threshold) {
                     Tree_node nodeValue = tree.nodes.get(current.nodeIndex);
                     nodeValue.setIsLeaf(true);
                     nodeValue.setLabel(leafLabel, layout->label_layout);
@@ -891,6 +1246,206 @@ namespace mcu{
                     queue_nodes.push_back(NodeToBuild(rightChildIndex, rightBegin, rightEnd, current.depth + 1));
                 } else {
                     // Already initialized as leaf, just ensure correct label
+                    Tree_node leafNode = tree.nodes.get(rightChildIndex);
+                    leafNode.setLabel(leafLabel, layout->label_layout);
+                    tree.nodes.set(rightChildIndex, leafNode);
+                }
+            }
+            tree.depth = depth;
+            tree.nodes.fit();
+        }
+
+        // Overloaded buildTree using chunk accessor for partial loading
+        void buildTree(Rf_tree& tree, ID_vector<sample_type,2>& sampleIDs, b_vector<NodeToBuild>& queue_nodes, TrainChunkAccessor* accessor) {
+            auto* ctx = training_ctx;
+            if(!ctx || !accessor){
+                return;
+            }
+
+            node_layout* layout = tree.layout;
+            RF_DEBUG(1, "🌳 Building tree (partial loading mode)... ");
+
+            size_t reservedCapacity = tree.nodes.capacity();
+            if (tree.nodes.get_bits_per_value() != layout->bits_per_node()) {
+                tree.reset_node_storage(reservedCapacity);
+            } else {
+                tree.nodes.clear();
+                if (reservedCapacity > 0) {
+                    tree.nodes.reserve(reservedCapacity);
+                }
+            }
+
+            if (sampleIDs.empty()) {
+                RF_DEBUG(1, "⚠️ Warning: sub_data is empty. Ignoring.. !");
+                return;
+            }
+
+            // Initialize root node
+            Tree_node rootNode;
+            rootNode.setIsLeaf(true);
+            rootNode.setLabel(0, layout->label_layout);
+            rootNode.setFeatureID(0, layout->featureID_layout);
+            rootNode.setLeftChildIndex(0, layout->left_child_layout);
+            tree.nodes.push_back(rootNode);
+
+            b_vector<sample_type, 8> indices;
+            indices.reserve(sampleIDs.size());
+            for (const auto& sid : sampleIDs) {
+                indices.push_back(sid);
+            }
+
+            // Ensure indices are ordered by chunk before any accessor batching to maximize cache hits
+            sortIndicesByChunk(indices, 0, static_cast<sample_type>(indices.size()), accessor->get_samples_per_chunk());
+            uint16_t depth = 0;
+
+            queue_nodes.push_back(NodeToBuild(0, 0, static_cast<sample_type>(indices.size()), 0));
+            
+            while (!queue_nodes.empty()) {
+                NodeToBuild current = std::move(queue_nodes.front());
+                queue_nodes.erase(0);
+
+                NodeStats stats(config.num_labels);
+                stats.analyzeSamples(indices, current.begin, current.end, config.num_labels, accessor);
+
+                if(current.nodeIndex >= forest_container.get_layout().max_nodes()){
+                    RF_DEBUG(2, "⚠️ Warning: Exceeded maximum node limit. Forcing leaf node 🌿.");
+                    label_type leafLabel = stats.majorityLabel;
+                    Tree_node nodeValue = tree.nodes.get(current.nodeIndex);
+                    nodeValue.setIsLeaf(true);
+                    nodeValue.setLabel(leafLabel, layout->label_layout);
+                    nodeValue.setFeatureID(0, layout->featureID_layout);
+                    tree.nodes.set(current.nodeIndex, nodeValue);
+                    continue;
+                }
+
+                bool shouldBeLeaf = false;
+                label_type leafLabel = stats.majorityLabel;
+
+                if (stats.labels.size() == 1) {
+                    shouldBeLeaf = true;
+                    leafLabel = *stats.labels.begin();
+                } else if (stats.totalSamples < config.min_split || current.depth >= config.max_depth - 1) {
+                    shouldBeLeaf = true;
+                }
+                if (shouldBeLeaf) {
+                    Tree_node nodeValue = tree.nodes.get(current.nodeIndex);
+                    nodeValue.setIsLeaf(true);
+                    nodeValue.setLabel(leafLabel, layout->label_layout);
+                    nodeValue.setFeatureID(0, layout->featureID_layout);
+                    tree.nodes.set(current.nodeIndex, nodeValue);
+                    continue;
+                }
+
+                uint8_t num_selected_features = static_cast<uint8_t>(sqrt(config.num_features));
+                if (num_selected_features == 0) num_selected_features = 1;
+                unordered_set<uint16_t> selectedFeatures;
+                selectedFeatures.reserve(num_selected_features);
+                uint16_t N = config.num_features;
+                uint16_t K = num_selected_features > N ? N : num_selected_features;
+                for (uint16_t j = N - K; j < N; ++j) {
+                    uint16_t t = static_cast<uint16_t>(ctx->random_generator.bounded(j + 1));
+                    if (selectedFeatures.find(t) == selectedFeatures.end()) selectedFeatures.insert(t);
+                    else selectedFeatures.insert(j);
+                }
+
+                SplitInfo bestSplit = findBestSplit(indices, current.begin, current.end,
+                                                selectedFeatures, config.use_gini, config.num_labels, accessor);
+
+                float adaptive_threshold = config.impurity_threshold;
+                if (adaptive_threshold > 0.0f && stats.totalSamples > config.min_split) {
+                    double scale = 1.0 / (1.0 + std::log2(static_cast<double>(stats.totalSamples) + 1.0));
+                    if (!(scale > 0.0) || !std::isfinite(scale)) {
+                        scale = 1.0;
+                    }
+                    adaptive_threshold = static_cast<float>(adaptive_threshold * scale);
+                    if (adaptive_threshold < 0.0001f) {
+                        adaptive_threshold = 0.0001f;
+                    }
+                }
+
+                if (bestSplit.gain <= adaptive_threshold) {
+                    Tree_node nodeValue = tree.nodes.get(current.nodeIndex);
+                    nodeValue.setIsLeaf(true);
+                    nodeValue.setLabel(leafLabel, layout->label_layout);
+                    nodeValue.setFeatureID(0, layout->featureID_layout);
+                    tree.nodes.set(current.nodeIndex, nodeValue);
+                    continue;
+                }
+
+                Tree_node splitNode = tree.nodes.get(current.nodeIndex);
+                splitNode.setFeatureID(bestSplit.featureID, layout->featureID_layout);
+                splitNode.setThresholdSlot(bestSplit.thresholdSlot);
+                splitNode.setIsLeaf(false);
+                tree.nodes.set(current.nodeIndex, splitNode);
+
+                // OPTIMIZATION: Batch extract split feature for all samples in node
+                b_vector<uint16_t> split_feature_values;
+                accessor->batch_extract_feature(indices, current.begin, current.end, 
+                                               bestSplit.featureID, split_feature_values);
+                
+                // Partition indices using pre-extracted feature values
+                sample_type iLeft = current.begin;
+                for (sample_type k = current.begin; k < current.end; ++k) {
+                    uint16_t fv = split_feature_values[k - current.begin];
+                    if (fv <= bestSplit.thresholdValue) {
+                        if (k != iLeft) {
+                            sample_type tmp = indices[iLeft];
+                            indices[iLeft] = indices[k];
+                            indices[k] = tmp;
+                        }
+                        ++iLeft;
+                    }
+                }
+                sample_type leftBegin = current.begin;
+                sample_type leftEnd = iLeft;
+                sample_type rightBegin = iLeft;
+                sample_type rightEnd = current.end;
+
+                // Sort left and right partitions by chunk to reduce cache thrashing
+                if (leftEnd > leftBegin) {
+                    sortIndicesByChunk(indices, leftBegin, leftEnd, accessor->get_samples_per_chunk());
+                }
+                if (rightEnd > rightBegin) {
+                    sortIndicesByChunk(indices, rightBegin, rightEnd, accessor->get_samples_per_chunk());
+                }
+
+                uint16_t leftChildIndex = static_cast<uint16_t>(tree.nodes.size());
+                uint16_t rightChildIndex = static_cast<uint16_t>(leftChildIndex + 1);
+
+                Tree_node parentNode = tree.nodes.get(current.nodeIndex);
+                parentNode.setLeftChildIndex(leftChildIndex, layout->left_child_layout);
+                tree.nodes.set(current.nodeIndex, parentNode);
+
+                // Initialize child nodes
+                Tree_node leftChild;
+                leftChild.setIsLeaf(true);
+                leftChild.setLabel(leafLabel, layout->label_layout);
+                leftChild.setFeatureID(0, layout->featureID_layout);
+                leftChild.setLeftChildIndex(0, layout->left_child_layout);
+                
+                Tree_node rightChild;
+                rightChild.setIsLeaf(true);
+                rightChild.setLabel(leafLabel, layout->label_layout);
+                rightChild.setFeatureID(0, layout->featureID_layout);
+                rightChild.setLeftChildIndex(0, layout->left_child_layout);
+                
+                tree.nodes.push_back(leftChild);
+                tree.nodes.push_back(rightChild);
+
+                if (current.depth + 1 > depth) {
+                    depth = current.depth + 1;
+                }
+
+                if (leftEnd > leftBegin) {
+                    queue_nodes.push_back(NodeToBuild(leftChildIndex, leftBegin, leftEnd, current.depth + 1));
+                } else {
+                    Tree_node leafNode = tree.nodes.get(leftChildIndex);
+                    leafNode.setLabel(leafLabel, layout->label_layout);
+                    tree.nodes.set(leftChildIndex, leafNode);
+                }
+                if (rightEnd > rightBegin) {
+                    queue_nodes.push_back(NodeToBuild(rightChildIndex, rightBegin, rightEnd, current.depth + 1));
+                } else {
                     Tree_node leafNode = tree.nodes.get(rightChildIndex);
                     leafNode.setLabel(leafLabel, layout->label_layout);
                     tree.nodes.set(rightChildIndex, leafNode);
@@ -1175,6 +1730,13 @@ namespace mcu{
 #if RF_ENABLE_TRAINING
             if(!base.able_to_training()){
                 RF_DEBUG(0, "❌ Model not set for training");
+                return;
+            }
+
+            // Disable grid search training in partial loading mode - too slow
+            if(config.enable_partial_loading){
+                RF_DEBUG(0, "⚠️  Grid search training disabled in partial loading mode");
+                RF_DEBUG(0, "💡 Use build_model() instead for single model training");
                 return;
             }
 
@@ -1476,6 +2038,18 @@ namespace mcu{
             config.enable_retrain = false;
             release_pending_data();
             release_base_data_stub();
+        }
+
+        // Enable partial loading mode for memory-efficient training with large datasets
+        void enable_partial_loading(){
+            config.enable_partial_loading = true;
+            RF_DEBUG(1, "✅ Partial loading mode enabled");
+        }
+
+        // Disable partial loading mode (use full dataset in RAM)
+        void disable_partial_loading(){
+            config.enable_partial_loading = false;
+            RF_DEBUG(1, "✅ Partial loading mode disabled");
         }
 
        // allow dataset to grow when new data is added, but limited to max_samples/max_dataset_size

@@ -5,6 +5,33 @@
 
 using namespace mcu;
 
+struct Tree_node {
+    uint32_t packed_data = 0;
+
+    inline uint16_t getFeatureID() const { return getBits(0, 8); }
+    inline uint8_t getLabel() const { return static_cast<uint8_t>(getBits(8, 5)); }
+    inline uint8_t getThresholdSlot() const { return static_cast<uint8_t>(getBits(13, 2)); }
+    inline bool getIsLeaf() const { return getBits(15, 1) != 0; }
+    inline uint16_t getLeftChildIndex() const { return getBits(16, 8); }
+    inline uint16_t getRightChildIndex() const { return static_cast<uint16_t>(getLeftChildIndex() + 1); }
+
+    inline void setFeatureID(uint16_t v) { setBits(0, 8, v); }
+    inline void setLabel(uint8_t v) { setBits(8, 5, v); }
+    inline void setThresholdSlot(uint8_t v) { setBits(13, 2, v); }
+    inline void setIsLeaf(bool v) { setBits(15, 1, v ? 1u : 0u); }
+    inline void setLeftChildIndex(uint16_t v) { setBits(16, 8, v); }
+
+private:
+    inline uint32_t getBits(uint8_t pos, uint8_t len) const {
+        return (packed_data >> pos) & ((1u << len) - 1u);
+    }
+
+    inline void setBits(uint8_t pos, uint8_t len, uint32_t val) {
+        const uint32_t mask = ((1u << len) - 1u) << pos;
+        packed_data = (packed_data & ~mask) | ((val << pos) & mask);
+    }
+};
+
 using packed_vector_1bit = packed_vector<1>;
 using packed_vector_2bit = packed_vector<2>;
 using packed_vector_4bit = packed_vector<4>;
@@ -397,6 +424,42 @@ void test_iterators() {
     } END_TEST
 }
 
+void test_custom_type_support() {
+    std::cout << "------------- Custom Type Support Test -------------\n";
+
+    TEST("Tree_node storage and retrieval") {
+        mcu::packed_vector<24, Tree_node> nodes;
+        Tree_node root;
+        root.setFeatureID(42);
+        root.setLabel(17);
+        root.setThresholdSlot(1);
+        root.setIsLeaf(false);
+        root.setLeftChildIndex(7);
+
+        nodes.push_back(root);
+
+        const Tree_node retrieved = nodes[0];
+        EXPECT(retrieved.getFeatureID() == 42);
+        EXPECT(retrieved.getLabel() == 17);
+        EXPECT(retrieved.getThresholdSlot() == 1);
+        EXPECT(!retrieved.getIsLeaf());
+        EXPECT(retrieved.getLeftChildIndex() == 7);
+        EXPECT(retrieved.getRightChildIndex() == 8);
+    } END_TEST
+
+    TEST("Tree_node bit clamping") {
+        mcu::packed_vector<24, Tree_node> nodes(2, Tree_node{});
+        Tree_node noisy;
+        noisy.packed_data = 0xFFFFFFFFu; // deliberately exceed 24 bits
+        nodes.set(1, noisy);
+
+        const Tree_node stored = nodes.get(1);
+        EXPECT((stored.packed_data & 0xFFFFFFu) == stored.packed_data);
+        EXPECT(stored.packed_data == 0xFFFFFFu);
+    EXPECT((mcu::packed_vector<24, Tree_node>::max_bits_value() == 0xFFFFFFu));
+    } END_TEST
+}
+
 void test_range_constructor() {
     std::cout << "------------- Range Constructor Test -------------\n";
     
@@ -677,6 +740,7 @@ int main(){
     test_range_constructor();
     test_dynamic_bits_per_value();
     test_runtime_bpv_memory_safety();
+    test_custom_type_support();
     
     // Print summary
     std::cout << "===============================================\n";

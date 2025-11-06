@@ -3,8 +3,10 @@
 #include "STL_MCU.h"  
 #include "Rf_file_manager.h"
 #include "esp_system.h"
+#include <esp_psram.h>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 
 
 #define GET_CURRENT_TIME_IN_MICROSECONDS() micros() // current time in microseconds
@@ -509,6 +511,7 @@ namespace mcu {
         bool extend_base_data;
         bool enable_retrain;
         bool enable_auto_config;   // change config based on dataset parameters (when base_data expands)
+        bool enable_partial_loading; // enable chunked training for large datasets that don't fit in RAM
 
         // runtime parameters
         pair<uint8_t, uint8_t> min_split_range;
@@ -546,7 +549,8 @@ namespace mcu {
             extend_base_data    = true;
             enable_retrain      = true;
             enable_auto_config  = false;
-            quantization_coefficient = 2; // Default 2 bits per value
+            enable_partial_loading = false;
+            quantization_coefficient = 2; 
         }
         
         Rf_config() {
@@ -695,8 +699,10 @@ namespace mcu {
             float deficit = max(0.0f, expected_min_pct - lowest_distribution);
             float imbalance = expected_min_pct > 0.0f ? min(1.0f, deficit / expected_min_pct) : 0.0f; // 0..1
 
-            double sample_factor_d = min(2.0, 0.75 + log2(max(2.0, static_cast<double>(num_samples))) / 12.0);
-            float sample_factor = static_cast<float>(sample_factor_d);
+            double log_samples = log2(max(2.0, static_cast<double>(num_samples)));
+            double adjusted = max(0.0, log_samples - 10.0); // keep small datasets unaffected
+            float sample_factor = static_cast<float>(1.0 / (1.0 + adjusted / 2.5));
+            sample_factor = max(0.25f, min(1.15f, sample_factor));
             // Imbalance factor: reduce threshold for imbalanced data to allow splitting on rare classes
             float imbalance_factor = 1.0f - 0.5f * imbalance; // 0.5..1.0
             // Feature factor: with many features, weak splits are common; require slightly higher gain
@@ -706,12 +712,12 @@ namespace mcu {
                 float max_gini = 1.0f - 1.0f / static_cast<float>(K);
                 float base = 0.003f * max_gini; // very small base for Gini
                 float thr = base * sample_factor * imbalance_factor * feature_factor;
-                impurity_threshold = max(0.0005f, min(0.02f, thr));
+                impurity_threshold = max(0.0003f, min(0.02f, thr));
             } else { // entropy
                 float max_entropy = log2(static_cast<float>(K));
                 float base = 0.02f * (max_entropy > 0.0f ? max_entropy : 1.0f); // larger than gini
                 float thr = base * sample_factor * imbalance_factor * feature_factor;
-                impurity_threshold = max(0.005f, min(0.2f, thr));
+                impurity_threshold = max(0.002f, min(0.2f, thr));
             }
             RF_DEBUG(1, "⚙️ Setting impurity_threshold to ", impurity_threshold);
         }
@@ -1001,6 +1007,7 @@ namespace mcu {
             file.printf("  \"extendBaseData\": %s,\n", extend_base_data ? "true" : "false");
             file.printf("  \"enableRetrain\": %s,\n", enable_retrain ? "true" : "false");
             file.printf("  \"enableAutoConfig\": %s,\n", enable_auto_config ? "true" : "false");
+            file.printf("  \"enablePartialLoading\": %s,\n", enable_partial_loading ? "true" : "false");
             file.printf("  \"resultScore\": %.4f,\n", result_score);
             file.printf("  \"Estimated RAM (bytes)\": %d,\n", estimatedRAM);
 
@@ -1051,6 +1058,7 @@ namespace mcu {
             extend_base_data = extractBoolValue(jsonStr, "extendBaseData");
             enable_retrain = extractBoolValue(jsonStr, "enableRetrain");
             enable_auto_config = extractBoolValue(jsonStr, "enableAutoConfig");
+            enable_partial_loading = extractBoolValue(jsonStr, "enablePartialLoading");
             result_score = extractFloatValue(jsonStr, "resultScore");      
             estimatedRAM = extractIntValue(jsonStr, "Estimated RAM (bytes)");
         }
@@ -1263,6 +1271,7 @@ namespace mcu {
     };
    
     /*
+    /*
     ------------------------------------------------------------------------------------------------------------------
     -------------------------------------------------- RF_DATA ------------------------------------------------------
     ------------------------------------------------------------------------------------------------------------------
@@ -1289,7 +1298,12 @@ namespace mcu {
     
     class Rf_data {
     private:
+        friend class TrainChunkAccessor; // Allow accessor to read private members
+    #ifndef RS_PSRAM_AVAILABLE
         static constexpr size_t MAX_CHUNKS_SIZE = 8192; // max bytes per chunk (8kB)
+    #else
+        static constexpr size_t MAX_CHUNKS_SIZE = 32768; // max bytes per chunk (32kB)
+    #endif  
 
         // Chunked packed storage - eliminates both heap overhead per sample and large contiguous allocations
         vector<packed_vector<8>> sampleChunks;  // Multiple chunks of packed features (up to 8 bits per value)
@@ -1641,6 +1655,12 @@ namespace mcu {
         void setfile_path(const char* path) {
             strncpy(this->file_path, path, RF_PATH_BUFFER);
             this->file_path[RF_PATH_BUFFER - 1] = '\0';
+        }
+
+        void getFilePath(char* buffer) const {
+            if (buffer) {
+                strncpy(buffer, this->file_path, RF_PATH_BUFFER);
+            }
         }
 
         // Fast accessors for training-time hot paths (avoid reconstructing Rf_sample)
@@ -2812,7 +2832,7 @@ namespace mcu {
     ------------------------------------------------------------------------------------------------------------------
     */
 
-    // Feature type definitions for CTG v2 format
+    // Feature type definitions for CTG3 format
     enum FeatureType { FT_DF = 0, FT_DC = 1, FT_CS = 2, FT_CU = 3 };
     
     // Packed feature reference structure (2 bytes per feature)
@@ -2853,7 +2873,6 @@ namespace mcu {
         uint8_t groupsPerFeature = 0;
         label_type numLabels = 0;
         uint8_t quantization_coefficient = 2; // Bits per feature value (1-8)
-        uint32_t scaleFactor = 50000;
         bool isLoaded = false;
         const Rf_base* base_ptr = nullptr;
 
@@ -2862,6 +2881,8 @@ namespace mcu {
         b_vector<uint16_t> sharedPatterns;             // Concatenated pattern edges
         b_vector<uint16_t, 32> allUniqueEdges;             // Concatenated unique edges
         b_vector<uint8_t> allDiscreteValues;           // Concatenated discrete values
+        b_vector<int64_t> featureBaselines;            // Per-feature baseline offsets (scaled)
+        b_vector<uint64_t> featureScales;             // Per-feature scaling factors
         b_vector<uint16_t> labelOffsets;               // Offsets into labelStorage for each normalized label
         b_vector<uint16_t> labelLengths;               // Cached label lengths for faster copy
         b_vector<char, 256> labelStorage;                   // Contiguous storage for label strings (null terminated)
@@ -2888,6 +2909,24 @@ namespace mcu {
             if (start > 0) {
                 memmove(str, str + start, strlen(str + start) + 1);
             }
+        }
+
+        static inline int64_t scaleToInt64(double value, uint64_t scale) {
+            long double scaled = static_cast<long double>(value) * static_cast<long double>(scale);
+            const long double maxVal = static_cast<long double>(std::numeric_limits<int64_t>::max());
+            const long double minVal = static_cast<long double>(std::numeric_limits<int64_t>::min());
+            if (scaled >= maxVal) {
+                return std::numeric_limits<int64_t>::max();
+            }
+            if (scaled <= minVal) {
+                return std::numeric_limits<int64_t>::min();
+            }
+            if (scaled >= 0.0L) {
+                scaled += 0.5L;
+            } else {
+                scaled -= 0.5L;
+            }
+            return static_cast<int64_t>(scaled);
         }
 
         static bool readLine(File& file, char* buffer, size_t bufferSize, size_t& outLength) {
@@ -2993,16 +3032,20 @@ namespace mcu {
                 int intValue = static_cast<int>(value);
                 return static_cast<uint8_t>((intValue < 0) ? 0 : ((intValue >= groupsPerFeature) ? (groupsPerFeature - 1) : intValue));
             }
-            
-            // Precompute scaled value for continuous features
-            const uint32_t scaledValue = static_cast<uint32_t>(value * scaleFactor + 0.5f);
-            
+
             if (type == FT_CS) {
                 // Continuous shared pattern
+                const int64_t baseline = (featureIdx < featureBaselines.size()) ? featureBaselines[featureIdx] : 0;
+                const uint64_t scale = (featureIdx < featureScales.size()) ? featureScales[featureIdx] : 1ULL;
+                int64_t adjusted = scaleToInt64(static_cast<double>(value), scale) - baseline;
+                if (adjusted <= 0) {
+                    return 0;
+                }
+                uint32_t scaledValue = static_cast<uint32_t>(adjusted <= std::numeric_limits<uint32_t>::max() ? adjusted : std::numeric_limits<uint32_t>::max());
                 const uint16_t baseOffset = ref.getAux() * (groupsPerFeature - 1);
                 const uint8_t limit = groupsPerFeature - 1;
                 const uint16_t* patterns = &sharedPatterns[baseOffset];
-                
+
                 for (uint8_t bin = 0; bin < limit; ++bin) {
                     if (scaledValue < patterns[bin]) {
                         return bin;
@@ -3010,13 +3053,20 @@ namespace mcu {
                 }
                 return limit;
             }
-            
+
             if (type == FT_CU) {
                 // Continuous unique edges
+                const int64_t baseline = (featureIdx < featureBaselines.size()) ? featureBaselines[featureIdx] : 0;
+                const uint64_t scale = (featureIdx < featureScales.size()) ? featureScales[featureIdx] : 1ULL;
+                int64_t adjusted = scaleToInt64(static_cast<double>(value), scale) - baseline;
+                if (adjusted <= 0) {
+                    return 0;
+                }
+                uint32_t scaledValue = static_cast<uint32_t>(adjusted <= std::numeric_limits<uint32_t>::max() ? adjusted : std::numeric_limits<uint32_t>::max());
                 const uint8_t edgeCount = ref.getAux();
                 const uint16_t baseOffset = ref.getOffset() * (groupsPerFeature - 1);
                 const uint16_t* edges = &allUniqueEdges[baseOffset];
-                
+
                 for (uint8_t bin = 0; bin < edgeCount; ++bin) {
                     if (scaledValue < edges[bin]) {
                         return bin;
@@ -3052,6 +3102,8 @@ namespace mcu {
             sharedPatterns.clear();
             allUniqueEdges.clear();
             allDiscreteValues.clear();
+            featureBaselines.clear();
+            featureScales.clear();
             labelOffsets.clear();
             labelLengths.clear();
             labelStorage.clear();
@@ -3063,7 +3115,7 @@ namespace mcu {
             isLoaded = false;
         }
         
-        // Load quantizer data from CTG v2 format without dynamic String allocations
+    // Load quantizer data from CTG3 format without dynamic String allocations
         bool loadQuantizer() {
             if (isLoaded) {
                 return true;
@@ -3091,12 +3143,13 @@ namespace mcu {
                 groupsPerFeature = 0;
                 numLabels = 0;
                 quantization_coefficient = 2;
-                scaleFactor = 50000;
                 isLoaded = false;
                 featureRefs.clear();
                 sharedPatterns.clear();
                 allUniqueEdges.clear();
                 allDiscreteValues.clear();
+                featureBaselines.clear();
+                featureScales.clear();
                 labelOffsets.clear();
                 labelLengths.clear();
                 labelStorage.clear();
@@ -3118,7 +3171,7 @@ namespace mcu {
 
                 char* tokens[64];
                 size_t tokenCount = tokenize(line, ',', tokens, 64);
-                if (tokenCount != 6) {
+                if (tokenCount != 5) {
                     RF_DEBUG(0, "❌ Invalid Quantizer header token count");
                     success = false;
                     break;
@@ -3127,7 +3180,7 @@ namespace mcu {
                     trim(tokens[i]);
                 }
 
-                if (strcmp(tokens[0], "CTG2") != 0) {
+                if (strcmp(tokens[0], "CTG3") != 0) {
                     RF_DEBUG(0, "❌ Unsupported Quantizer format identifier");
                     success = false;
                     break;
@@ -3137,7 +3190,6 @@ namespace mcu {
                 groupsPerFeature = static_cast<uint8_t>(strtoul(tokens[2], nullptr, 10));
                 numLabels = static_cast<uint8_t>(strtoul(tokens[3], nullptr, 10));
                 numSharedPatterns = static_cast<uint16_t>(strtoul(tokens[4], nullptr, 10));
-                scaleFactor = static_cast<uint32_t>(strtoul(tokens[5], nullptr, 10));
 
                 // Calculate quantization_coefficient from groupsPerFeature
                 if (groupsPerFeature == 0) {
@@ -3163,6 +3215,8 @@ namespace mcu {
                     allUniqueEdges.reserve(static_cast<size_t>(numFeatures) * (groupsPerFeature - 1));
                 }
                 allDiscreteValues.reserve(static_cast<size_t>(numFeatures) * groupsPerFeature);
+                featureBaselines.reserve(numFeatures);
+                featureScales.reserve(numFeatures);
                 labelOffsets.resize(numLabels, UINT16_MAX);
                 labelLengths.resize(numLabels, 0);
                 labelStorage.reserve(numLabels * 8);
@@ -3261,17 +3315,31 @@ namespace mcu {
                         trim(featureTokens[j]);
                     }
 
+                    int64_t baselineValue = 0;
+                    uint64_t scaleValue = 1;
+
                     if (strcmp(featureTokens[0], "DF") == 0) {
+                        if (count != 3) {
+                            RF_DEBUG(0, "❌ Invalid DF line format");
+                            success = false;
+                            break;
+                        }
                         featureRefs.push_back(FeatureRef(FT_DF, 0, 0));
+                        baselineValue = static_cast<int64_t>(strtoll(featureTokens[1], nullptr, 10));
+                        scaleValue = static_cast<uint64_t>(strtoull(featureTokens[2], nullptr, 10));
+                        if (scaleValue == 0) {
+                            scaleValue = 1;
+                        }
                     } else if (strcmp(featureTokens[0], "DC") == 0) {
-                        if (count < 2) {
+                        if (count < 4) {
                             RF_DEBUG(0, "❌ Invalid DC line format");
                             success = false;
                             break;
                         }
                         uint8_t customCount = static_cast<uint8_t>(strtoul(featureTokens[1], nullptr, 10));
-                        if (count != static_cast<size_t>(2 + customCount)) {
-                            RF_DEBUG_2(0, "❌ DC value count mismatch - Expected: ", 2 + customCount, ", Found: ", count);
+                        size_t expectedCount = static_cast<size_t>(2 + customCount + 2);
+                        if (count != expectedCount) {
+                            RF_DEBUG_2(0, "❌ DC value count mismatch - Expected: ", expectedCount, ", Found: ", count);
                             success = false;
                             break;
                         }
@@ -3279,24 +3347,39 @@ namespace mcu {
                         for (uint8_t j = 0; j < customCount; ++j) {
                             allDiscreteValues.push_back(static_cast<uint8_t>(strtoul(featureTokens[2 + j], nullptr, 10)));
                         }
+                        baselineValue = static_cast<int64_t>(strtoll(featureTokens[2 + customCount], nullptr, 10));
+                        scaleValue = static_cast<uint64_t>(strtoull(featureTokens[3 + customCount], nullptr, 10));
+                        if (scaleValue == 0) {
+                            scaleValue = 1;
+                        }
                         featureRefs.push_back(FeatureRef(FT_DC, customCount, offset));
                     } else if (strcmp(featureTokens[0], "CS") == 0) {
-                        if (count != 2) {
+                        if (count != 4) {
                             RF_DEBUG(0, "❌ Invalid CS line format");
                             success = false;
                             break;
                         }
                         uint16_t patternId = static_cast<uint16_t>(strtoul(featureTokens[1], nullptr, 10));
+                        baselineValue = static_cast<int64_t>(strtoll(featureTokens[2], nullptr, 10));
+                        scaleValue = static_cast<uint64_t>(strtoull(featureTokens[3], nullptr, 10));
+                        if (scaleValue == 0) {
+                            scaleValue = 1;
+                        }
                         featureRefs.push_back(FeatureRef(FT_CS, patternId, 0));
                     } else if (strcmp(featureTokens[0], "CU") == 0) {
-                        if (count < 2) {
+                        if (count < 4) {
                             RF_DEBUG(0, "❌ Invalid CU line format");
                             success = false;
                             break;
                         }
                         uint8_t edgeCount = static_cast<uint8_t>(strtoul(featureTokens[1], nullptr, 10));
-                        if (count != static_cast<size_t>(2 + edgeCount)) {
-                            RF_DEBUG_2(0, "❌ CU edge count mismatch - Expected: ", 2 + edgeCount, ", Found: ", count);
+                        size_t expectedCount = static_cast<size_t>(2 + edgeCount + 2);
+                        if (count != expectedCount) {
+                            char mismatchMsg[112];
+                            snprintf(mismatchMsg, sizeof(mismatchMsg), "❌ CU edge count mismatch - Found: %u, Expected: %u",
+                                     static_cast<unsigned>(count),
+                                     static_cast<unsigned>(expectedCount));
+                            RF_DEBUG(0, "", mismatchMsg);
                             success = false;
                             break;
                         }
@@ -3315,12 +3398,20 @@ namespace mcu {
                         for (uint8_t j = 0; j < edgeCount; ++j) {
                             allUniqueEdges.push_back(static_cast<uint16_t>(strtoul(featureTokens[2 + j], nullptr, 10)));
                         }
+                        baselineValue = static_cast<int64_t>(strtoll(featureTokens[2 + edgeCount], nullptr, 10));
+                        scaleValue = static_cast<uint64_t>(strtoull(featureTokens[3 + edgeCount], nullptr, 10));
+                        if (scaleValue == 0) {
+                            scaleValue = 1;
+                        }
                         featureRefs.push_back(FeatureRef(FT_CU, edgeCount, offset));
                     } else {
                         RF_DEBUG(0, "❌ Unknown feature type encountered");
                         success = false;
                         break;
                     }
+
+                    featureBaselines.push_back(baselineValue);
+                    featureScales.push_back(scaleValue);
                 }
             } while (false);
 
@@ -3335,7 +3426,6 @@ namespace mcu {
             RF_DEBUG(1, "✅ Quantizer loaded successfully! : ", file_path);
             RF_DEBUG_2(2, "📊 Features: ", numFeatures, ", Groups: ", groupsPerFeature);
             RF_DEBUG_2(2, "   Labels: ", numLabels, ", Patterns: ", numSharedPatterns);
-            RF_DEBUG(2, "   Scale Factor: ", scaleFactor);
             return true;
         }
         
@@ -3351,6 +3441,8 @@ namespace mcu {
             sharedPatterns.clear();
             allUniqueEdges.clear();
             allDiscreteValues.clear();
+            featureBaselines.clear();
+            featureScales.clear();
             labelOffsets.clear();
             labelLengths.clear();
             labelStorage.clear();
@@ -3372,7 +3464,7 @@ namespace mcu {
             
             // Basic members
             usage += sizeof(numFeatures) + sizeof(groupsPerFeature) + sizeof(numLabels) + 
-                    sizeof(quantization_coefficient) + sizeof(scaleFactor) + sizeof(isLoaded);
+            sizeof(quantization_coefficient) + sizeof(isLoaded);
             usage += 4;
             
             // Core data structures
@@ -3380,6 +3472,8 @@ namespace mcu {
             usage += sharedPatterns.size() * sizeof(uint16_t);
             usage += allUniqueEdges.size() * sizeof(uint16_t);
             usage += allDiscreteValues.size() * sizeof(uint8_t);
+        usage += featureBaselines.size() * sizeof(int64_t);
+        usage += featureScales.size() * sizeof(uint64_t);
             usage += labelOffsets.size() * sizeof(uint16_t);
             usage += labelLengths.size() * sizeof(uint16_t);
             usage += labelStorage.size() * sizeof(char);
@@ -3392,7 +3486,6 @@ namespace mcu {
         uint8_t getGroupsPerFeature() const { return groupsPerFeature; }
         label_type getNumLabels() const { return numLabels; }
         uint8_t getQuantizationCoefficient() const { return quantization_coefficient; }
-        uint32_t getScaleFactor() const { return scaleFactor; }
         bool loaded() const { return isLoaded; }
 
         const char* getOriginalLabelPtr(label_type normalizedLabel) const {
@@ -4201,21 +4294,487 @@ namespace mcu {
         static uint64_t hashIDVector(const IdVec& ids) {
             uint64_t h = FNV_OFFSET;
             for (size_t i = 0; i < ids.size(); ++i) {
-                uint16_t v = ids[i];
-                h ^= static_cast<uint64_t>(v & 0xFF);
-                h *= FNV_PRIME;
-                h ^= static_cast<uint64_t>((v >> 8) & 0xFF);
+                auto v = ids[i];
+                for (size_t byte = 0; byte < sizeof(v); ++byte) {
+                    h ^= static_cast<uint64_t>((static_cast<uint64_t>(v) >> (byte * 8)) & 0xFFULL);
+                    h *= FNV_PRIME;
+                }
+            }
+            size_t sz = ids.size();
+            for (size_t byte = 0; byte < sizeof(sz); ++byte) {
+                h ^= static_cast<uint64_t>((sz >> (byte * 8)) & 0xFFULL);
                 h *= FNV_PRIME;
             }
-            h ^= static_cast<uint64_t>(ids.size() & 0xFF);
-            h *= FNV_PRIME;
-            h ^= static_cast<uint64_t>((ids.size() >> 8) & 0xFF);
-            h *= FNV_PRIME;
+            return h;
+        }
+
+        template <typename T, uint8_t BitsPerValue>
+        static uint64_t hashIDVector(const ID_vector<T, BitsPerValue>& ids) {
+            uint64_t h = FNV_OFFSET;
+            for (auto it = ids.begin(); it != ids.end(); ++it) {
+                T v = *it;
+                for (size_t byte = 0; byte < sizeof(T); ++byte) {
+                    h ^= static_cast<uint64_t>((static_cast<uint64_t>(v) >> (byte * 8)) & 0xFFULL);
+                    h *= FNV_PRIME;
+                }
+            }
+            size_t sz = ids.size();
+            for (size_t byte = 0; byte < sizeof(sz); ++byte) {
+                h ^= static_cast<uint64_t>((sz >> (byte * 8)) & 0xFFULL);
+                h *= FNV_PRIME;
+            }
             return h;
         }
         size_t memory_usage() const {
             size_t total = sizeof(Rf_random);
             return total;
+        }
+    };
+
+    /*
+    ------------------------------------------------------------------------------------------------------------------------------
+    ------------------------------------------ TRAIN CHUNK ACCESSOR --------------------------------------------------------------
+    ------------------------------------------------------------------------------------------------------------------------------
+    */
+    
+    /**
+     * @brief Efficient chunk-based data accessor for training with large datasets
+     * Opens file once, maintains reusable buffers, and provides zero-allocation label/feature access
+     */
+    class TrainChunkAccessor {
+    private:
+        struct CachedChunk {
+            size_t chunk_idx;
+            sample_type first_sample_id;
+            sample_type num_samples;
+            b_vector<label_type> labels;
+            b_vector<uint8_t> packed_features;
+            bool valid;
+            
+            CachedChunk() : chunk_idx(SIZE_MAX), first_sample_id(0), num_samples(0), valid(false) {}
+            
+            void invalidate() {
+                valid = false;
+                chunk_idx = SIZE_MAX;
+                first_sample_id = 0;
+                num_samples = 0;
+            }
+        };
+        
+        File file;
+        char file_path[RF_PATH_BUFFER];
+        sample_type total_samples;
+        uint16_t num_features;
+        uint8_t quantization_coefficient;
+        sample_type samples_per_chunk;
+        size_t total_chunks;
+        uint16_t packed_feature_bytes;
+        size_t header_size;
+        size_t record_size;
+        
+        // Larger LRU cache for partial loading mode to handle sibling nodes + parent
+        // During tree building, we typically access left child, right child, and occasionally parent
+        static constexpr size_t CACHE_SIZE = 4;
+        CachedChunk cache[CACHE_SIZE];
+        uint8_t lru_counter[CACHE_SIZE];
+        
+        size_t cache_hits;
+        size_t cache_misses;
+        
+    public:
+        TrainChunkAccessor() : total_samples(0), num_features(0), quantization_coefficient(2),
+                               samples_per_chunk(0), total_chunks(0), packed_feature_bytes(0),
+                               header_size(0), record_size(0), cache_hits(0), cache_misses(0) {
+            file_path[0] = '\0';
+            for (size_t i = 0; i < CACHE_SIZE; ++i) {
+                lru_counter[i] = 0;
+            }
+        }
+        
+        ~TrainChunkAccessor() {
+            close();
+        }
+        
+        bool init(const char* path, sample_type num_samples, uint16_t features, uint8_t quant_coeff, sample_type spc) {
+            if (!path || num_samples == 0 || features == 0) {
+                RF_DEBUG(0, "❌ Invalid parameters for TrainChunkAccessor");
+                return false;
+            }
+            
+            strncpy(file_path, path, RF_PATH_BUFFER - 1);
+            file_path[RF_PATH_BUFFER - 1] = '\0';
+            
+            total_samples = num_samples;
+            num_features = features;
+            quantization_coefficient = quant_coeff;
+            samples_per_chunk = spc;
+            total_chunks = (num_samples + spc - 1) / spc;
+            
+            uint32_t total_bits = static_cast<uint32_t>(features) * quant_coeff;
+            packed_feature_bytes = (total_bits + 7) / 8;
+            header_size = sizeof(uint32_t) + sizeof(uint16_t);
+            record_size = sizeof(uint8_t) + packed_feature_bytes;
+            
+            // Open file once for the entire training session
+            file = RF_FS_OPEN(file_path, RF_FILE_READ);
+            if (!file) {
+                RF_DEBUG(0, "❌ Failed to open file for chunk accessor: ", file_path);
+                return false;
+            }
+            
+            // Verify header
+            uint32_t file_samples;
+            uint16_t file_features;
+            if (file.read((uint8_t*)&file_samples, sizeof(file_samples)) != sizeof(file_samples) ||
+                file.read((uint8_t*)&file_features, sizeof(file_features)) != sizeof(file_features)) {
+                RF_DEBUG(0, "❌ Failed to read file header: ", file_path);
+                close();
+                return false;
+            }
+            
+            if (file_samples != num_samples || file_features != features) {
+                RF_DEBUG_2(0, "❌ File mismatch: expected ", num_samples, "samples, ", features);
+                close();
+                return false;
+            }
+            
+            // Initialize cache
+            for (size_t i = 0; i < CACHE_SIZE; ++i) {
+                cache[i].invalidate();
+                lru_counter[i] = 0;
+            }
+            
+            cache_hits = 0;
+            cache_misses = 0;
+            
+            RF_DEBUG_2(1, "✅ TrainChunkAccessor initialized: ", total_chunks, "chunks, ", samples_per_chunk);
+            return true;
+        }
+        
+        void close() {
+            if (file) {
+                file.close();
+            }
+            for (size_t i = 0; i < CACHE_SIZE; ++i) {
+                cache[i].invalidate();
+            }
+            if (cache_hits + cache_misses > 0) {
+                float hit_rate = 100.0f * cache_hits / (cache_hits + cache_misses);
+                RF_DEBUG_2(2, "📊 Cache stats: ", cache_hits, "hits, missed: ", cache_misses);
+                RF_DEBUG(2, "   Hit rate(%): ", hit_rate);
+            }
+        }
+        
+        void flush() {
+            for (size_t i = 0; i < CACHE_SIZE; ++i) {
+                cache[i].invalidate();
+            }
+            cache_hits = 0;
+            cache_misses = 0;
+        }
+        
+    private:
+        size_t find_lru_slot() {
+            size_t lru_idx = 0;
+            uint8_t min_counter = lru_counter[0];
+            for (size_t i = 1; i < CACHE_SIZE; ++i) {
+                if (lru_counter[i] < min_counter) {
+                    min_counter = lru_counter[i];
+                    lru_idx = i;
+                }
+            }
+            return lru_idx;
+        }
+        
+        void update_lru(size_t used_idx) {
+            lru_counter[used_idx] = 255;
+            for (size_t i = 0; i < CACHE_SIZE; ++i) {
+                if (i != used_idx && lru_counter[i] > 0) {
+                    lru_counter[i]--;
+                }
+            }
+        }
+        
+        bool load_chunk(size_t chunk_idx) {
+            if (chunk_idx >= total_chunks) {
+                return false;
+            }
+            
+            // Check if already cached
+            for (size_t i = 0; i < CACHE_SIZE; ++i) {
+                if (cache[i].valid && cache[i].chunk_idx == chunk_idx) {
+                    update_lru(i);
+                    cache_hits++;
+                    return true;
+                }
+            }
+            
+            cache_misses++;
+            
+            // Find LRU slot to evict
+            size_t slot = find_lru_slot();
+            CachedChunk& chunk = cache[slot];
+            
+            // Calculate chunk boundaries
+            sample_type start_sample = chunk_idx * samples_per_chunk;
+            sample_type end_sample = start_sample + samples_per_chunk;
+            if (end_sample > total_samples) {
+                end_sample = total_samples;
+            }
+            sample_type chunk_size = end_sample - start_sample;
+            
+            // Seek to chunk position
+            size_t chunk_offset = header_size + start_sample * record_size;
+            if (!file.seek(chunk_offset)) {
+                RF_DEBUG_2(0, "❌ Failed to seek to chunk ", chunk_idx, " at offset ", chunk_offset);
+                return false;
+            }
+            
+            // Allocate buffers if needed
+            chunk.labels.clear();
+            chunk.labels.reserve(chunk_size);
+            chunk.packed_features.clear();
+            chunk.packed_features.reserve(chunk_size * packed_feature_bytes);
+            
+            // Read chunk data in one batch
+            size_t chunk_bytes = chunk_size * record_size;
+            uint8_t* read_buffer = mem_alloc::allocate<uint8_t>(chunk_bytes);
+            if (!read_buffer) {
+                RF_DEBUG(0, "❌ Failed to allocate read buffer for chunk ", chunk_idx);
+                return false;
+            }
+            
+            size_t bytes_read = file.read(read_buffer, chunk_bytes);
+            if (bytes_read != chunk_bytes) {
+                RF_DEBUG_2(0, "❌ Failed to read chunk ", chunk_idx, ": expected ", chunk_bytes);
+                mem_alloc::deallocate(read_buffer);
+                return false;
+            }
+            
+            // Parse buffer into labels and packed features
+            for (sample_type i = 0; i < chunk_size; ++i) {
+                size_t offset = i * record_size;
+                label_type label = read_buffer[offset];
+                chunk.labels.push_back(label);
+                
+                // Copy packed features
+                for (uint16_t j = 0; j < packed_feature_bytes; ++j) {
+                    chunk.packed_features.push_back(read_buffer[offset + 1 + j]);
+                }
+            }
+            
+            mem_alloc::deallocate(read_buffer);
+            
+            // Update chunk metadata
+            chunk.chunk_idx = chunk_idx;
+            chunk.first_sample_id = start_sample;
+            chunk.num_samples = chunk_size;
+            chunk.valid = true;
+            
+            update_lru(slot);
+            return true;
+        }
+        
+        CachedChunk* get_chunk_for_sample(sample_type sample_id) {
+            if (sample_id >= total_samples) {
+                return nullptr;
+            }
+            
+            size_t chunk_idx = sample_id / samples_per_chunk;
+            
+            // Check cache first
+            for (size_t i = 0; i < CACHE_SIZE; ++i) {
+                if (cache[i].valid && cache[i].chunk_idx == chunk_idx) {
+                    update_lru(i);
+                    cache_hits++;
+                    return &cache[i];
+                }
+            }
+            
+            // Load chunk if not cached
+            if (load_chunk(chunk_idx)) {
+                for (size_t i = 0; i < CACHE_SIZE; ++i) {
+                    if (cache[i].valid && cache[i].chunk_idx == chunk_idx) {
+                        return &cache[i];
+                    }
+                }
+            }
+            
+            return nullptr;
+        }
+        
+    public:
+        label_type label(sample_type sample_id) {
+            CachedChunk* chunk = get_chunk_for_sample(sample_id);
+            if (!chunk) {
+                RF_DEBUG(2, "❌ Failed to get chunk for sample ", sample_id);
+                return 0;
+            }
+            
+            sample_type local_idx = sample_id - chunk->first_sample_id;
+            if (local_idx >= chunk->num_samples) {
+                RF_DEBUG_2(2, "❌ Local index ", local_idx, " out of bounds for chunk ", chunk->chunk_idx);
+                return 0;
+            }
+            
+            return chunk->labels[local_idx];
+        }
+        
+        uint16_t feature(sample_type sample_id, uint16_t feature_id) {
+            if (feature_id >= num_features) {
+                return 0;
+            }
+            
+            CachedChunk* chunk = get_chunk_for_sample(sample_id);
+            if (!chunk) {
+                return 0;
+            }
+            
+            sample_type local_idx = sample_id - chunk->first_sample_id;
+            if (local_idx >= chunk->num_samples) {
+                return 0;
+            }
+            
+            // Unpack feature from packed_features buffer
+            size_t packed_offset = local_idx * packed_feature_bytes;
+            uint32_t bit_position = static_cast<uint32_t>(feature_id) * quantization_coefficient;
+            uint16_t byte_idx = bit_position / 8;
+            uint8_t bit_offset = bit_position % 8;
+            
+            const uint8_t* packed = &chunk->packed_features[packed_offset];
+            
+            uint8_t feature_value = 0;
+            if (bit_offset + quantization_coefficient <= 8) {
+                // Feature fits in single byte
+                uint8_t mask = ((1 << quantization_coefficient) - 1) << bit_offset;
+                feature_value = (packed[byte_idx] & mask) >> bit_offset;
+            } else {
+                // Feature spans two bytes
+                uint8_t bits_in_first = 8 - bit_offset;
+                uint8_t bits_in_second = quantization_coefficient - bits_in_first;
+                uint8_t mask1 = ((1 << bits_in_first) - 1) << bit_offset;
+                uint8_t mask2 = (1 << bits_in_second) - 1;
+                feature_value = ((packed[byte_idx] & mask1) >> bit_offset) |
+                               ((packed[byte_idx + 1] & mask2) << bits_in_first);
+            }
+            
+            return feature_value;
+        }
+        
+        // OPTIMIZATION: Batch extract a single feature for multiple samples
+        // This is much faster than calling feature() individually because:
+        // 1. Reduces chunk lookup overhead
+        // 2. Better cache utilization when samples are in same chunk
+        // 3. Amortizes function call overhead
+        void batch_extract_feature(const b_vector<sample_type, 8>& sample_ids, 
+                                   sample_type begin, sample_type end,
+                                   uint16_t feature_id, 
+                                   b_vector<uint16_t>& out_values) {
+            if (feature_id >= num_features || begin >= end) {
+                return;
+            }
+            
+            sample_type count = end - begin;
+            out_values.clear();
+            out_values.reserve(count);
+            
+            // Pre-calculate bit extraction parameters
+            uint32_t bit_position = static_cast<uint32_t>(feature_id) * quantization_coefficient;
+            uint16_t byte_idx = bit_position / 8;
+            uint8_t bit_offset = bit_position % 8;
+            
+            uint8_t mask1, mask2 = 0;
+            uint8_t bits_in_first = 0, bits_in_second = 0;
+            bool spans_two_bytes = (bit_offset + quantization_coefficient > 8);
+            
+            if (spans_two_bytes) {
+                bits_in_first = 8 - bit_offset;
+                bits_in_second = quantization_coefficient - bits_in_first;
+                mask1 = ((1 << bits_in_first) - 1) << bit_offset;
+                mask2 = (1 << bits_in_second) - 1;
+            } else {
+                mask1 = ((1 << quantization_coefficient) - 1) << bit_offset;
+            }
+            
+            // Extract features with optimized chunk access
+            for (sample_type k = begin; k < end; ++k) {
+                sample_type sid = sample_ids[k];
+                
+                CachedChunk* chunk = get_chunk_for_sample(sid);
+                if (!chunk) {
+                    out_values.push_back(0);
+                    continue;
+                }
+                
+                sample_type local_idx = sid - chunk->first_sample_id;
+                if (local_idx >= chunk->num_samples) {
+                    out_values.push_back(0);
+                    continue;
+                }
+                
+                // Unpack feature using pre-calculated parameters
+                size_t packed_offset = local_idx * packed_feature_bytes;
+                const uint8_t* packed = &chunk->packed_features[packed_offset];
+                
+                uint16_t feature_value;
+                if (spans_two_bytes) {
+                    feature_value = ((packed[byte_idx] & mask1) >> bit_offset) |
+                                   ((packed[byte_idx + 1] & mask2) << bits_in_first);
+                } else {
+                    feature_value = (packed[byte_idx] & mask1) >> bit_offset;
+                }
+                
+                out_values.push_back(feature_value);
+            }
+        }
+        
+        // OPTIMIZATION: Batch extract labels for multiple samples
+        // Reduces chunk lookup overhead compared to individual label() calls
+        void batch_extract_labels(const b_vector<sample_type, 8>& sample_ids,
+                                 sample_type begin, sample_type end,
+                                 b_vector<label_type>& out_labels) {
+            if (begin >= end) {
+                return;
+            }
+            
+            sample_type count = end - begin;
+            out_labels.clear();
+            out_labels.reserve(count);
+            
+            for (sample_type k = begin; k < end; ++k) {
+                sample_type sid = sample_ids[k];
+                
+                CachedChunk* chunk = get_chunk_for_sample(sid);
+                if (!chunk) {
+                    out_labels.push_back(0);
+                    continue;
+                }
+                
+                sample_type local_idx = sid - chunk->first_sample_id;
+                if (local_idx >= chunk->num_samples) {
+                    out_labels.push_back(0);
+                    continue;
+                }
+                
+                out_labels.push_back(chunk->labels[local_idx]);
+            }
+        }
+        
+        sample_type get_samples_per_chunk() const {
+            return samples_per_chunk;
+        }
+        
+        size_t get_total_chunks() const {
+            return total_chunks;
+        }
+        
+        void print_stats() const {
+            if (cache_hits + cache_misses > 0) {
+                float hit_rate = 100.0f * cache_hits / (cache_hits + cache_misses);
+                RF_DEBUG(1, "📊 Chunk Accessor Stats:");
+                RF_DEBUG_2(1, "   Hits: ", cache_hits, ", Misses: ", cache_misses);
+                RF_DEBUG(1, "   Hit Rate(%): ", hit_rate);
+            }
         }
     };
 

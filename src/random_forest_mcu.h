@@ -42,7 +42,7 @@ namespace mcu{
         b_vector<uint16_t> threshold_cache;
         mutable char path_buffer[RF_PATH_BUFFER] = {'\0'};
 
-#if RF_ENABLE_TRAINING
+    #if RF_ENABLE_TRAINING
         inline TrainingContext* ensure_training_context(){
             if(!training_ctx){
                 release_base_data_stub();
@@ -63,7 +63,7 @@ namespace mcu{
                 training_ctx = nullptr;
             }
         }
-#endif
+    #endif
 
         inline Rf_pending_data* ensure_pending_data(){
             if(!pending_data){
@@ -81,13 +81,13 @@ namespace mcu{
         }
 
         inline Rf_data* ensure_base_data_stub(){
-#if RF_ENABLE_TRAINING
+    #if RF_ENABLE_TRAINING
             if(training_ctx){
                 if(training_ctx->base_data.isProperlyInitialized()){
                     return &training_ctx->base_data;
                 }
             }
-#endif
+    #endif
             if(!base_data_stub){
                 base_data_stub = new Rf_data();
                 base.get_base_data_path(path_buffer);
@@ -1226,8 +1226,8 @@ namespace mcu{
                 sample_type rightBegin = iLeft;
                 sample_type rightEnd = current.end;
 
-                uint32_t leftChildIndex = static_cast<uint32_t>(tree.nodes.size());
-                uint32_t rightChildIndex = leftChildIndex + 1;
+                uint16_t leftChildIndex = static_cast<uint16_t>(tree.nodes.size());
+                uint16_t rightChildIndex = static_cast<uint16_t>(leftChildIndex + 1);
 
                 Tree_node parentNode = tree.nodes.get(current.nodeIndex);
                 parentNode.setLeftChildIndex(leftChildIndex, layout->left_child_layout);
@@ -1254,7 +1254,7 @@ namespace mcu{
                 }
 
                 if (leftEnd > leftBegin) {
-                    queue_nodes.push_back(NodeToBuild(leftChildIndex, leftBegin, leftEnd, static_cast<uint16_t>(current.depth + 1)));
+                    queue_nodes.push_back(NodeToBuild(leftChildIndex, leftBegin, leftEnd, current.depth + 1));
                 } else {
                     // Already initialized as leaf, just ensure correct label
                     Tree_node leafNode = tree.nodes.get(leftChildIndex);
@@ -1262,7 +1262,7 @@ namespace mcu{
                     tree.nodes.set(leftChildIndex, leafNode);
                 }
                 if (rightEnd > rightBegin) {
-                    queue_nodes.push_back(NodeToBuild(rightChildIndex, rightBegin, rightEnd, static_cast<uint16_t>(current.depth + 1)));
+                    queue_nodes.push_back(NodeToBuild(rightChildIndex, rightBegin, rightEnd, current.depth + 1));
                 } else {
                     // Already initialized as leaf, just ensure correct label
                     Tree_node leafNode = tree.nodes.get(rightChildIndex);
@@ -1437,8 +1437,8 @@ namespace mcu{
                     sortIndicesByChunk(indices, rightBegin, rightEnd, accessor->get_samples_per_chunk());
                 }
 
-                uint32_t leftChildIndex = static_cast<uint32_t>(tree.nodes.size());
-                uint32_t rightChildIndex = leftChildIndex + 1;
+                uint16_t leftChildIndex = static_cast<uint16_t>(tree.nodes.size());
+                uint16_t rightChildIndex = static_cast<uint16_t>(leftChildIndex + 1);
 
                 Tree_node parentNode = tree.nodes.get(current.nodeIndex);
                 parentNode.setLeftChildIndex(leftChildIndex, layout->left_child_layout);
@@ -1465,14 +1465,14 @@ namespace mcu{
                 }
 
                 if (leftEnd > leftBegin) {
-                    queue_nodes.push_back(NodeToBuild(leftChildIndex, leftBegin, leftEnd, static_cast<uint16_t>(current.depth + 1)));
+                    queue_nodes.push_back(NodeToBuild(leftChildIndex, leftBegin, leftEnd, current.depth + 1));
                 } else {
                     Tree_node leafNode = tree.nodes.get(leftChildIndex);
                     leafNode.setLabel(leafLabel, layout->label_layout);
                     tree.nodes.set(leftChildIndex, leafNode);
                 }
                 if (rightEnd > rightBegin) {
-                    queue_nodes.push_back(NodeToBuild(rightChildIndex, rightBegin, rightEnd, static_cast<uint16_t>(current.depth + 1)));
+                    queue_nodes.push_back(NodeToBuild(rightChildIndex, rightBegin, rightEnd, current.depth + 1));
                 } else {
                     Tree_node leafNode = tree.nodes.get(rightChildIndex);
                     leafNode.setLabel(leafLabel, layout->label_layout);
@@ -2076,18 +2076,18 @@ namespace mcu{
             release_pending_data();
             release_base_data_stub();
         }
-
-        // Enable partial loading mode for memory-efficient training with large datasets
+    #ifdef DEV_STAGE
+        // Enable partial loading mode 
         void enable_partial_loading(){
             config.enable_partial_loading = true;
             RF_DEBUG(1, "✅ Partial loading mode enabled");
         }
-
-        // Disable partial loading mode (use full dataset in RAM)
+        // Disable partial loading mode
         void disable_partial_loading(){
             config.enable_partial_loading = false;
             RF_DEBUG(1, "✅ Partial loading mode disabled");
         }
+    #endif
 
        // allow dataset to grow when new data is added, but limited to max_samples/max_dataset_size
         void enable_extend_base_data(){

@@ -720,7 +720,7 @@ namespace mcu {
             }
 
             if (max_depth == 0) {
-                max_depth = 250;
+                max_depth = 50;
             }
 
             // Generate max_depth range - use larger values to explore tree depth
@@ -2528,11 +2528,11 @@ namespace mcu {
             return (1 << label_layout.second);
         }
         // return max_nodes, allow exceed RF_MAX_NODES
-        uint32_t max_nodes() const {
+        uint16_t max_nodes() const {
             if (left_child_layout.second >= 32) {
                 return RF_MAX_NODES;
             }
-            uint32_t mn = 1u << left_child_layout.second;
+            uint16_t mn = 1u << left_child_layout.second;
             return mn > RF_MAX_NODES ? mn : RF_MAX_NODES;
         }
         uint8_t bits_per_node() const {
@@ -2568,12 +2568,11 @@ namespace mcu {
             return (packed_data >> layout.first) & ((1 << layout.second) - 1);  
         }
 
-        inline uint32_t getLeftChildIndex(const pair<uint8_t, uint8_t>& layout) const noexcept{
-            const uint32_t mask = (layout.second >= 32) ? 0xFFFFFFFFu : ((1u << layout.second) - 1u);
-            return (packed_data >> layout.first) & mask;  
+        inline uint16_t getLeftChildIndex(const pair<uint8_t, uint8_t>& layout) const noexcept{
+            return (packed_data >> layout.first) & ((1 << layout.second) - 1);  
         }
         
-        inline uint32_t getRightChildIndex(const pair<uint8_t, uint8_t>& layout) const noexcept{
+        inline uint16_t getRightChildIndex(const pair<uint8_t, uint8_t>& layout) const noexcept{
             return getLeftChildIndex(layout) + 1;  // Breadth-first property: right = left + 1
         }
         
@@ -2594,10 +2593,9 @@ namespace mcu {
             packed_data &= ~(((1 << layout.second) - 1) << layout.first); // Clear label bits
             packed_data |= (label & ((1 << layout.second) - 1)) << layout.first; // Set label bits
         }
-        inline void setLeftChildIndex(uint32_t index, const pair<uint8_t, uint8_t>& layout) noexcept{
-            const uint32_t mask = (layout.second >= 32) ? 0xFFFFFFFFu : ((1u << layout.second) - 1u);
-            packed_data &= ~(mask << layout.first); // Clear left child index bits
-            packed_data |= (index & mask) << layout.first; // Set left child index bits
+        inline void setLeftChildIndex(uint16_t index, const pair<uint8_t, uint8_t>& layout) noexcept{
+            packed_data &= ~(((1 << layout.second) - 1) << layout.first); // Clear left child index bits
+            packed_data |= (index & ((1 << layout.second) - 1)) << layout.first; // Set left child index bits
         }
     };
 
@@ -2835,8 +2833,8 @@ namespace mcu {
             const auto& labelLayout = layout->label_layout;
             const auto& childLayout = layout->left_child_layout;
 
-            uint32_t currentIndex = 0;
-            const uint32_t nodeCount = static_cast<uint32_t>(nodes.size());
+            uint16_t currentIndex = 0;
+            const uint16_t nodeCount = static_cast<uint16_t>(nodes.size());
             uint16_t maxDepth = 100; // Safety limit to prevent infinite loops
 
             while (__builtin_expect(currentIndex < nodeCount, 1) && maxDepth-- > 0) {
@@ -2853,7 +2851,7 @@ namespace mcu {
                                                : thresholds.back();
 
                 const uint16_t featureValue = static_cast<uint16_t>(packed_features[featureID]);
-                const uint32_t leftChild = node.getLeftChildIndex(childLayout);
+                const uint16_t leftChild = node.getLeftChildIndex(childLayout);
                 currentIndex = (featureValue <= threshold)
                                    ? leftChild
                                    : node.getRightChildIndex(childLayout);
@@ -3671,11 +3669,11 @@ namespace mcu {
         bool is_trained;
         b_vector<node_data, 5> buffer;
     private:
-    const Rf_base* base_ptr = nullptr;
-    const Rf_config* config_ptr = nullptr;
-    uint32_t trained_sample_count = 0;   // Samples present when coefficients were derived
-    bool dataset_warning_emitted = false;
-    bool dataset_drift_emitted = false;
+        const Rf_base* base_ptr = nullptr;
+        const Rf_config* config_ptr = nullptr;
+        uint32_t trained_sample_count = 0;   // Samples present when coefficients were derived
+        bool dataset_warning_emitted = false;
+        bool dataset_drift_emitted = false;
         
         bool has_base() const {
             return base_ptr != nullptr && base_ptr->ready_to_use();
@@ -3695,15 +3693,46 @@ namespace mcu {
         }
 
         // if failed to load predictor, manual estimate will be used
+        // if failed to load predictor, manual estimate will be used
         float manual_estimate(const node_data& data) const {
             if (data.min_split == 0) {
                 return 100.0f; 
             }
-            // Simple heuristic: more nodes = better accuracy with smaller min_leaf and larger max_depth
+            
+            // Enhanced heuristic considering dataset complexity
+            // Base estimate accounts for tree structure parameters
             float safe_leaf = max(1.0f, static_cast<float>(data.min_leaf));
             float leaf_adjustment = 60.0f / safe_leaf;
             float depth_factor = min(250.0f, static_cast<float>(data.max_depth)) / 50.0f;
+            
+            // Dataset complexity factors
+            float sample_factor = 1.0f;
+            float feature_factor = 1.0f;
+            float label_factor = 1.0f;
+            
+            if (config_ptr) {
+                // More samples → more potential nodes (logarithmic growth)
+                if (config_ptr->num_samples > 100) {
+                    sample_factor = 1.0f + 0.5f * log2(static_cast<float>(config_ptr->num_samples) / 100.0f);
+                    sample_factor = min(2.5f, sample_factor); // Cap at 2.5x
+                }
+                
+                // More features → more splitting opportunities (sublinear)
+                if (config_ptr->num_features > 10) {
+                    feature_factor = 1.0f + 0.3f * log2(static_cast<float>(config_ptr->num_features) / 10.0f);
+                    feature_factor = min(2.0f, feature_factor); // Cap at 2.0x
+                }
+                
+                // More labels → more complex decision boundaries (linear)
+                if (config_ptr->num_labels > 2) {
+                    label_factor = 0.8f + 0.2f * static_cast<float>(config_ptr->num_labels) / 10.0f;
+                    label_factor = min(1.5f, label_factor); // Cap at 1.5x
+                }
+            }
+            
             float estimate = 120.0f - data.min_split * 10.0f + leaf_adjustment + depth_factor * 15.0f;
+            estimate *= (sample_factor * feature_factor * label_factor);
+            
             return estimate < 10.0f ? 10.0f : estimate; // ensure reasonable minimum
         }
 
@@ -4235,59 +4264,48 @@ namespace mcu {
             return true;
         }
         
-        uint32_t estimate_nodes(uint8_t min_split, uint8_t min_leaf, uint16_t max_depth = 250) {
+        uint16_t estimate_nodes(uint8_t min_split, uint8_t min_leaf, uint16_t max_depth = 50) {
             if (min_leaf == 0) {
                 min_leaf = 1;
             }
             node_data data(min_split, min_leaf, max_depth);
             float raw_est = raw_estimate(data);
             float acc = accuracy;
-            if(acc < 0.8) acc = 0.85f;
-            uint32_t estimate = static_cast<uint32_t>(raw_est * 100 / acc);
-            if (estimate == 0) {
-                estimate = 1;
-            }
-            return (estimate <= RF_MAX_NODES) ? estimate : RF_MAX_NODES;
+            if(acc < 80.0f) acc = 85.0f;
+            uint16_t estimate = static_cast<uint16_t>(raw_est * 100 / acc);
+            return estimate < RF_MAX_NODES ? estimate : 512;       // 2kB RAM
         }
 
-        uint32_t estimate_nodes(const Rf_config& config) {
+        uint16_t estimate_nodes(const Rf_config& config) {
             uint8_t min_split = config.min_split;
             uint8_t min_leaf = config.min_leaf > 0 ? config.min_leaf : static_cast<uint8_t>(1);
             uint16_t max_depth = config.max_depth > 0 ? config.max_depth : 25;
             node_data data(min_split, min_leaf, max_depth);
             float raw_est = raw_estimate(data);
             float acc = accuracy;
-            if(acc < 0.8) acc = 0.85f;
-            uint32_t estimate = static_cast<uint32_t>(raw_est * 100 / acc);
+            if(acc < 80.0f) acc = 85.0f;
+            uint16_t estimate = static_cast<uint16_t>(raw_est * 100 / acc);
             if(config.training_score == K_FOLD_SCORE){
                 estimate = estimate * config.k_folds / (config.k_folds + 1);
             }
-            if (estimate == 0) {
-                estimate = 1;
-            }
-            return (estimate <= RF_MAX_NODES) ? estimate : RF_MAX_NODES;
+            return estimate < RF_MAX_NODES ? estimate : 512;       // 2kB RAM
         }
 
         uint16_t queue_peak_size(uint8_t min_split, uint8_t min_leaf, uint16_t max_depth = 250) {
-            uint32_t estimate = estimate_nodes(min_split, min_leaf, max_depth);
-            uint32_t peak_est = static_cast<uint32_t>(estimate * peak_percent / 100);
-            if (peak_est > 120) {
-                peak_est = 120;
-            }
-            return static_cast<uint16_t>(peak_est);
+            return min(120, estimate_nodes(min_split, min_leaf, max_depth) * peak_percent / 100);
         }
 
         uint16_t queue_peak_size(const Rf_config& config) {
-            uint32_t est_nodes = estimate_nodes(config);
+            uint16_t est_nodes = estimate_nodes(config);
             if(config.training_score == K_FOLD_SCORE){
                 est_nodes = est_nodes * config.k_folds / (config.k_folds + 1);
             }
-            est_nodes = static_cast<uint32_t>(est_nodes * peak_percent / 100);
-            uint32_t max_peak_theory = static_cast<uint32_t>(RF_MAX_NODES * 0.3f);
+            est_nodes = static_cast<uint16_t>(est_nodes * peak_percent / 100);
+            uint16_t max_peak_theory = static_cast<uint16_t>(RF_MAX_NODES * 0.3f * 0.05);
             uint16_t min_peak_theory = 30;
-            if (est_nodes > max_peak_theory) return static_cast<uint16_t>(max_peak_theory > 65535 ? 65535 : max_peak_theory);
+            if (est_nodes > max_peak_theory) return max_peak_theory;
             if (est_nodes < min_peak_theory) return min_peak_theory;
-            return static_cast<uint16_t>(est_nodes > 65535 ? 65535 : est_nodes);
+            return est_nodes;
         }
 
         void flush_buffer() {
@@ -4563,24 +4581,34 @@ namespace mcu {
     /**
      * @brief Efficient chunk-based data accessor for training with large datasets
      * Opens file once, maintains reusable buffers, and provides zero-allocation label/feature access
+     * Features batch-prefetch optimization to reduce I/O overhead by loading multiple consecutive chunks
      */
     class TrainChunkAccessor {
     private:
         struct CachedChunk {
-            size_t chunk_idx;
-            sample_type first_sample_id;
-            sample_type num_samples;
+            size_t chunk_idx;              // First logical chunk index in this cache entry
+            sample_type first_sample_id;   // First sample ID covered by this entry
+            sample_type num_samples;       // Total samples in this entry (may span multiple chunks)
+            uint8_t batch_size;            // Number of consecutive chunks coalesced (1 = single chunk)
             b_vector<label_type> labels;
             b_vector<uint8_t> packed_features;
             bool valid;
             
-            CachedChunk() : chunk_idx(SIZE_MAX), first_sample_id(0), num_samples(0), valid(false) {}
+            CachedChunk() : chunk_idx(SIZE_MAX), first_sample_id(0), num_samples(0), 
+                          batch_size(1), valid(false) {}
             
             void invalidate() {
                 valid = false;
                 chunk_idx = SIZE_MAX;
                 first_sample_id = 0;
                 num_samples = 0;
+                batch_size = 1;
+            }
+            
+            // Check if this cached entry contains the given chunk_idx
+            bool contains_chunk(size_t query_chunk_idx) const {
+                return valid && query_chunk_idx >= chunk_idx && 
+                       query_chunk_idx < (chunk_idx + batch_size);
             }
         };
         
@@ -4595,8 +4623,13 @@ namespace mcu {
         size_t header_size;
         size_t record_size;
         
-        // Larger LRU cache for partial loading mode to handle sibling nodes + parent
-        // During tree building, we typically access left child, right child, and occasionally parent
+        // Batch-prefetch configuration
+        uint8_t chunks_per_batch;       // Number of consecutive chunks to load per miss (1-4)
+        uint8_t* scratch_buffer;        // Reusable buffer for I/O (sized for max batch)
+        size_t scratch_buffer_size;     // Current scratch buffer size
+        
+        // LRU cache for partial loading mode
+        // With batched chunks, effective cache capacity = CACHE_SIZE * chunks_per_batch
         static constexpr size_t CACHE_SIZE = 4;
         CachedChunk cache[CACHE_SIZE];
         uint8_t lru_counter[CACHE_SIZE];
@@ -4607,7 +4640,9 @@ namespace mcu {
     public:
         TrainChunkAccessor() : total_samples(0), num_features(0), quantization_coefficient(2),
                                samples_per_chunk(0), total_chunks(0), packed_feature_bytes(0),
-                               header_size(0), record_size(0), cache_hits(0), cache_misses(0) {
+                               header_size(0), record_size(0), chunks_per_batch(1),
+                               scratch_buffer(nullptr), scratch_buffer_size(0),
+                               cache_hits(0), cache_misses(0) {
             file_path[0] = '\0';
             for (size_t i = 0; i < CACHE_SIZE; ++i) {
                 lru_counter[i] = 0;
@@ -5221,11 +5256,11 @@ namespace mcu {
     struct NodeToBuild {
         sample_type begin;   // inclusive
         sample_type end;     // exclusive
-        uint32_t nodeIndex;
+        uint16_t nodeIndex;
         uint16_t depth;
         
         NodeToBuild() : begin(0), end(0), nodeIndex(0), depth(0) {}
-        NodeToBuild(uint32_t idx, sample_type b, sample_type e, uint16_t d) 
+        NodeToBuild(uint16_t idx, sample_type b, sample_type e, uint16_t d) 
             : nodeIndex(idx), begin(b), end(e), depth(d) {}
     };
 
@@ -5292,7 +5327,7 @@ namespace mcu {
                 return (bits == 0) ? static_cast<uint8_t>(1) : bits;
             }
 
-            void calculate_layout(label_type num_label, uint16_t num_feature, uint32_t max_node){
+            void calculate_layout(label_type num_label, uint16_t num_feature, uint16_t max_node){
                 const uint32_t fallback_node_index = (RF_MAX_NODES > 0)
                     ? static_cast<uint32_t>(RF_MAX_NODES - 1)
                     : static_cast<uint32_t>(0);
@@ -5362,9 +5397,13 @@ namespace mcu {
                 config_ptr->min_split = config_ptr->min_split_range.first;
                 config_ptr->min_leaf  = config_ptr->min_leaf_range.first;
 
-                uint32_t est_nodes = node_pred_ptr
-                    ? node_pred_ptr->estimate_nodes(*config_ptr)
-                    : RF_MAX_NODES;
+                // Use predictor only if it's trained; otherwise use safe default of 2046 nodes
+                uint16_t est_nodes;
+                if (node_pred_ptr && node_pred_ptr->is_trained) {
+                    est_nodes = node_pred_ptr->estimate_nodes(*config_ptr);
+                } else {
+                    est_nodes = static_cast<uint16_t>(2046); // Safe default when predictor not available/trained
+                }
                 calculate_layout(config_ptr->num_labels, config_ptr->num_features, est_nodes);
                 rebuild_tree_slots(config_ptr->num_trees, true);
 
@@ -5405,9 +5444,13 @@ namespace mcu {
                     delay(10);
                 }
                 if (config_ptr) {
-                    uint32_t est_nodes = node_pred_ptr
-                        ? node_pred_ptr->estimate_nodes(*config_ptr)
-                        : RF_MAX_NODES;
+                    // Use predictor only if it's trained; otherwise use safe default of 2046 nodes
+                    uint16_t est_nodes;
+                    if (node_pred_ptr && node_pred_ptr->is_trained) {
+                        est_nodes = node_pred_ptr->estimate_nodes(*config_ptr);
+                    } else {
+                        est_nodes = static_cast<uint16_t>(2046); // Safe default when predictor not available/trained
+                    }
                     calculate_layout(config_ptr->num_labels, config_ptr->num_features, est_nodes);
                 }
                 rebuild_tree_slots(config_ptr->num_trees, true);
@@ -5434,9 +5477,9 @@ namespace mcu {
                     ensure_tree_slot(index);
                     uint16_t d = tree.getTreeDepth();
                     // Serial.println("here 3.3");
-                    uint32_t n = tree.countNodes();
+                    uint16_t n = tree.countNodes();
                     // Serial.println("here 3.4");
-                    uint32_t l = tree.countLeafNodes();
+                    uint16_t l = tree.countLeafNodes();
                     // Serial.println("here 3.5");
 
                     total_depths += d;
@@ -5675,7 +5718,7 @@ namespace mcu {
                     }
                     
                     // Validate node count based on current layout allowance
-                    const uint32_t allowedNodes = layout.max_nodes();
+                    const uint16_t allowedNodes = layout.max_nodes();
                     if(nodeCount == 0 || nodeCount > allowedNodes) {
                         RF_DEBUG(1, "❌ Invalid node count for tree: ", treeIndex);
                         // Skip this tree's data

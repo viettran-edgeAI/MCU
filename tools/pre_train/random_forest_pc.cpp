@@ -31,7 +31,7 @@ std::string extract_model_name(const std::string& data_path) {
     return (first_underscore != std::string::npos) ? filename.substr(0, first_underscore) : filename;
 }
 
-static constexpr int RF_MAX_NODES = 131071; // Maximum nodes per tree (matches MCU 32-bit layout limit)
+static constexpr int RF_MAX_NODES = 65535; // Maximum nodes per tree (matches MCU 32-bit layout limit)
 
 
 class RandomForest{
@@ -482,7 +482,7 @@ public:
         unordered_set<uint16_t> labels;
         b_vector<uint16_t> labelCounts; 
         uint16_t majorityLabel;
-        uint32_t totalSamples;
+        uint16_t totalSamples;
         
         NodeStats(uint16_t numLabels) : majorityLabel(0), totalSamples(0) {
             labelCounts.reserve(numLabels);
@@ -490,11 +490,11 @@ public:
         }
         
         // New: analyze a slice [begin,end) over a shared indices array
-        void analyzeSamplesRange(const b_vector<uint32_t, 8>& indices, uint32_t begin, uint32_t end,
+        void analyzeSamplesRange(const b_vector<uint32_t, 8>& indices, uint16_t begin, uint16_t end,
                                  uint16_t numLabels, const Rf_data& data) {
             totalSamples = (begin < end) ? (end - begin) : 0;
-            uint32_t maxCount = 0;
-            for (uint32_t k = begin; k < end; ++k) {
+            uint16_t maxCount = 0;
+            for (uint16_t k = begin; k < end; ++k) {
                 uint32_t sampleID = indices[k];
                 if (sampleID < data.allSamples.size()) {
                     uint16_t label = data.allSamples[sampleID].label;
@@ -512,7 +512,7 @@ public:
     };
 
     // New: Range-based variant operating on a shared indices array
-    SplitInfo findBestSplitRange(const b_vector<uint32_t, 8>& indices, uint32_t begin, uint32_t end,
+    SplitInfo findBestSplitRange(const b_vector<uint32_t, 8>& indices, uint16_t begin, uint16_t end,
                                  const unordered_set<uint16_t>& selectedFeatures, bool use_Gini, uint16_t numLabels) {
         SplitInfo bestSplit;
         uint32_t totalSamples = (begin < end) ? (end - begin) : 0;
@@ -520,7 +520,7 @@ public:
 
         // Base label counts
     vector<uint16_t> baseLabelCounts(numLabels, 0);
-        for (uint32_t k = begin; k < end; ++k) {
+        for (uint16_t k = begin; k < end; ++k) {
             uint32_t sid = indices[k];
             if (sid < train_data.allSamples.size()) {
                 uint16_t lbl = train_data.allSamples[sid].label;
@@ -547,7 +547,7 @@ public:
         }
 
         uint8_t quantBits = config.quantization_coefficient;
-    vector<uint16_t> thresholdCandidates;
+        vector<uint16_t> thresholdCandidates;
         QuantizationHelper::buildThresholdCandidates(quantBits, thresholdCandidates);
         if (thresholdCandidates.empty()) {
             return bestSplit;
@@ -571,7 +571,7 @@ public:
                 uint32_t rightTotal = 0;
 
                 // Collect counts for value 0 (left) and value 1 (right)
-                for (uint32_t k = begin; k < end; ++k) {
+                for (uint16_t k = begin; k < end; ++k) {
                     uint32_t sid = indices[k];
                     if (sid >= train_data.allSamples.size()) continue;
                     const auto& sample = train_data.allSamples[sid];
@@ -645,7 +645,7 @@ public:
                         rightCounts[i] = 0;
                     }
 
-                    for (uint32_t k = begin; k < end; ++k) {
+                    for (uint16_t k = begin; k < end; ++k) {
                         uint32_t sid = indices[k];
                         if (sid >= train_data.allSamples.size()) continue;
                         const auto& sample = train_data.allSamples[sid];
@@ -729,7 +729,7 @@ public:
         // Create root node
         Tree_node rootNode;
         tree.nodes.push_back(rootNode);
-    queue_nodes.push_back(NodeToBuild(0, 0, static_cast<uint32_t>(indices.size()), 0));
+        queue_nodes.push_back(NodeToBuild(0, 0, static_cast<uint16_t>(indices.size()), 0));
 
         // ---- BFS queue peak tracking (for ESP32 RAM estimation) ----
         size_t peak_queue_size = 0;
@@ -748,7 +748,7 @@ public:
             NodeStats stats(config.num_labels);
             stats.analyzeSamplesRange(indices, current.begin, current.end, config.num_labels, train_data);
 
-            if(current.nodeIndex >= static_cast<uint32_t>(RF_MAX_NODES)){
+            if(current.nodeIndex >= RF_MAX_NODES){
                 // force leaf if exceeding max nodes
                 uint8_t leafLabel = stats.majorityLabel;
                 tree.nodes[current.nodeIndex].setIsLeaf(true);
@@ -773,19 +773,16 @@ public:
             }
             
             // Random feature subset
-            uint32_t num_selected_features = static_cast<uint32_t>(sqrt(config.num_features));
+            uint16_t num_selected_features = static_cast<uint16_t>(sqrt(config.num_features));
             if (num_selected_features == 0) num_selected_features = 1;
             unordered_set<uint16_t> selectedFeatures;
-            selectedFeatures.reserve(static_cast<size_t>(num_selected_features));
-            uint32_t N = static_cast<uint32_t>(config.num_features);
-            uint32_t K = num_selected_features > N ? N : num_selected_features;
-            for (uint32_t j = N - K; j < N; ++j) {
-                uint32_t t = static_cast<uint32_t>(rng.bounded(static_cast<uint32_t>(j + 1)));
-                if (selectedFeatures.find(static_cast<uint16_t>(t)) == selectedFeatures.end()) {
-                    selectedFeatures.insert(static_cast<uint16_t>(t));
-                } else {
-                    selectedFeatures.insert(static_cast<uint16_t>(j));
-                }
+            selectedFeatures.reserve(num_selected_features);
+            uint16_t N = static_cast<uint16_t>(config.num_features);
+            uint16_t K = num_selected_features > N ? N : num_selected_features;
+            for (uint16_t j = N - K; j < N; ++j) {
+                uint16_t t = static_cast<uint16_t>(rng.bounded(j + 1));
+                if (selectedFeatures.find(t) == selectedFeatures.end()) selectedFeatures.insert(t);
+                else selectedFeatures.insert(j);
             }
             
             // Find best split on the slice
@@ -832,8 +829,8 @@ public:
             tree.nodes[current.nodeIndex].setIsLeaf(false);
             
             // In-place partition of indices[current.begin, current.end) using the best feature
-            uint32_t iLeft = current.begin;
-            for (uint32_t k = current.begin; k < current.end; ++k) {
+            uint16_t iLeft = current.begin;
+            for (uint16_t k = current.begin; k < current.end; ++k) {
                 uint32_t sid = indices[k];
                 if (sid < train_data.allSamples.size() &&
                     train_data.allSamples[sid].features[bestSplit.featureID] <= bestSplit.threshold_value) {
@@ -845,13 +842,13 @@ public:
                     ++iLeft;
                 }
             }
-            uint32_t leftBegin = current.begin;
-            uint32_t leftEnd = iLeft;
-            uint32_t rightBegin = iLeft;
-            uint32_t rightEnd = current.end;
-
-            uint32_t leftChildIndex = static_cast<uint32_t>(tree.nodes.size());
-            uint32_t rightChildIndex = leftChildIndex + 1;
+            uint16_t leftBegin = current.begin;
+            uint16_t leftEnd = iLeft;
+            uint16_t rightBegin = iLeft;
+            uint16_t rightEnd = current.end;
+            
+            uint16_t leftChildIndex = tree.nodes.size();
+            uint16_t rightChildIndex = leftChildIndex + 1;
             tree.nodes[current.nodeIndex].setLeftChildIndex(leftChildIndex);
             
             Tree_node leftChild; tree.nodes.push_back(leftChild);
@@ -1070,13 +1067,8 @@ public:
 
         std::cout << std::endl;
         if (best_found) {
-            std::cout << "✅ Training Complete! Best: min_split=" << (int)best_min_split
-                      << ", min_leaf=" << (int)best_min_leaf
-                      << ", max_depth=" << (int)best_max_depth
-                      << ", score=" << std::setprecision(3) << best_score << "\n";
-            std::cout << "   Precision=" << std::setprecision(3) << best_metrics.precision
-                      << ", Recall=" << best_metrics.recall
-                      << ", Coverage=" << best_metrics.coverage << "\n";
+            std::cout << "✅ Training Complete! " << std::endl;
+            std::cout << "🏆 Best Score: " << best_score << std::endl;
         } else {
             std::cout << "⚠️  No valid candidate found during training; retaining existing parameters.\n";
         }
@@ -1089,7 +1081,7 @@ public:
         MakeForest();
 
         uint16_t min_votes_required = std::max<uint16_t>(1, static_cast<uint16_t>(std::ceil(config.num_trees * 0.15f)));
-    vector<EvaluationSample> final_samples;
+        vector<EvaluationSample> final_samples;
         if (config.training_score == "valid_score") {
             final_samples = collectValidationSamples(validation_data);
         } else {
@@ -1102,9 +1094,6 @@ public:
         } else {
             config.result_score = 0.0f;
         }
-
-        std::cout << "🎯 Final model score: " << std::fixed << std::setprecision(3) << config.result_score
-                  << " (coverage=" << final_result.metrics.coverage << ")\n";
 
         saveForest(result_folder);
 
@@ -1363,9 +1352,9 @@ public:
             return static_cast<uint32_t>((1u << bits) - 1u);
         };
 
-    const uint32_t featureMask = mask_for_bits(layout.feature_bits);
-    const uint32_t labelMask = mask_for_bits(layout.label_bits);
-    const uint32_t childMask = mask_for_bits(layout.child_bits);
+        const uint32_t featureMask = mask_for_bits(layout.feature_bits);
+        const uint32_t labelMask = mask_for_bits(layout.label_bits);
+        const uint32_t childMask = mask_for_bits(layout.child_bits);
 
         if (maxFeatureId > featureMask || maxLabelId > labelMask || maxChildIndex > childMask) {
             if (!silent) {

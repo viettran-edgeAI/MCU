@@ -395,13 +395,23 @@ public:
         
         HOGDescriptorMCU hog(hog_params);
 
-        // Structure to hold CSV rows
+        // Structure to hold CSV rows (only needed if shuffling)
         struct CSVRow {
             std::string class_name;
             mcu::vector<float> features;
         };
         
         mcu::vector<CSVRow> csv_data;
+        
+        // Open CSV file for writing (if not shuffling, write directly)
+        std::ofstream csv_file;
+        if (!config.output.shuffle_data) {
+            csv_file.open(config.output.csv_path, std::ios::trunc);
+            if (!csv_file.is_open()) {
+                std::cerr << "Error: Cannot open CSV file " << config.output.csv_path << " for writing." << std::endl;
+                return 1;
+            }
+        }
 
         // Process each class folder
         namespace fs = std::filesystem;
@@ -483,11 +493,20 @@ public:
                         mcu::vector<float> features;
                         hog.compute(imageData.data(), features);
 
-                        // Store for later processing
-                        CSVRow row;
-                        row.class_name = class_name;
-                        row.features = std::move(features);
-                        csv_data.push_back(std::move(row));
+                        // If not shuffling, write directly to file
+                        if (!config.output.shuffle_data) {
+                            csv_file << class_name;
+                            for (float f : features) {
+                                csv_file << "," << f;
+                            }
+                            csv_file << "\n";
+                        } else {
+                            // Store for later processing (shuffling)
+                            CSVRow row;
+                            row.class_name = class_name;
+                            row.features = std::move(features);
+                            csv_data.push_back(std::move(row));
+                        }
                         
                         images_processed++;
                     }
@@ -497,6 +516,17 @@ public:
                     std::cout << "  Processed " << images_processed << " images for class " << class_name << std::endl;
                 }
             }
+        }
+
+        // Close the file if we were writing directly
+        if (!config.output.shuffle_data) {
+            csv_file.close();
+            
+            if (config.processing.verbose) {
+                std::cout << "Processing complete! Results written to " << config.output.csv_path << std::endl;
+            }
+            
+            return 0;
         }
 
         if (csv_data.empty()) {
@@ -515,7 +545,7 @@ public:
         }
 
         // Write to CSV file
-        std::ofstream csv_file(config.output.csv_path, std::ios::trunc);
+        csv_file.open(config.output.csv_path, std::ios::trunc);
         if (!csv_file.is_open()) {
             std::cerr << "Error: Cannot open CSV file " << config.output.csv_path << " for writing." << std::endl;
             return 1;

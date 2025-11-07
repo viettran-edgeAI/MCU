@@ -7,6 +7,8 @@
 namespace mcu{
 
     class RandomForest{
+        // 8-bit occurrence counts keep bootstrap bags identical to PC implementation
+        using TreeSampleIDs = ID_vector<sample_type,8>;
 #if RF_ENABLE_TRAINING
         struct TrainingContext {
             Rf_data base_data;
@@ -14,7 +16,7 @@ namespace mcu{
             Rf_data test_data;
             Rf_data validation_data;
             Rf_random random_generator;
-            vector<ID_vector<sample_type,2>> dataList;
+            vector<TreeSampleIDs> dataList;
             TrainChunkAccessor* chunk_accessor; // For partial loading mode
             bool build_model;
             bool data_prepared;
@@ -128,7 +130,7 @@ namespace mcu{
             logger.init(&base);
             config.init(&base);
             quantizer.init(&base);
-            node_pred.init(&base);
+            node_pred.init(&base, &config);
 
             // load resources
             config.loadConfig();
@@ -367,10 +369,10 @@ namespace mcu{
             }
             
             forest_container.is_loaded = false;
-            node_pred.add_new_samples(config.min_split, config.max_depth, forest_container.avg_nodes());
+            node_pred.add_new_samples(config.min_split, config.min_leaf,config.max_depth, forest_container.avg_nodes());
 
             RF_DEBUG_2(0, "🌲 Forest built successfully: ", forest_container.get_total_nodes(), "nodes","");
-            RF_DEBUG_2(1, "Min split: ", config.min_split, "- Max depth: ", config.max_depth);
+            RF_DEBUG_2(1, "Min split: ", config.min_split, "- Min leaf: ", config.min_leaf);
             size_t end = logger.drop_anchor();
             long unsigned dur = logger.t_log("forest building time", start, end, "s");
             RF_DEBUG_2(1, "⏱️  Forest building time: ", dur, "s","");
@@ -494,11 +496,11 @@ namespace mcu{
 
             // Track hashes of each tree dataset to avoid duplicates across trees
             unordered_set<uint64_t> seen_hashes;
+            RF_DEBUG(1, "Creating dataset for trees..."); 
             seen_hashes.reserve(config.num_trees * 2);
             for (uint8_t i = 0; i < config.num_trees; i++) {
                 // Create a new ID_vector for this tree with proper range [0, numSample-1]
-                ID_vector<sample_type,2> sub_data;
-                RF_DEBUG(1, "Creating dataset for tree ", i);
+                TreeSampleIDs sub_data;
                 
                 // CRITICAL: Set the ID range to match the sample IDs (0 to numSample-1)
                 if(numSample > 1){
@@ -580,6 +582,8 @@ namespace mcu{
             uint16_t featureID = 0;
             uint16_t thresholdValue = 0; // Actual threshold value for splitting
             uint8_t  thresholdSlot = 0;  // Changed from threshold to thresholdSlot (0-7)
+            uint32_t leftCount = 0;
+            uint32_t rightCount = 0;
         } SplitInfo;
 
         struct NodeStats {
@@ -744,6 +748,8 @@ namespace mcu{
                         bestSplit.featureID = featureID;
                         bestSplit.thresholdSlot = 0;  // Only one threshold slot for 1-bit
                         bestSplit.thresholdValue = 0;  // Threshold value: 0 (<=0 goes left, >0 goes right)
+                        bestSplit.leftCount = leftTotal;
+                        bestSplit.rightCount = rightTotal;
                     }
                 }
             } else {
@@ -815,6 +821,8 @@ namespace mcu{
                         bestSplit.featureID = featureID;
                         bestSplit.thresholdSlot = slot;
                         bestSplit.thresholdValue = threshold;
+                        bestSplit.leftCount = leftTotal;
+                        bestSplit.rightCount = rightTotal;
                     }
                 }
             }
@@ -1001,6 +1009,8 @@ namespace mcu{
                             bestSplit.featureID = featureID;
                             bestSplit.thresholdSlot = slot;
                             bestSplit.thresholdValue = threshold;
+                            bestSplit.leftCount = leftTotal;
+                            bestSplit.rightCount = rightTotal;
                         }
                     }
                 }
@@ -1069,7 +1079,7 @@ namespace mcu{
         }
 
         // Breadth-first tree building for optimal node layout - MEMORY OPTIMIZED
-        void buildTree(Rf_tree& tree, ID_vector<sample_type,2>& sampleIDs, b_vector<NodeToBuild>& queue_nodes) {
+        void buildTree(Rf_tree& tree, TreeSampleIDs& sampleIDs, b_vector<NodeToBuild>& queue_nodes) {
             auto* ctx = training_ctx;
             if(!ctx){
                 return;
@@ -1162,6 +1172,15 @@ namespace mcu{
                 SplitInfo bestSplit = findBestSplit(indices, current.begin, current.end,
                                                 selectedFeatures, config.use_gini, config.num_labels);
 
+                if (bestSplit.leftCount < config.min_leaf || bestSplit.rightCount < config.min_leaf) {
+                    Tree_node nodeValue = tree.nodes.get(current.nodeIndex);
+                    nodeValue.setIsLeaf(true);
+                    nodeValue.setLabel(leafLabel, layout->label_layout);
+                    nodeValue.setFeatureID(0, layout->featureID_layout);
+                    tree.nodes.set(current.nodeIndex, nodeValue);
+                    continue;
+                }
+
                 float adaptive_threshold = config.impurity_threshold;
                 if (adaptive_threshold > 0.0f && stats.totalSamples > config.min_split) {
                     double scale = 1.0 / (1.0 + std::log2(static_cast<double>(stats.totalSamples) + 1.0));
@@ -1207,8 +1226,8 @@ namespace mcu{
                 sample_type rightBegin = iLeft;
                 sample_type rightEnd = current.end;
 
-                uint16_t leftChildIndex = static_cast<uint16_t>(tree.nodes.size());
-                uint16_t rightChildIndex = static_cast<uint16_t>(leftChildIndex + 1);
+                uint32_t leftChildIndex = static_cast<uint32_t>(tree.nodes.size());
+                uint32_t rightChildIndex = leftChildIndex + 1;
 
                 Tree_node parentNode = tree.nodes.get(current.nodeIndex);
                 parentNode.setLeftChildIndex(leftChildIndex, layout->left_child_layout);
@@ -1235,7 +1254,7 @@ namespace mcu{
                 }
 
                 if (leftEnd > leftBegin) {
-                    queue_nodes.push_back(NodeToBuild(leftChildIndex, leftBegin, leftEnd, current.depth + 1));
+                    queue_nodes.push_back(NodeToBuild(leftChildIndex, leftBegin, leftEnd, static_cast<uint16_t>(current.depth + 1)));
                 } else {
                     // Already initialized as leaf, just ensure correct label
                     Tree_node leafNode = tree.nodes.get(leftChildIndex);
@@ -1243,7 +1262,7 @@ namespace mcu{
                     tree.nodes.set(leftChildIndex, leafNode);
                 }
                 if (rightEnd > rightBegin) {
-                    queue_nodes.push_back(NodeToBuild(rightChildIndex, rightBegin, rightEnd, current.depth + 1));
+                    queue_nodes.push_back(NodeToBuild(rightChildIndex, rightBegin, rightEnd, static_cast<uint16_t>(current.depth + 1)));
                 } else {
                     // Already initialized as leaf, just ensure correct label
                     Tree_node leafNode = tree.nodes.get(rightChildIndex);
@@ -1256,7 +1275,7 @@ namespace mcu{
         }
 
         // Overloaded buildTree using chunk accessor for partial loading
-        void buildTree(Rf_tree& tree, ID_vector<sample_type,2>& sampleIDs, b_vector<NodeToBuild>& queue_nodes, TrainChunkAccessor* accessor) {
+        void buildTree(Rf_tree& tree, TreeSampleIDs& sampleIDs, b_vector<NodeToBuild>& queue_nodes, TrainChunkAccessor* accessor) {
             auto* ctx = training_ctx;
             if(!ctx || !accessor){
                 return;
@@ -1351,6 +1370,15 @@ namespace mcu{
                 SplitInfo bestSplit = findBestSplit(indices, current.begin, current.end,
                                                 selectedFeatures, config.use_gini, config.num_labels, accessor);
 
+                if (bestSplit.leftCount < config.min_leaf || bestSplit.rightCount < config.min_leaf) {
+                    Tree_node nodeValue = tree.nodes.get(current.nodeIndex);
+                    nodeValue.setIsLeaf(true);
+                    nodeValue.setLabel(leafLabel, layout->label_layout);
+                    nodeValue.setFeatureID(0, layout->featureID_layout);
+                    tree.nodes.set(current.nodeIndex, nodeValue);
+                    continue;
+                }
+
                 float adaptive_threshold = config.impurity_threshold;
                 if (adaptive_threshold > 0.0f && stats.totalSamples > config.min_split) {
                     double scale = 1.0 / (1.0 + std::log2(static_cast<double>(stats.totalSamples) + 1.0));
@@ -1409,8 +1437,8 @@ namespace mcu{
                     sortIndicesByChunk(indices, rightBegin, rightEnd, accessor->get_samples_per_chunk());
                 }
 
-                uint16_t leftChildIndex = static_cast<uint16_t>(tree.nodes.size());
-                uint16_t rightChildIndex = static_cast<uint16_t>(leftChildIndex + 1);
+                uint32_t leftChildIndex = static_cast<uint32_t>(tree.nodes.size());
+                uint32_t rightChildIndex = leftChildIndex + 1;
 
                 Tree_node parentNode = tree.nodes.get(current.nodeIndex);
                 parentNode.setLeftChildIndex(leftChildIndex, layout->left_child_layout);
@@ -1437,14 +1465,14 @@ namespace mcu{
                 }
 
                 if (leftEnd > leftBegin) {
-                    queue_nodes.push_back(NodeToBuild(leftChildIndex, leftBegin, leftEnd, current.depth + 1));
+                    queue_nodes.push_back(NodeToBuild(leftChildIndex, leftBegin, leftEnd, static_cast<uint16_t>(current.depth + 1)));
                 } else {
                     Tree_node leafNode = tree.nodes.get(leftChildIndex);
                     leafNode.setLabel(leafLabel, layout->label_layout);
                     tree.nodes.set(leftChildIndex, leafNode);
                 }
                 if (rightEnd > rightBegin) {
-                    queue_nodes.push_back(NodeToBuild(rightChildIndex, rightBegin, rightEnd, current.depth + 1));
+                    queue_nodes.push_back(NodeToBuild(rightChildIndex, rightBegin, rightEnd, static_cast<uint16_t>(current.depth + 1)));
                 } else {
                     Tree_node leafNode = tree.nodes.get(rightChildIndex);
                     leafNode.setLabel(leafLabel, layout->label_layout);
@@ -1761,14 +1789,18 @@ namespace mcu{
             RF_DEBUG(0, "🌲 Starting training...");
             uint8_t min_ms = config.min_split_range.first;
             uint8_t max_ms = config.min_split_range.second;
-            uint16_t min_md = config.max_depth_range.first;
-            uint16_t max_md = config.max_depth_range.second;
-            int total_combinations = ((max_ms - min_ms) / 2 + 1) * ((max_md - min_md) / 2 + 1);
+            uint8_t min_ml = config.min_leaf_range.first;
+            uint8_t max_ml = config.min_leaf_range.second;
+
+            int split_steps = (max_ms >= min_ms) ? ((max_ms - min_ms) / 2 + 1) : 1;
+            int leaf_steps = (max_ml >= min_ml) ? (max_ml - min_ml + 1) : 1;
+            int total_combinations = split_steps * leaf_steps;
             RF_DEBUG_2(1, "🔍 Hyperparameter tuning over ", total_combinations, "combinations","");
             int best_min_split = config.min_split;
-            int best_max_depth = config.max_depth;
+            int best_min_leaf = config.min_leaf;
 
-            float best_score = get_training_evaluation_index();
+            float best_score = -1.0f;
+            float original_result_score = config.result_score;
 
             Rf_data old_base_data;
             if(config.training_score == Rf_training_score::K_FOLD_SCORE){
@@ -1783,9 +1815,9 @@ namespace mcu{
             }
 
             for(uint8_t min_split = min_ms; min_split <= max_ms; min_split += 2){
-                for(uint16_t max_depth = min_md; max_depth <= max_md; max_depth += 2){
+                for(uint8_t min_leaf = min_ml; min_leaf <= max_ml; min_leaf++){
                     config.min_split = min_split;
-                    config.max_depth = max_depth;
+                    config.min_leaf = min_leaf;
                     float score;
                     if(config.training_score == Rf_training_score::K_FOLD_SCORE){
                         score = get_cross_validation_score();
@@ -1793,14 +1825,14 @@ namespace mcu{
                         build_forest();
                         score = get_training_evaluation_index();
                     }
-                    RF_DEBUG_2(1, "Min_split: ", min_split, ", Max_depth: ", max_depth);
+                    RF_DEBUG_2(1, "Min_split: ", min_split, ", Min_leaf: ", min_leaf);
                     RF_DEBUG(1, " => Score: ", score);
                     RF_DEBUG(1, "best_score: ", best_score);
-                    if(score > best_score){
+                    if(score >= 0.0f && score > best_score){
                         RF_DEBUG(1, "🎉 New best score found!");
                         best_score = score;
                         best_min_split = min_split;
-                        best_max_depth = max_depth;
+                        best_min_leaf = min_leaf;
                         config.result_score = best_score;
                         if(config.training_score != Rf_training_score::K_FOLD_SCORE){
                             forest_container.releaseForest();
@@ -1814,9 +1846,14 @@ namespace mcu{
             }
 
             config.min_split = best_min_split;
-            config.max_depth = best_max_depth;
-            if constexpr (!ENABLE_TEST_DATA)
-                config.result_score = best_score;
+            config.min_leaf = best_min_leaf;
+            if constexpr (!ENABLE_TEST_DATA) {
+                if(best_score >= 0.0f){
+                    config.result_score = best_score;
+                } else {
+                    config.result_score = original_result_score;
+                }
+            }
 
             if(config.training_score == Rf_training_score::K_FOLD_SCORE){
                 ctx->train_data = ctx->base_data;     // restore train_data
@@ -1827,7 +1864,7 @@ namespace mcu{
                 forest_container.releaseForest();
             }
             RF_DEBUG(0,"🌲 Training complete.");
-            RF_DEBUG_2(0, "Best parameters: min_split=", best_min_split, ", max_depth=", best_max_depth);
+            RF_DEBUG_2(0, "Best parameters: min_split=", best_min_split, ", min_leaf=", best_min_leaf);
             RF_DEBUG(0, "Best score: ", best_score);
 
             size_t end = logger.drop_anchor();
@@ -2341,21 +2378,40 @@ namespace mcu{
         // New combined prediction metrics function
         b_vector<b_vector<pair<label_type, float>>> predict(Rf_data& data) {
             size_t start = logger.drop_anchor();
+            RF_DEBUG(1, "📊 Starting prediction on dataset...");
+            
             bool pre_load_data = true;
             if(!data.isLoaded){
+                RF_DEBUG(1, "📂 Loading test data...");
                 data.loadData();
                 pre_load_data = false;
+                RF_DEBUG_2(1, "✅ Test data loaded: ", data.size(), "samples","");
             }
+            
+            RF_DEBUG(1, "🌲 Loading forest for evaluation...");
             forest_container.loadForest();
+            RF_DEBUG(1, "✅ Forest loaded for evaluation");
 
             // Initialize matrix score calculator
             Rf_matrix_score scorer(config.num_labels, 0xFF); // Use all flags for detailed metrics
             
-            // Single pass over samples (using direct indexing)
+            // Pre-allocate reusable sample buffer to avoid repeated allocations
+            Rf_sample sample_buffer;
+            
             for (sample_type i = 0; i < data.size(); i++) {
-                const Rf_sample& sample = data[i];
-                label_type actual = sample.label;
-                label_type pred = forest_container.predict_features(sample.features, threshold_cache);
+                // // Progress indicator for large datasets - print every 50 samples
+                // if(i % 50 == 0){
+                //     RF_DEBUG_2(1, "   Processed ", i, "/", data.size());
+                //     #if defined(ESP32) || defined(ARDUINO)
+                //     // Yield to watchdog timer on ESP32 to prevent reset during long predictions
+                //     yield();
+                //     #endif
+                // }
+                
+                // Retrieve sample efficiently
+                sample_buffer = data[i];
+                label_type actual = sample_buffer.label;
+                label_type pred = forest_container.predict_features(sample_buffer.features, threshold_cache);
                 
                 // Update metrics using matrix scorer
                 if(actual < config.num_labels && pred < config.num_labels) {
@@ -2363,20 +2419,28 @@ namespace mcu{
                 }
                 // base.log_inference(actual == pred);
             }
+            RF_DEBUG_2(1, "✅ Processed all ", data.size(), "samples","");
             
             // Build result vectors using matrix scorer
+            RF_DEBUG(1, "📈 Computing metrics...");
             b_vector<b_vector<pair<label_type, float>>> result;
             result.push_back(scorer.get_precisions());  // 0: precisions
+            RF_DEBUG(2, "   Precisions computed");
             result.push_back(scorer.get_recalls());     // 1: recalls
+            RF_DEBUG(2, "   Recalls computed");
             result.push_back(scorer.get_f1_scores());   // 2: F1 scores
+            RF_DEBUG(2, "   F1 scores computed");
             result.push_back(scorer.get_accuracies());  // 3: accuracies
+            RF_DEBUG(2, "   Accuracies computed");
 
             if(!pre_load_data) data.releaseData();
             forest_container.releaseForest();
-            return result;
+            
             size_t end = logger.drop_anchor();
             long unsigned dur = logger.t_log("data prediction time", start, end, "ms");
-            RF_DEBUG_2(1, "⏱️ Data prediction time: ", dur / 1000.0f, " seconds","");
+            RF_DEBUG_2(1, "⏱️ Data prediction time: ", dur, "ms","");
+            
+            return result;
         }
 
         // print metrix score on test set

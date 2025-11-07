@@ -31,7 +31,7 @@ std::string extract_model_name(const std::string& data_path) {
     return (first_underscore != std::string::npos) ? filename.substr(0, first_underscore) : filename;
 }
 
-static constexpr int RF_MAX_NODES = 1024; // Maximum nodes per tree
+static constexpr int RF_MAX_NODES = 131071; // Maximum nodes per tree (matches MCU 32-bit layout limit)
 
 
 class RandomForest{
@@ -106,6 +106,7 @@ public:
         // Fix: get_accuracy() already returns percentage (0-100), don't multiply by 100 again
     pre.accuracy = static_cast<uint8_t>(std::min(100.0f, std::max(0.0f, pre_ac)));
         // std::cout << "node predictor accuracy: " << pre_ac << std::endl;
+        pre.trained_sample_count = static_cast<uint32_t>(config.num_samples);
         pre.save_model(node_predictor_path);
     }
 
@@ -305,23 +306,18 @@ public:
     }
 
     void generateFilePaths() {
-        node_log_path = result_folder + model_name + "_node_log.csv";
-        node_predictor_path = result_folder + model_name + "_node_pred.bin";
+        node_log_path = result_folder + model_name + "_nlg.csv";
+        node_predictor_path = result_folder + model_name + "_npd.bin";
         result_config_path = result_folder + model_name + "_config.json";
     }
 
     // Split data into training and testing sets (or validation if enabled)
     // Synchronized with ESP32 version AND old_forest behavior: uses ALL samples
     void splitData(float trainRatio) {
-        std::cout << "🔄 Splitting data..." << std::endl;
         size_t maxID = config.num_samples;  // total number of samples
         uint32_t trainSize = static_cast<uint32_t>(maxID * config.train_ratio);
         uint32_t testSize = static_cast<uint32_t>(maxID * config.test_ratio);
         uint32_t validationSize = (config.training_score == "valid_score") ? static_cast<uint32_t>(maxID * config.valid_ratio) : 0;
-        
-        std::cout << "   Target train size: " << trainSize << ", Target test size: " << testSize;
-        if (validationSize > 0) std::cout << ", Target valid size: " << validationSize;
-        std::cout << std::endl;
         
         // Pre-allocate output vectors
         train_data.allSamples.reserve(trainSize);
@@ -390,20 +386,6 @@ public:
             std::cout << ", " << validation_data.allSamples.size() << " validation";
         }
         std::cout << std::endl;
-        
-        // Verify split integrity
-        std::cout << "   Verifying split integrity..." << std::endl;
-        uint32_t total_samples = train_data.allSamples.size() + test_data.allSamples.size();
-        if (config.training_score == "valid_score") {
-            total_samples += validation_data.allSamples.size();
-        }
-        
-        if (total_samples != maxID) {
-            std::cout << "   ⚠️  WARNING: Total samples (" << total_samples 
-                      << ") doesn't match dataset size (" << maxID << ")" << std::endl;
-        } else {
-            std::cout << "   ✅ All " << maxID << " samples distributed across splits" << std::endl;
-        }
     }
 
     // ---------------------------------------------------------------------------------
@@ -500,7 +482,7 @@ public:
         unordered_set<uint16_t> labels;
         b_vector<uint16_t> labelCounts; 
         uint16_t majorityLabel;
-        uint16_t totalSamples;
+        uint32_t totalSamples;
         
         NodeStats(uint16_t numLabels) : majorityLabel(0), totalSamples(0) {
             labelCounts.reserve(numLabels);
@@ -508,11 +490,11 @@ public:
         }
         
         // New: analyze a slice [begin,end) over a shared indices array
-        void analyzeSamplesRange(const b_vector<uint32_t, 8>& indices, uint16_t begin, uint16_t end,
+        void analyzeSamplesRange(const b_vector<uint32_t, 8>& indices, uint32_t begin, uint32_t end,
                                  uint16_t numLabels, const Rf_data& data) {
             totalSamples = (begin < end) ? (end - begin) : 0;
-            uint16_t maxCount = 0;
-            for (uint16_t k = begin; k < end; ++k) {
+            uint32_t maxCount = 0;
+            for (uint32_t k = begin; k < end; ++k) {
                 uint32_t sampleID = indices[k];
                 if (sampleID < data.allSamples.size()) {
                     uint16_t label = data.allSamples[sampleID].label;
@@ -530,7 +512,7 @@ public:
     };
 
     // New: Range-based variant operating on a shared indices array
-    SplitInfo findBestSplitRange(const b_vector<uint32_t, 8>& indices, uint16_t begin, uint16_t end,
+    SplitInfo findBestSplitRange(const b_vector<uint32_t, 8>& indices, uint32_t begin, uint32_t end,
                                  const unordered_set<uint16_t>& selectedFeatures, bool use_Gini, uint16_t numLabels) {
         SplitInfo bestSplit;
         uint32_t totalSamples = (begin < end) ? (end - begin) : 0;
@@ -538,7 +520,7 @@ public:
 
         // Base label counts
     vector<uint16_t> baseLabelCounts(numLabels, 0);
-        for (uint16_t k = begin; k < end; ++k) {
+        for (uint32_t k = begin; k < end; ++k) {
             uint32_t sid = indices[k];
             if (sid < train_data.allSamples.size()) {
                 uint16_t lbl = train_data.allSamples[sid].label;
@@ -589,7 +571,7 @@ public:
                 uint32_t rightTotal = 0;
 
                 // Collect counts for value 0 (left) and value 1 (right)
-                for (uint16_t k = begin; k < end; ++k) {
+                for (uint32_t k = begin; k < end; ++k) {
                     uint32_t sid = indices[k];
                     if (sid >= train_data.allSamples.size()) continue;
                     const auto& sample = train_data.allSamples[sid];
@@ -663,7 +645,7 @@ public:
                         rightCounts[i] = 0;
                     }
 
-                    for (uint16_t k = begin; k < end; ++k) {
+                    for (uint32_t k = begin; k < end; ++k) {
                         uint32_t sid = indices[k];
                         if (sid >= train_data.allSamples.size()) continue;
                         const auto& sample = train_data.allSamples[sid];
@@ -747,7 +729,7 @@ public:
         // Create root node
         Tree_node rootNode;
         tree.nodes.push_back(rootNode);
-        queue_nodes.push_back(NodeToBuild(0, 0, static_cast<uint16_t>(indices.size()), 0));
+    queue_nodes.push_back(NodeToBuild(0, 0, static_cast<uint32_t>(indices.size()), 0));
 
         // ---- BFS queue peak tracking (for ESP32 RAM estimation) ----
         size_t peak_queue_size = 0;
@@ -766,7 +748,7 @@ public:
             NodeStats stats(config.num_labels);
             stats.analyzeSamplesRange(indices, current.begin, current.end, config.num_labels, train_data);
 
-            if(current.nodeIndex >= RF_MAX_NODES){
+            if(current.nodeIndex >= static_cast<uint32_t>(RF_MAX_NODES)){
                 // force leaf if exceeding max nodes
                 uint8_t leafLabel = stats.majorityLabel;
                 tree.nodes[current.nodeIndex].setIsLeaf(true);
@@ -791,21 +773,32 @@ public:
             }
             
             // Random feature subset
-            uint16_t num_selected_features = static_cast<uint16_t>(sqrt(config.num_features));
+            uint32_t num_selected_features = static_cast<uint32_t>(sqrt(config.num_features));
             if (num_selected_features == 0) num_selected_features = 1;
             unordered_set<uint16_t> selectedFeatures;
-            selectedFeatures.reserve(num_selected_features);
-            uint16_t N = static_cast<uint16_t>(config.num_features);
-            uint16_t K = num_selected_features > N ? N : num_selected_features;
-            for (uint16_t j = N - K; j < N; ++j) {
-                uint16_t t = static_cast<uint16_t>(rng.bounded(j + 1));
-                if (selectedFeatures.find(t) == selectedFeatures.end()) selectedFeatures.insert(t);
-                else selectedFeatures.insert(j);
+            selectedFeatures.reserve(static_cast<size_t>(num_selected_features));
+            uint32_t N = static_cast<uint32_t>(config.num_features);
+            uint32_t K = num_selected_features > N ? N : num_selected_features;
+            for (uint32_t j = N - K; j < N; ++j) {
+                uint32_t t = static_cast<uint32_t>(rng.bounded(static_cast<uint32_t>(j + 1)));
+                if (selectedFeatures.find(static_cast<uint16_t>(t)) == selectedFeatures.end()) {
+                    selectedFeatures.insert(static_cast<uint16_t>(t));
+                } else {
+                    selectedFeatures.insert(static_cast<uint16_t>(j));
+                }
             }
             
             // Find best split on the slice
             SplitInfo bestSplit = findBestSplitRange(indices, current.begin, current.end,
                                                      selectedFeatures, config.use_gini, config.num_labels);
+
+            // Check if either child would violate min_leaf constraint
+            if (bestSplit.leftCount < config.min_leaf || bestSplit.rightCount < config.min_leaf) {
+                tree.nodes[current.nodeIndex].setIsLeaf(true);
+                tree.nodes[current.nodeIndex].setLabel(leafLabel);
+                tree.nodes[current.nodeIndex].setFeatureID(0);
+                continue;
+            }
 
             float adaptive_threshold = config.impurity_threshold;
             if (adaptive_threshold > 0.0f && stats.totalSamples > config.min_split) {
@@ -826,7 +819,7 @@ public:
                 continue;
             }
             
-            if (tree.nodes.size() + 2 > 1023) {
+            if (tree.nodes.size() + 2 > static_cast<size_t>(RF_MAX_NODES)) {
                 tree.nodes[current.nodeIndex].setIsLeaf(true);
                 tree.nodes[current.nodeIndex].setLabel(leafLabel);
                 tree.nodes[current.nodeIndex].setFeatureID(0);
@@ -839,8 +832,8 @@ public:
             tree.nodes[current.nodeIndex].setIsLeaf(false);
             
             // In-place partition of indices[current.begin, current.end) using the best feature
-            uint16_t iLeft = current.begin;
-            for (uint16_t k = current.begin; k < current.end; ++k) {
+            uint32_t iLeft = current.begin;
+            for (uint32_t k = current.begin; k < current.end; ++k) {
                 uint32_t sid = indices[k];
                 if (sid < train_data.allSamples.size() &&
                     train_data.allSamples[sid].features[bestSplit.featureID] <= bestSplit.threshold_value) {
@@ -852,13 +845,13 @@ public:
                     ++iLeft;
                 }
             }
-            uint16_t leftBegin = current.begin;
-            uint16_t leftEnd = iLeft;
-            uint16_t rightBegin = iLeft;
-            uint16_t rightEnd = current.end;
-            
-            uint16_t leftChildIndex = tree.nodes.size();
-            uint16_t rightChildIndex = leftChildIndex + 1;
+            uint32_t leftBegin = current.begin;
+            uint32_t leftEnd = iLeft;
+            uint32_t rightBegin = iLeft;
+            uint32_t rightEnd = current.end;
+
+            uint32_t leftChildIndex = static_cast<uint32_t>(tree.nodes.size());
+            uint32_t rightChildIndex = leftChildIndex + 1;
             tree.nodes[current.nodeIndex].setLeftChildIndex(leftChildIndex);
             
             Tree_node leftChild; tree.nodes.push_back(leftChild);
@@ -911,11 +904,11 @@ public:
             std::cerr << "❌ Failed to create node_predictor log file\n";
             return;
         }
-        file << "min_split,max_depth,total_nodes\n";
+        file << "min_split,min_leaf,max_depth,total_nodes\n";
         file.close();
 
         bool use_cv = (config.training_score == "k_fold_score");
-        const int num_runs = use_cv ? 1 : 3;
+        const int num_runs = 1; // Single run with fixed seed is sufficient
 
         if (use_cv) {
             std::cout << "📊 Using " << (int)config.k_folds << "-fold cross validation for evaluation\n";
@@ -936,13 +929,13 @@ public:
             mkdir(final_folder.c_str(), 0755);
         #endif
 
-        uint32_t candidate_count = config.min_split_range.size() * config.max_depth_range.size();
+        uint32_t candidate_count = config.min_split_range.size() * config.min_leaf_range.size() * config.max_depth_range.size();
         if (candidate_count == 0) candidate_count = 1;
-        uint32_t total_iterations = candidate_count * (use_cv ? 1 : num_runs);
+        uint32_t total_iterations = candidate_count;
         if (total_iterations == 0) total_iterations = 1;
         uint32_t current_iteration = 0;
 
-        auto updateProgress = [&](float score, uint16_t min_split, uint16_t max_depth) {
+        auto updateProgress = [&](float score, uint16_t min_split, uint16_t min_leaf, uint16_t max_depth) {
             float progress = total_iterations ? static_cast<float>(current_iteration) / total_iterations : 1.0f;
             int bar_width = 50;
             int pos = static_cast<int>(bar_width * progress);
@@ -955,20 +948,23 @@ public:
             std::cout << "] " << std::fixed << std::setprecision(1) << (progress * 100.0f) << "% ";
             std::cout << "(" << current_iteration << "/" << total_iterations << ") ";
             std::cout << "Score≈" << std::setprecision(3) << score;
-            std::cout << " | split=" << min_split << ", depth=" << max_depth;
+            // std::cout << " | split=" << min_split << ", leaf=" << min_leaf << ", depth=" << max_depth;
             std::cout.flush();
         };
 
         uint16_t best_min_split = config.min_split;
+        uint16_t best_min_leaf = config.min_leaf;
         uint16_t best_max_depth = config.max_depth;
         float best_score = -1.0f;
         MetricsSummary best_metrics;
         bool best_found = false;
 
         for (uint16_t current_min_split : config.min_split_range) {
-            for (uint16_t current_max_depth : config.max_depth_range) {
-                config.min_split = current_min_split;
-                config.max_depth = current_max_depth;
+            for (uint16_t current_min_leaf : config.min_leaf_range) {
+                for (uint16_t current_max_depth : config.max_depth_range) {
+                    config.min_split = current_min_split;
+                    config.min_leaf = current_min_leaf;
+                    config.max_depth = current_max_depth;
 
                 float avg_nodes = 0.0f;
                 bool best_forest_saved = false;
@@ -1000,7 +996,7 @@ public:
                     best_forest_saved = true;
 
                     current_iteration++;
-                    updateProgress(aggregated_result.score, current_min_split, current_max_depth);
+                    updateProgress(aggregated_result.score, current_min_split, current_min_leaf, current_max_depth);
                 } else {
                     float total_run_score = 0.0f;
                     float best_run_score = -1.0f;
@@ -1039,7 +1035,7 @@ public:
                         }
 
                         current_iteration++;
-                        updateProgress(run_result.score, current_min_split, current_max_depth);
+                        updateProgress(run_result.score, current_min_split, current_min_leaf, current_max_depth);
                     }
 
                     if (num_runs > 0) {
@@ -1053,18 +1049,21 @@ public:
                     std::ofstream log_file(node_log_path, std::ios::app);
                     if (log_file.is_open()) {
                         log_file << static_cast<int>(config.min_split) << ","
+                                 << static_cast<int>(config.min_leaf) << ","
                                  << static_cast<int>(config.max_depth) << ","
                                  << static_cast<int>(std::round(avg_nodes)) << "\n";
                     }
-                }
+                    }
 
-                if (aggregated_result.score > best_score && best_forest_saved) {
-                    best_score = aggregated_result.score;
-                    best_min_split = config.min_split;
-                    best_max_depth = config.max_depth;
-                    best_metrics = aggregated_result.metrics;
-                    best_found = true;
-                    copyDirectory(temp_folder, final_folder);
+                    if (aggregated_result.score > best_score && best_forest_saved) {
+                        best_score = aggregated_result.score;
+                        best_min_split = config.min_split;
+                        best_min_leaf = config.min_leaf;
+                        best_max_depth = config.max_depth;
+                        best_metrics = aggregated_result.metrics;
+                        best_found = true;
+                        copyDirectory(temp_folder, final_folder);
+                    }
                 }
             }
         }
@@ -1072,6 +1071,7 @@ public:
         std::cout << std::endl;
         if (best_found) {
             std::cout << "✅ Training Complete! Best: min_split=" << (int)best_min_split
+                      << ", min_leaf=" << (int)best_min_leaf
                       << ", max_depth=" << (int)best_max_depth
                       << ", score=" << std::setprecision(3) << best_score << "\n";
             std::cout << "   Precision=" << std::setprecision(3) << best_metrics.precision
@@ -1082,6 +1082,7 @@ public:
         }
 
         config.min_split = best_min_split;
+        config.min_leaf = best_min_leaf;
         config.max_depth = best_max_depth;
 
         ClonesData();
@@ -1189,6 +1190,193 @@ public:
         // Save config in both JSON and CSV formats
         config.saveConfig(result_config_path);
 
+        // Determine MCU node layout requirements before writing
+        auto bits_required = [](uint32_t value) -> uint8_t {
+            uint8_t bits = 0;
+            do {
+                ++bits;
+                value >>= 1;
+            } while (value != 0 && bits < 32);
+            return static_cast<uint8_t>(bits == 0 ? 1 : bits);
+        };
+
+        struct PackedLayout {
+            uint8_t feature_start = 4;
+            uint8_t feature_bits = 1;
+            uint8_t label_start = 5;
+            uint8_t label_bits = 1;
+            uint8_t child_start = 6;
+            uint8_t child_bits = 1;
+
+            uint8_t bits_per_node() const {
+                return static_cast<uint8_t>(1 + 3 + feature_bits + label_bits + child_bits);
+            }
+
+            void update_starts() {
+                label_start = static_cast<uint8_t>(feature_start + feature_bits);
+                child_start = static_cast<uint8_t>(label_start + label_bits);
+            }
+        } layout;
+
+        uint32_t maxFeatureId = 0;
+        uint32_t maxLabelId = 0;
+        uint32_t maxChildIndex = 0;
+        uint32_t maxNodesPerTree = 0;
+        bool hasNodes = false;
+        bool missingTree = false;
+
+        for (uint16_t i = 0; i < config.num_trees; ++i) {
+            const auto& tree = root[i];
+            const size_t nodeCount = tree.nodes.size();
+            if (nodeCount == 0) {
+                missingTree = true;
+                continue;
+            }
+
+            hasNodes = true;
+            if (nodeCount > RF_MAX_NODES) {
+                if (!silent) {
+                    std::cout << "❌ Tree " << static_cast<int>(i)
+                              << " exceeds MCU node limit (" << nodeCount << "/" << RF_MAX_NODES << ")\n";
+                }
+                return;
+            }
+
+            maxNodesPerTree = std::max(maxNodesPerTree, static_cast<uint32_t>(nodeCount));
+            if (nodeCount > 0) {
+                uint32_t upperIndex = static_cast<uint32_t>(nodeCount - 1);
+                if (upperIndex > maxChildIndex) {
+                    maxChildIndex = upperIndex;
+                }
+            }
+
+            for (const auto& node : tree.nodes) {
+                if (!node.getIsLeaf()) {
+                    uint32_t leftIndex = node.getLeftChildIndex();
+                    uint32_t rightIndex = node.getRightChildIndex();
+                    if (leftIndex > maxChildIndex) {
+                        maxChildIndex = leftIndex;
+                    }
+                    if (rightIndex > maxChildIndex) {
+                        maxChildIndex = rightIndex;
+                    }
+                }
+                uint32_t featureId = node.getFeatureID();
+                uint32_t labelId = node.getLabel();
+                if (featureId > maxFeatureId) {
+                    maxFeatureId = featureId;
+                }
+                if (labelId > maxLabelId) {
+                    maxLabelId = labelId;
+                }
+            }
+        }
+
+        if (!hasNodes) {
+            if (!silent) {
+                std::cout << "❌ Forest has no nodes to export\n";
+            }
+            return;
+        }
+
+        if (missingTree) {
+            if (!silent) {
+                std::cout << "❌ One or more trees are empty; aborting MCU export\n";
+            }
+            return;
+        }
+
+        if (config.num_features > 0) {
+            uint32_t cfgMaxFeature = static_cast<uint32_t>(config.num_features - 1);
+            if (cfgMaxFeature > maxFeatureId) {
+                maxFeatureId = cfgMaxFeature;
+            }
+        }
+        if (config.num_labels > 0) {
+            uint32_t cfgMaxLabel = static_cast<uint32_t>(config.num_labels - 1);
+            if (cfgMaxLabel > maxLabelId) {
+                maxLabelId = cfgMaxLabel;
+            }
+        }
+
+        if (maxNodesPerTree > 0) {
+            uint32_t upperIndex = maxNodesPerTree - 1;
+            if (upperIndex > maxChildIndex) {
+                maxChildIndex = upperIndex;
+            }
+        }
+
+        layout.feature_bits = std::max<uint8_t>(1, std::min<uint8_t>(10, bits_required(maxFeatureId)));
+        layout.update_starts();
+
+        layout.label_bits = std::max<uint8_t>(1, std::min<uint8_t>(8, bits_required(maxLabelId)));
+        layout.update_starts();
+
+        const uint8_t maxChildBitsByWord = (layout.child_start >= 32)
+            ? static_cast<uint8_t>(0)
+            : static_cast<uint8_t>(32 - layout.child_start);
+
+        const uint8_t requiredChildBits = bits_required(maxChildIndex);
+        const uint32_t limitIndex = (RF_MAX_NODES > 0) ? static_cast<uint32_t>(RF_MAX_NODES - 1) : 0;
+        const uint8_t maxChildBitsByLimit = bits_required(limitIndex);
+
+        if (maxChildBitsByWord == 0) {
+            if (!silent) {
+                std::cout << "❌ Unable to encode forest: no bit space left for child indices (featureBits="
+                          << static_cast<int>(layout.feature_bits) << ", labelBits="
+                          << static_cast<int>(layout.label_bits) << ")\n";
+            }
+            return;
+        }
+
+        if (requiredChildBits > maxChildBitsByWord) {
+            if (!silent) {
+                std::cout << "❌ Forest requires " << static_cast<int>(requiredChildBits)
+                          << " child bits but only " << static_cast<int>(maxChildBitsByWord)
+                          << " fit in the 32-bit node layout. Reduce feature or label bit usage.\n";
+            }
+            return;
+        }
+
+        if (requiredChildBits > maxChildBitsByLimit) {
+            if (!silent) {
+                std::cout << "❌ Forest requires " << static_cast<int>(requiredChildBits)
+                          << " child bits but MCU limit allows only " << static_cast<int>(maxChildBitsByLimit)
+                          << " (" << RF_MAX_NODES << " nodes). Consider pruning tree depth.\n";
+            }
+            return;
+        }
+
+        layout.child_bits = std::max<uint8_t>(1, std::min<uint8_t>(requiredChildBits, std::min<uint8_t>(maxChildBitsByWord, maxChildBitsByLimit)));
+
+        if (layout.bits_per_node() > 32) {
+            if (!silent) {
+                std::cout << "❌ Calculated node layout exceeds 32 bits; cannot encode MCU forest\n";
+            }
+            return;
+        }
+
+        auto mask_for_bits = [](uint8_t bits) -> uint32_t {
+            if (bits >= 32) {
+                return 0xFFFFFFFFu;
+            }
+            return static_cast<uint32_t>((1u << bits) - 1u);
+        };
+
+    const uint32_t featureMask = mask_for_bits(layout.feature_bits);
+    const uint32_t labelMask = mask_for_bits(layout.label_bits);
+    const uint32_t childMask = mask_for_bits(layout.child_bits);
+
+        if (maxFeatureId > featureMask || maxLabelId > labelMask || maxChildIndex > childMask) {
+            if (!silent) {
+                std::cout << "❌ Forest metadata exceeds MCU bit layout."
+                          << " MaxFeature=" << maxFeatureId
+                          << " MaxLabel=" << maxLabelId
+                          << " MaxChild=" << maxChildIndex << "\n";
+            }
+            return;
+        }
+
         // Save unified forest file directly from memory (no individual tree files)
         const uint32_t FOREST_MAGIC = 0x464F5253; // "FORS"
         std::string unified_path = folder_path + "/" + model_name + "_forest.bin";
@@ -1212,15 +1400,38 @@ public:
             }
             
             uint32_t node_count = static_cast<uint32_t>(root[i].nodes.size());
-            
+
             // Unified per-tree header: tree index (u8) + node_count (u32)
             uint8_t tree_index = static_cast<uint8_t>(i);
             out.write(reinterpret_cast<const char*>(&tree_index), sizeof(tree_index));
             out.write(reinterpret_cast<const char*>(&node_count), sizeof(node_count));
-            
-            // Write node data directly from memory
+
             for (const auto& node : root[i].nodes) {
-                out.write(reinterpret_cast<const char*>(&node.packed_data), sizeof(node.packed_data));
+                uint8_t thresholdSlot = node.getThresholdSlot();
+                uint32_t featureId = node.getFeatureID();
+                uint32_t labelId = node.getLabel();
+                uint32_t leftIndex = node.getLeftChildIndex();
+
+                if (thresholdSlot > 7 || featureId > featureMask || labelId > labelMask || leftIndex > childMask) {
+                    if (!silent) {
+                        std::cout << "❌ Node encoding overflow at tree " << static_cast<int>(i)
+                                  << ", feature=" << featureId
+                                  << ", label=" << labelId
+                                  << ", leftIndex=" << leftIndex << "\n";
+                    }
+                    out.close();
+                    std::remove(unified_path.c_str());
+                    return;
+                }
+
+                uint32_t packed32 = 0;
+                packed32 |= static_cast<uint32_t>(node.getIsLeaf() ? 1u : 0u);
+                packed32 |= static_cast<uint32_t>(thresholdSlot & 0x07u) << 1;
+                packed32 |= (featureId & featureMask) << layout.feature_start;
+                packed32 |= (labelId & labelMask) << layout.label_start;
+                packed32 |= (leftIndex & childMask) << layout.child_start;
+
+                out.write(reinterpret_cast<const char*>(&packed32), sizeof(packed32));
             }
 
             ++tree_count_written;
@@ -1234,7 +1445,9 @@ public:
 
         if (!silent) {
             std::cout << "✅ Saved unified forest: " << (int)tree_count_written << "/" << (int)config.num_trees
-                      << " trees (" << total_nodes_written << " nodes) -> " << unified_path << "\n";
+                      << " trees (" << total_nodes_written << " nodes, layout bits f:" << (int)layout.feature_bits
+                      << " l:" << (int)layout.label_bits << " c:" << (int)layout.child_bits
+                      << ") -> " << unified_path << "\n";
         }
     }
     

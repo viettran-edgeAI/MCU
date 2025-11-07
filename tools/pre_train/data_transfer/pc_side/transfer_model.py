@@ -65,17 +65,17 @@ def get_model_files(model_name):
         forest_files.append(forest_file)
     
     # Add node predictor model file
-    predictor_file = os.path.join(model_dir, f"{model_name}_node_pred.bin")
+    predictor_file = os.path.join(model_dir, f"{model_name}_npd.bin")
     if os.path.exists(predictor_file):
         predictor_files.append(predictor_file)
     else:
         # Try alternative locations for node predictor (relative to script)
-        alt_predictor_path = os.path.join(script_dir, '..', f"{model_name}_node_pred.bin")
+        alt_predictor_path = os.path.join(script_dir, '..', f"{model_name}_npd.bin")
         if os.path.exists(alt_predictor_path):
             predictor_files.append(os.path.abspath(alt_predictor_path))
     
     # Add tree log CSV file (model-specific, now in trained_model folder)
-    tree_log_file = os.path.join(model_dir, f"{model_name}_node_log.csv")
+    tree_log_file = os.path.join(model_dir, f"{model_name}_nlg.csv")
     if os.path.exists(tree_log_file):
         log_files.append(tree_log_file)
     

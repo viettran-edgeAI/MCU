@@ -101,76 +101,76 @@ using sample_set = b_vector<Rf_sample>; // set of samples
 
 
 struct Tree_node{
-    uint32_t packed_data; 
+    uint64_t packed_data; 
     
-    // Bit layout (32 bits total) - optimized for breadth-first tree building:
-    // Bits 0-9:    featureID (10 bits) - 0 to 1023 features
-    // Bits 10-17:  label (8 bits) - 0 to 255 classes  
-    // Bits 18-20:  threshold slot (3 bits) - 0 to 7 (maps to quantized thresholds)
-    // Bit 21:      is_leaf (1 bit) - 0 or 1
-    // Bits 22-31:  left child index (10 bits) - 0 to 1023 nodes
+    // Bit layout (64 bits total) - optimized for breadth-first tree building with large dataset support:
+    // Bits 0-15:   featureID (16 bits) - 0 to 65535 features
+    // Bits 16-27:  label (12 bits) - 0 to 4095 classes  
+    // Bits 28-30:  threshold slot (3 bits) - 0 to 7 (maps to quantized thresholds)
+    // Bit 31:      is_leaf (1 bit) - 0 or 1
+    // Bits 32-63:  left child index (32 bits) - 0 to 4,294,967,295 nodes
     // Note: right child index = left child index + 1 (breadth-first property)
 
     // Constructor
     Tree_node() : packed_data(0) {}
 
     // Getter methods for packed data
-    uint16_t getFeatureID() const {
-        return packed_data & 0x3FF;  // Bits 0-9 (10 bits)
+    uint32_t getFeatureID() const {
+        return static_cast<uint32_t>(packed_data & 0xFFFF);  // Bits 0-15 (16 bits)
     }
     
-    uint16_t getLabel() const {
-        return (packed_data >> 10) & 0xFF;  // Bits 10-17 (8 bits)
+    uint32_t getLabel() const {
+        return static_cast<uint32_t>((packed_data >> 16) & 0xFFF);  // Bits 16-27 (12 bits)
     }
     
-    uint16_t getThresholdSlot() const {
-        return (packed_data >> 18) & 0x07;  // Bits 18-20 (3 bits)
+    uint8_t getThresholdSlot() const {
+        return static_cast<uint8_t>((packed_data >> 28) & 0x07);  // Bits 28-30 (3 bits)
     }
     
     bool getIsLeaf() const {
-        return (packed_data >> 21) & 0x01;  // Bit 21
+        return static_cast<bool>((packed_data >> 31) & 0x01);  // Bit 31
     }
     
-    uint16_t getLeftChildIndex() const {
-        return (packed_data >> 22) & 0x3FF;  // Bits 22-31 (10 bits)
+    uint32_t getLeftChildIndex() const {
+        return static_cast<uint32_t>(packed_data >> 32);  // Bits 32-63 (32 bits)
     }
     
-    uint16_t getRightChildIndex() const {
-        return static_cast<uint16_t>(getLeftChildIndex() + 1);  // Breadth-first property: right = left + 1
+    uint32_t getRightChildIndex() const {
+        return getLeftChildIndex() + 1;  // Breadth-first property: right = left + 1
     }
     
     // Setter methods for packed data
-    void setFeatureID(uint16_t featureID) {
-        packed_data = (packed_data & 0xFFFFFC00) | (featureID & 0x3FF);  // Bits 0-9
+    void setFeatureID(uint32_t featureID) {
+        packed_data = (packed_data & 0xFFFFFFFFFFFF0000ULL) | (static_cast<uint64_t>(featureID) & 0xFFFF);  // Bits 0-15
     }
     
-    void setLabel(uint16_t label) {
-        packed_data = (packed_data & 0xFFFC03FF) | ((uint32_t)(label & 0xFF) << 10);  // Bits 10-17
+    void setLabel(uint32_t label) {
+        packed_data = (packed_data & 0xFFFFFFFFF000FFFFULL) | ((static_cast<uint64_t>(label) & 0xFFF) << 16);  // Bits 16-27
     }
     
-    void setThresholdSlot(uint16_t slot) {
-        packed_data = (packed_data & 0xFFE3FFFF) | ((uint32_t)(slot & 0x07) << 18);  // Bits 18-20
+    void setThresholdSlot(uint8_t slot) {
+        packed_data = (packed_data & 0xFFFFFFFF8FFFFFFFULL) | ((static_cast<uint64_t>(slot) & 0x07) << 28);  // Bits 28-30
     }
     
     void setIsLeaf(bool isLeaf) {
-        packed_data = (packed_data & 0xFFDFFFFF) | ((uint32_t)(isLeaf ? 1 : 0) << 21);  // Bit 21
+        packed_data = (packed_data & 0xFFFFFFFF7FFFFFFFULL) | ((static_cast<uint64_t>(isLeaf ? 1 : 0)) << 31);  // Bit 31
     }
     
-    void setLeftChildIndex(uint16_t index) {
-        packed_data = (packed_data & 0x003FFFFF) | ((uint32_t)(index & 0x3FF) << 22);  // Bits 22-31
+    void setLeftChildIndex(uint32_t index) {
+        packed_data = (packed_data & 0x00000000FFFFFFFFULL) | (static_cast<uint64_t>(index) << 32);  // Bits 32-63
     }
     
     // Note: setRightChildIndex is not needed since right = left + 1
 };
 
 struct NodeToBuild {
-    uint16_t nodeIndex;
-    uint16_t begin;   // inclusive
-    uint16_t end;     // exclusive
+    uint32_t nodeIndex;
+    uint32_t begin;   // inclusive
+    uint32_t end;     // exclusive
     uint16_t depth;
     
     NodeToBuild() : nodeIndex(0), begin(0), end(0), depth(0) {}
-    NodeToBuild(uint16_t idx, uint16_t b, uint16_t e, uint16_t d) 
+    NodeToBuild(uint32_t idx, uint32_t b, uint32_t e, uint16_t d) 
         : nodeIndex(idx), begin(b), end(e), depth(d) {}
 };
 
@@ -190,7 +190,7 @@ class Rf_tree {
     }
 
     size_t get_memory_usage() const {
-        return nodes.size() * 4;
+        return nodes.size() * 8;  // 8 bytes per node (uint64_t)
     }
 
     // Count leaf nodes in the tree
@@ -257,7 +257,7 @@ class Rf_tree {
         // Read number of nodes
         uint32_t nodeCount;
         file.read(reinterpret_cast<char*>(&nodeCount), sizeof(nodeCount));
-        if (nodeCount == 0 || nodeCount > 1023) { // 10-bit limit after slot expansion
+        if (nodeCount == 0 || nodeCount > 4294967295U) { // 32-bit limit for large trees
             std::cout << "❌ Invalid node count in tree file: " << nodeCount << std::endl;
             file.close();
             return;
@@ -291,7 +291,7 @@ class Rf_tree {
         //           << " (" << nodeCount << " nodes)" << std::endl;
     }
 
-    uint16_t predictSample(const Rf_sample& sample, uint8_t quant_bits) const {
+    uint32_t predictSample(const Rf_sample& sample, uint8_t quant_bits) const {
         if (nodes.empty()) return 0;
         uint8_t sanitizedBits = QuantizationHelper::sanitizeBits(quant_bits);
     vector<uint16_t> cachedThresholds;
@@ -300,7 +300,7 @@ class Rf_tree {
             cachedThresholds.push_back(0);
         }
         
-        uint16_t currentIndex = 0;  // Start from root
+        uint32_t currentIndex = 0;  // Start from root
         
         while (currentIndex < nodes.size() && !nodes[currentIndex].getIsLeaf()) {
             // Bounds check for feature access
@@ -309,7 +309,7 @@ class Rf_tree {
             }
             
             uint16_t featureValue = sample.features[nodes[currentIndex].getFeatureID()];
-            uint16_t slot = nodes[currentIndex].getThresholdSlot();
+            uint8_t slot = nodes[currentIndex].getThresholdSlot();
             uint16_t thresholdValue = (slot < cachedThresholds.size())
                                         ? cachedThresholds[slot]
                                         : cachedThresholds.back();
@@ -338,12 +338,12 @@ class Rf_tree {
 
   private:
     // Recursive helper to get tree depth
-    uint16_t getTreeDepthRecursive(uint16_t nodeIndex) const {
+    uint16_t getTreeDepthRecursive(uint32_t nodeIndex) const {
         if (nodeIndex >= nodes.size()) return 0;
         if (nodes[nodeIndex].getIsLeaf()) return 1;
         
-        uint16_t leftIndex = nodes[nodeIndex].getLeftChildIndex();
-        uint16_t rightIndex = nodes[nodeIndex].getRightChildIndex();
+        uint32_t leftIndex = nodes[nodeIndex].getLeftChildIndex();
+        uint32_t rightIndex = nodes[nodeIndex].getRightChildIndex();
         
         uint16_t leftDepth = getTreeDepthRecursive(leftIndex);
         uint16_t rightDepth = getTreeDepthRecursive(rightIndex);
@@ -469,15 +469,14 @@ public:
             validSamples++;
         }
         
-        std::cout << "📋 CSV Processing Results:" << std::endl;
-        std::cout << "   Lines processed: " << linesProcessed << std::endl;
-        std::cout << "   Empty lines: " << emptyLines << std::endl;
-        std::cout << "   Valid samples: " << validSamples << std::endl;
-        std::cout << "   Invalid samples: " << invalidSamples << std::endl;
-        std::cout << "   Total samples in memory: " << allSamples.size() << std::endl;
+        // std::cout << "📋 CSV Processing Results:" << std::endl;
+        // std::cout << "   Lines processed: " << linesProcessed << std::endl;
+        // std::cout << "   Empty lines: " << emptyLines << std::endl;
+        // std::cout << "   Valid samples: " << validSamples << std::endl;
+        // std::cout << "   Invalid samples: " << invalidSamples << std::endl;
+        // std::cout << "   Total samples in memory: " << allSamples.size() << std::endl;
         
         file.close();
-        std::cout << "✅ CSV data loaded successfully." << std::endl;
     }
 };
 
@@ -533,6 +532,7 @@ struct Rf_config{
     uint16_t num_labels;
     uint16_t k_folds; 
     uint16_t min_split; 
+    uint16_t min_leaf;
     uint16_t max_depth;
     uint32_t num_samples;  // number of samples in the base data - changed to uint32_t for large datasets
     uint32_t random_seed = 42; // random seed for Rf_random class
@@ -544,9 +544,10 @@ struct Rf_config{
     float valid_ratio = 0.15f; // ratio of validation data to total data, automatically set
     float boostrap_ratio = 0.632f; // ratio of samples taken from train data to create subdata
 
-    b_vector<uint16_t> max_depth_range;      // for training
+    b_vector<uint16_t> min_leaf_range;       // for training
     b_vector<uint16_t> min_split_range;      // for training 
-    b_vector<bool> overwrite{2}; // min_split-> max_depth
+    b_vector<uint16_t> max_depth_range;      // for training
+    b_vector<bool> overwrite{3}; // min_split, min_leaf, max_depth
 
     uint16_t max_feature_value = 0;
     uint8_t dataset_quantization_bits = 1;
@@ -570,7 +571,7 @@ public:
     Rf_config() {};
 
     Rf_config (std::string init_path = config_path){
-        for (size_t i = 0; i < 2; i++) {
+        for (size_t i = 0; i < 3; i++) {
             overwrite[i] = false; // default to not overwriting any parameters
         }
 
@@ -877,9 +878,9 @@ public:
             return "";
         };
 
-        // Initialize overwrite vector: min_split, max_depth
+        // Initialize overwrite vector: min_split, min_leaf, max_depth
         overwrite.clear();
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < 3; i++) {
             overwrite.push_back(false);
         }
 
@@ -893,9 +894,19 @@ public:
             }
         }
 
-        // Check and extract max_depth
-        overwrite[1] = isParameterEnabled("max_depth");
+        // Check and extract min_leaf
+        overwrite[1] = isParameterEnabled("min_leaf");
         if (overwrite[1]) {
+            std::string value = extractParameterValue("min_leaf");
+            if (!value.empty()) {
+                min_leaf = static_cast<uint16_t>(std::stoi(value));
+                std::cout << "⚙️  min_leaf override enabled: " << (int)min_leaf << std::endl;
+            }
+        }
+
+        // Check and extract max_depth
+        overwrite[2] = isParameterEnabled("max_depth");
+        if (overwrite[2]) {
             std::string value = extractParameterValue("max_depth");
             if (!value.empty()) {
                 max_depth = static_cast<uint16_t>(std::stoi(value));
@@ -1017,76 +1028,45 @@ public:
         // Automatic ratio configuration based on dataset size and training method
         float samples_per_label = (float)numSamples / labelCounts.size();
         
-        if (training_score == "oob_score" || training_score == "k_fold_score") {
-            // OOB and K-fold don't need validation data
-            if (samples_per_label > 150) {
-                train_ratio = 0.8f;
-                test_ratio = 0.2f;
-                valid_ratio = 0.0f;
-                std::cout << "📏 Large dataset (samples/label: " << samples_per_label << " > 150). Using ratios: 0.8/0.2/0.0\n";
-            } else {
-                train_ratio = 0.8f;
-                test_ratio = 0.2f;
-                valid_ratio = 0.0f;
-                std::cout << "📏 Small dataset (samples/label: " << samples_per_label << " ≤ 150). Using ratios: 0.8/0.2/0.0\n";
-            }
-        } else if (training_score == "valid_score") {
-            // Validation score needs validation data
-            if (samples_per_label > 150) {
-                train_ratio = 0.7f;
-                test_ratio = 0.15f;
-                valid_ratio = 0.15f;
-                std::cout << "📏 Large dataset (samples/label: " << samples_per_label << " > 150). Using ratios: 0.7/0.15/0.15\n";
-            } else {
-                train_ratio = 0.6f;
-                test_ratio = 0.2f;
-                valid_ratio = 0.2f;
-                std::cout << "📏 Small dataset (samples/label: " << samples_per_label << " ≤ 150). Using ratios: 0.6/0.2/0.2\n";
-            }
-        }
-
         // Validate training_score and split_ratio consistency
+        bool valid_ratios = true;
         if (json_ratios_found) {
-            bool mismatch_detected = false;
-            
             // Check for invalid cases
-            if (training_score == "valid_score" && json_valid_ratio == 0.0f) {
-                std::cout << "⚠️ Invalid configuration: valid_score selected but valid_ratio = 0 in JSON\n";
-                if(samples_per_label <= 150){
-                    train_ratio = 0.6f;
-                    test_ratio = 0.2f;
-                    valid_ratio = 0.2f;
-                    std::cout << "🔧 Adjusting to small dataset ratios: train=0.6, test=0.2, valid=0.2";
-                }else{
-                    train_ratio = 0.7f;
-                    test_ratio = 0.15f;
-                    valid_ratio = 0.15f;
-                    std::cout << "🔧 Adjusting to large dataset ratios: train=0.7, test=0.15, valid=0.15";
-                }
-            }
-            else if (training_score != "valid_score" && json_valid_ratio > 0.0f) {
-                std::cout << "⚠️ Invalid configuration: " << training_score << " selected but valid_ratio > 0 in JSON\n";
-                if(samples_per_label <= 150){
-                    train_ratio = 0.75f;
-                    test_ratio = 0.25f;
+            if (training_score == "valid_score" && json_valid_ratio == 0.0f) valid_ratios = false;
+            else if (training_score != "valid_score" && json_valid_ratio > 0.0f) valid_ratios = false;
+        }
+        if (!valid_ratios){
+            std::cout << "⚠️ Invalid ratios detected. Auto adjusting.." << std::endl;
+            if (training_score == "oob_score" || training_score == "k_fold_score") {
+                // OOB and K-fold don't need validation data
+                if (samples_per_label > 800){
+                    train_ratio = 0.9f;
+                    test_ratio  = 0.1f;
                     valid_ratio = 0.0f;
-                    std::cout << "🔧 Adjusting to small dataset ratios: train=0.75, test=0.25, valid=0.0";
-                }else{
+                }else if (samples_per_label > 150) {
                     train_ratio = 0.8f;
                     test_ratio = 0.2f;
                     valid_ratio = 0.0f;
-                    std::cout << "🔧 Adjusting to large dataset ratios: train=0.8, test=0.2, valid=0.0";
+                } else {
+                    train_ratio = 0.75f;
+                    test_ratio = 0.25f;
+                    valid_ratio = 0.0f;
                 }
-                    
+            } else if (training_score == "valid_score") {
+                // Validation score needs validation data
+                test_ratio *= 1.5f;
+                train_ratio = 1.0f - test_ratio;
+                test_ratio *= 0.5f;
+                valid_ratio = 1.0f - train_ratio - test_ratio;
             }
+
         }
 
         // Final validation and normalization of ratios
         float total_ratio = train_ratio + test_ratio + valid_ratio;
         if (abs(total_ratio - 1.0f) > 0.001f) {
-            std::cout << "⚠️ Split ratios don't sum to 1.0 (sum: " << total_ratio << "). Normalizing...\n";
             train_ratio /= total_ratio;
-            test_ratio /= total_ratio;
+            test_ratio  /= total_ratio;
             valid_ratio /= total_ratio;
         }
 
@@ -1159,7 +1139,7 @@ public:
         }
 
         std::cout << "🎯 Final split ratios: train=" << train_ratio << ", test=" << test_ratio 
-                  << ", valid=" << valid_ratio << " (method: " << training_score << ")\n";
+                  << ", valid=" << valid_ratio << std::endl;
         
         // Calculate optimal parameters based on dataset size
         int baseline_minsplit_ratio = 100 * (num_samples / 500 + 1); 
@@ -1169,26 +1149,50 @@ public:
         uint16_t max_minSplit = std::min(24, dynamic_max_split); // Cap at 24 to prevent overly simple trees.
         if (max_minSplit <= min_minSplit) max_minSplit = min_minSplit + 4; // Ensure a valid range.
 
+        // Calculate min_leaf range based on dataset density and class balance
+        float samples_per_label_leaf = (num_labels > 0)
+                                      ? static_cast<float>(num_samples) / static_cast<float>(num_labels)
+                                      : static_cast<float>(num_samples);
+        float density_factor = std::clamp(samples_per_label_leaf / 600.0f, 0.3f, 3.0f);
+        float expected_min_pct_leaf = (num_labels > 0) ? (100.0f / static_cast<float>(num_labels)) : 100.0f;
+        float deficit_pct = std::max(0.0f, expected_min_pct_leaf - lowestDistribution);
+        float imbalance_factor_leaf = 1.0f - std::min(0.5f, (expected_min_pct_leaf > 0.0f)
+                                                        ? (deficit_pct / expected_min_pct_leaf)
+                                                        : 0.0f); // 0.5 .. 1.0
 
-        int base_maxDepth = std::max((int)log2(num_samples * 2.0f), (int)(log2(num_features) * 2.5f));
-        uint16_t max_maxDepth = std::max(6, base_maxDepth);
-        int dynamic_min_depth = std::max(4, (int)(log2(num_features) + 2));
+        float min_ratio = std::clamp(0.12f + 0.05f * density_factor * imbalance_factor_leaf, 0.1f, 0.35f);
+        float max_ratio = std::clamp(min_ratio + (0.12f + 0.04f * density_factor), min_ratio + 0.1f, 0.6f);
+
+        uint16_t min_minLeaf = static_cast<uint16_t>(std::floor(static_cast<float>(min_minSplit) * min_ratio));
+        uint16_t max_cap = static_cast<uint16_t>(max_minSplit > 1 ? max_minSplit - 1 : 1);
+        min_minLeaf = std::max<uint16_t>(1, std::min<uint16_t>(min_minLeaf, max_cap));
+
+        uint16_t max_minLeaf = static_cast<uint16_t>(std::ceil(static_cast<float>(max_minSplit) * max_ratio));
+        max_minLeaf = std::min<uint16_t>(max_minLeaf, max_cap);
+        if (max_minLeaf < min_minLeaf) {
+            max_minLeaf = min_minLeaf;
+        }
+
+        int base_maxDepth = std::max((int)log2(num_samples * 2.0f), (int)(log2(num_features) * 3.2f));
+        uint16_t max_maxDepth = std::max(8, base_maxDepth);
+        int dynamic_min_depth = std::max(6, (int)(log2(num_features * 1.5f) + 2));
         uint16_t min_maxDepth = std::min((int)max_maxDepth - 2, dynamic_min_depth); // Ensure a valid range.
-        if (min_maxDepth >= max_maxDepth) min_maxDepth = max_maxDepth - 2;
-        if (min_maxDepth < 4) min_maxDepth = 4;
 
         // Set default values only if not overridden
         if (!overwrite[0]) {
             min_split = (min_minSplit + max_minSplit + 1) / 2 ;
         }
         if (!overwrite[1]) {
+            uint16_t suggested_leaf = static_cast<uint16_t>((min_minLeaf + max_minLeaf + 1) / 2);
+            min_leaf = std::clamp<uint16_t>(suggested_leaf, min_minLeaf, max_minLeaf);
+        }
+        if (!overwrite[2]) {
             max_depth = (min_maxDepth + max_maxDepth) / 2 ;
         }
-        std::cout << "min_split range: " << (int)min_minSplit << " - " << (int)max_minSplit << std::endl;
-        std::cout << "max_depth range: " << (int)min_maxDepth << " - " << (int)max_maxDepth << std::endl;
-        
+
         // Build ranges based on override status
         min_split_range.clear();
+        min_leaf_range.clear();
         max_depth_range.clear();
         
         if (overwrite[0]) {
@@ -1199,7 +1203,7 @@ public:
             // min_split automatic - build range with step 2
             uint16_t min_split_step = 2;
             if(overwrite[1] || max_minSplit - min_minSplit < 4) {
-                min_split_step = 1; // If max_depth is overridden, use smaller step for min_split
+                min_split_step = 1; // If min_leaf is overridden, use smaller step for min_split
             }
             for(uint16_t i = min_minSplit; i <= max_minSplit; i += min_split_step) {
                 min_split_range.push_back(i);
@@ -1207,17 +1211,17 @@ public:
         }
         
         if (overwrite[1]) {
-            // max_depth override is enabled - use only the override value
-            max_depth_range.push_back(max_depth);
-            std::cout << "🔧 max_depth override active: using fixed value " << (int)max_depth << "\n";
+            // min_leaf override is enabled - use only the override value
+            min_leaf_range.push_back(min_leaf);
+            std::cout << "🔧 min_leaf override active: using fixed value " << (int)min_leaf << "\n";
         } else {
-            // max_depth automatic - build range with step 2
-            uint16_t max_depth_step = 2;
+            // min_leaf automatic - build range with step 1
+            uint16_t min_leaf_step = 1;
             if(overwrite[0]) {
-                max_depth_step = 1; // If min_split is overridden, use smaller step for max_depth
+                min_leaf_step = 1; // If min_split is overridden, use step of 1
             }
-            for(uint16_t i = min_maxDepth; i <= max_maxDepth; i += max_depth_step) {
-                max_depth_range.push_back(i);
+            for(uint16_t i = min_minLeaf; i <= max_minLeaf; i += min_leaf_step) {
+                min_leaf_range.push_back(i);
             }
         }
         
@@ -1225,17 +1229,41 @@ public:
         if (min_split_range.empty()) {
             min_split_range.push_back(min_split);
         }
+        if (min_leaf_range.empty()) {
+            min_leaf_range.push_back(min_leaf);
+        }
+        
+        if (overwrite[2]) {
+            // max_depth override is enabled - use only the override value
+            max_depth_range.push_back(max_depth);
+            std::cout << "🔧 max_depth override active: using fixed value " << (int)max_depth << "\n";
+        } else {
+            uint16_t max_depth_step = 3;  // Step of 3 to reduce combinations
+            for(uint16_t i = min_maxDepth; i <= max_maxDepth; i += max_depth_step) {
+                max_depth_range.push_back(i);
+            }
+            // Always include the max value if not already included
+            if (max_depth_range.empty() || max_depth_range.back() < max_maxDepth) {
+                max_depth_range.push_back(max_maxDepth);
+            }
+        }
+        
+        // Ensure at least one value in max_depth_range
         if (max_depth_range.empty()) {
             max_depth_range.push_back(max_depth);
         }
         
         // Debug: Show range sizes
-        std::cout << "📊 Training ranges: min_split_range has " << min_split_range.size() 
-                  << " values, max_depth_range has " << max_depth_range.size() << " values\n";
+        std::cout << "📊 Training ranges: \n";
         std::cout << "   min_split values: ";
         for(size_t i = 0; i < min_split_range.size(); i++) {
             std::cout << (int)min_split_range[i];
             if (i + 1 < min_split_range.size()) std::cout << ", ";
+        }
+        std::cout << "\n   min_leaf values: ";
+        for(size_t i = 0; i < min_leaf_range.size(); i++) {
+            std::cout << (int)min_leaf_range[i];
+            if (i + 1 < min_leaf_range.size()) std::cout << ", ";
         }
         std::cout << "\n   max_depth values: ";
         for(size_t i = 0; i < max_depth_range.size(); i++) {
@@ -1246,28 +1274,28 @@ public:
 
         // generate impurity_threshold
         int K = std::max(2, static_cast<int>(num_labels));
-        float expected_min_pct = 100.0f / static_cast<float>(K);
-        float deficit = std::max(0.0f, expected_min_pct - lowestDistribution);
-        float imbalance = expected_min_pct > 0.0f ? std::min(1.0f, deficit / expected_min_pct) : 0.0f; // 0..1
+        float expected_min_pct_threshold = 100.0f / static_cast<float>(K);
+        float deficit_threshold = std::max(0.0f, expected_min_pct_threshold - lowestDistribution);
+        float imbalance_threshold = expected_min_pct_threshold > 0.0f ? std::min(1.0f, deficit_threshold / expected_min_pct_threshold) : 0.0f; // 0..1
 
         // Sample factor: with more data, we can demand slightly larger impurity gains to split
         // compute using double to avoid mixed-type std::min/std::max template deduction issues, then cast
         double sample_factor_d = std::min(2.0, 0.75 + std::log2(std::max(2.0, static_cast<double>(num_samples))) / 12.0);
         float sample_factor = static_cast<float>(sample_factor_d);
         // Imbalance factor: reduce threshold for imbalanced data to allow splitting on rare classes
-        float imbalance_factor = 1.0f - 0.5f * imbalance; // 0.5..1.0
+        float imbalance_factor_threshold = 1.0f - 0.5f * imbalance_threshold; // 0.5..1.0
         // Feature factor: with many features, weak splits are common; require slightly higher gain
         float feature_factor = 0.9f + 0.1f * std::min(1.0f, static_cast<float>(std::log2(std::max(2, static_cast<int>(num_features)))) / 8.0f);
 
         if (use_gini) {
             float max_gini = 1.0f - 1.0f / static_cast<float>(K);
             float base = 0.003f * max_gini; // very small base for Gini
-            float thr = base * sample_factor * imbalance_factor * feature_factor;
+            float thr = base * sample_factor * imbalance_factor_threshold * feature_factor;
             impurity_threshold = std::max(0.0005f, std::min(0.02f, thr));
         } else { // entropy
             float max_entropy = std::log2(static_cast<float>(K));
             float base = 0.02f * (max_entropy > 0.0f ? max_entropy : 1.0f); // larger than gini
-            float thr = base * sample_factor * imbalance_factor * feature_factor;
+            float thr = base * sample_factor * imbalance_factor_threshold * feature_factor;
             impurity_threshold = std::max(0.005f, std::min(0.2f, thr));
         }
 
@@ -1299,6 +1327,7 @@ public:
             config_file << "  \"test_ratio\": " << norm_test_ratio << ",\n";
             config_file << "  \"valid_ratio\": " << norm_valid_ratio << ",\n";
             config_file << "  \"minSplit\": " << (int)min_split << ",\n";
+            config_file << "  \"minLeaf\": " << (int)min_leaf << ",\n";
             config_file << "  \"maxDepth\": " << (int)max_depth << ",\n";
             config_file << "  \"useBootstrap\": " << (use_bootstrap ? "true" : "false") << ",\n";
             config_file << "  \"boostrapRatio\": " << boostrap_ratio << ",\n";
@@ -1332,14 +1361,16 @@ private:
 
 struct node_data {
     uint16_t min_split;
+    uint16_t min_leaf;
     uint16_t max_depth;
     uint16_t total_nodes; // Total nodes in the tree for this configuration
     
-    node_data() : min_split(3), max_depth(6), total_nodes(0) {}
-    node_data(uint16_t split, uint16_t depth, uint16_t nodes) 
-        : min_split(split), max_depth(depth), total_nodes(nodes) {}
-    node_data(uint16_t min_split, uint16_t max_depth){
+    node_data() : min_split(3), min_leaf(1), max_depth(250), total_nodes(0) {}
+    node_data(uint16_t split, uint16_t leaf, uint16_t depth, uint16_t nodes) 
+        : min_split(split), min_leaf(leaf), max_depth(depth), total_nodes(nodes) {}
+    node_data(uint16_t min_split, uint16_t min_leaf, uint16_t max_depth){
         min_split = min_split;
+        min_leaf = min_leaf;
         max_depth = max_depth;
         total_nodes = 0; // Default to 0, will be calculated later
     }
@@ -1350,16 +1381,17 @@ public:
     vector<node_data> training_data;
     
     // Regression coefficients for the prediction formula
-    // Formula: nodes = a0 + a1*min_split + a2*max_depth
-    float coefficients[3];    
+    // Formula: nodes = a0 + a1*min_split + a2*min_leaf + a3*max_depth
+    float coefficients[4];    
     b_vector<float> peak_nodes;
 public:
     bool is_trained;
     uint8_t accuracy; // in percentage
     uint8_t peak_percent;   // number of nodes at depth with maximum number of nodes / total number of nodes in tree
+    uint32_t trained_sample_count = 0; // Samples observed when predictor was trained
     
     
-    // Helper methods for regression analysis
+    // Improved multiple linear regression using least squares method with robustness
     void compute_coefficients() {
         if (training_data.empty()) {
             std::cerr << "❌ No training data available" << std::endl;
@@ -1368,124 +1400,166 @@ public:
         
         size_t n = training_data.size();
         
-        // Dynamically analyze the data patterns
-        // Collect all unique min_split and max_depth values
-    vector<uint16_t> unique_min_splits;
-    vector<uint16_t> unique_max_depths;
+        // Check for constant features (zero variance)
+        bool split_varies = false, leaf_varies = false, depth_varies = false;
+        uint16_t first_split = training_data[0].min_split;
+        uint16_t first_leaf = training_data[0].min_leaf;
+        uint16_t first_depth = training_data[0].max_depth;
+        
+        for (size_t i = 1; i < n; i++) {
+            if (training_data[i].min_split != first_split) split_varies = true;
+            if (training_data[i].min_leaf != first_leaf) leaf_varies = true;
+            if (training_data[i].max_depth != first_depth) depth_varies = true;
+        }
+        
+        // Build feature set dynamically based on variance
+        vector<int> active_features; // 0=intercept, 1=split, 2=leaf, 3=depth
+        active_features.push_back(0); // Always include intercept
+        if (split_varies) active_features.push_back(1);
+        if (leaf_varies) active_features.push_back(2);
+        if (depth_varies) active_features.push_back(3);
+        
+        int num_features = active_features.size();
+        
+        if (num_features == 1) {
+            // Only intercept - use mean
+            double mean = 0.0;
+            for (const auto& sample : training_data) {
+                mean += sample.total_nodes;
+            }
+            coefficients[0] = static_cast<float>(mean / n);
+            coefficients[1] = 0.0f;
+            coefficients[2] = 0.0f;
+            coefficients[3] = 0.0f;
+            is_trained = true;
+            return;
+        }
+        
+        // Build design matrix sums dynamically
+        vector<vector<double>> XTX(num_features, vector<double>(num_features, 0.0));
+        vector<double> XTy(num_features, 0.0);
         
         for (const auto& sample : training_data) {
-            // Add unique min_split values
-            if (std::find(unique_min_splits.begin(), unique_min_splits.end(), sample.min_split) == unique_min_splits.end()) {
-                unique_min_splits.push_back(sample.min_split);
-            }
-            // Add unique max_depth values
-            if (std::find(unique_max_depths.begin(), unique_max_depths.end(), sample.max_depth) == unique_max_depths.end()) {
-                unique_max_depths.push_back(sample.max_depth);
-            }
-        }
-        
-        std::sort(unique_min_splits.begin(), unique_min_splits.end());
-        std::sort(unique_max_depths.begin(), unique_max_depths.end());
-        
-        // Calculate average nodes for each min_split value
-    vector<float> avg_nodes_by_split(unique_min_splits.size(), 0.0f);
-    vector<int> count_by_split(unique_min_splits.size(), 0);
-        
-        for (const auto& sample : training_data) {
-            auto it = std::find(unique_min_splits.begin(), unique_min_splits.end(), sample.min_split);
-            if (it != unique_min_splits.end()) {
-                size_t idx = std::distance(unique_min_splits.begin(), it);
-                avg_nodes_by_split[idx] += sample.total_nodes;
-                count_by_split[idx]++;
-            }
-        }
-        
-        for (size_t i = 0; i < avg_nodes_by_split.size(); i++) {
-            if (count_by_split[i] > 0) {
-                avg_nodes_by_split[i] /= count_by_split[i];
-            }
-        }
-        
-        // Calculate average nodes for each max_depth value
-    vector<float> avg_nodes_by_depth(unique_max_depths.size(), 0.0f);
-    vector<int> count_by_depth(unique_max_depths.size(), 0);
-        
-        for (const auto& sample : training_data) {
-            auto it = std::find(unique_max_depths.begin(), unique_max_depths.end(), sample.max_depth);
-            if (it != unique_max_depths.end()) {
-                size_t idx = std::distance(unique_max_depths.begin(), it);
-                avg_nodes_by_depth[idx] += sample.total_nodes;
-                count_by_depth[idx]++;
-            }
-        }
-        
-        for (size_t i = 0; i < avg_nodes_by_depth.size(); i++) {
-            if (count_by_depth[i] > 0) {
-                avg_nodes_by_depth[i] /= count_by_depth[i];
-            }
-        }
-        
-        // Calculate overall average as baseline
-        float overall_avg = 0.0f;
-        for (const auto& sample : training_data) {
-            overall_avg += sample.total_nodes;
-        }
-        overall_avg /= n;
-        
-        // Calculate min_split effect (how nodes change with min_split)
-        float split_effect = 0.0f;
-        if (avg_nodes_by_split.size() >= 2) {
-            // Calculate slope between first and last min_split values
-            float first_avg = avg_nodes_by_split[0];
-            float last_avg = avg_nodes_by_split.back();
-            float split_range = static_cast<float>(unique_min_splits.back() - unique_min_splits[0]);
+            vector<double> x(num_features);
+            x[0] = 1.0; // intercept
             
-            if (split_range > 0) {
-                split_effect = (last_avg - first_avg) / split_range;
-            }
-        }
-        
-        // Calculate max_depth effect (how nodes change with max_depth)
-        float depth_effect = 0.0f;
-        if (avg_nodes_by_depth.size() >= 2) {
-            // Calculate slope between first and last max_depth values
-            float first_avg = avg_nodes_by_depth[0];
-            float last_avg = avg_nodes_by_depth.back();
-            float depth_range = static_cast<float>(unique_max_depths.back() - unique_max_depths[0]);
+            int idx = 1;
+            if (split_varies) x[idx++] = static_cast<double>(sample.min_split);
+            if (leaf_varies) x[idx++] = static_cast<double>(sample.min_leaf);
+            if (depth_varies) x[idx++] = static_cast<double>(sample.max_depth);
             
-            if (depth_range > 0) {
-                depth_effect = (last_avg - first_avg) / depth_range;
+            double y = static_cast<double>(sample.total_nodes);
+            
+            // Build X^T * X and X^T * y
+            for (int i = 0; i < num_features; i++) {
+                XTy[i] += x[i] * y;
+                for (int j = 0; j < num_features; j++) {
+                    XTX[i][j] += x[i] * x[j];
+                }
             }
         }
         
-        // Build the simple linear model: nodes = bias + split_coeff * min_split + depth_coeff * max_depth
-        // Calculate bias to center the model around the overall average
-        float reference_split = unique_min_splits.empty() ? 3.0f : static_cast<float>(unique_min_splits[0]);
-        float reference_depth = unique_max_depths.empty() ? 6.0f : static_cast<float>(unique_max_depths[0]);
+        // Add small regularization to diagonal for numerical stability
+        for (int i = 0; i < num_features; i++) {
+            XTX[i][i] += 1e-8;
+        }
         
-        coefficients[0] = overall_avg - (split_effect * reference_split) - (depth_effect * reference_depth); // bias
-        coefficients[1] = split_effect; // min_split coefficient
-        coefficients[2] = depth_effect; // max_depth coefficient
+        // Solve using Gaussian elimination with partial pivoting
+        vector<vector<double>> aug(num_features, vector<double>(num_features + 1));
+        for (int i = 0; i < num_features; i++) {
+            for (int j = 0; j < num_features; j++) {
+                aug[i][j] = XTX[i][j];
+            }
+            aug[i][num_features] = XTy[i];
+        }
+        
+        // Forward elimination
+        for (int k = 0; k < num_features; k++) {
+            // Find pivot
+            int max_row = k;
+            double max_val = std::abs(aug[k][k]);
+            for (int i = k + 1; i < num_features; i++) {
+                if (std::abs(aug[i][k]) > max_val) {
+                    max_val = std::abs(aug[i][k]);
+                    max_row = i;
+                }
+            }
+            
+            // Swap rows
+            if (max_row != k) {
+                std::swap(aug[k], aug[max_row]);
+            }
+            
+            // Eliminate
+            for (int i = k + 1; i < num_features; i++) {
+                if (std::abs(aug[k][k]) > 1e-10) {
+                    double factor = aug[i][k] / aug[k][k];
+                    for (int j = k; j <= num_features; j++) {
+                        aug[i][j] -= factor * aug[k][j];
+                    }
+                }
+            }
+        }
+        
+        // Back substitution
+        vector<double> solution(num_features, 0.0);
+        for (int i = num_features - 1; i >= 0; i--) {
+            double sum = aug[i][num_features];
+            for (int j = i + 1; j < num_features; j++) {
+                sum -= aug[i][j] * solution[j];
+            }
+            if (std::abs(aug[i][i]) > 1e-10) {
+                solution[i] = sum / aug[i][i];
+            }
+        }
+        
+        // Map solution back to coefficients
+        coefficients[0] = static_cast<float>(solution[0]); // intercept
+        coefficients[1] = 0.0f;
+        coefficients[2] = 0.0f;
+        coefficients[3] = 0.0f;
+        
+        int sol_idx = 1;
+        if (split_varies) coefficients[1] = static_cast<float>(solution[sol_idx++]);
+        if (leaf_varies) coefficients[2] = static_cast<float>(solution[sol_idx++]);
+        if (depth_varies) coefficients[3] = static_cast<float>(solution[sol_idx++]);
+        
+        // Adjust intercept for constant features
+        if (!split_varies) coefficients[0] -= coefficients[1] * first_split;
+        if (!leaf_varies) coefficients[0] -= coefficients[2] * first_leaf;
+        if (!depth_varies) coefficients[0] -= coefficients[3] * first_depth;
         
         is_trained = true;
     }
 
     float evaluate_formula(const node_data& data) const {
         if (!is_trained) {
-            return 100.0f; // default estimate
+            return manual_estimate(data);
         }
         
         float result = coefficients[0]; // bias
         result += coefficients[1] * static_cast<float>(data.min_split);
-        result += coefficients[2] * static_cast<float>(data.max_depth);
+        result += coefficients[2] * static_cast<float>(data.min_leaf);
+        result += coefficients[3] * static_cast<float>(data.max_depth);
         
         return std::max(10.0f, result); // ensure reasonable minimum
     }
-
     
+    // Fallback manual estimation if model fails
+    float manual_estimate(const node_data& data) const {
+        if (data.min_split == 0) {
+            return 100.0f;
+        }
+        // Simple heuristic based on tree constraints
+        float safe_leaf = std::max(1.0f, static_cast<float>(data.min_leaf));
+        float leaf_adjustment = 60.0f / safe_leaf;
+        float depth_factor = std::min(250.0f, static_cast<float>(data.max_depth)) / 50.0f;
+        float estimate = 120.0f - data.min_split * 10.0f + leaf_adjustment + depth_factor * 15.0f;
+        return std::max(10.0f, estimate);
+    }    
 public:
-    node_predictor() : is_trained(false), accuracy(0), peak_percent(0) {
-        for (int i = 0; i < 3; i++) {
+    node_predictor() : is_trained(false), accuracy(0), peak_percent(0), trained_sample_count(0) {
+        for (int i = 0; i < 4; i++) {
             coefficients[i] = 0.0f;
         }
     }
@@ -1517,11 +1591,15 @@ public:
             if (!std::getline(ss, token, ',')) continue;
             sample.min_split = static_cast<uint16_t>(std::stoi(token));
             
+            // Parse min_leaf
+            if (!std::getline(ss, token, ',')) continue;
+            sample.min_leaf = static_cast<uint16_t>(std::stoi(token));
+            
             // Parse max_depth
             if (!std::getline(ss, token, ',')) continue;
             sample.max_depth = static_cast<uint16_t>(std::stoi(token));
             
-            // Parse total_nodes (skip num_samples and num_features)
+            // Parse total_nodes
             if (!std::getline(ss, token, ',')) continue;
             sample.total_nodes = static_cast<uint16_t>(std::stoi(token));
             
@@ -1596,17 +1674,19 @@ public:
         file.write(reinterpret_cast<const char*>(&accuracy), sizeof(accuracy));
         file.write(reinterpret_cast<const char*>(&peak_percent), sizeof(peak_percent));
         
-        // Write number of coefficients
-    uint8_t num_coefficients = 3;
+        // Write number of coefficients (now 4 instead of 3)
+        uint8_t num_coefficients = 4;
         file.write(reinterpret_cast<const char*>(&num_coefficients), sizeof(num_coefficients));
         
         // Write coefficients
-        file.write(reinterpret_cast<const char*>(coefficients), sizeof(float) * 3);
+        file.write(reinterpret_cast<const char*>(coefficients), sizeof(float) * 4);
+
+        // Write dataset sample count for MCU-side drift detection
+        file.write(reinterpret_cast<const char*>(&trained_sample_count), sizeof(trained_sample_count));
         
         file.close();
         return true;
     }
-
     
     // Load trained model from binary file
     bool load_model(const std::string& bin_file_path) {
@@ -1633,42 +1713,70 @@ public:
         file.read(reinterpret_cast<char*>(&peak_percent), sizeof(peak_percent));
         
         // Read number of coefficients
-    uint8_t num_coefficients;
+        uint8_t num_coefficients;
         file.read(reinterpret_cast<char*>(&num_coefficients), sizeof(num_coefficients));
         
-        if (num_coefficients != 3) {
+        // Support both old (3) and new (4) coefficient formats for backward compatibility
+        if (num_coefficients == 3) {
+            std::cout << "⚠️  Loading old format with 3 coefficients, max_depth coefficient will be 0" << std::endl;
+            file.read(reinterpret_cast<char*>(coefficients), sizeof(float) * 3);
+            coefficients[3] = 0.0f; // Default max_depth coefficient
+        } else if (num_coefficients == 4) {
+            file.read(reinterpret_cast<char*>(coefficients), sizeof(float) * 4);
+        } else {
             std::cerr << "❌ Invalid number of coefficients: " << (int)num_coefficients << std::endl;
             file.close();
             return false;
         }
-        
-        // Read coefficients
-        file.read(reinterpret_cast<char*>(coefficients), sizeof(float) * 3);
+
+        // Optional sample count metadata (MCU-aware builds append this)
+        trained_sample_count = 0;
+        uint32_t stored_samples = 0;
+        file.read(reinterpret_cast<char*>(&stored_samples), sizeof(stored_samples));
+        if (file.gcount() == static_cast<std::streamsize>(sizeof(stored_samples))) {
+            trained_sample_count = stored_samples;
+        } else {
+            file.clear();
+        }
         
         file.close();
         std::cout << "📂 Model loaded from " << bin_file_path << std::endl;
         return true;
     }
 
-    // Get prediction accuracy on training data
+    // Get prediction accuracy on training data using R-squared metric
     float get_accuracy() const {
         if (!is_trained || training_data.empty()) {
             return 0.0f;
         }
         
-        float total_error = 0.0f;
-        float total_actual = 0.0f;
+        // Calculate mean of actual values
+        double mean_actual = 0.0;
+        for (const auto& sample : training_data) {
+            mean_actual += static_cast<double>(sample.total_nodes);
+        }
+        mean_actual /= training_data.size();
+        
+        // Calculate total sum of squares (TSS) and residual sum of squares (RSS)
+        double tss = 0.0;
+        double rss = 0.0;
         
         for (const auto& sample : training_data) {
-            uint16_t predicted = predict(sample);
-            float error = std::abs(static_cast<float>(predicted) - static_cast<float>(sample.total_nodes));
-            total_error += error;
-            total_actual += static_cast<float>(sample.total_nodes);
+            double actual = static_cast<double>(sample.total_nodes);
+            double predicted = static_cast<double>(predict(sample));
+            
+            tss += (actual - mean_actual) * (actual - mean_actual);
+            rss += (actual - predicted) * (actual - predicted);
         }
         
-        float mape = (total_error / total_actual) * 100.0f; // Mean Absolute Percentage Error
-
-        return std::max(0.0f, 100.0f - mape); // Return accuracy as percentage
+        // Calculate R-squared (coefficient of determination)
+        // R² = 1 - (RSS/TSS)
+        // R² ranges from -∞ to 1, where 1 is perfect prediction
+        double r_squared = (tss > 0.0) ? (1.0 - (rss / tss)) : 0.0;
+        
+        // Convert to percentage (0-100%) and clamp to valid range
+        float accuracy_percent = static_cast<float>(r_squared * 100.0);
+        return std::max(0.0f, std::min(100.0f, accuracy_percent));
     }
 };
 

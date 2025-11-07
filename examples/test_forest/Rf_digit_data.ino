@@ -53,7 +53,8 @@ void setup() {
     // Optional: Configure forest parameters
     // forest.set_num_trees(20);
     // forest.set_random_seed(42);
-    // forest.set_training_score(Rf_training_score::K_FOLD_SCORE);
+    // forest.disable_partial_loading();
+    // forest.set_training_score(Rf_training_score::OOB_SCORE);
 
     // Build and train the model
     if (!forest.build_model()) {
@@ -61,7 +62,7 @@ void setup() {
         return;
     }
 
-    forest.training(2); // limit to 3 epochs
+    // forest.training(2); // limit to 3 epochs
 
     // Load trained forest from filesystem
     Serial.print("Loading forest... ");

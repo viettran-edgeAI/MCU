@@ -6,8 +6,8 @@
  * 
  * Files received:
  * - {model_name}_config.json (model configuration)
- * - {model_name}_node_pred.bin (memory estimation model)
- * - {model_name}_node_log.csv (training history and statistics)
+ * - {model_name}_npd.bin (memory estimation model)
+ * - {model_name}_nlg.csv (training history and statistics)
  * - {model_name}_forest.bin (unified forest file containing all decision trees)
  * 
  * The unified forest file replaces individual tree files for more efficient
@@ -163,11 +163,11 @@ void listReceivedFiles() {
                 Serial.printf("   📋 %s (%u bytes) - Configuration\n", fileName.c_str(), file.size());
                 configFiles++;
                 fileCount++;
-            } else if (fileName.indexOf("node_pred") >= 0 && fileName.endsWith(".bin")) {
+            } else if (fileName.indexOf("npd") >= 0 && fileName.endsWith(".bin")) {
                 Serial.printf("   🧮 %s (%u bytes) - Node Predictor\n", fileName.c_str(), file.size());
                 predictorFiles++;
                 fileCount++;
-            } else if (fileName.indexOf("node_log") >= 0 && fileName.endsWith(".csv")) {
+            } else if (fileName.indexOf("nlg") >= 0 && fileName.endsWith(".csv")) {
                 Serial.printf("   📊 %s (%u bytes) - Training Log\n", fileName.c_str(), file.size());
                 logFiles++;
                 fileCount++;
@@ -430,9 +430,9 @@ void handleFileInfo() {
     String fileType = "📄 File";
     if (strstr(receivedFileName, ".json") && strstr(receivedFileName, "_config")) {
         fileType = "📋 Configuration";
-    } else if (strstr(receivedFileName, "node_pred") && strstr(receivedFileName, ".bin")) {
+    } else if (strstr(receivedFileName, "npd") && strstr(receivedFileName, ".bin")) {
         fileType = "🧮 Node Predictor";
-    } else if (strstr(receivedFileName, "node_log") && strstr(receivedFileName, ".csv")) {
+    } else if (strstr(receivedFileName, "nlg") && strstr(receivedFileName, ".csv")) {
         fileType = "📊 Training Log";
     } else if (strstr(receivedFileName, "_forest") && strstr(receivedFileName, ".bin")) {
         fileType = "🌳 Unified Forest";

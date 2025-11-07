@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <new>
 #include <type_traits>
@@ -3382,6 +3383,27 @@ namespace mcu {
             packed_data = PackedArray<BitsPerElement>(calc_words_for_bpv(capacity_, active_bpv));
             packed_data.set_bpv(active_bpv);
 
+            // Optimized bulk copy for word-aligned ranges when bpv matches
+            if (active_bpv == source_bpv && (start_index * active_bpv) % 32 == 0) {
+                // Fast path: word-aligned bulk copy
+                const size_t start_bit = start_index * active_bpv;
+                const size_t end_bit = end_index * active_bpv;
+                const size_t start_word = start_bit / 32;
+                const size_t num_bits = size_ * active_bpv;
+                const size_t num_words = (num_bits + 31) / 32;
+                
+                // Direct word copy from source packed data
+                const uint32_t* src_words = source.get_packed_data_words();
+                uint32_t* dst_words = packed_data.raw_data();
+                
+                if (src_words && dst_words && num_words > 0) {
+                    // Use memcpy for bulk transfer
+                    memcpy(dst_words, src_words + start_word, num_words * sizeof(uint32_t));
+                    return;
+                }
+            }
+            
+            // Fallback: element-by-element copy
             for (size_type i = 0; i < size_; ++i) {
                 using SourceValue = typename SourceVector::value_type;
                 using SourceTraits = packed_value_traits<SourceValue>;
@@ -3756,6 +3778,9 @@ namespace mcu {
 
         const uint32_t* data() const { return packed_data.raw_data(); }
         uint32_t* data() { return packed_data.raw_data(); }
+        
+        // Helper methods for optimized range copying
+        const uint32_t* get_packed_data_words() const { return packed_data.raw_data(); }
     };
     /*  
     ------------------------------------------------------------------------------------------------------------------

@@ -36,8 +36,8 @@ static constexpr uint8_t      RF_PATH_BUFFER         = 64;     // buffer for fil
 static constexpr uint8_t      RF_MAX_TREES           = 100;    // maximum number of trees in a forest
 static constexpr label_type   RF_MAX_LABELS          = 255;    // maximum number of unique labels supported 
 static constexpr uint16_t     RF_MAX_FEATURES        = 1023;   // maximum number of features
-static constexpr uint16_t     RF_MAX_NODES           = 2047;   // Maximum nodes per tree 
 static constexpr sample_type  RF_MAX_SAMPLES         = 65535;  // maximum number of samples in a dataset
+static constexpr uint32_t     RF_MAX_NODES           = 131071; // Maximum nodes per tree 
 #ifdef RF_USE_SDCARD
     #if defined(RF_PSRAM_AVAILABLE)
         // SD card + PSRAM: allow largest dataset
@@ -67,11 +67,11 @@ static constexpr label_type RF_ERROR_LABEL = Rf_err_label<label_type>::value;
     4. model_name_dp.csv        : information about dataset (num_features, num_labels...)
     5. model_name_forest.bin    : model file (all trees) in unified format
     6. model_name_tree_*.bin    : model files (tree files) in individual format. (Given from pc/use during training)
-    7. model_name_node_pred.bin : node predictor file 
-    8. model_name_node_log.csv  : node splitting log file during training (for retraining node predictor)
-    9. model_name_infer_log.bin : inference log file (predictions, actual labels, metrics over time)
-    10. model_name_time_log.csv     : time log file (detailed timing of forest events)
-    11. model_name_memory_log.csv   : memory log file (detailed memory usage of forest events)
+    7. model_name_npd.bin       : node predictor file 
+    8. model_name_nlg.csv       : node splitting log file during training (for retraining node predictor)
+    9. model_name_ifl.bin :     inference log file (predictions, actual labels, metrics over time)
+    10. model_name_tlog.csv     : time log file (detailed timing of forest events)
+    11. model_name_mlog.csv     : memory log file (detailed memory usage of forest events)
 */
 
 namespace mcu {
@@ -245,7 +245,7 @@ namespace mcu {
             }
 
             // check : node predictor file exists
-            build_file_path(filepath, "_node_pred.bin");
+            build_file_path(filepath, "_npd.bin");
             if (RF_FS_EXISTS(filepath)) {
                 RF_DEBUG(1, "✅ Found node predictor file: ", filepath);
                 flags |= static_cast<Rf_base_flags>(NODE_PRED_FILE_EXIST);
@@ -337,25 +337,25 @@ namespace mcu {
                         const { build_file_path(buffer, "_ctg.csv", buffer_size); }
 
         inline void get_infer_log_path(char* buffer, int buffer_size = RF_PATH_BUFFER ) 
-                        const { build_file_path(buffer, "_infer_log.bin", buffer_size); }
+                        const { build_file_path(buffer, "_ifl.bin", buffer_size); }
 
         inline void get_config_path(char* buffer, int buffer_size = RF_PATH_BUFFER ) 
                         const { build_file_path(buffer, "_config.json", buffer_size); }
 
         inline void get_node_pred_path(char* buffer, int buffer_size = RF_PATH_BUFFER ) 
-                        const { build_file_path(buffer, "_node_pred.bin", buffer_size); }
+                        const { build_file_path(buffer, "_npd.bin", buffer_size); }
 
         inline void get_node_log_path(char* buffer, int buffer_size = RF_PATH_BUFFER ) 
-                        const { build_file_path(buffer, "_node_log.csv", buffer_size); }
+                        const { build_file_path(buffer, "_nlg.csv", buffer_size); }
 
         inline void get_forest_path(char* buffer, int buffer_size = RF_PATH_BUFFER ) 
                         const { build_file_path(buffer, "_forest.bin", buffer_size); }
 
         inline void get_time_log_path(char* buffer, int buffer_size = RF_PATH_BUFFER ) 
-                        const { build_file_path(buffer, "_time_log.csv", buffer_size); }
+                        const { build_file_path(buffer, "_tlog.csv", buffer_size); }
 
         inline void get_memory_log_path(char* buffer, int buffer_size = RF_PATH_BUFFER ) 
-                        const { build_file_path(buffer, "_memory_log.csv", buffer_size); }
+                        const { build_file_path(buffer, "_mlog.csv", buffer_size); }
         
         inline void get_temp_base_data_path(char* buffer, int buffer_size = RF_PATH_BUFFER)
                         const { build_file_path(buffer, "_cpy.bin", buffer_size); }
@@ -395,12 +395,12 @@ namespace mcu {
                 rename_file("_nml.bin");       // base file
                 rename_file("_dp.csv");        // data_params file
                 rename_file("_ctg.csv");       // quantizer file
-                rename_file("_infer_log.bin"); // inference log file
-                rename_file("_node_pred.bin"); // node predictor file
-                rename_file("_node_log.bin");  // node predict log file
+                rename_file("_ifl.bin"); // inference log file
+                rename_file("_npd.bin"); // node predictor file
+                rename_file("_nlg.bin");  // node predict log file
                 rename_file("_config.json");   // config file
-                rename_file("_memory_log.csv");// memory log file
-                rename_file("_time_log.csv");  // time log file
+                rename_file("_mlog.csv");// memory log file
+                rename_file("_tlog.csv");  // time log file
 
                 // tree files - handle both individual and unified formats
                 snprintf(old_file, RF_PATH_BUFFER, "/%s_forest.bin", old_model_name);
@@ -494,6 +494,7 @@ namespace mcu {
         uint8_t     num_trees;
         uint32_t    random_seed;
         uint8_t     min_split;
+        uint8_t     min_leaf;
         uint8_t     max_depth;
         bool        use_boostrap;
         bool        use_gini;
@@ -515,7 +516,8 @@ namespace mcu {
 
         // runtime parameters
         pair<uint8_t, uint8_t> min_split_range;
-        pair<uint8_t, uint8_t> max_depth_range; 
+        pair<uint8_t, uint8_t> min_leaf_range;
+        pair<uint16_t, uint16_t> max_depth_range; 
 
         // Dataset parameters 
         sample_type num_samples;
@@ -533,7 +535,8 @@ namespace mcu {
             num_trees           = 20;
             random_seed         = 37;
             min_split           = 2;
-            max_depth           = 13;
+            min_leaf            = 1;
+            max_depth           = 250;
             use_boostrap        = true;
             boostrap_ratio      = 0.632f; 
             use_gini            = false;
@@ -657,34 +660,79 @@ namespace mcu {
             return true;
         }
         
-        // generate optimal ranges for min_split and max_depth based on dataset parameters
+        // generate optimal ranges for min_split and min_leaf based on dataset parameters
         void generate_ranges(){
-            // Calculate optimal min_split, max_depth and ranges
-            int baseline_minsplit_ratio = 100 * (num_samples / 500 + 1); 
-            if (baseline_minsplit_ratio > 500) baseline_minsplit_ratio = 500; 
-            uint8_t min_minSplit = max(2, (int)(num_samples / baseline_minsplit_ratio) - 2);
-            int dynamic_max_split = min(min_minSplit + 6, (int)(log2(num_samples) / 4 + num_features / 25.0f));
-            uint8_t max_minSplit = min(24, dynamic_max_split) - 2; // Cap at 24 to prevent overly simple trees.
-            if (max_minSplit <= min_minSplit) max_minSplit = min_minSplit + 4; // Ensure a valid range.
-
-
-            int base_maxDepth = max((int)log2(num_samples * 2.0f), (int)(log2(num_features) * 2.5f));
-            uint8_t max_maxDepth = max(6, base_maxDepth);
-            int dynamic_min_depth = max(4, (int)(log2(num_features) + 2));
-            uint8_t min_maxDepth = min((int)max_maxDepth - 2, dynamic_min_depth); // Ensure a valid range.
-            if (min_maxDepth >= max_maxDepth) min_maxDepth = max_maxDepth - 2;
-            if (min_maxDepth < 4) min_maxDepth = 4;
-
-            if(min_split == 0 || max_depth == 0) {
-                min_split = (min_minSplit + max_minSplit) / 2;
-                max_depth = (min_maxDepth + max_maxDepth) / 2;
-                RF_DEBUG_2(1, "Setting minSplit to ", min_split, "and maxDepth to ", max_depth);
+            int baseline_minsplit_ratio = 100 * (num_samples / 500 + 1);
+            if (baseline_minsplit_ratio > 500) baseline_minsplit_ratio = 500;
+            uint8_t min_minSplit = max(2, (int)(num_samples / baseline_minsplit_ratio));
+            if (min_minSplit > 2) {
+                min_minSplit = static_cast<uint8_t>(min_minSplit - 1);
             }
 
+            int dynamic_max_split = min(min_minSplit + 6, (int)(log2(num_samples) / 4 + num_features / 25.0f));
+            uint8_t max_minSplit = min<uint8_t>(24, dynamic_max_split);
+            if (max_minSplit <= min_minSplit) {
+                max_minSplit = static_cast<uint8_t>(min_minSplit + 4);
+            }
+
+            if (min_split == 0) {
+                min_split = static_cast<uint8_t>((min_minSplit + max_minSplit + 1) / 2);
+                RF_DEBUG_2(1, "Setting minSplit to ", min_split, " (auto)", "");
+            }
+
+            float samples_per_label = (num_labels > 0)
+                                          ? static_cast<float>(num_samples) / static_cast<float>(num_labels)
+                                          : static_cast<float>(num_samples);
+            float density_factor = samples_per_label / 600.0f;
+            if (density_factor < 0.3f) density_factor = 0.3f;
+            if (density_factor > 3.0f) density_factor = 3.0f;
+
+            float expected_min_pct = (num_labels > 0) ? (100.0f / static_cast<float>(num_labels)) : 100.0f;
+            float deficit_pct = max(0.0f, expected_min_pct - lowest_distribution);
+            float imbalance_ratio = (expected_min_pct > 0.0f) ? (deficit_pct / expected_min_pct) : 0.0f;
+            if (imbalance_ratio > 0.5f) imbalance_ratio = 0.5f;
+            float imbalance_factor = 1.0f - imbalance_ratio; // 0.5 .. 1.0
+
+            float min_ratio = 0.12f + 0.05f * density_factor * imbalance_factor;
+            if (min_ratio < 0.1f) min_ratio = 0.1f;
+            if (min_ratio > 0.35f) min_ratio = 0.35f;
+
+            float max_ratio = min_ratio + (0.12f + 0.04f * density_factor);
+            float min_allowed = min_ratio + 0.1f;
+            if (max_ratio < min_allowed) max_ratio = min_allowed;
+            if (max_ratio > 0.6f) max_ratio = 0.6f;
+
+            uint8_t max_cap = (max_minSplit > 1) ? static_cast<uint8_t>(max_minSplit - 1) : static_cast<uint8_t>(1);
+            uint8_t min_minLeaf = static_cast<uint8_t>(floorf(static_cast<float>(min_minSplit) * min_ratio));
+            if (min_minLeaf < 1) min_minLeaf = 1;
+            if (min_minLeaf > max_cap) min_minLeaf = max_cap;
+
+            uint8_t max_minLeaf = static_cast<uint8_t>(ceilf(static_cast<float>(max_minSplit) * max_ratio));
+            if (max_minLeaf > max_cap) max_minLeaf = max_cap;
+            if (max_minLeaf < min_minLeaf) {
+                max_minLeaf = min_minLeaf;
+            }
+
+            if (min_leaf == 0) {
+                uint8_t mid_leaf = static_cast<uint8_t>((min_minLeaf + max_minLeaf + 1) / 2);
+                min_leaf = max<uint8_t>(1, min<uint8_t>(mid_leaf, max_cap));
+                RF_DEBUG_2(1, "Setting minLeaf to ", min_leaf, " (auto)", "");
+            }
+
+            if (max_depth == 0) {
+                max_depth = 250;
+            }
+
+            // Generate max_depth range - use larger values to explore tree depth
+            uint16_t min_maxDepth = 8;  // Start from depth 8
+            uint16_t max_maxDepth = max<uint16_t>(32, min<uint16_t>(250, static_cast<uint16_t>(log2(num_samples) * 4)));
+            
             RF_DEBUG_2(1, "⚙️ Setting minSplit range: ", min_minSplit, "to ", max_minSplit);
+            RF_DEBUG_2(1, "⚙️ Setting minLeaf range: ", min_minLeaf, "to ", max_minLeaf);
             RF_DEBUG_2(1, "⚙️ Setting maxDepth range: ", min_maxDepth, "to ", max_maxDepth);
 
             min_split_range = make_pair(min_minSplit, max_minSplit);
+            min_leaf_range = make_pair(min_minLeaf, max_minLeaf);
             max_depth_range = make_pair(min_maxDepth, max_maxDepth);
         }
 
@@ -996,6 +1044,7 @@ namespace mcu {
             file.printf("  \"test_ratio\": %.2f,\n", test_ratio);
             file.printf("  \"valid_ratio\": %.2f,\n", valid_ratio);
             file.printf("  \"minSplit\": %d,\n", min_split);
+            file.printf("  \"minLeaf\": %d,\n", min_leaf);
             file.printf("  \"maxDepth\": %d,\n", max_depth);
             file.printf("  \"useBootstrap\": %s,\n", use_boostrap ? "true" : "false");
             file.printf("  \"boostrapRatio\": %.3f,\n", boostrap_ratio);
@@ -1041,6 +1090,10 @@ namespace mcu {
             num_trees = extractIntValue(jsonStr, "numTrees");              
             random_seed = extractIntValue(jsonStr, "randomSeed");          
             min_split = extractIntValue(jsonStr, "minSplit");             
+            min_leaf = extractIntValue(jsonStr, "minLeaf");
+            if (min_leaf == 0) {
+                min_leaf = 1;
+            }
             max_depth = extractIntValue(jsonStr, "maxDepth");            
             use_boostrap = extractBoolValue(jsonStr, "useBootstrap");     
             boostrap_ratio = extractFloatValue(jsonStr, "boostrapRatio"); 
@@ -1194,14 +1247,19 @@ namespace mcu {
                 }
             }
             if(enable_auto_config){
-                if(rarest_class < 150){
-                    train_ratio = 0.6f;
-                    test_ratio = 0.2f;
-                    valid_ratio = 0.2f;
-                }else{
+                if(rarest_class > 750){
+                    train_ratio = 0.8f;
+                    test_ratio = 0.1f;
+                    valid_ratio = 0.1f;
+                } 
+                else if(rarest_class > 150){
                     train_ratio = 0.7f;
                     test_ratio = 0.15f;
                     valid_ratio = 0.15f;
+                }else{
+                    train_ratio = 0.6f;
+                    test_ratio = 0.2f;
+                    valid_ratio = 0.2f;
                 }
             }
             if (training_score != VALID_SCORE){
@@ -1210,8 +1268,9 @@ namespace mcu {
             }
             else {
                 if (valid_ratio < 0.1f){
-                    if(rarest_class < 150)  valid_ratio = 0.2f;
-                    else                    valid_ratio = 0.15f;
+                    if(rarest_class > 750)      valid_ratio = 0.1f;
+                    else if(rarest_class > 150) valid_ratio = 0.15f;
+                    else                        valid_ratio = 0.2f;
                     train_ratio -= valid_ratio;
                 }
             }
@@ -1234,6 +1293,7 @@ namespace mcu {
             RF_DEBUG(1, "   - Random seed: ", random_seed);
             RF_DEBUG(1, "   - max_depth: ", max_depth);
             RF_DEBUG(1, "   - min_split: ", min_split);
+            RF_DEBUG(1, "   - min_leaf: ", min_leaf);
             RF_DEBUG(1, "   - train_ratio: ", train_ratio);
             RF_DEBUG(1, "   - test_ratio: ", test_ratio);
             RF_DEBUG(1, "   - valid_ratio: ", valid_ratio);
@@ -2468,8 +2528,11 @@ namespace mcu {
             return (1 << label_layout.second);
         }
         // return max_nodes, allow exceed RF_MAX_NODES
-        uint16_t max_nodes() const {
-            uint16_t mn = 1 << left_child_layout.second;
+        uint32_t max_nodes() const {
+            if (left_child_layout.second >= 32) {
+                return RF_MAX_NODES;
+            }
+            uint32_t mn = 1u << left_child_layout.second;
             return mn > RF_MAX_NODES ? mn : RF_MAX_NODES;
         }
         uint8_t bits_per_node() const {
@@ -2505,11 +2568,12 @@ namespace mcu {
             return (packed_data >> layout.first) & ((1 << layout.second) - 1);  
         }
 
-        inline uint16_t getLeftChildIndex(const pair<uint8_t, uint8_t>& layout) const noexcept{
-            return (packed_data >> layout.first) & ((1 << layout.second) - 1);  
+        inline uint32_t getLeftChildIndex(const pair<uint8_t, uint8_t>& layout) const noexcept{
+            const uint32_t mask = (layout.second >= 32) ? 0xFFFFFFFFu : ((1u << layout.second) - 1u);
+            return (packed_data >> layout.first) & mask;  
         }
         
-        inline uint16_t getRightChildIndex(const pair<uint8_t, uint8_t>& layout) const noexcept{
+        inline uint32_t getRightChildIndex(const pair<uint8_t, uint8_t>& layout) const noexcept{
             return getLeftChildIndex(layout) + 1;  // Breadth-first property: right = left + 1
         }
         
@@ -2530,9 +2594,10 @@ namespace mcu {
             packed_data &= ~(((1 << layout.second) - 1) << layout.first); // Clear label bits
             packed_data |= (label & ((1 << layout.second) - 1)) << layout.first; // Set label bits
         }
-        inline void setLeftChildIndex(uint16_t index, const pair<uint8_t, uint8_t>& layout) noexcept{
-            packed_data &= ~(((1 << layout.second) - 1) << layout.first); // Clear left child index bits
-            packed_data |= (index & ((1 << layout.second) - 1)) << layout.first; // Set left child index bits
+        inline void setLeftChildIndex(uint32_t index, const pair<uint8_t, uint8_t>& layout) noexcept{
+            const uint32_t mask = (layout.second >= 32) ? 0xFFFFFFFFu : ((1u << layout.second) - 1u);
+            packed_data &= ~(mask << layout.first); // Clear left child index bits
+            packed_data |= (index & mask) << layout.first; // Set left child index bits
         }
     };
 
@@ -2724,7 +2789,7 @@ namespace mcu {
                 return false;
             }
 
-            if (nodeCount == 0 || nodeCount > 2047) {
+            if (nodeCount == 0 || nodeCount > RF_MAX_NODES) {
                 RF_DEBUG(1, "❌ Invalid node count in tree file");
                 file.close();
                 return false;
@@ -2770,10 +2835,11 @@ namespace mcu {
             const auto& labelLayout = layout->label_layout;
             const auto& childLayout = layout->left_child_layout;
 
-            uint16_t currentIndex = 0;
-            const uint16_t nodeCount = static_cast<uint16_t>(nodes.size());
+            uint32_t currentIndex = 0;
+            const uint32_t nodeCount = static_cast<uint32_t>(nodes.size());
+            uint16_t maxDepth = 100; // Safety limit to prevent infinite loops
 
-            while (__builtin_expect(currentIndex < nodeCount, 1)) {
+            while (__builtin_expect(currentIndex < nodeCount, 1) && maxDepth-- > 0) {
                 const Tree_node node = nodes.get(currentIndex);
 
                 if (__builtin_expect(node.getIsLeaf(), 0)) {
@@ -2787,10 +2853,15 @@ namespace mcu {
                                                : thresholds.back();
 
                 const uint16_t featureValue = static_cast<uint16_t>(packed_features[featureID]);
-                const uint16_t leftChild = node.getLeftChildIndex(childLayout);
+                const uint32_t leftChild = node.getLeftChildIndex(childLayout);
                 currentIndex = (featureValue <= threshold)
                                    ? leftChild
                                    : node.getRightChildIndex(childLayout);
+            }
+            
+            // If we exceeded maxDepth, log a warning
+            if (maxDepth == 0) {
+                RF_DEBUG(2, "⚠️ Tree traversal exceeded maximum depth - possible infinite loop");
             }
             
             return RF_ERROR_LABEL;
@@ -3583,23 +3654,28 @@ namespace mcu {
     */
     struct node_data {
         uint32_t total_nodes;
-        uint16_t max_depth;
+        uint8_t min_leaf;
         uint8_t min_split;
+        uint16_t max_depth;
 
-        node_data() : total_nodes(0), max_depth(0), min_split(0) {}
-        node_data(uint8_t min_split, uint16_t max_depth) 
-            : total_nodes(0), max_depth(max_depth), min_split(min_split) {}
-        node_data(uint8_t min_split, uint16_t max_depth, uint32_t total_nodes) 
-            : total_nodes(total_nodes), max_depth(max_depth), min_split(min_split) {}
+        node_data() : total_nodes(0), min_leaf(0), min_split(0), max_depth(250) {}
+        node_data(uint8_t min_split, uint8_t min_leaf, uint16_t max_depth = 250)
+            : total_nodes(0), min_leaf(min_leaf), min_split(min_split), max_depth(max_depth) {}
+        node_data(uint8_t min_split, uint8_t min_leaf, uint16_t max_depth, uint32_t total_nodes)
+            : total_nodes(total_nodes), min_leaf(min_leaf), min_split(min_split), max_depth(max_depth) {}
     };
 
     class Rf_node_predictor {
     public:
-        float coefficients[3];  // bias, min_split_coeff, max_depth_coeff
+        float coefficients[4];  // bias, min_split_coeff, min_leaf_coeff, max_depth_coeff
         bool is_trained;
         b_vector<node_data, 5> buffer;
     private:
-        const Rf_base* base_ptr = nullptr;
+    const Rf_base* base_ptr = nullptr;
+    const Rf_config* config_ptr = nullptr;
+    uint32_t trained_sample_count = 0;   // Samples present when coefficients were derived
+    bool dataset_warning_emitted = false;
+    bool dataset_drift_emitted = false;
         
         bool has_base() const {
             return base_ptr != nullptr && base_ptr->ready_to_use();
@@ -3612,18 +3688,22 @@ namespace mcu {
             
             float result = coefficients[0]; // bias
             result += coefficients[1] * static_cast<float>(data.min_split);
-            result += coefficients[2] * static_cast<float>(data.max_depth);
+            result += coefficients[2] * static_cast<float>(data.min_leaf);
+            result += coefficients[3] * static_cast<float>(data.max_depth);
             
             return result > 10.0f ? result : 10.0f; // ensure reasonable minimum
         }
 
         // if failed to load predictor, manual estimate will be used
         float manual_estimate(const node_data& data) const {
-            if (data.min_split == 0 || data.max_depth == 0) {
+            if (data.min_split == 0) {
                 return 100.0f; 
             }
-            // Simple heuristic: more nodes = better accuracy
-            float estimate = 100.0f - data.min_split * 12 + data.max_depth * 3;
+            // Simple heuristic: more nodes = better accuracy with smaller min_leaf and larger max_depth
+            float safe_leaf = max(1.0f, static_cast<float>(data.min_leaf));
+            float leaf_adjustment = 60.0f / safe_leaf;
+            float depth_factor = min(250.0f, static_cast<float>(data.max_depth)) / 50.0f;
+            float estimate = 120.0f - data.min_split * 10.0f + leaf_adjustment + depth_factor * 15.0f;
             return estimate < 10.0f ? 10.0f : estimate; // ensure reasonable minimum
         }
 
@@ -3635,11 +3715,32 @@ namespace mcu {
                 }
             }
             float prediction = evaluate_formula(data);
+            if (is_trained && config_ptr) {
+                uint32_t current_samples = config_ptr->num_samples;
+                if (trained_sample_count > 0 && current_samples > 0) {
+                    float ratio = static_cast<float>(current_samples) / static_cast<float>(trained_sample_count);
+                    if (ratio > 1.75f || ratio < 0.5f) {
+                        if (!dataset_drift_emitted) {
+                            RF_DEBUG_2(1, "⚠️ Node predictor dataset drift detected. Trained on ", trained_sample_count, ", current samples: ", current_samples);
+                            RF_DEBUG(1, "   Recommendation: retrain node predictor to refresh coefficients.");
+                            dataset_drift_emitted = true;
+                        }
+                        return manual_estimate(data);
+                    }
+
+                    if ((ratio > 1.05f || ratio < 0.95f) && !dataset_warning_emitted) {
+                        RF_DEBUG(1, "ℹ️ Adjusting node estimate for sample count change.");
+                        RF_DEBUG_2(1, "   factor: ", ratio, "", "");
+                        dataset_warning_emitted = true;
+                    }
+
+                    float clamped_ratio = ratio;
+                    if (clamped_ratio > 1.35f) clamped_ratio = 1.35f;
+                    if (clamped_ratio < 0.75f) clamped_ratio = 0.75f;
+                    prediction *= clamped_ratio;
+                }
+            }
             return prediction; 
-        }
-        float raw_estimate(uint8_t min_split, uint16_t max_depth) {
-            node_data data(min_split, max_depth);
-            return raw_estimate(data);
         }
         
 
@@ -3648,40 +3749,71 @@ namespace mcu {
         uint8_t peak_percent;  // number of nodes at depth with maximum number of nodes / total number of nodes in tree
         
         Rf_node_predictor() : is_trained(false), accuracy(0), peak_percent(0) {
-            for (int i = 0; i < 3; i++) {
+            for (int i = 0; i < 4; i++) {
                 coefficients[i] = 0.0f;
             }
+            trained_sample_count = 0;
+            dataset_warning_emitted = false;
+            dataset_drift_emitted = false;
+            base_ptr = nullptr;
+            config_ptr = nullptr;
         }
 
         Rf_node_predictor(Rf_base* base) : base_ptr(base), is_trained(false), accuracy(0), peak_percent(0) {
             RF_DEBUG(2, "🔧 Initializing node predictor");
-            for (int i = 0; i < 3; i++) {
+            for (int i = 0; i < 4; i++) {
                 coefficients[i] = 0.0f;
             }
+            trained_sample_count = 0;
+            dataset_warning_emitted = false;
+            dataset_drift_emitted = false;
+            config_ptr = nullptr;
         }
 
         ~Rf_node_predictor() {
             base_ptr = nullptr;
+            config_ptr = nullptr;
             is_trained = false;
             buffer.clear();
+            trained_sample_count = 0;
+            dataset_warning_emitted = false;
+            dataset_drift_emitted = false;
         }
 
-        void init(Rf_base* base) {
+        void init(Rf_base* base, const Rf_config* config = nullptr) {
             base_ptr = base;
+            config_ptr = config;
             is_trained = false;
-            for (int i = 0; i < 3; i++) {
+            trained_sample_count = 0;
+            dataset_warning_emitted = false;
+            dataset_drift_emitted = false;
+            for (int i = 0; i < 4; i++) {
                 coefficients[i] = 0.0f;
             }
-            // get logfile path from file_path : "/model_name_node_pred.bin" -> "/model_name_node_log.csv"
             char node_predictor_log[RF_PATH_BUFFER] = {0};
             if (base_ptr) {
                 base_ptr->get_node_log_path(node_predictor_log);
             }
-            // check if node_log file exists, if not create with header
+            // Check if node_log file exists
+            if (node_predictor_log[0] != '\0' && RF_FS_EXISTS(node_predictor_log)) {
+                // Check if it has the old format and delete it
+                File checkFile = RF_FS_OPEN(node_predictor_log, RF_FILE_READ);
+                if (checkFile) {
+                    String firstLine = checkFile.readStringUntil('\n');
+                    firstLine.trim();
+                    checkFile.close();
+                    // If header doesn't contain "max_depth", delete the old file
+                    if (firstLine.indexOf("max_depth") < 0 || firstLine.indexOf("min_split,min_leaf,max_depth,total_nodes") < 0) {
+                        RF_DEBUG(1, "🔄 Detected old node log format, removing: ", node_predictor_log);
+                        RF_FS_REMOVE(node_predictor_log);
+                    }
+                }
+            }
+            // Create new file with correct header if it doesn't exist
             if (node_predictor_log[0] != '\0' && !RF_FS_EXISTS(node_predictor_log)) {
                 File logFile = RF_FS_OPEN(node_predictor_log, FILE_WRITE);
                 if (logFile) {
-                    logFile.println("min_split,max_depth,total_nodes");
+                    logFile.println("min_split,min_leaf,max_depth,total_nodes");
                     logFile.close();
                 }
             }
@@ -3697,6 +3829,8 @@ namespace mcu {
             base_ptr->get_node_pred_path(file_path);
             RF_DEBUG(2, "🔍 Loading node predictor from file: ", file_path);
             if(is_trained) return true;
+            dataset_warning_emitted = false;
+            dataset_drift_emitted = false;
             if (!RF_FS_EXISTS(file_path)) {
                 RF_DEBUG(1, "⚠️  No predictor file found, using default predictor.");
                 return false;
@@ -3735,17 +3869,37 @@ namespace mcu {
             
             // Read number of coefficients
             uint8_t num_coefficients;
-            if (file.read((uint8_t*)&num_coefficients, sizeof(num_coefficients)) != sizeof(num_coefficients) || num_coefficients != 3) {
-                RF_DEBUG_2(2, "❌ Coefficient count mismatch - Expected: ", 3, ", Found: ", num_coefficients);
+            if (file.read((uint8_t*)&num_coefficients, sizeof(num_coefficients)) != sizeof(num_coefficients)) {
+                RF_DEBUG(0, "❌ Failed to read coefficient count");
                 file.close();
                 return false;
             }
-            
-            // Read coefficients
-            if (file.read((uint8_t*)coefficients, sizeof(float) * 3) != sizeof(float) * 3) {
-                RF_DEBUG(0, "❌ Failed to read coefficients");
+
+            if (num_coefficients == 3) {
+                if (file.read((uint8_t*)coefficients, sizeof(float) * 3) != sizeof(float) * 3) {
+                    RF_DEBUG(0, "❌ Failed to read legacy coefficients");
+                    file.close();
+                    return false;
+                }
+                coefficients[3] = 0.0f; // Legacy files omitted depth coefficient
+            } else if (num_coefficients == 4) {
+                if (file.read((uint8_t*)coefficients, sizeof(float) * 4) != sizeof(float) * 4) {
+                    RF_DEBUG(0, "❌ Failed to read coefficients");
+                    file.close();
+                    return false;
+                }
+            } else {
+                RF_DEBUG_2(2, "❌ Unsupported coefficient count: ", num_coefficients, "", "");
                 file.close();
                 return false;
+            }
+
+            // Optional sample count metadata (available in new format)
+            trained_sample_count = 0;
+            uint32_t stored_samples = 0;
+            size_t bytes_read = file.read((uint8_t*)&stored_samples, sizeof(stored_samples));
+            if (bytes_read == sizeof(stored_samples)) {
+                trained_sample_count = stored_samples;
             }
             
             file.close();
@@ -3760,11 +3914,21 @@ namespace mcu {
                 RF_DEBUG(1, "✅ Node predictor loaded : ", file_path);
                 RF_DEBUG(2, "bias: ", this->coefficients[0]);
                 RF_DEBUG(2, "min_split effect: ", this->coefficients[1]);
-                RF_DEBUG(2, "max_depth effect: ", this->coefficients[2]);
+                RF_DEBUG(2, "min_leaf effect: ", this->coefficients[2]);
                 RF_DEBUG(2, "accuracy: ", accuracy);
+                dataset_warning_emitted = false;
+                dataset_drift_emitted = false;
+                if (trained_sample_count == 0) {
+                    RF_DEBUG(2, "ℹ️ Predictor file missing sample count metadata (legacy format).");
+                } else {
+                    RF_DEBUG_2(2, "   Predictor trained on samples: ", trained_sample_count, "", "");
+                }
             } else {
                 RF_DEBUG(1, "⚠️  Predictor file exists but is not trained, using default predictor.");
                 is_trained = false;
+                trained_sample_count = 0;
+                dataset_warning_emitted = false;
+                dataset_drift_emitted = false;
             }
             return file_is_trained;
         }
@@ -3789,6 +3953,10 @@ namespace mcu {
                 return false;
             }
             
+            if (config_ptr) {
+                trained_sample_count = static_cast<uint32_t>(config_ptr->num_samples);
+            }
+
             // Write magic number
             uint32_t magic = 0x4E4F4445; // "NODE" in hex
             file.write((uint8_t*)&magic, sizeof(magic));
@@ -3801,25 +3969,30 @@ namespace mcu {
             file.write((uint8_t*)&peak_percent, sizeof(peak_percent));
             
             // Write number of coefficients
-            uint8_t num_coefficients = 3;
+            uint8_t num_coefficients = 4;
             file.write((uint8_t*)&num_coefficients, sizeof(num_coefficients));
             
             // Write coefficients
-            file.write((uint8_t*)coefficients, sizeof(float) * 3);
+            file.write((uint8_t*)coefficients, sizeof(float) * 4);
+
+            // Write dataset sample count metadata
+            file.write((uint8_t*)&trained_sample_count, sizeof(trained_sample_count));
             
             file.close();
+            dataset_warning_emitted = false;
+            dataset_drift_emitted = false;
             RF_DEBUG(1, "✅ Node predictor saved: ", file_path);
             return true;
         }
         
         // Add new training samples to buffer
-        void add_new_samples(uint8_t min_split, uint16_t max_depth, uint32_t total_nodes) {
-            if (min_split == 0 || max_depth == 0) return; // invalid sample
+        void add_new_samples(uint8_t min_split, uint8_t min_leaf, uint16_t max_depth, uint32_t total_nodes) {
+            if (min_split == 0 || min_leaf == 0) return; // invalid sample
             if (buffer.size() >= 100) {
                 RF_DEBUG(2, "⚠️ Node_pred buffer full, consider retraining soon.");
                 return;
             }
-            buffer.push_back(node_data(min_split, max_depth, total_nodes));
+            buffer.push_back(node_data(min_split, min_leaf, max_depth, total_nodes));
         }
         // Retrain the predictor using data from rf_tree_log.csv (synchronized with PC version)
         bool re_train(bool save_after_retrain = true) {
@@ -3864,22 +4037,37 @@ namespace mcu {
                     continue; // Skip header line
                 }
                 
-                // Parse CSV line: min_split,max_depth,total_nodes
+                // Parse CSV line: min_split,min_leaf,max_depth,total_nodes
                 node_data sample;
                 int comma1 = line.indexOf(',');
                 int comma2 = line.indexOf(',', comma1 + 1);
+                int comma3 = line.indexOf(',', comma2 + 1);
                 
-                if (comma1 != -1 && comma2 != -1) {
+                if (comma1 != -1 && comma2 != -1 && comma3 != -1) {
                     String min_split_str = line.substring(0, comma1);
-                    String max_depth_str = line.substring(comma1 + 1, comma2);
-                    String total_nodes_str = line.substring(comma2 + 1);
+                    String min_leaf_str = line.substring(comma1 + 1, comma2);
+                    String max_depth_str = line.substring(comma2 + 1, comma3);
+                    String total_nodes_str = line.substring(comma3 + 1);
+
+                    int parsed_split = min_split_str.toInt();
+                    if (parsed_split < 0) parsed_split = 0;
+                    if (parsed_split > 255) parsed_split = 255;
+                    sample.min_split = static_cast<uint8_t>(parsed_split);
+
+                    int parsed_leaf = min_leaf_str.toInt();
+                    if (parsed_leaf < 0) parsed_leaf = 0;
+                    if (parsed_leaf > 255) parsed_leaf = 255;
+                    sample.min_leaf = static_cast<uint8_t>(parsed_leaf);
                     
-                    sample.min_split = min_split_str.toInt();
-                    sample.max_depth = max_depth_str.toInt();
+                    int parsed_depth = max_depth_str.toInt();
+                    if (parsed_depth < 0) parsed_depth = 0;
+                    if (parsed_depth > 65535) parsed_depth = 65535;
+                    sample.max_depth = static_cast<uint16_t>(parsed_depth);
+                    
                     sample.total_nodes = total_nodes_str.toInt();
                     
                     // skip invalid samples
-                    if (sample.min_split > 0 && sample.max_depth > 0 && sample.total_nodes > 0) {
+                    if (sample.min_split > 0 && sample.min_leaf > 0 && sample.max_depth > 0 && sample.total_nodes > 0) {
                         training_data.push_back(sample);
                     }
                 }
@@ -3890,9 +4078,9 @@ namespace mcu {
                 return false;
             }
             
-            // Collect all unique min_split and max_depth values
+            // Collect all unique min_split and min_leaf values
             b_vector<uint8_t> unique_min_splits;
-            b_vector<uint16_t> unique_max_depths;
+            b_vector<uint8_t> unique_min_leafs;
             
             for (const auto& sample : training_data) {
                 // Add unique min_split values
@@ -3907,22 +4095,22 @@ namespace mcu {
                     unique_min_splits.push_back(sample.min_split);
                 }
                 
-                // Add unique max_depth values
-                bool found_depth = false;
-                for (const auto& existing_depth : unique_max_depths) {
-                    if (existing_depth == sample.max_depth) {
-                        found_depth = true;
+                // Add unique min_leaf values
+                bool found_leaf = false;
+                for (const auto& existing_leaf : unique_min_leafs) {
+                    if (existing_leaf == sample.min_leaf) {
+                        found_leaf = true;
                         break;
                     }
                 }
-                if (!found_depth) {
-                    unique_max_depths.push_back(sample.max_depth);
+                if (!found_leaf) {
+                    unique_min_leafs.push_back(sample.min_leaf);
                 }
             }
             
             // Sort vectors for easier processing
             unique_min_splits.sort();
-            unique_max_depths.sort();
+            unique_min_leafs.sort();
             
             // Calculate effects using a simpler approach without large intermediate vectors
             // Calculate min_split effect directly
@@ -3959,36 +4147,36 @@ namespace mcu {
                 }
             }
             
-            // Calculate max_depth effect directly
-            float depth_effect = 0.0f;
-            if (unique_max_depths.size() >= 2) {
-                // Calculate average nodes for first and last max_depth values
-                float first_depth_avg = 0.0f;
-                float last_depth_avg = 0.0f;
-                int first_depth_count = 0;
-                int last_depth_count = 0;
-                
-                uint16_t first_depth = unique_max_depths[0];
-                uint16_t last_depth = unique_max_depths[unique_max_depths.size() - 1];
-                
+            // Calculate min_leaf effect directly
+            float leaf_effect = 0.0f;
+            if (unique_min_leafs.size() >= 2) {
+                // Calculate average nodes for first and last min_leaf values
+                float first_leaf_avg = 0.0f;
+                float last_leaf_avg = 0.0f;
+                int first_leaf_count = 0;
+                int last_leaf_count = 0;
+
+                uint8_t first_leaf = unique_min_leafs[0];
+                uint8_t last_leaf = unique_min_leafs[unique_min_leafs.size() - 1];
+
                 // Calculate averages directly from training data
                 for (const auto& sample : training_data) {
-                    if (sample.max_depth == first_depth) {
-                        first_depth_avg += sample.total_nodes;
-                        first_depth_count++;
-                    } else if (sample.max_depth == last_depth) {
-                        last_depth_avg += sample.total_nodes;
-                        last_depth_count++;
+                    if (sample.min_leaf == first_leaf) {
+                        first_leaf_avg += sample.total_nodes;
+                        first_leaf_count++;
+                    } else if (sample.min_leaf == last_leaf) {
+                        last_leaf_avg += sample.total_nodes;
+                        last_leaf_count++;
                     }
                 }
-                
-                if (first_depth_count > 0 && last_depth_count > 0) {
-                    first_depth_avg /= first_depth_count;
-                    last_depth_avg /= last_depth_count;
-                    
-                    float depth_range = static_cast<float>(last_depth - first_depth);
-                    if (depth_range > 0.01f) {
-                        depth_effect = (last_depth_avg - first_depth_avg) / depth_range;
+
+                if (first_leaf_count > 0 && last_leaf_count > 0) {
+                    first_leaf_avg /= first_leaf_count;
+                    last_leaf_avg /= last_leaf_count;
+
+                    float leaf_range = static_cast<float>(last_leaf - first_leaf);
+                    if (leaf_range > 0.01f) {
+                        leaf_effect = (last_leaf_avg - first_leaf_avg) / leaf_range;
                     }
                 }
             }
@@ -4000,21 +4188,21 @@ namespace mcu {
             }
             overall_avg /= training_data.size();
             
-            // Build the simple linear predictor: nodes = bias + split_coeff * min_split + depth_coeff * max_depth
+            // Build the simple linear predictor: nodes = bias + split_coeff * min_split + leaf_coeff * min_leaf
             // Calculate bias to center the predictor around the overall average
             float reference_split = unique_min_splits.empty() ? 3.0f : static_cast<float>(unique_min_splits[0]);
-            float reference_depth = unique_max_depths.empty() ? 6.0f : static_cast<float>(unique_max_depths[0]);
+            float reference_leaf = unique_min_leafs.empty() ? 2.0f : static_cast<float>(unique_min_leafs[0]);
             
-            coefficients[0] = overall_avg - (split_effect * reference_split) - (depth_effect * reference_depth); // bias
+            coefficients[0] = overall_avg - (split_effect * reference_split) - (leaf_effect * reference_leaf); // bias
             coefficients[1] = split_effect; // min_split coefficient
-            coefficients[2] = depth_effect; // max_depth coefficient
+            coefficients[2] = leaf_effect; // min_leaf coefficient
             
             // Calculate accuracy using PC version's approach exactly
             float total_error = 0.0f;
             float total_actual = 0.0f;
             
             for (const auto& sample : training_data) {
-                node_data data(sample.min_split, sample.max_depth);
+                node_data data(sample.min_split, sample.min_leaf);
                 float predicted = evaluate_formula(data);
                 float actual = static_cast<float>(sample.total_nodes);
                 float error = fabs(predicted - actual);
@@ -4034,48 +4222,72 @@ namespace mcu {
             peak_percent = 30; // A reasonable default for binary tree structures
             
             is_trained = true;
+            if (config_ptr) {
+                trained_sample_count = static_cast<uint32_t>(config_ptr->num_samples);
+            }
+            dataset_warning_emitted = false;
+            dataset_drift_emitted = false;
             RF_DEBUG(2, "✅ Node predictor retraining complete!");
             RF_DEBUG_2(2, "   Accuracy: ", accuracy, "%, Peak (%): ", peak_percent);
-            if(save_after_retrain) releasePredictor(); // Save the new predictor
+            if(save_after_retrain) {
+                releasePredictor(); // Save the new predictor
+            }
             return true;
         }
         
-        uint16_t estimate_nodes(uint8_t min_split, uint16_t max_depth) {
-            float raw_est = raw_estimate(min_split, max_depth);
+        uint32_t estimate_nodes(uint8_t min_split, uint8_t min_leaf, uint16_t max_depth = 250) {
+            if (min_leaf == 0) {
+                min_leaf = 1;
+            }
+            node_data data(min_split, min_leaf, max_depth);
+            float raw_est = raw_estimate(data);
             float acc = accuracy;
-            if(acc == 0) acc = 0.85f;
-            uint16_t estimate = static_cast<uint16_t>(raw_est * 100 / accuracy);
-            return estimate < RF_MAX_NODES ? estimate : 512;       // 2kB RAM
+            if(acc < 0.8) acc = 0.85f;
+            uint32_t estimate = static_cast<uint32_t>(raw_est * 100 / acc);
+            if (estimate == 0) {
+                estimate = 1;
+            }
+            return (estimate <= RF_MAX_NODES) ? estimate : RF_MAX_NODES;
         }
 
-        uint16_t estimate_nodes(const Rf_config& config) {
+        uint32_t estimate_nodes(const Rf_config& config) {
             uint8_t min_split = config.min_split;
-            uint16_t max_depth = config.max_depth;
-            float raw_est = raw_estimate(min_split, max_depth);
+            uint8_t min_leaf = config.min_leaf > 0 ? config.min_leaf : static_cast<uint8_t>(1);
+            uint16_t max_depth = config.max_depth > 0 ? config.max_depth : 25;
+            node_data data(min_split, min_leaf, max_depth);
+            float raw_est = raw_estimate(data);
             float acc = accuracy;
-            if(acc == 0) acc = 0.85f;
-            uint16_t estimate = static_cast<uint16_t>(raw_est * 100 / accuracy);
+            if(acc < 0.8) acc = 0.85f;
+            uint32_t estimate = static_cast<uint32_t>(raw_est * 100 / acc);
             if(config.training_score == K_FOLD_SCORE){
                 estimate = estimate * config.k_folds / (config.k_folds + 1);
             }
-            return estimate < RF_MAX_NODES ? estimate : 512;       // 2kB RAM
+            if (estimate == 0) {
+                estimate = 1;
+            }
+            return (estimate <= RF_MAX_NODES) ? estimate : RF_MAX_NODES;
         }
 
-        uint16_t queue_peak_size(uint8_t min_split, uint16_t max_depth) {
-            return min(120, estimate_nodes(min_split, max_depth) * peak_percent / 100);
+        uint16_t queue_peak_size(uint8_t min_split, uint8_t min_leaf, uint16_t max_depth = 250) {
+            uint32_t estimate = estimate_nodes(min_split, min_leaf, max_depth);
+            uint32_t peak_est = static_cast<uint32_t>(estimate * peak_percent / 100);
+            if (peak_est > 120) {
+                peak_est = 120;
+            }
+            return static_cast<uint16_t>(peak_est);
         }
 
         uint16_t queue_peak_size(const Rf_config& config) {
-            uint16_t est_nodes = estimate_nodes(config);
+            uint32_t est_nodes = estimate_nodes(config);
             if(config.training_score == K_FOLD_SCORE){
                 est_nodes = est_nodes * config.k_folds / (config.k_folds + 1);
             }
-            est_nodes = static_cast<uint16_t>(est_nodes * peak_percent / 100);
-            uint16_t max_peak_theory = static_cast<uint16_t>(RF_MAX_NODES * 0.3f);
+            est_nodes = static_cast<uint32_t>(est_nodes * peak_percent / 100);
+            uint32_t max_peak_theory = static_cast<uint32_t>(RF_MAX_NODES * 0.3f);
             uint16_t min_peak_theory = 30;
-            if (est_nodes > max_peak_theory) return max_peak_theory;
+            if (est_nodes > max_peak_theory) return static_cast<uint16_t>(max_peak_theory > 65535 ? 65535 : max_peak_theory);
             if (est_nodes < min_peak_theory) return min_peak_theory;
-            return est_nodes;
+            return static_cast<uint16_t>(est_nodes > 65535 ? 65535 : est_nodes);
         }
 
         void flush_buffer() {
@@ -4098,19 +4310,30 @@ namespace mcu {
                 file.close();
             }
             // Ensure header is present
-            String header = "min_split,max_depth,total_nodes";
+            String header = "min_split,min_leaf,max_depth,total_nodes";
             if (lines.empty() || lines[0] != header) {
                 lines.insert(0, header);
             }
-            // Remove header for easier manipulation
+            // Remove header for easier manipulation and discard legacy headers
             b_vector<String> data_lines;
             for (size_t i = 1; i < lines.size(); ++i) {
-                data_lines.push_back(lines[i]);
+                const String& existing = lines[i];
+                if (existing == header) {
+                    continue;
+                }
+                if (existing.length() == 0) {
+                    continue;
+                }
+                char first_char = existing.charAt(0);
+                if (first_char < '0' || first_char > '9') {
+                    continue;
+                }
+                data_lines.push_back(existing);
             }
             // Prepend new samples
             for (int i = buffer.size() - 1; i >= 0; --i) {
                 const node_data& nd = buffer[i];
-                String row = String(nd.min_split) + "," + String(nd.max_depth) + "," + String(nd.total_nodes);
+                String row = String(nd.min_split) + "," + String(nd.min_leaf) + "," + String(nd.max_depth) + "," + String(nd.total_nodes);
                 data_lines.insert(0, row);
             }
             // Limit to 50 rows
@@ -4786,9 +5009,9 @@ namespace mcu {
 
     class Rf_matrix_score{
         // Confusion matrix components
-        b_vector<sample_type, 4> tp;
-        b_vector<sample_type, 4> fp;
-        b_vector<sample_type, 4> fn;
+        b_vector<sample_type, 8> tp;
+        b_vector<sample_type, 8> fp;
+        b_vector<sample_type, 8> fn;
 
         sample_type total_predict = 0;
         sample_type correct_predict = 0;
@@ -4998,11 +5221,11 @@ namespace mcu {
     struct NodeToBuild {
         sample_type begin;   // inclusive
         sample_type end;     // exclusive
-        uint16_t nodeIndex;
+        uint32_t nodeIndex;
         uint16_t depth;
         
         NodeToBuild() : begin(0), end(0), nodeIndex(0), depth(0) {}
-        NodeToBuild(uint16_t idx, sample_type b, sample_type e, uint8_t d) 
+        NodeToBuild(uint32_t idx, sample_type b, sample_type e, uint16_t d) 
             : nodeIndex(idx), begin(b), end(e), depth(d) {}
     };
 
@@ -5011,7 +5234,7 @@ namespace mcu {
         private:
             // String model_name;
             const Rf_base* base_ptr = nullptr;
-            const Rf_config* config_ptr = nullptr;
+            Rf_config* config_ptr = nullptr;
             Rf_node_predictor* node_pred_ptr = nullptr;
             char tree_path_buffer[RF_PATH_BUFFER] = {0}; // Buffer for tree file paths
 
@@ -5069,7 +5292,7 @@ namespace mcu {
                 return (bits == 0) ? static_cast<uint8_t>(1) : bits;
             }
 
-            void calculate_layout(label_type num_label, uint16_t num_feature, uint16_t max_node){
+            void calculate_layout(label_type num_label, uint16_t num_feature, uint32_t max_node){
                 const uint32_t fallback_node_index = (RF_MAX_NODES > 0)
                     ? static_cast<uint32_t>(RF_MAX_NODES - 1)
                     : static_cast<uint32_t>(0);
@@ -5092,8 +5315,24 @@ namespace mcu {
                 if (feature_bits > 10) {
                     feature_bits = 10;
                 }
-                if (child_index_bits > 10) {
-                    child_index_bits = 10;
+
+                const uint8_t max_child_bits_word = static_cast<uint8_t>((4 + feature_bits + label_bits) >= 32
+                    ? 0
+                    : 32 - (4 + feature_bits + label_bits));
+                const uint8_t max_child_bits_limit = bits_required(fallback_node_index);
+
+                if (max_child_bits_word == 0) {
+                    child_index_bits = 1;
+                } else {
+                    if (child_index_bits > max_child_bits_word) {
+                        child_index_bits = max_child_bits_word;
+                    }
+                    if (child_index_bits > max_child_bits_limit) {
+                        child_index_bits = max_child_bits_limit;
+                    }
+                    if (child_index_bits == 0) {
+                        child_index_bits = 1;
+                    }
                 }
 
                 layout.set_layout(feature_bits, label_bits, child_index_bits);
@@ -5115,12 +5354,24 @@ namespace mcu {
                     trees.clear();
                     return;
                 }
+                // pretend to set max depth, min split, min leaf to extreme values to estimate max nodes
+                auto old_max_depth = config_ptr->max_depth;
+                auto old_min_split = config_ptr->min_split;
+                auto old_min_leaf  = config_ptr->min_leaf;
+                config_ptr->max_depth = config_ptr->max_depth_range.second;
+                config_ptr->min_split = config_ptr->min_split_range.first;
+                config_ptr->min_leaf  = config_ptr->min_leaf_range.first;
 
-                uint16_t est_nodes = node_pred_ptr
+                uint32_t est_nodes = node_pred_ptr
                     ? node_pred_ptr->estimate_nodes(*config_ptr)
-                    : static_cast<uint16_t>(RF_MAX_NODES);
+                    : RF_MAX_NODES;
                 calculate_layout(config_ptr->num_labels, config_ptr->num_features, est_nodes);
                 rebuild_tree_slots(config_ptr->num_trees, true);
+
+                // restore old config values
+                config_ptr->max_depth = old_max_depth;
+                config_ptr->min_split = old_min_split;
+                config_ptr->min_leaf  = old_min_leaf;
                 predictClass.reserve(config_ptr->num_trees);
                 queue_nodes.clear();
                 total_depths = 0;
@@ -5154,9 +5405,9 @@ namespace mcu {
                     delay(10);
                 }
                 if (config_ptr) {
-                    uint16_t est_nodes = node_pred_ptr
+                    uint32_t est_nodes = node_pred_ptr
                         ? node_pred_ptr->estimate_nodes(*config_ptr)
-                        : static_cast<uint16_t>(RF_MAX_NODES);
+                        : RF_MAX_NODES;
                     calculate_layout(config_ptr->num_labels, config_ptr->num_features, est_nodes);
                 }
                 rebuild_tree_slots(config_ptr->num_trees, true);
@@ -5183,9 +5434,9 @@ namespace mcu {
                     ensure_tree_slot(index);
                     uint16_t d = tree.getTreeDepth();
                     // Serial.println("here 3.3");
-                    uint16_t n = tree.countNodes();
+                    uint32_t n = tree.countNodes();
                     // Serial.println("here 3.4");
-                    uint16_t l = tree.countLeafNodes();
+                    uint32_t l = tree.countLeafNodes();
                     // Serial.println("here 3.5");
 
                     total_depths += d;
@@ -5423,8 +5674,9 @@ namespace mcu {
                         break;
                     }
                     
-                    // Validate node count
-                    if(nodeCount == 0 || nodeCount > 2047) {
+                    // Validate node count based on current layout allowance
+                    const uint32_t allowedNodes = layout.max_nodes();
+                    if(nodeCount == 0 || nodeCount > allowedNodes) {
                         RF_DEBUG(1, "❌ Invalid node count for tree: ", treeIndex);
                         // Skip this tree's data
                         file.seek(file.position() + nodeCount * sizeof(uint32_t));

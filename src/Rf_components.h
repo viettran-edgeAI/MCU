@@ -97,6 +97,8 @@ namespace mcu {
     class Rf_tree_container;    // manages all trees at forest level
     class Rf_pending_data;      // manage pending data waiting for true labels from feedback action
 
+    class TrainChunkAccessor;   // data accessor for training process (partial loading support)
+
     // enum Rf_metric_scores;      // flags for training process/score calculation (accuracy, precision, recall, f1_score)
     // enum Rf_training_score;     // score types for training process (oob, validation, k-fold)
     // ...
@@ -2491,6 +2493,469 @@ namespace mcu {
         }
     };
 
+    /*
+    ------------------------------------------------------------------------------------------------------------------------------
+    ------------------------------------------ TRAIN CHUNK ACCESSOR --------------------------------------------------------------
+    ------------------------------------------------------------------------------------------------------------------------------
+    */
+    
+    /**
+     * @brief Efficient chunk-based data accessor for training with large datasets
+     * Opens file once, maintains reusable buffers, and provides zero-allocation label/feature access
+     * Features batch-prefetch optimization to reduce I/O overhead by loading multiple consecutive chunks
+     */
+    class TrainChunkAccessor {
+    private:
+        struct CachedChunk {
+            size_t chunk_idx;              // First logical chunk index in this cache entry
+            sample_type first_sample_id;   // First sample ID covered by this entry
+            sample_type num_samples;       // Total samples in this entry (may span multiple chunks)
+            uint8_t batch_size;            // Number of consecutive chunks coalesced (1 = single chunk)
+            b_vector<label_type> labels;
+            b_vector<uint8_t> packed_features;
+            bool valid;
+            
+            CachedChunk() : chunk_idx(SIZE_MAX), first_sample_id(0), num_samples(0), 
+                          batch_size(1), valid(false) {}
+            
+            void invalidate() {
+                valid = false;
+                chunk_idx = SIZE_MAX;
+                first_sample_id = 0;
+                num_samples = 0;
+                batch_size = 1;
+            }
+            
+            // Check if this cached entry contains the given chunk_idx
+            bool contains_chunk(size_t query_chunk_idx) const {
+                return valid && query_chunk_idx >= chunk_idx && 
+                       query_chunk_idx < (chunk_idx + batch_size);
+            }
+        };
+        
+        File file;
+        char file_path[RF_PATH_BUFFER];
+        sample_type total_samples;
+        uint16_t num_features;
+        uint8_t quantization_coefficient;
+        sample_type samples_per_chunk;
+        size_t total_chunks;
+        uint16_t packed_feature_bytes;
+        size_t header_size;
+        size_t record_size;
+        
+        // Batch-prefetch configuration
+        uint8_t chunks_per_batch;       // Number of consecutive chunks to load per miss (1-4)
+        uint8_t* scratch_buffer;        // Reusable buffer for I/O (sized for max batch)
+        size_t scratch_buffer_size;     // Current scratch buffer size
+        
+        // LRU cache for partial loading mode
+        // With batched chunks, effective cache capacity = CACHE_SIZE * chunks_per_batch
+        static constexpr size_t CACHE_SIZE = 4;
+        CachedChunk cache[CACHE_SIZE];
+        uint8_t lru_counter[CACHE_SIZE];
+        
+        size_t cache_hits;
+        size_t cache_misses;
+        
+    public:
+        TrainChunkAccessor() : total_samples(0), num_features(0), quantization_coefficient(2),
+                               samples_per_chunk(0), total_chunks(0), packed_feature_bytes(0),
+                               header_size(0), record_size(0), chunks_per_batch(1),
+                               scratch_buffer(nullptr), scratch_buffer_size(0),
+                               cache_hits(0), cache_misses(0) {
+            file_path[0] = '\0';
+            for (size_t i = 0; i < CACHE_SIZE; ++i) {
+                lru_counter[i] = 0;
+            }
+        }
+        
+        ~TrainChunkAccessor() {
+            close();
+        }
+        
+        bool init(const char* path, sample_type num_samples, uint16_t features, uint8_t quant_coeff, sample_type spc) {
+            if (!path || num_samples == 0 || features == 0) {
+                RF_DEBUG(0, "❌ Invalid parameters for TrainChunkAccessor");
+                return false;
+            }
+            
+            strncpy(file_path, path, RF_PATH_BUFFER - 1);
+            file_path[RF_PATH_BUFFER - 1] = '\0';
+            
+            total_samples = num_samples;
+            num_features = features;
+            quantization_coefficient = quant_coeff;
+            samples_per_chunk = spc;
+            total_chunks = (num_samples + spc - 1) / spc;
+            
+            uint32_t total_bits = static_cast<uint32_t>(features) * quant_coeff;
+            packed_feature_bytes = (total_bits + 7) / 8;
+            header_size = sizeof(uint32_t) + sizeof(uint16_t);
+            record_size = sizeof(uint8_t) + packed_feature_bytes;
+            
+            // Open file once for the entire training session
+            file = RF_FS_OPEN(file_path, RF_FILE_READ);
+            if (!file) {
+                RF_DEBUG(0, "❌ Failed to open file for chunk accessor: ", file_path);
+                return false;
+            }
+            
+            // Verify header
+            uint32_t file_samples;
+            uint16_t file_features;
+            if (file.read((uint8_t*)&file_samples, sizeof(file_samples)) != sizeof(file_samples) ||
+                file.read((uint8_t*)&file_features, sizeof(file_features)) != sizeof(file_features)) {
+                RF_DEBUG(0, "❌ Failed to read file header: ", file_path);
+                close();
+                return false;
+            }
+            
+            if (file_samples != num_samples || file_features != features) {
+                RF_DEBUG_2(0, "❌ File mismatch: expected ", num_samples, "samples, ", features);
+                close();
+                return false;
+            }
+            
+            // Initialize cache
+            for (size_t i = 0; i < CACHE_SIZE; ++i) {
+                cache[i].invalidate();
+                lru_counter[i] = 0;
+            }
+            
+            cache_hits = 0;
+            cache_misses = 0;
+            
+            RF_DEBUG_2(1, "✅ TrainChunkAccessor initialized: ", total_chunks, "chunks, ", samples_per_chunk);
+            return true;
+        }
+        
+        void close() {
+            if (file) {
+                file.close();
+            }
+            for (size_t i = 0; i < CACHE_SIZE; ++i) {
+                cache[i].invalidate();
+            }
+            if (cache_hits + cache_misses > 0) {
+                float hit_rate = 100.0f * cache_hits / (cache_hits + cache_misses);
+                RF_DEBUG_2(2, "📊 Cache stats: ", cache_hits, "hits, missed: ", cache_misses);
+                RF_DEBUG(2, "   Hit rate(%): ", hit_rate);
+            }
+        }
+        
+        void flush() {
+            for (size_t i = 0; i < CACHE_SIZE; ++i) {
+                cache[i].invalidate();
+            }
+            cache_hits = 0;
+            cache_misses = 0;
+        }
+        
+    private:
+        size_t find_lru_slot() {
+            size_t lru_idx = 0;
+            uint8_t min_counter = lru_counter[0];
+            for (size_t i = 1; i < CACHE_SIZE; ++i) {
+                if (lru_counter[i] < min_counter) {
+                    min_counter = lru_counter[i];
+                    lru_idx = i;
+                }
+            }
+            return lru_idx;
+        }
+        
+        void update_lru(size_t used_idx) {
+            lru_counter[used_idx] = 255;
+            for (size_t i = 0; i < CACHE_SIZE; ++i) {
+                if (i != used_idx && lru_counter[i] > 0) {
+                    lru_counter[i]--;
+                }
+            }
+        }
+        
+        bool load_chunk(size_t chunk_idx) {
+            if (chunk_idx >= total_chunks) {
+                return false;
+            }
+            
+            // Check if already cached
+            for (size_t i = 0; i < CACHE_SIZE; ++i) {
+                if (cache[i].valid && cache[i].chunk_idx == chunk_idx) {
+                    update_lru(i);
+                    cache_hits++;
+                    return true;
+                }
+            }
+            
+            cache_misses++;
+            
+            // Find LRU slot to evict
+            size_t slot = find_lru_slot();
+            CachedChunk& chunk = cache[slot];
+            
+            // Calculate chunk boundaries
+            sample_type start_sample = chunk_idx * samples_per_chunk;
+            sample_type end_sample = start_sample + samples_per_chunk;
+            if (end_sample > total_samples) {
+                end_sample = total_samples;
+            }
+            sample_type chunk_size = end_sample - start_sample;
+            
+            // Seek to chunk position
+            size_t chunk_offset = header_size + start_sample * record_size;
+            if (!file.seek(chunk_offset)) {
+                RF_DEBUG_2(0, "❌ Failed to seek to chunk ", chunk_idx, " at offset ", chunk_offset);
+                return false;
+            }
+            
+            // Allocate buffers if needed
+            chunk.labels.clear();
+            chunk.labels.reserve(chunk_size);
+            chunk.packed_features.clear();
+            chunk.packed_features.reserve(chunk_size * packed_feature_bytes);
+            
+            // Read chunk data in one batch
+            size_t chunk_bytes = chunk_size * record_size;
+            uint8_t* read_buffer = mem_alloc::allocate<uint8_t>(chunk_bytes);
+            if (!read_buffer) {
+                RF_DEBUG(0, "❌ Failed to allocate read buffer for chunk ", chunk_idx);
+                return false;
+            }
+            
+            size_t bytes_read = file.read(read_buffer, chunk_bytes);
+            if (bytes_read != chunk_bytes) {
+                RF_DEBUG_2(0, "❌ Failed to read chunk ", chunk_idx, ": expected ", chunk_bytes);
+                mem_alloc::deallocate(read_buffer);
+                return false;
+            }
+            
+            // Parse buffer into labels and packed features
+            for (sample_type i = 0; i < chunk_size; ++i) {
+                size_t offset = i * record_size;
+                label_type label = read_buffer[offset];
+                chunk.labels.push_back(label);
+                
+                // Copy packed features
+                for (uint16_t j = 0; j < packed_feature_bytes; ++j) {
+                    chunk.packed_features.push_back(read_buffer[offset + 1 + j]);
+                }
+            }
+            
+            mem_alloc::deallocate(read_buffer);
+            
+            // Update chunk metadata
+            chunk.chunk_idx = chunk_idx;
+            chunk.first_sample_id = start_sample;
+            chunk.num_samples = chunk_size;
+            chunk.valid = true;
+            
+            update_lru(slot);
+            return true;
+        }
+        
+        CachedChunk* get_chunk_for_sample(sample_type sample_id) {
+            if (sample_id >= total_samples) {
+                return nullptr;
+            }
+            
+            size_t chunk_idx = sample_id / samples_per_chunk;
+            
+            // Check cache first
+            for (size_t i = 0; i < CACHE_SIZE; ++i) {
+                if (cache[i].valid && cache[i].chunk_idx == chunk_idx) {
+                    update_lru(i);
+                    cache_hits++;
+                    return &cache[i];
+                }
+            }
+            
+            // Load chunk if not cached
+            if (load_chunk(chunk_idx)) {
+                for (size_t i = 0; i < CACHE_SIZE; ++i) {
+                    if (cache[i].valid && cache[i].chunk_idx == chunk_idx) {
+                        return &cache[i];
+                    }
+                }
+            }
+            
+            return nullptr;
+        }
+        
+    public:
+        label_type label(sample_type sample_id) {
+            CachedChunk* chunk = get_chunk_for_sample(sample_id);
+            if (!chunk) {
+                RF_DEBUG(2, "❌ Failed to get chunk for sample ", sample_id);
+                return 0;
+            }
+            
+            sample_type local_idx = sample_id - chunk->first_sample_id;
+            if (local_idx >= chunk->num_samples) {
+                RF_DEBUG_2(2, "❌ Local index ", local_idx, " out of bounds for chunk ", chunk->chunk_idx);
+                return 0;
+            }
+            
+            return chunk->labels[local_idx];
+        }
+        
+        uint16_t feature(sample_type sample_id, uint16_t feature_id) {
+            if (feature_id >= num_features) {
+                return 0;
+            }
+            
+            CachedChunk* chunk = get_chunk_for_sample(sample_id);
+            if (!chunk) {
+                return 0;
+            }
+            
+            sample_type local_idx = sample_id - chunk->first_sample_id;
+            if (local_idx >= chunk->num_samples) {
+                return 0;
+            }
+            
+            // Unpack feature from packed_features buffer
+            size_t packed_offset = local_idx * packed_feature_bytes;
+            uint32_t bit_position = static_cast<uint32_t>(feature_id) * quantization_coefficient;
+            uint16_t byte_idx = bit_position / 8;
+            uint8_t bit_offset = bit_position % 8;
+            
+            const uint8_t* packed = &chunk->packed_features[packed_offset];
+            
+            uint8_t feature_value = 0;
+            if (bit_offset + quantization_coefficient <= 8) {
+                // Feature fits in single byte
+                uint8_t mask = ((1 << quantization_coefficient) - 1) << bit_offset;
+                feature_value = (packed[byte_idx] & mask) >> bit_offset;
+            } else {
+                // Feature spans two bytes
+                uint8_t bits_in_first = 8 - bit_offset;
+                uint8_t bits_in_second = quantization_coefficient - bits_in_first;
+                uint8_t mask1 = ((1 << bits_in_first) - 1) << bit_offset;
+                uint8_t mask2 = (1 << bits_in_second) - 1;
+                feature_value = ((packed[byte_idx] & mask1) >> bit_offset) |
+                               ((packed[byte_idx + 1] & mask2) << bits_in_first);
+            }
+            
+            return feature_value;
+        }
+        
+        // OPTIMIZATION: Batch extract a single feature for multiple samples
+        // This is much faster than calling feature() individually because:
+        // 1. Reduces chunk lookup overhead
+        // 2. Better cache utilization when samples are in same chunk
+        // 3. Amortizes function call overhead
+        void batch_extract_feature(const b_vector<sample_type, 8>& sample_ids, 
+                                   sample_type begin, sample_type end,
+                                   uint16_t feature_id, 
+                                   b_vector<uint16_t>& out_values) {
+            if (feature_id >= num_features || begin >= end) {
+                return;
+            }
+            
+            sample_type count = end - begin;
+            out_values.clear();
+            out_values.reserve(count);
+            
+            // Pre-calculate bit extraction parameters
+            uint32_t bit_position = static_cast<uint32_t>(feature_id) * quantization_coefficient;
+            uint16_t byte_idx = bit_position / 8;
+            uint8_t bit_offset = bit_position % 8;
+            
+            uint8_t mask1, mask2 = 0;
+            uint8_t bits_in_first = 0, bits_in_second = 0;
+            bool spans_two_bytes = (bit_offset + quantization_coefficient > 8);
+            
+            if (spans_two_bytes) {
+                bits_in_first = 8 - bit_offset;
+                bits_in_second = quantization_coefficient - bits_in_first;
+                mask1 = ((1 << bits_in_first) - 1) << bit_offset;
+                mask2 = (1 << bits_in_second) - 1;
+            } else {
+                mask1 = ((1 << quantization_coefficient) - 1) << bit_offset;
+            }
+            
+            // Extract features with optimized chunk access
+            for (sample_type k = begin; k < end; ++k) {
+                sample_type sid = sample_ids[k];
+                
+                CachedChunk* chunk = get_chunk_for_sample(sid);
+                if (!chunk) {
+                    out_values.push_back(0);
+                    continue;
+                }
+                
+                sample_type local_idx = sid - chunk->first_sample_id;
+                if (local_idx >= chunk->num_samples) {
+                    out_values.push_back(0);
+                    continue;
+                }
+                
+                // Unpack feature using pre-calculated parameters
+                size_t packed_offset = local_idx * packed_feature_bytes;
+                const uint8_t* packed = &chunk->packed_features[packed_offset];
+                
+                uint16_t feature_value;
+                if (spans_two_bytes) {
+                    feature_value = ((packed[byte_idx] & mask1) >> bit_offset) |
+                                   ((packed[byte_idx + 1] & mask2) << bits_in_first);
+                } else {
+                    feature_value = (packed[byte_idx] & mask1) >> bit_offset;
+                }
+                
+                out_values.push_back(feature_value);
+            }
+        }
+        
+        // OPTIMIZATION: Batch extract labels for multiple samples
+        // Reduces chunk lookup overhead compared to individual label() calls
+        void batch_extract_labels(const b_vector<sample_type, 8>& sample_ids,
+                                 sample_type begin, sample_type end,
+                                 b_vector<label_type>& out_labels) {
+            if (begin >= end) {
+                return;
+            }
+            
+            sample_type count = end - begin;
+            out_labels.clear();
+            out_labels.reserve(count);
+            
+            for (sample_type k = begin; k < end; ++k) {
+                sample_type sid = sample_ids[k];
+                
+                CachedChunk* chunk = get_chunk_for_sample(sid);
+                if (!chunk) {
+                    out_labels.push_back(0);
+                    continue;
+                }
+                
+                sample_type local_idx = sid - chunk->first_sample_id;
+                if (local_idx >= chunk->num_samples) {
+                    out_labels.push_back(0);
+                    continue;
+                }
+                
+                out_labels.push_back(chunk->labels[local_idx]);
+            }
+        }
+        
+        sample_type get_samples_per_chunk() const {
+            return samples_per_chunk;
+        }
+        
+        size_t get_total_chunks() const {
+            return total_chunks;
+        }
+        
+        void print_stats() const {
+            if (cache_hits + cache_misses > 0) {
+                float hit_rate = 100.0f * cache_hits / (cache_hits + cache_misses);
+                RF_DEBUG(1, "📊 Chunk Accessor Stats:");
+                RF_DEBUG_2(1, "   Hits: ", cache_hits, ", Misses: ", cache_misses);
+                RF_DEBUG(1, "   Hit Rate(%): ", hit_rate);
+            }
+        }
+    };
 
     /*
     ------------------------------------------------------------------------------------------------------------------
@@ -4569,470 +5034,6 @@ namespace mcu {
         size_t memory_usage() const {
             size_t total = sizeof(Rf_random);
             return total;
-        }
-    };
-
-    /*
-    ------------------------------------------------------------------------------------------------------------------------------
-    ------------------------------------------ TRAIN CHUNK ACCESSOR --------------------------------------------------------------
-    ------------------------------------------------------------------------------------------------------------------------------
-    */
-    
-    /**
-     * @brief Efficient chunk-based data accessor for training with large datasets
-     * Opens file once, maintains reusable buffers, and provides zero-allocation label/feature access
-     * Features batch-prefetch optimization to reduce I/O overhead by loading multiple consecutive chunks
-     */
-    class TrainChunkAccessor {
-    private:
-        struct CachedChunk {
-            size_t chunk_idx;              // First logical chunk index in this cache entry
-            sample_type first_sample_id;   // First sample ID covered by this entry
-            sample_type num_samples;       // Total samples in this entry (may span multiple chunks)
-            uint8_t batch_size;            // Number of consecutive chunks coalesced (1 = single chunk)
-            b_vector<label_type> labels;
-            b_vector<uint8_t> packed_features;
-            bool valid;
-            
-            CachedChunk() : chunk_idx(SIZE_MAX), first_sample_id(0), num_samples(0), 
-                          batch_size(1), valid(false) {}
-            
-            void invalidate() {
-                valid = false;
-                chunk_idx = SIZE_MAX;
-                first_sample_id = 0;
-                num_samples = 0;
-                batch_size = 1;
-            }
-            
-            // Check if this cached entry contains the given chunk_idx
-            bool contains_chunk(size_t query_chunk_idx) const {
-                return valid && query_chunk_idx >= chunk_idx && 
-                       query_chunk_idx < (chunk_idx + batch_size);
-            }
-        };
-        
-        File file;
-        char file_path[RF_PATH_BUFFER];
-        sample_type total_samples;
-        uint16_t num_features;
-        uint8_t quantization_coefficient;
-        sample_type samples_per_chunk;
-        size_t total_chunks;
-        uint16_t packed_feature_bytes;
-        size_t header_size;
-        size_t record_size;
-        
-        // Batch-prefetch configuration
-        uint8_t chunks_per_batch;       // Number of consecutive chunks to load per miss (1-4)
-        uint8_t* scratch_buffer;        // Reusable buffer for I/O (sized for max batch)
-        size_t scratch_buffer_size;     // Current scratch buffer size
-        
-        // LRU cache for partial loading mode
-        // With batched chunks, effective cache capacity = CACHE_SIZE * chunks_per_batch
-        static constexpr size_t CACHE_SIZE = 4;
-        CachedChunk cache[CACHE_SIZE];
-        uint8_t lru_counter[CACHE_SIZE];
-        
-        size_t cache_hits;
-        size_t cache_misses;
-        
-    public:
-        TrainChunkAccessor() : total_samples(0), num_features(0), quantization_coefficient(2),
-                               samples_per_chunk(0), total_chunks(0), packed_feature_bytes(0),
-                               header_size(0), record_size(0), chunks_per_batch(1),
-                               scratch_buffer(nullptr), scratch_buffer_size(0),
-                               cache_hits(0), cache_misses(0) {
-            file_path[0] = '\0';
-            for (size_t i = 0; i < CACHE_SIZE; ++i) {
-                lru_counter[i] = 0;
-            }
-        }
-        
-        ~TrainChunkAccessor() {
-            close();
-        }
-        
-        bool init(const char* path, sample_type num_samples, uint16_t features, uint8_t quant_coeff, sample_type spc) {
-            if (!path || num_samples == 0 || features == 0) {
-                RF_DEBUG(0, "❌ Invalid parameters for TrainChunkAccessor");
-                return false;
-            }
-            
-            strncpy(file_path, path, RF_PATH_BUFFER - 1);
-            file_path[RF_PATH_BUFFER - 1] = '\0';
-            
-            total_samples = num_samples;
-            num_features = features;
-            quantization_coefficient = quant_coeff;
-            samples_per_chunk = spc;
-            total_chunks = (num_samples + spc - 1) / spc;
-            
-            uint32_t total_bits = static_cast<uint32_t>(features) * quant_coeff;
-            packed_feature_bytes = (total_bits + 7) / 8;
-            header_size = sizeof(uint32_t) + sizeof(uint16_t);
-            record_size = sizeof(uint8_t) + packed_feature_bytes;
-            
-            // Open file once for the entire training session
-            file = RF_FS_OPEN(file_path, RF_FILE_READ);
-            if (!file) {
-                RF_DEBUG(0, "❌ Failed to open file for chunk accessor: ", file_path);
-                return false;
-            }
-            
-            // Verify header
-            uint32_t file_samples;
-            uint16_t file_features;
-            if (file.read((uint8_t*)&file_samples, sizeof(file_samples)) != sizeof(file_samples) ||
-                file.read((uint8_t*)&file_features, sizeof(file_features)) != sizeof(file_features)) {
-                RF_DEBUG(0, "❌ Failed to read file header: ", file_path);
-                close();
-                return false;
-            }
-            
-            if (file_samples != num_samples || file_features != features) {
-                RF_DEBUG_2(0, "❌ File mismatch: expected ", num_samples, "samples, ", features);
-                close();
-                return false;
-            }
-            
-            // Initialize cache
-            for (size_t i = 0; i < CACHE_SIZE; ++i) {
-                cache[i].invalidate();
-                lru_counter[i] = 0;
-            }
-            
-            cache_hits = 0;
-            cache_misses = 0;
-            
-            RF_DEBUG_2(1, "✅ TrainChunkAccessor initialized: ", total_chunks, "chunks, ", samples_per_chunk);
-            return true;
-        }
-        
-        void close() {
-            if (file) {
-                file.close();
-            }
-            for (size_t i = 0; i < CACHE_SIZE; ++i) {
-                cache[i].invalidate();
-            }
-            if (cache_hits + cache_misses > 0) {
-                float hit_rate = 100.0f * cache_hits / (cache_hits + cache_misses);
-                RF_DEBUG_2(2, "📊 Cache stats: ", cache_hits, "hits, missed: ", cache_misses);
-                RF_DEBUG(2, "   Hit rate(%): ", hit_rate);
-            }
-        }
-        
-        void flush() {
-            for (size_t i = 0; i < CACHE_SIZE; ++i) {
-                cache[i].invalidate();
-            }
-            cache_hits = 0;
-            cache_misses = 0;
-        }
-        
-    private:
-        size_t find_lru_slot() {
-            size_t lru_idx = 0;
-            uint8_t min_counter = lru_counter[0];
-            for (size_t i = 1; i < CACHE_SIZE; ++i) {
-                if (lru_counter[i] < min_counter) {
-                    min_counter = lru_counter[i];
-                    lru_idx = i;
-                }
-            }
-            return lru_idx;
-        }
-        
-        void update_lru(size_t used_idx) {
-            lru_counter[used_idx] = 255;
-            for (size_t i = 0; i < CACHE_SIZE; ++i) {
-                if (i != used_idx && lru_counter[i] > 0) {
-                    lru_counter[i]--;
-                }
-            }
-        }
-        
-        bool load_chunk(size_t chunk_idx) {
-            if (chunk_idx >= total_chunks) {
-                return false;
-            }
-            
-            // Check if already cached
-            for (size_t i = 0; i < CACHE_SIZE; ++i) {
-                if (cache[i].valid && cache[i].chunk_idx == chunk_idx) {
-                    update_lru(i);
-                    cache_hits++;
-                    return true;
-                }
-            }
-            
-            cache_misses++;
-            
-            // Find LRU slot to evict
-            size_t slot = find_lru_slot();
-            CachedChunk& chunk = cache[slot];
-            
-            // Calculate chunk boundaries
-            sample_type start_sample = chunk_idx * samples_per_chunk;
-            sample_type end_sample = start_sample + samples_per_chunk;
-            if (end_sample > total_samples) {
-                end_sample = total_samples;
-            }
-            sample_type chunk_size = end_sample - start_sample;
-            
-            // Seek to chunk position
-            size_t chunk_offset = header_size + start_sample * record_size;
-            if (!file.seek(chunk_offset)) {
-                RF_DEBUG_2(0, "❌ Failed to seek to chunk ", chunk_idx, " at offset ", chunk_offset);
-                return false;
-            }
-            
-            // Allocate buffers if needed
-            chunk.labels.clear();
-            chunk.labels.reserve(chunk_size);
-            chunk.packed_features.clear();
-            chunk.packed_features.reserve(chunk_size * packed_feature_bytes);
-            
-            // Read chunk data in one batch
-            size_t chunk_bytes = chunk_size * record_size;
-            uint8_t* read_buffer = mem_alloc::allocate<uint8_t>(chunk_bytes);
-            if (!read_buffer) {
-                RF_DEBUG(0, "❌ Failed to allocate read buffer for chunk ", chunk_idx);
-                return false;
-            }
-            
-            size_t bytes_read = file.read(read_buffer, chunk_bytes);
-            if (bytes_read != chunk_bytes) {
-                RF_DEBUG_2(0, "❌ Failed to read chunk ", chunk_idx, ": expected ", chunk_bytes);
-                mem_alloc::deallocate(read_buffer);
-                return false;
-            }
-            
-            // Parse buffer into labels and packed features
-            for (sample_type i = 0; i < chunk_size; ++i) {
-                size_t offset = i * record_size;
-                label_type label = read_buffer[offset];
-                chunk.labels.push_back(label);
-                
-                // Copy packed features
-                for (uint16_t j = 0; j < packed_feature_bytes; ++j) {
-                    chunk.packed_features.push_back(read_buffer[offset + 1 + j]);
-                }
-            }
-            
-            mem_alloc::deallocate(read_buffer);
-            
-            // Update chunk metadata
-            chunk.chunk_idx = chunk_idx;
-            chunk.first_sample_id = start_sample;
-            chunk.num_samples = chunk_size;
-            chunk.valid = true;
-            
-            update_lru(slot);
-            return true;
-        }
-        
-        CachedChunk* get_chunk_for_sample(sample_type sample_id) {
-            if (sample_id >= total_samples) {
-                return nullptr;
-            }
-            
-            size_t chunk_idx = sample_id / samples_per_chunk;
-            
-            // Check cache first
-            for (size_t i = 0; i < CACHE_SIZE; ++i) {
-                if (cache[i].valid && cache[i].chunk_idx == chunk_idx) {
-                    update_lru(i);
-                    cache_hits++;
-                    return &cache[i];
-                }
-            }
-            
-            // Load chunk if not cached
-            if (load_chunk(chunk_idx)) {
-                for (size_t i = 0; i < CACHE_SIZE; ++i) {
-                    if (cache[i].valid && cache[i].chunk_idx == chunk_idx) {
-                        return &cache[i];
-                    }
-                }
-            }
-            
-            return nullptr;
-        }
-        
-    public:
-        label_type label(sample_type sample_id) {
-            CachedChunk* chunk = get_chunk_for_sample(sample_id);
-            if (!chunk) {
-                RF_DEBUG(2, "❌ Failed to get chunk for sample ", sample_id);
-                return 0;
-            }
-            
-            sample_type local_idx = sample_id - chunk->first_sample_id;
-            if (local_idx >= chunk->num_samples) {
-                RF_DEBUG_2(2, "❌ Local index ", local_idx, " out of bounds for chunk ", chunk->chunk_idx);
-                return 0;
-            }
-            
-            return chunk->labels[local_idx];
-        }
-        
-        uint16_t feature(sample_type sample_id, uint16_t feature_id) {
-            if (feature_id >= num_features) {
-                return 0;
-            }
-            
-            CachedChunk* chunk = get_chunk_for_sample(sample_id);
-            if (!chunk) {
-                return 0;
-            }
-            
-            sample_type local_idx = sample_id - chunk->first_sample_id;
-            if (local_idx >= chunk->num_samples) {
-                return 0;
-            }
-            
-            // Unpack feature from packed_features buffer
-            size_t packed_offset = local_idx * packed_feature_bytes;
-            uint32_t bit_position = static_cast<uint32_t>(feature_id) * quantization_coefficient;
-            uint16_t byte_idx = bit_position / 8;
-            uint8_t bit_offset = bit_position % 8;
-            
-            const uint8_t* packed = &chunk->packed_features[packed_offset];
-            
-            uint8_t feature_value = 0;
-            if (bit_offset + quantization_coefficient <= 8) {
-                // Feature fits in single byte
-                uint8_t mask = ((1 << quantization_coefficient) - 1) << bit_offset;
-                feature_value = (packed[byte_idx] & mask) >> bit_offset;
-            } else {
-                // Feature spans two bytes
-                uint8_t bits_in_first = 8 - bit_offset;
-                uint8_t bits_in_second = quantization_coefficient - bits_in_first;
-                uint8_t mask1 = ((1 << bits_in_first) - 1) << bit_offset;
-                uint8_t mask2 = (1 << bits_in_second) - 1;
-                feature_value = ((packed[byte_idx] & mask1) >> bit_offset) |
-                               ((packed[byte_idx + 1] & mask2) << bits_in_first);
-            }
-            
-            return feature_value;
-        }
-        
-        // OPTIMIZATION: Batch extract a single feature for multiple samples
-        // This is much faster than calling feature() individually because:
-        // 1. Reduces chunk lookup overhead
-        // 2. Better cache utilization when samples are in same chunk
-        // 3. Amortizes function call overhead
-        void batch_extract_feature(const b_vector<sample_type, 8>& sample_ids, 
-                                   sample_type begin, sample_type end,
-                                   uint16_t feature_id, 
-                                   b_vector<uint16_t>& out_values) {
-            if (feature_id >= num_features || begin >= end) {
-                return;
-            }
-            
-            sample_type count = end - begin;
-            out_values.clear();
-            out_values.reserve(count);
-            
-            // Pre-calculate bit extraction parameters
-            uint32_t bit_position = static_cast<uint32_t>(feature_id) * quantization_coefficient;
-            uint16_t byte_idx = bit_position / 8;
-            uint8_t bit_offset = bit_position % 8;
-            
-            uint8_t mask1, mask2 = 0;
-            uint8_t bits_in_first = 0, bits_in_second = 0;
-            bool spans_two_bytes = (bit_offset + quantization_coefficient > 8);
-            
-            if (spans_two_bytes) {
-                bits_in_first = 8 - bit_offset;
-                bits_in_second = quantization_coefficient - bits_in_first;
-                mask1 = ((1 << bits_in_first) - 1) << bit_offset;
-                mask2 = (1 << bits_in_second) - 1;
-            } else {
-                mask1 = ((1 << quantization_coefficient) - 1) << bit_offset;
-            }
-            
-            // Extract features with optimized chunk access
-            for (sample_type k = begin; k < end; ++k) {
-                sample_type sid = sample_ids[k];
-                
-                CachedChunk* chunk = get_chunk_for_sample(sid);
-                if (!chunk) {
-                    out_values.push_back(0);
-                    continue;
-                }
-                
-                sample_type local_idx = sid - chunk->first_sample_id;
-                if (local_idx >= chunk->num_samples) {
-                    out_values.push_back(0);
-                    continue;
-                }
-                
-                // Unpack feature using pre-calculated parameters
-                size_t packed_offset = local_idx * packed_feature_bytes;
-                const uint8_t* packed = &chunk->packed_features[packed_offset];
-                
-                uint16_t feature_value;
-                if (spans_two_bytes) {
-                    feature_value = ((packed[byte_idx] & mask1) >> bit_offset) |
-                                   ((packed[byte_idx + 1] & mask2) << bits_in_first);
-                } else {
-                    feature_value = (packed[byte_idx] & mask1) >> bit_offset;
-                }
-                
-                out_values.push_back(feature_value);
-            }
-        }
-        
-        // OPTIMIZATION: Batch extract labels for multiple samples
-        // Reduces chunk lookup overhead compared to individual label() calls
-        void batch_extract_labels(const b_vector<sample_type, 8>& sample_ids,
-                                 sample_type begin, sample_type end,
-                                 b_vector<label_type>& out_labels) {
-            if (begin >= end) {
-                return;
-            }
-            
-            sample_type count = end - begin;
-            out_labels.clear();
-            out_labels.reserve(count);
-            
-            for (sample_type k = begin; k < end; ++k) {
-                sample_type sid = sample_ids[k];
-                
-                CachedChunk* chunk = get_chunk_for_sample(sid);
-                if (!chunk) {
-                    out_labels.push_back(0);
-                    continue;
-                }
-                
-                sample_type local_idx = sid - chunk->first_sample_id;
-                if (local_idx >= chunk->num_samples) {
-                    out_labels.push_back(0);
-                    continue;
-                }
-                
-                out_labels.push_back(chunk->labels[local_idx]);
-            }
-        }
-        
-        sample_type get_samples_per_chunk() const {
-            return samples_per_chunk;
-        }
-        
-        size_t get_total_chunks() const {
-            return total_chunks;
-        }
-        
-        void print_stats() const {
-            if (cache_hits + cache_misses > 0) {
-                float hit_rate = 100.0f * cache_hits / (cache_hits + cache_misses);
-                RF_DEBUG(1, "📊 Chunk Accessor Stats:");
-                RF_DEBUG_2(1, "   Hits: ", cache_hits, ", Misses: ", cache_misses);
-                RF_DEBUG(1, "   Hit Rate(%): ", hit_rate);
-            }
         }
     };
 

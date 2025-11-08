@@ -70,3 +70,4 @@ src/*.bin
 src/*.py
 
 old_/
+tools/hog_transform/mnist/

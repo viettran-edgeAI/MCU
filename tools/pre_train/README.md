@@ -72,6 +72,7 @@ The configuration system is divided into two main categories:
 | `criterion` | string | "entropy" | Node splitting criterion: `"gini"` or `"entropy"` |
 | `impurity_threshold` | float | 0.1 | Threshold for node impurity (rarely needs adjustment) |
 | `data_path` | string | "../data_processing/data/result/digit_data_nml.csv" | Path to normalized dataset |
+| `max_samples` | integer | 0 | Maximum number of samples to keep in dataset. When exceeded, oldest samples are removed (FIFO). Set to 0 for unlimited samples. Useful for online learning on memory-constrained devices |
 
 ##### Split Ratio Configuration
 
@@ -91,6 +92,34 @@ The `split_ratio` parameter controls how the dataset is divided:
 - **`valid_ratio`**: Proportion of data for validation (default: 0.15)
 
 > **Note:** When `use_validation` is false, only `train_ratio` and `test_ratio` are used. The ratios should sum to 1.0 for optimal data utilization.
+
+##### Max Samples Configuration
+
+The `max_samples` parameter controls memory usage for online learning scenarios:
+
+```json
+"max_samples": {
+    "value": 0,
+    "description": "Maximum number of samples to keep in the dataset..."
+}
+```
+
+- **Value `0`** (default): Unlimited samples - dataset can grow indefinitely
+- **Value `> 0`**: Dataset size limit - when exceeded, oldest samples are automatically removed (FIFO)
+
+**Use Cases:**
+- **ESP32 Online Learning**: Set to prevent memory overflow as dataset grows from user feedback
+- **Adaptive Models**: Maintain recent data while discarding outdated patterns
+- **Memory-Constrained Devices**: Essential for devices with limited RAM/storage
+
+**Behavior:**
+- When `addNewData()` is called and dataset size exceeds `max_samples`:
+  - Oldest samples are removed first (FIFO queue behavior)
+  - New samples are added to maintain the specified limit
+  - Node layout is recalculated based on current dataset size
+  - Training continues with the updated dataset
+
+> **Recommendation:** For ESP32 with 4MB PSRAM, typical values range from 3000-10000 samples depending on feature count and model complexity.
 
 #### B. Evaluation Strategy
 
@@ -239,6 +268,24 @@ Training flags specify which metrics to optimize during model training:
 }
 ```
 
+### For Online Learning on ESP32
+```json
+{
+    "num_trees": {"value": 15},
+    "split_ratio": {
+        "train_ratio": 0.8,
+        "test_ratio": 0.2,
+        "valid_ratio": 0.0
+    },
+    "max_samples": {"value": 5000},
+    "extend_base_data": {"value": true},
+    "enable_retrain": {"value": true},
+    "training_score": {"value": "oob_score"}
+}
+```
+
+> **Note:** `max_samples` is crucial for online learning scenarios where the dataset grows over time through user feedback. When the limit is reached, the oldest samples are automatically removed (FIFO queue), ensuring memory usage stays within ESP32 constraints while maintaining recent relevant data.
+
 ## Performance Tuning
 
 ### Data Splitting Strategy
@@ -251,6 +298,7 @@ Training flags specify which metrics to optimize during model training:
 - **Reduce `num_trees`**: Fewer trees = less memory, but may reduce accuracy
 - **Disable `use_bootstrap`**: Saves 38% RAM and SPIFFS storage
 - **Enable `max_depth` override**: Limit tree depth to control memory usage
+- **Set `max_samples`**: Limit dataset size for online learning scenarios (prevents unbounded growth)
 - **Use `oob_score`**: Most memory-efficient evaluation method
 
 ### Accuracy Optimization

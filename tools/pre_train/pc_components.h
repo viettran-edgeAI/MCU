@@ -2,7 +2,6 @@
 
 #include "STL_MCU.h"  
 #include <string>
-#include <random>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -38,61 +37,15 @@ struct QuantizationHelper {
         return static_cast<uint8_t>(bits);
     }
 
-    static void buildThresholdCandidates(uint8_t bits, vector<uint16_t>& out) {
-        out.clear();
-        uint8_t sanitized = sanitizeBits(bits);
-        if (sanitized <= 1) {
-            out.push_back(0);
-            return;
-        }
-        if (sanitized == 2) {
-            out.push_back(0);
-            out.push_back(1);
-            out.push_back(2);
-            return;
-        }
-
-        uint16_t maxValue = static_cast<uint16_t>((1u << sanitized) - 1);
-        uint16_t availableOdd = maxValue / 2; // number of odd thresholds below maxValue
-        if (availableOdd == 0) {
-            out.push_back(maxValue ? (maxValue - 1) : 0);
-            return;
-        }
-
-        uint16_t desired = std::min<uint16_t>(8, availableOdd);
-        for (uint16_t i = 0; i < desired; ++i) {
-            uint32_t numerator = static_cast<uint32_t>(2 * i + 1) * static_cast<uint32_t>(availableOdd);
-            uint16_t oddIndex = static_cast<uint16_t>(numerator / (2 * desired));
-            if (oddIndex >= availableOdd) oddIndex = availableOdd - 1;
-            uint16_t threshold = static_cast<uint16_t>(2 * oddIndex + 1);
-            if (threshold >= maxValue) {
-                threshold = static_cast<uint16_t>(maxValue - 1);
-            }
-            if (!out.empty() && threshold <= out.back()) {
-                uint16_t candidate = static_cast<uint16_t>(out.back() + 2);
-                if (candidate >= maxValue) candidate = static_cast<uint16_t>(maxValue - 1);
-                threshold = candidate;
-            }
-            out.push_back(threshold);
-        }
+    static uint16_t thresholdFromSlot(uint8_t bits, uint16_t slot) {
+        const uint8_t sanitized = sanitizeBits(bits);
+        const uint16_t maxValue = static_cast<uint16_t>((1u << sanitized) - 1u);
+        return (slot > maxValue) ? maxValue : slot;
     }
 
-    static uint16_t thresholdFromSlot(uint8_t bits, uint8_t slot) {
-    vector<uint16_t> candidates;
-        buildThresholdCandidates(bits, candidates);
-        if (candidates.empty()) {
-            return 0;
-        }
-        if (slot >= candidates.size()) {
-            return candidates.back();
-        }
-        return candidates[slot];
-    }
-
-    static uint8_t slotCount(uint8_t bits) {
-    vector<uint16_t> candidates;
-        buildThresholdCandidates(bits, candidates);
-        return static_cast<uint8_t>(candidates.size());
+    static uint16_t slotCount(uint8_t bits) {
+        const uint8_t sanitized = sanitizeBits(bits);
+        return static_cast<uint16_t>(1u << sanitized);
     }
 };
 
@@ -102,62 +55,79 @@ using sample_set = b_vector<Rf_sample>; // set of samples
 
 struct Tree_node{
     uint64_t packed_data; 
-    
+
     // Bit layout (64 bits total) - optimized for breadth-first tree building with large dataset support:
-    // Bits 0-15:   featureID (16 bits) - 0 to 65535 features
-    // Bits 16-27:  label (12 bits) - 0 to 4095 classes  
-    // Bits 28-30:  threshold slot (3 bits) - 0 to 7 (maps to quantized thresholds)
-    // Bit 31:      is_leaf (1 bit) - 0 or 1
-    // Bits 32-63:  left child index (32 bits) - 0 to 4,294,967,295 nodes
+    // Bits 0-15:   featureID (16 bits)
+    // Bits 16-27:  label (12 bits)
+    // Bits 28-35:  threshold slot (8 bits) to cover up to 256 quantized thresholds
+    // Bit 36:      is_leaf (1 bit)
+    // Bits 37-63:  left child index (27 bits)
     // Note: right child index = left child index + 1 (breadth-first property)
 
-    // Constructor
+    static constexpr uint8_t FEATURE_SHIFT = 0;
+    static constexpr uint64_t FEATURE_MASK = 0xFFFFull;
+
+    static constexpr uint8_t LABEL_SHIFT = 16;
+    static constexpr uint64_t LABEL_MASK = 0xFFFull;
+
+    static constexpr uint8_t THRESHOLD_SHIFT = 28;
+    static constexpr uint64_t THRESHOLD_MASK = 0xFFull;
+
+    static constexpr uint8_t IS_LEAF_SHIFT = 36;
+    static constexpr uint64_t IS_LEAF_MASK = 0x1ull;
+
+    static constexpr uint8_t LEFT_SHIFT = 37;
+    static constexpr uint64_t LEFT_MASK = 0x1FFFFFFull; // 27 bits
+
     Tree_node() : packed_data(0) {}
 
-    // Getter methods for packed data
     uint32_t getFeatureID() const {
-        return static_cast<uint32_t>(packed_data & 0xFFFF);  // Bits 0-15 (16 bits)
+        return static_cast<uint32_t>((packed_data >> FEATURE_SHIFT) & FEATURE_MASK);
     }
     
     uint32_t getLabel() const {
-        return static_cast<uint32_t>((packed_data >> 16) & 0xFFF);  // Bits 16-27 (12 bits)
+        return static_cast<uint32_t>((packed_data >> LABEL_SHIFT) & LABEL_MASK);
     }
     
-    uint8_t getThresholdSlot() const {
-        return static_cast<uint8_t>((packed_data >> 28) & 0x07);  // Bits 28-30 (3 bits)
+    uint16_t getThresholdSlot() const {
+        return static_cast<uint16_t>((packed_data >> THRESHOLD_SHIFT) & THRESHOLD_MASK);
     }
     
     bool getIsLeaf() const {
-        return static_cast<bool>((packed_data >> 31) & 0x01);  // Bit 31
+        return static_cast<bool>((packed_data >> IS_LEAF_SHIFT) & IS_LEAF_MASK);
     }
     
     uint32_t getLeftChildIndex() const {
-        return static_cast<uint32_t>(packed_data >> 32);  // Bits 32-63 (32 bits)
+        return static_cast<uint32_t>((packed_data >> LEFT_SHIFT) & LEFT_MASK);
     }
     
     uint32_t getRightChildIndex() const {
-        return getLeftChildIndex() + 1;  // Breadth-first property: right = left + 1
+        return getLeftChildIndex() + 1;
     }
     
-    // Setter methods for packed data
     void setFeatureID(uint32_t featureID) {
-        packed_data = (packed_data & 0xFFFFFFFFFFFF0000ULL) | (static_cast<uint64_t>(featureID) & 0xFFFF);  // Bits 0-15
+        packed_data &= ~(FEATURE_MASK << FEATURE_SHIFT);
+        packed_data |= (static_cast<uint64_t>(featureID) & FEATURE_MASK) << FEATURE_SHIFT;
     }
     
     void setLabel(uint32_t label) {
-        packed_data = (packed_data & 0xFFFFFFFFF000FFFFULL) | ((static_cast<uint64_t>(label) & 0xFFF) << 16);  // Bits 16-27
+        packed_data &= ~(LABEL_MASK << LABEL_SHIFT);
+        packed_data |= (static_cast<uint64_t>(label) & LABEL_MASK) << LABEL_SHIFT;
     }
     
-    void setThresholdSlot(uint8_t slot) {
-        packed_data = (packed_data & 0xFFFFFFFF8FFFFFFFULL) | ((static_cast<uint64_t>(slot) & 0x07) << 28);  // Bits 28-30
+    void setThresholdSlot(uint16_t slot) {
+        packed_data &= ~(THRESHOLD_MASK << THRESHOLD_SHIFT);
+        packed_data |= (static_cast<uint64_t>(slot) & THRESHOLD_MASK) << THRESHOLD_SHIFT;
     }
     
     void setIsLeaf(bool isLeaf) {
-        packed_data = (packed_data & 0xFFFFFFFF7FFFFFFFULL) | ((static_cast<uint64_t>(isLeaf ? 1 : 0)) << 31);  // Bit 31
+        packed_data &= ~(IS_LEAF_MASK << IS_LEAF_SHIFT);
+        packed_data |= (static_cast<uint64_t>(isLeaf ? 1u : 0u) & IS_LEAF_MASK) << IS_LEAF_SHIFT;
     }
     
     void setLeftChildIndex(uint32_t index) {
-        packed_data = (packed_data & 0x00000000FFFFFFFFULL) | (static_cast<uint64_t>(index) << 32);  // Bits 32-63
+        packed_data &= ~(LEFT_MASK << LEFT_SHIFT);
+        packed_data |= (static_cast<uint64_t>(index) & LEFT_MASK) << LEFT_SHIFT;
     }
     
     // Note: setRightChildIndex is not needed since right = left + 1
@@ -293,12 +263,8 @@ class Rf_tree {
 
     uint32_t predictSample(const Rf_sample& sample, uint8_t quant_bits) const {
         if (nodes.empty()) return 0;
-        uint8_t sanitizedBits = QuantizationHelper::sanitizeBits(quant_bits);
-    vector<uint16_t> cachedThresholds;
-        QuantizationHelper::buildThresholdCandidates(sanitizedBits, cachedThresholds);
-        if (cachedThresholds.empty()) {
-            cachedThresholds.push_back(0);
-        }
+        const uint8_t sanitizedBits = QuantizationHelper::sanitizeBits(quant_bits);
+        const uint16_t maxThresholdValue = static_cast<uint16_t>((1u << sanitizedBits) - 1u);
         
         uint32_t currentIndex = 0;  // Start from root
         
@@ -309,10 +275,8 @@ class Rf_tree {
             }
             
             uint16_t featureValue = sample.features[nodes[currentIndex].getFeatureID()];
-            uint8_t slot = nodes[currentIndex].getThresholdSlot();
-            uint16_t thresholdValue = (slot < cachedThresholds.size())
-                                        ? cachedThresholds[slot]
-                                        : cachedThresholds.back();
+            const uint16_t slot = nodes[currentIndex].getThresholdSlot();
+            const uint16_t thresholdValue = (slot > maxThresholdValue) ? maxThresholdValue : slot;
 
             if (featureValue <= thresholdValue) {
                 // Go to left child
@@ -535,6 +499,7 @@ struct Rf_config{
     uint16_t min_leaf;
     uint16_t max_depth;
     uint32_t num_samples;  // number of samples in the base data - changed to uint32_t for large datasets
+    uint32_t max_samples = 0; // maximum samples allowed in dataset (0 = unlimited, used for ESP32)
     uint32_t random_seed = 42; // random seed for Rf_random class
     size_t RAM_usage = 0;
     int epochs = 20;    // number of epochs for inner training
@@ -551,6 +516,12 @@ struct Rf_config{
 
     uint16_t max_feature_value = 0;
     uint8_t dataset_quantization_bits = 1;
+
+    // MCU node layout bits (calculated after building trees)
+    uint8_t threshold_bits = 0;
+    uint8_t feature_bits = 0;
+    uint8_t label_bits = 0;
+    uint8_t child_bits = 0;
 
     Rf_metric_scores metric_score;
     std::string data_path;
@@ -775,8 +746,8 @@ public:
                     valid_ratio = json_valid_ratio; // Apply to actual config
                 }
                 
-                std::cout << "📊 Split ratios loaded from JSON: train=" << train_ratio 
-                          << ", test=" << test_ratio << ", valid=" << valid_ratio << std::endl;
+                // std::cout << "📊 Split ratios loaded from JSON: train=" << train_ratio 
+                //           << ", test=" << test_ratio << ", valid=" << valid_ratio << std::endl;
             }
         }
 
@@ -890,7 +861,7 @@ public:
             std::string value = extractParameterValue("min_split");
             if (!value.empty()) {
                 min_split = static_cast<uint16_t>(std::stoi(value));
-                std::cout << "⚙️  min_split override enabled: " << (int)min_split << std::endl;
+                // std::cout << "⚙️  min_split override enabled: " << (int)min_split << std::endl;
             }
         }
 
@@ -900,7 +871,7 @@ public:
             std::string value = extractParameterValue("min_leaf");
             if (!value.empty()) {
                 min_leaf = static_cast<uint16_t>(std::stoi(value));
-                std::cout << "⚙️  min_leaf override enabled: " << (int)min_leaf << std::endl;
+                // std::cout << "⚙️  min_leaf override enabled: " << (int)min_leaf << std::endl;
             }
         }
 
@@ -910,7 +881,7 @@ public:
             std::string value = extractParameterValue("max_depth");
             if (!value.empty()) {
                 max_depth = static_cast<uint16_t>(std::stoi(value));
-                std::cout << "⚙️  max_depth override enabled: " << (int)max_depth << std::endl;
+                // std::cout << "⚙️  max_depth override enabled: " << (int)max_depth << std::endl;
             }
         }
 
@@ -919,15 +890,15 @@ public:
         
         std::cout << "✅ Configuration loaded from " << init_path << std::endl;
         std::cout << "   Number of trees: " << (int)num_trees << std::endl;
-        std::cout << "   K-folds: " << (int)k_folds << std::endl;
+        // std::cout << "   K-folds: " << (int)k_folds << std::endl;
         std::cout << "   Criterion: " << (use_gini ? "gini" : "entropy") << std::endl;
         std::cout << "   Use bootstrap: " << (use_bootstrap ? "true" : "false") << std::endl;
         std::cout << "   Training score method: " << training_score << std::endl;
-        std::cout << "   Data path: " << data_path << std::endl;
-        if (json_ratios_found) {
-            std::cout << "   JSON split ratios found: train=" << json_train_ratio << ", test=" << json_test_ratio << ", valid=" << json_valid_ratio << " (will be validated)" << std::endl;
-        }
-        std::cout << "   Quantization bits: " << (int)quantization_coefficient << std::endl;
+        // std::cout << "   Data path: " << data_path << std::endl;
+        // if (json_ratios_found) {
+        //     std::cout << "   JSON split ratios found: train=" << json_train_ratio << ", test=" << json_test_ratio << ", valid=" << json_valid_ratio << " (will be validated)" << std::endl;
+        // }
+        // std::cout << "   Quantization bits: " << (int)quantization_coefficient << std::endl;
         std::cout << "   Random seed: " << random_seed << std::endl;
     }
 
@@ -1124,13 +1095,17 @@ public:
                          << min_validation_samples << " samples).\n";
                 training_score = "oob_score";
                 // Recalculate ratios without validation
-                if (samples_per_label > 150) {
-                    train_ratio = 0.85f;  // Redistribute validation ratio to training
-                    test_ratio = 0.15f;
+                if (samples_per_label > 800){
+                    train_ratio = 0.9f;
+                    test_ratio  = 0.1f;
+                    valid_ratio = 0.0f;
+                }else if (samples_per_label > 150) {
+                    train_ratio = 0.8f;
+                    test_ratio = 0.2f;
                     valid_ratio = 0.0f;
                 } else {
-                    train_ratio = 0.8f;   // Redistribute validation ratio to training
-                    test_ratio = 0.2f;
+                    train_ratio = 0.75f;
+                    test_ratio = 0.25f;
                     valid_ratio = 0.0f;
                 }
                 std::cout << "📏 Adjusted ratios after removing validation: train=" << train_ratio 
@@ -1145,9 +1120,9 @@ public:
         int baseline_minsplit_ratio = 100 * (num_samples / 500 + 1); 
         if (baseline_minsplit_ratio > 500) baseline_minsplit_ratio = 500; 
         uint16_t min_minSplit = std::min(2, (int)(num_samples / baseline_minsplit_ratio));
-        int dynamic_max_split = std::min(min_minSplit + 6, (int)(log2(num_samples) / 4 + num_features / 25.0f));
-        uint16_t max_minSplit = std::min(24, dynamic_max_split); // Cap at 24 to prevent overly simple trees.
-        if (max_minSplit <= min_minSplit) max_minSplit = min_minSplit + 4; // Ensure a valid range.
+        int dynamic_max_split = std::min(min_minSplit + 4, (int)(log2(num_samples) / 4 + num_features / 25.0f));
+        uint16_t max_minSplit = std::min(16, dynamic_max_split); // Cap at 16 to prevent overly simple trees.
+        if (max_minSplit <= min_minSplit + 4) max_minSplit = min_minSplit + 4; // Ensure a valid range.
 
         // Calculate min_leaf range based on dataset density and class balance
         float samples_per_label_leaf = (num_labels > 0)
@@ -1173,10 +1148,9 @@ public:
             max_minLeaf = min_minLeaf;
         }
 
-        int base_maxDepth = std::max((int)log2(num_samples * 2.0f), (int)(log2(num_features) * 3.2f));
+        int base_maxDepth = (int)(log2(num_samples) + log2(num_features)) + 1;
         uint16_t max_maxDepth = std::max(8, base_maxDepth);
-        int dynamic_min_depth = std::max(6, (int)(log2(num_features * 1.5f) + 2));
-        uint16_t min_maxDepth = std::min((int)max_maxDepth - 2, dynamic_min_depth); // Ensure a valid range.
+        uint16_t min_maxDepth = max_maxDepth > 18 ? max_maxDepth - 6 : max_maxDepth > 12 ? max_maxDepth - 4 : max_maxDepth > 8 ? max_maxDepth - 2 : 4;
 
         // Set default values only if not overridden
         if (!overwrite[0]) {
@@ -1238,7 +1212,7 @@ public:
             max_depth_range.push_back(max_depth);
             std::cout << "🔧 max_depth override active: using fixed value " << (int)max_depth << "\n";
         } else {
-            uint16_t max_depth_step = 3;  // Step of 3 to reduce combinations
+            uint16_t max_depth_step = 2;  // Step of 3 to reduce combinations
             for(uint16_t i = min_maxDepth; i <= max_maxDepth; i += max_depth_step) {
                 max_depth_range.push_back(i);
             }
@@ -1337,6 +1311,10 @@ public:
             config_file << "  \"impurityThreshold\": " << impurity_threshold << ",\n";
             config_file << "  \"metric_score\": \"" << flagsToString(metric_score) << "\",\n";
             config_file << "  \"resultScore\": " << result_score << ",\n";
+            config_file << "  \"threshold_bits\": " << (int)threshold_bits << ",\n";
+            config_file << "  \"feature_bits\": " << (int)feature_bits << ",\n";
+            config_file << "  \"label_bits\": " << (int)label_bits << ",\n";
+            config_file << "  \"child_bits\": " << (int)child_bits << ",\n";
             config_file << "  \"extendBaseData\": " << (extend_base_data ? "true" : "false") << ",\n";
             config_file << "  \"enableRetrain\": " << (enable_retrain ? "true" : "false") << ",\n";
             config_file << "  \"enableAutoConfig\": " << (enable_auto_config ? "true" : "false") << ",\n";
@@ -1842,12 +1820,14 @@ public:
         if (has_global()) {
             base_seed = global_seed();
         } else {
-            // Use high-resolution clock for entropy on PC
+            // Use clock-derived entropy only (avoid std::random_device for MCU parity)
             auto now = std::chrono::high_resolution_clock::now();
             auto duration = now.time_since_epoch();
             uint64_t hw = static_cast<uint64_t>(duration.count());
-            uint64_t cyc = static_cast<uint64_t>(std::random_device{}());
-            base_seed = splitmix64(hw ^ cyc);
+            auto steady_now = std::chrono::steady_clock::now().time_since_epoch();
+            uint64_t mono = static_cast<uint64_t>(steady_now.count());
+            uint64_t addr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(this));
+            base_seed = splitmix64(hw ^ (mono << 1) ^ (addr >> 3));
         }
         engine.seed(base_seed, base_seed ^ 0xda3e39cb94b95bdbULL);
     }
@@ -1858,12 +1838,14 @@ public:
         } else if (has_global()) {
             base_seed = global_seed();
         } else {
-            // Use high-resolution clock for entropy on PC
+            // Use clock-derived entropy only (avoid std::random_device for MCU parity)
             auto now = std::chrono::high_resolution_clock::now();
             auto duration = now.time_since_epoch();
             uint64_t hw = static_cast<uint64_t>(duration.count());
-            uint64_t cyc = static_cast<uint64_t>(std::random_device{}());
-            base_seed = splitmix64(hw ^ cyc ^ seed);
+            auto steady_now = std::chrono::steady_clock::now().time_since_epoch();
+            uint64_t mono = static_cast<uint64_t>(steady_now.count());
+            uint64_t addr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(this));
+            base_seed = splitmix64(hw ^ (mono << 1) ^ (addr >> 3) ^ seed);
         }
         engine.seed(base_seed, base_seed ^ 0xda3e39cb94b95bdbULL);
     }

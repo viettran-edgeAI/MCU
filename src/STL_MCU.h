@@ -3790,9 +3790,9 @@ namespace mcu {
 
     template <typename T,  uint8_t BitsPerValue = 1>
     class ID_vector{
-        static_assert(BitsPerValue > 0 && BitsPerValue <= 8, "BitsPerValue must be between 1 and 8");
+        static_assert(BitsPerValue > 0 && BitsPerValue <= 32, "BitsPerValue must be between 1 and 32");
     public:
-        using count_type = uint8_t; // type for storing count of each ID
+        using count_type = uint32_t; // type for storing count of each ID
         
         // Index type mapping based on T
         using index_type = typename conditional_t<
@@ -3829,7 +3829,7 @@ namespace mcu {
         constexpr static index_type MAX_RF_ID = 
             is_same_t<index_type, uint8_t>::value ? 255 :
             is_same_t<index_type, uint16_t>::value ? 65535 :
-            536870912; // For size_t types
+            2147483647; // max for size_t (assuming 32-bit signed)
             
         constexpr static index_type DEFAULT_MAX_ID = 
             is_same_t<index_type, uint8_t>::value ? 63 :
@@ -3908,6 +3908,7 @@ namespace mcu {
                 throw std::out_of_range("Cannot set max_id below existing elements. Current largest element is " + std::to_string(current_max_element));
             }
         }
+        
         // Set minimum ID that can be stored and allocate memory accordingly
         void set_minID(index_type new_min_id) {
             if(new_min_id > MAX_RF_ID){
@@ -4688,6 +4689,79 @@ namespace mcu {
             const size_t words = bits_to_words(total_bits);
             const size_t bytes = words * sizeof(uint32_t);
             return sizeof(ID_vector) + bytes;
+        }
+
+        /**
+         * @brief Get the current bits per value (runtime value).
+         * @return Current bits per value setting.
+         */
+        uint8_t get_bits_per_value() const noexcept {
+            return id_array.get_bpv();
+        }
+
+        /**
+         * @brief Set the bits per value dynamically.
+         * @param new_bpv New bits per value (must be 1-32).
+         * @return true if successful, false if new_bpv is invalid or would cause data loss.
+         * @note This reallocates the internal array and preserves existing data if possible.
+         *       Will fail if any existing count value exceeds the new maximum count.
+         */
+        bool set_bits_per_value(uint8_t new_bpv) noexcept {
+            // Validate new bits per value
+            if (new_bpv == 0 || new_bpv > 32) {
+                return false;
+            }
+
+            // Get current bits per value
+            uint8_t current_bpv = id_array.get_bpv();
+            
+            // If same, no change needed
+            if (new_bpv == current_bpv) {
+                return true;
+            }
+
+            // Calculate new max count
+            count_type new_max_count = (new_bpv >= 32) 
+                ? std::numeric_limits<uint32_t>::max() 
+                : ((count_type{1} << new_bpv) - 1);
+
+            // If reducing bits, check if any existing values would overflow
+            if (new_bpv < current_bpv && size_ > 0) {
+                index_type range = static_cast<index_type>((static_cast<size_t>(max_id_) - static_cast<size_t>(min_id_) + 1));
+                for (index_type i = 0; i < range; ++i) {
+                    count_type current_count = id_array.get(i);
+                    if (current_count > new_max_count) {
+                        // Would cause data loss
+                        return false;
+                    }
+                }
+            }
+
+            // Save old data
+            const size_t old_words = id_array.words();
+            PackedArray<BitsPerValue> old_array(old_words);
+            old_array.copy_from(id_array, old_words);
+
+            // Calculate new word count and reallocate
+            const size_t range = static_cast<size_t>(max_id_) - static_cast<size_t>(min_id_) + 1;
+            const size_t new_total_bits = range * new_bpv;
+            const size_t new_words = bits_to_words(new_total_bits);
+            
+            id_array = PackedArray<BitsPerValue>(new_words);
+            id_array.set_bpv(new_bpv);
+
+            // Copy elements from old array to new array with new bit width
+            if (size_ > 0) {
+                index_type element_range = static_cast<index_type>((static_cast<size_t>(max_id_) - static_cast<size_t>(min_id_) + 1));
+                for (index_type i = 0; i < element_range; ++i) {
+                    count_type count_val = old_array.get(i);
+                    if (count_val > 0) {
+                        id_array.set(i, count_val);
+                    }
+                }
+            }
+
+            return true;
         }
         
     };

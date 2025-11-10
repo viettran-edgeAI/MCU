@@ -7,8 +7,7 @@
 namespace mcu{
 
     class RandomForest{
-        // 8-bit occurrence counts keep bootstrap bags identical to PC implementation
-        using TreeSampleIDs = ID_vector<sample_type,8>;
+        using TreeSampleIDs = ID_vector<sample_type,3>;
 #if RF_ENABLE_TRAINING
         struct TrainingContext {
             Rf_data base_data;
@@ -37,9 +36,8 @@ namespace mcu{
         Rf_pending_data* pending_data = nullptr;
         Rf_data* base_data_stub = nullptr;
 
-        // Optimization: Pre-allocated buffers for inference
-        packed_vector<8> categorization_buffer;
-        b_vector<uint16_t> threshold_cache;
+        // Pre-allocated buffers for inference
+    packed_vector<8> categorization_buffer;
         mutable char path_buffer[RF_PATH_BUFFER] = {'\0'};
 
     #if RF_ENABLE_TRAINING
@@ -129,11 +127,11 @@ namespace mcu{
 
             logger.init(&base);
             config.init(&base);
+            config.loadConfig();    
             quantizer.init(&base);
             node_pred.init(&base, &config);
 
             // load resources
-            config.loadConfig();
             forest_container.init(&base, &config, &node_pred);
             quantizer.loadQuantizer();  // Load quantizer first to get quantization_coefficient
             
@@ -151,10 +149,6 @@ namespace mcu{
             // Initialize inference optimization buffers
             categorization_buffer.set_bits_per_value(config.quantization_coefficient);
             categorization_buffer.resize(config.num_features, 0);
-            buildThresholdCandidates(config.quantization_coefficient, threshold_cache);
-            if (threshold_cache.empty()) {
-                threshold_cache.push_back(0);
-            }
         }
         
         // Enhanced destructor
@@ -247,6 +241,17 @@ namespace mcu{
                     break;
                 }
 
+                // Recalculate layout based on current dataset size for adaptive node capacity
+                RF_DEBUG(1, "📐 Recalculating layout for current dataset size");
+                uint16_t est_nodes;
+                if (node_pred.is_trained) {
+                    est_nodes = node_pred.estimate_nodes(config);
+                } else {
+                    if (config.num_samples < 2048) est_nodes = 512;
+                    else est_nodes = 2046;
+                }
+                forest_container.calculate_layout(config.num_labels, config.num_features, est_nodes);
+
                 // build forest
                 if(!build_forest()){
                     RF_DEBUG(0, "❌ Error building forest");
@@ -301,7 +306,7 @@ namespace mcu{
                 config.enable_partial_loading = false;
             }
             #endif
-
+            uint16_t max_nodes = 0;
             if (config.enable_partial_loading) {
                 // Partial loading path: use chunk accessor
                 RF_DEBUG(1, "📦 Using partial loading mode (chunked training)");
@@ -328,7 +333,6 @@ namespace mcu{
                         return false;
                     }
                 }
-                
                 // Build trees using chunk accessor (no full train_data load)
                 for(uint8_t i = 0; i < config.num_trees; i++){
                     Rf_tree tree(i);
@@ -337,6 +341,9 @@ namespace mcu{
                     queue_nodes.clear();
                     buildTree(tree, ctx->dataList[i], queue_nodes, ctx->chunk_accessor);
                     tree.isLoaded = true;
+                    if(tree.countNodes() > max_nodes){
+                        max_nodes = tree.countNodes();
+                    }
                     forest_container.add_tree(std::move(tree));
                     logger.m_log("tree creation (chunked)");
                 }
@@ -361,6 +368,9 @@ namespace mcu{
                     queue_nodes.clear();
                     buildTree(tree, ctx->dataList[i], queue_nodes);
                     tree.isLoaded = true;
+                    if(tree.countNodes() > max_nodes){
+                        max_nodes = tree.countNodes();
+                    }
                     forest_container.add_tree(std::move(tree));
                     logger.m_log("tree creation");
                 }
@@ -369,7 +379,7 @@ namespace mcu{
             }
             
             forest_container.is_loaded = false;
-            node_pred.add_new_samples(config.min_split, config.min_leaf,config.max_depth, forest_container.avg_nodes());
+            node_pred.add_new_samples(config.min_split, config.min_leaf,config.max_depth, max_nodes);
 
             RF_DEBUG_2(0, "🌲 Forest built successfully: ", forest_container.get_total_nodes(), "nodes","");
             RF_DEBUG_2(1, "Min split: ", config.min_split, "- Min leaf: ", config.min_leaf);
@@ -459,12 +469,17 @@ namespace mcu{
             for(uint8_t i=0; i< dest.size(); i++){
                 sink_IDs.clear();
                 sample_type sink_require = static_cast<sample_type>(static_cast<float>(maxID) * dest[i].first);
+                // CRITICAL: Must call bounded() on every iteration to match PC RNG consumption
+                // PC's 1-bit ID_vector doesn't increase size() on duplicate push_back(),
+                // so loop keeps calling bounded() even for duplicates
                 while(sink_IDs.size() < sink_require) {
                     sample_type sampleId = static_cast<sample_type>(ctx->random_generator.bounded(static_cast<uint32_t>(maxID)));
+                    // Only add if not already used (1-bit ID_vector behavior)
                     if (!used.contains(sampleId)) {
                         sink_IDs.push_back(sampleId);
                         used.push_back(sampleId);
                     }
+                    // Note: If sampleId already in used, we still consumed an RNG call (matching PC)
                 }
                 dest[i].second->loadData(source, sink_IDs, true);
                 dest[i].second->releaseData(false); 
@@ -494,6 +509,17 @@ namespace mcu{
                 RF_DEBUG(2, "No bootstrap, unique sample IDs only");
             }
 
+            // uint8_t bits = 3;       // bits per sample ID (for bootstrap sampling)
+            // if(!config.use_boostrap){
+            //     bits = 1;
+            // }else{
+            //     if(config.num_samples < 2048){
+            //         bits = 3;
+            //     }else{
+            //         bits = 3;
+            //     }
+            // }
+
             // Track hashes of each tree dataset to avoid duplicates across trees
             unordered_set<uint64_t> seen_hashes;
             RF_DEBUG(1, "Creating dataset for trees..."); 
@@ -501,6 +527,7 @@ namespace mcu{
             for (uint8_t i = 0; i < config.num_trees; i++) {
                 // Create a new ID_vector for this tree with proper range [0, numSample-1]
                 TreeSampleIDs sub_data;
+                // sub_data.set_bits_per_value(bits);
                 
                 // CRITICAL: Set the ID range to match the sample IDs (0 to numSample-1)
                 if(numSample > 1){
@@ -581,7 +608,7 @@ namespace mcu{
             float gain = -1.0f;
             uint16_t featureID = 0;
             uint16_t thresholdValue = 0; // Actual threshold value for splitting
-            uint8_t  thresholdSlot = 0;  // Changed from threshold to thresholdSlot (0-7)
+            uint16_t thresholdSlot = 0;   // Slot index into quantized threshold cache
             uint32_t leftCount = 0;
             uint32_t rightCount = 0;
         } SplitInfo;
@@ -653,8 +680,13 @@ namespace mcu{
 
             // Get quantization info
             uint8_t quant_bits = config.quantization_coefficient;
-            uint16_t maxFeatureValue = (quant_bits >= 8) ? 255 : ((1u << quant_bits) - 1);
-            uint8_t numCandidates = static_cast<uint8_t>(threshold_cache.size());
+            if (quant_bits < 1) {
+                quant_bits = 1;
+            } else if (quant_bits > 8) {
+                quant_bits = 8;
+            }
+            const uint16_t numCandidates = static_cast<uint16_t>(1u << quant_bits);
+            const uint16_t maxFeatureValue = static_cast<uint16_t>((1u << quant_bits) - 1u);
 
             // Base label counts
             b_vector<sample_type> baseLabelCounts(numLabels, 0);
@@ -776,8 +808,8 @@ namespace mcu{
                     }
 
                     // Try each threshold candidate
-                    for (uint8_t slot = 0; slot < numCandidates; slot++) {
-                        uint16_t threshold = threshold_cache[slot];
+                    for (uint16_t slot = 0; slot < numCandidates; ++slot) {
+                        const uint16_t threshold = (slot > maxFeatureValue) ? maxFeatureValue : slot;
                         
                         uint32_t leftTotal = 0, rightTotal = 0;
                         b_vector<sample_type> leftCounts(numLabels, 0), rightCounts(numLabels, 0);
@@ -843,8 +875,13 @@ namespace mcu{
 
             // Get quantization info
             uint8_t quant_bits = config.quantization_coefficient;
-            uint16_t maxFeatureValue = (quant_bits >= 8) ? 255 : ((1u << quant_bits) - 1);
-            uint8_t numCandidates = static_cast<uint8_t>(threshold_cache.size());
+            if (quant_bits < 1) {
+                quant_bits = 1;
+            } else if (quant_bits > 8) {
+                quant_bits = 8;
+            }
+            const uint16_t numCandidates = static_cast<uint16_t>(1u << quant_bits);
+            const uint16_t maxFeatureValue = static_cast<uint16_t>((1u << quant_bits) - 1u);
 
             // OPTIMIZATION: Batch extract labels once for all features
             b_vector<label_type> sample_labels;
@@ -965,8 +1002,8 @@ namespace mcu{
                     }
 
                     // Try each threshold candidate
-                    for (uint8_t slot = 0; slot < numCandidates; slot++) {
-                        uint16_t threshold = threshold_cache[slot];
+                    for (uint16_t slot = 0; slot < numCandidates; ++slot) {
+                        const uint16_t threshold = (slot > maxFeatureValue) ? maxFeatureValue : slot;
                         
                         uint32_t leftTotal = 0, rightTotal = 0;
                         b_vector<sample_type> leftCounts(numLabels, 0), rightCounts(numLabels, 0);
@@ -1079,7 +1116,7 @@ namespace mcu{
         }
 
         // Breadth-first tree building for optimal node layout - MEMORY OPTIMIZED
-        void buildTree(Rf_tree& tree, TreeSampleIDs& sampleIDs, b_vector<NodeToBuild>& queue_nodes) {
+        void buildTree(Rf_tree& tree, TreeSampleIDs& sampleIDs, vector<NodeToBuild>& queue_nodes) {
             auto* ctx = training_ctx;
             if(!ctx){
                 return;
@@ -1204,7 +1241,7 @@ namespace mcu{
 
                 Tree_node splitNode = tree.nodes.get(current.nodeIndex);
                 splitNode.setFeatureID(bestSplit.featureID, layout->featureID_layout);
-                splitNode.setThresholdSlot(bestSplit.thresholdSlot);
+                splitNode.setThresholdSlot(bestSplit.thresholdSlot, layout->threshold_layout);
                 splitNode.setIsLeaf(false);
                 tree.nodes.set(current.nodeIndex, splitNode);
 
@@ -1275,7 +1312,7 @@ namespace mcu{
         }
 
         // Overloaded buildTree using chunk accessor for partial loading
-        void buildTree(Rf_tree& tree, TreeSampleIDs& sampleIDs, b_vector<NodeToBuild>& queue_nodes, TrainChunkAccessor* accessor) {
+        void buildTree(Rf_tree& tree, TreeSampleIDs& sampleIDs, vector<NodeToBuild>& queue_nodes, TrainChunkAccessor* accessor) {
             auto* ctx = training_ctx;
             if(!ctx || !accessor){
                 return;
@@ -1402,7 +1439,7 @@ namespace mcu{
 
                 Tree_node splitNode = tree.nodes.get(current.nodeIndex);
                 splitNode.setFeatureID(bestSplit.featureID, layout->featureID_layout);
-                splitNode.setThresholdSlot(bestSplit.thresholdSlot);
+                splitNode.setThresholdSlot(bestSplit.thresholdSlot, layout->threshold_layout);
                 splitNode.setIsLeaf(false);
                 tree.nodes.set(current.nodeIndex, splitNode);
 
@@ -1553,7 +1590,7 @@ namespace mcu{
 
                     for(const uint8_t& treeIdx : activeTrees){
                         if(treeIdx < forest_container.size()){
-                            label_type predict = forest_container[treeIdx].predict_features(sample.features, threshold_cache);
+                            label_type predict = forest_container[treeIdx].predict_features(sample.features);
                             if(predict < config.num_labels){
                                 oobPredictClass[predict]++;
                                 oobTotalPredict++;
@@ -1619,7 +1656,7 @@ namespace mcu{
 
                 // Use all trees for validation prediction
                 for(uint8_t t = 0; t < config.num_trees && t < forest_container.size(); t++){
-                    label_type predict = forest_container[t].predict_features(sample.features, threshold_cache);
+                    label_type predict = forest_container[t].predict_features(sample.features);
                     if(predict < config.num_labels){
                         validPredictClass[predict]++;
                         validTotalPredict++;
@@ -1700,7 +1737,7 @@ namespace mcu{
                 for(sample_type i = 0; i < ctx->validation_data.size(); i++){
                     const Rf_sample& sample = ctx->validation_data[i];
                     label_type actual = sample.label;
-                    label_type pred = forest_container.predict_features(sample.features, threshold_cache);
+                    label_type pred = forest_container.predict_features(sample.features);
                 
                     if(actual < config.num_labels && pred < config.num_labels) {
                         scorer.update_prediction(actual, pred);
@@ -1783,6 +1820,18 @@ namespace mcu{
                 end_training_session();
                 return;
             }
+            
+            // Recalculate layout based on current dataset size for adaptive node capacity
+            RF_DEBUG(1, "📐 Recalculating layout for current dataset size");
+            uint16_t est_nodes;
+            if (node_pred.is_trained) {
+                est_nodes = node_pred.estimate_nodes(config);
+            } else {
+                if (config.num_samples < 2048) est_nodes = 512;
+                else est_nodes = 2046;
+            }
+            forest_container.calculate_layout(config.num_labels, config.num_features, est_nodes);
+            
             training_ctx->build_model = false;
 
             size_t start = logger.drop_anchor();
@@ -1924,7 +1973,7 @@ namespace mcu{
             quantizer.quantizeFeatures(features, categorization_buffer);
 
             // perform prediction using the quantized buffer (categorization_buffer -> actual features expected by forest)
-            result.i_label = forest_container.predict_features(categorization_buffer, threshold_cache);
+            result.i_label = forest_container.predict_features(categorization_buffer);
 
             if (__builtin_expect(config.enable_retrain, 1)) {
                 Rf_sample sample(categorization_buffer, result.i_label);
@@ -2399,19 +2448,10 @@ namespace mcu{
             Rf_sample sample_buffer;
             
             for (sample_type i = 0; i < data.size(); i++) {
-                // // Progress indicator for large datasets - print every 50 samples
-                // if(i % 50 == 0){
-                //     RF_DEBUG_2(1, "   Processed ", i, "/", data.size());
-                //     #if defined(ESP32) || defined(ARDUINO)
-                //     // Yield to watchdog timer on ESP32 to prevent reset during long predictions
-                //     yield();
-                //     #endif
-                // }
-                
                 // Retrieve sample efficiently
                 sample_buffer = data[i];
                 label_type actual = sample_buffer.label;
-                label_type pred = forest_container.predict_features(sample_buffer.features, threshold_cache);
+                label_type pred = forest_container.predict_features(sample_buffer.features);
                 
                 // Update metrics using matrix scorer
                 if(actual < config.num_labels && pred < config.num_labels) {
@@ -2549,7 +2589,7 @@ namespace mcu{
             for (sample_type i = 0; i < data.size(); i++) {
                 const Rf_sample& sample = data[i];
                 label_type actual = sample.label;
-                label_type pred = forest_container.predict_features(sample.features, threshold_cache);
+                label_type pred = forest_container.predict_features(sample.features);
                 
                 if(actual < config.num_labels && pred < config.num_labels) {
                     scorer.update_prediction(actual, pred);
@@ -2573,7 +2613,7 @@ namespace mcu{
             for (sample_type i = 0; i < data.size(); i++) {
                 const Rf_sample& sample = data[i];
                 label_type actual = sample.label;
-                label_type pred = forest_container.predict_features(sample.features, threshold_cache);
+                label_type pred = forest_container.predict_features(sample.features);
                 
                 if(actual < config.num_labels && pred < config.num_labels) {
                     scorer.update_prediction(actual, pred);
@@ -2597,7 +2637,7 @@ namespace mcu{
             for (sample_type i = 0; i < data.size(); i++) {
                 const Rf_sample& sample = data[i];
                 label_type actual = sample.label;
-                label_type pred = forest_container.predict_features(sample.features, threshold_cache);
+                label_type pred = forest_container.predict_features(sample.features);
                 
                 if(actual < config.num_labels && pred < config.num_labels) {
                     scorer.update_prediction(actual, pred);
@@ -2621,7 +2661,7 @@ namespace mcu{
             for (sample_type i = 0; i < data.size(); i++) {
                 const Rf_sample& sample = data[i];
                 label_type actual = sample.label;
-                label_type pred = forest_container.predict_features(sample.features, threshold_cache);
+                label_type pred = forest_container.predict_features(sample.features);
                 
                 if(actual < config.num_labels && pred < config.num_labels) {
                     scorer.update_prediction(actual, pred);
@@ -2648,7 +2688,7 @@ namespace mcu{
             RF_DEBUG(0, "Predicted, Actual");
             for (sample_type i = 0; i < ctx->test_data.size(); i++) {
                 const Rf_sample& sample = ctx->test_data[i];
-                label_type pred = forest_container.predict_features(sample.features, threshold_cache);
+                label_type pred = forest_container.predict_features(sample.features);
                 RF_DEBUG_2(0, String(pred).c_str(), ", ", String(sample.label).c_str(), "");
             }
             ctx->test_data.releaseData(true); // Release test set data after use

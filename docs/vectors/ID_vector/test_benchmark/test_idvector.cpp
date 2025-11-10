@@ -6,7 +6,7 @@
 #include <algorithm>
 #include <iomanip>
 #include <utility>
-#include "../ID_vector.cpp"
+#include "../../../../src/STL_MCU.h"
 
 using namespace mcu;
 using namespace std::chrono;
@@ -1517,6 +1517,218 @@ public:
         assert_test(combined.get_maxID() >= vec2.get_maxID(), "Vector addition expands range appropriately (max)");
     }
 
+    // Test get_bits_per_value() and set_bits_per_value() methods
+    void test_dynamic_bits_per_value() {
+        std::cout << "\n=== Test: Dynamic Bits Per Value ===\n";
+        
+        // Test 1: get_bits_per_value() on template-defined vector
+        {
+            ID_vector<uint16_t, 3> vec(100);
+            uint8_t bpv = vec.get_bits_per_value();
+            assert_test(bpv == 3, "get_bits_per_value returns correct template value (3 bits)");
+            
+            ID_vector<uint16_t, 8> vec8(100);
+            bpv = vec8.get_bits_per_value();
+            assert_test(bpv == 8, "get_bits_per_value returns correct template value (8 bits)");
+        }
+        
+        // Test 2: set_bits_per_value() with empty vector
+        {
+            ID_vector<uint16_t, 2> vec(10, 20);
+            assert_test(vec.get_bits_per_value() == 2, "Initial bits per value is 2");
+            assert_test(vec.empty(), "Vector is empty");
+            
+            bool success = vec.set_bits_per_value(4);
+            assert_test(success, "set_bits_per_value succeeds on empty vector");
+            assert_test(vec.get_bits_per_value() == 4, "Bits per value changed to 4");
+            assert_test(vec.empty(), "Vector remains empty after set_bits_per_value");
+        }
+        
+        // Test 3: set_bits_per_value() with same value (no-op)
+        {
+            ID_vector<uint16_t, 3> vec(50);
+            vec.push_back(25);
+            vec.push_back(25);
+            vec.push_back(25);
+            
+            assert_test(vec.count(25) == 3, "Initial count is 3");
+            assert_test(vec.size() == 3, "Initial size is 3");
+            
+            bool success = vec.set_bits_per_value(3); // Same value
+            assert_test(success, "set_bits_per_value succeeds with same value");
+            assert_test(vec.count(25) == 3, "Count unchanged after no-op set_bits_per_value");
+            assert_test(vec.size() == 3, "Size unchanged after no-op set_bits_per_value");
+        }
+        
+        // Test 4: set_bits_per_value() increasing bits (safe operation)
+        {
+            ID_vector<uint16_t, 2> vec(10, 30);
+            
+            // Add IDs with counts that fit in 2 bits (max 3)
+            vec.push_back(15);
+            vec.push_back(15);
+            vec.push_back(15);
+            vec.push_back(20);
+            vec.push_back(20);
+            
+            assert_test(vec.count(15) == 3, "ID 15 has count 3 (max for 2 bits)");
+            assert_test(vec.count(20) == 2, "ID 20 has count 2");
+            assert_test(vec.size() == 5, "Total size is 5");
+            
+            // Increase bits from 2 to 4 (max count: 3 -> 15)
+            bool success = vec.set_bits_per_value(4);
+            assert_test(success, "set_bits_per_value succeeds when increasing bits");
+            assert_test(vec.get_bits_per_value() == 4, "Bits per value changed to 4");
+            assert_test(vec.count(15) == 3, "ID 15 count preserved after increasing bits");
+            assert_test(vec.count(20) == 2, "ID 20 count preserved after increasing bits");
+            assert_test(vec.size() == 5, "Total size preserved after increasing bits");
+            assert_test(vec.contains(15) && vec.contains(20), "All IDs preserved after increasing bits");
+        }
+        
+        // Test 5: set_bits_per_value() decreasing bits (safe data preservation)
+        {
+            ID_vector<uint16_t, 3> vec(10, 30);
+            
+            // Add IDs with counts that fit in both 3 bits (max 7) and 2 bits (max 3)
+            vec.push_back(15);
+            vec.push_back(15);
+            vec.push_back(15); // Count 3
+            vec.push_back(20);
+            vec.push_back(20);
+            
+            assert_test(vec.count(15) == 3, "ID 15 has count 3");
+            assert_test(vec.count(20) == 2, "ID 20 has count 2");
+            
+            // Decrease bits from 3 to 2 (max count: 7 -> 3)
+            bool success = vec.set_bits_per_value(2);
+            assert_test(success, "set_bits_per_value succeeds when decreasing bits (safe counts)");
+            assert_test(vec.get_bits_per_value() == 2, "Bits per value changed to 2");
+            assert_test(vec.count(15) == 3, "ID 15 count preserved at boundary");
+            assert_test(vec.count(20) == 2, "ID 20 count preserved after decreasing bits");
+            assert_test(vec.size() == 5, "Total size preserved after decreasing bits");
+        }
+        
+        // Test 6: set_bits_per_value() decreasing bits (data loss prevention)
+        {
+            ID_vector<uint16_t, 3> vec(10, 30);
+            
+            // Add IDs with counts that exceed 2-bit capacity (max 3)
+            vec.push_back(15);
+            vec.push_back(15);
+            vec.push_back(15);
+            vec.push_back(15); // Count 4 (exceeds 2-bit max of 3)
+            vec.push_back(20);
+            
+            assert_test(vec.count(15) == 4, "ID 15 has count 4 (exceeds 2-bit capacity)");
+            assert_test(vec.size() == 5, "Total size is 5");
+            
+            // Try to decrease bits from 3 to 2 (would cause data loss)
+            bool success = vec.set_bits_per_value(2);
+            assert_test(!success, "set_bits_per_value fails when data would be lost");
+            assert_test(vec.get_bits_per_value() == 3, "Bits per value unchanged after failed operation");
+            assert_test(vec.count(15) == 4, "ID 15 count unchanged after failed operation");
+            assert_test(vec.size() == 5, "Total size unchanged after failed operation");
+        }
+        
+        // Test 7: Invalid bits per value values
+        {
+            ID_vector<uint16_t, 2> vec(100);
+            
+            bool success0 = vec.set_bits_per_value(0);
+            assert_test(!success0, "set_bits_per_value(0) fails");
+            
+            bool success33 = vec.set_bits_per_value(33);
+            assert_test(!success33, "set_bits_per_value(33) fails");
+            
+            bool success_neg = vec.set_bits_per_value(255); // Wrap around to 255
+            assert_test(!success_neg, "set_bits_per_value(255) fails");
+            
+            assert_test(vec.get_bits_per_value() == 2, "Bits per value unchanged after failed attempts");
+        }
+        
+        // Test 8: Extensive data preservation with different bit widths
+        {
+            ID_vector<uint16_t, 1> vec_1bit(10, 30);
+            vec_1bit.push_back(15);
+            vec_1bit.push_back(20);
+            vec_1bit.push_back(25);
+            
+            // Increase 1 -> 2 -> 3 -> 4 -> 8 bits
+            assert_test(vec_1bit.set_bits_per_value(2), "Increase 1->2 bits");
+            assert_test(vec_1bit.get_bits_per_value() == 2, "Now 2 bits");
+            assert_test(vec_1bit.size() == 3, "Size preserved at 2 bits");
+            assert_test(vec_1bit.contains(15) && vec_1bit.contains(20) && vec_1bit.contains(25), "All IDs preserved at 2 bits");
+            
+            assert_test(vec_1bit.set_bits_per_value(4), "Increase 2->4 bits");
+            assert_test(vec_1bit.get_bits_per_value() == 4, "Now 4 bits");
+            assert_test(vec_1bit.size() == 3, "Size preserved at 4 bits");
+            
+            assert_test(vec_1bit.set_bits_per_value(8), "Increase 4->8 bits");
+            assert_test(vec_1bit.get_bits_per_value() == 8, "Now 8 bits");
+            assert_test(vec_1bit.size() == 3, "Size preserved at 8 bits");
+            
+            // Decrease back down
+            assert_test(vec_1bit.set_bits_per_value(4), "Decrease 8->4 bits");
+            assert_test(vec_1bit.size() == 3, "Size still 3 after decrease to 4 bits");
+            
+            assert_test(vec_1bit.set_bits_per_value(1), "Decrease 4->1 bits");
+            assert_test(vec_1bit.get_bits_per_value() == 1, "Back to 1 bit");
+            assert_test(vec_1bit.size() == 3, "Size still 3 after all transitions");
+        }
+        
+        // Test 9: Bits per value with high count vectors
+        {
+            ID_vector<uint16_t, 8> vec8(10, 20);
+            
+            // Add multiple instances up to 255 (max for 8 bits)
+            for (int i = 0; i < 100; ++i) {
+                vec8.push_back(15);
+            }
+            assert_test(vec8.count(15) == 100, "Added 100 instances to ID 15");
+            
+            // Reduce to 4 bits (max 15) - should fail
+            bool success = vec8.set_bits_per_value(4);
+            assert_test(!success, "set_bits_per_value(4) fails for vector with count 100 (exceeds 4-bit max of 15)");
+            assert_test(vec8.get_bits_per_value() == 8, "Bits per value unchanged after failed reduction");
+            assert_test(vec8.count(15) == 100, "Count unchanged after failed operation");
+            
+            // Reduce to 8 bits (max 255) - should succeed (no-op)
+            success = vec8.set_bits_per_value(8);
+            assert_test(success, "set_bits_per_value(8) succeeds (no-op)");
+            
+            // Reduce to 7 bits (max 127) - should succeed
+            success = vec8.set_bits_per_value(7);
+            assert_test(success, "set_bits_per_value(7) succeeds");
+            assert_test(vec8.get_bits_per_value() == 7, "Bits per value changed to 7");
+            assert_test(vec8.count(15) == 100, "Count preserved after reduction to 7 bits");
+        }
+        
+        // Test 10: Performance of set_bits_per_value with large vectors
+        {
+            ID_vector<uint16_t, 2> vec(0, 1000);
+            
+            // Add data to many IDs
+            for (uint16_t id = 0; id <= 500; id += 5) {
+                for (int count = 0; count < 2; ++count) {
+                    vec.push_back(id);
+                }
+            }
+            size_t original_size = vec.size();
+            
+            auto start = high_resolution_clock::now();
+            bool success = vec.set_bits_per_value(4);
+            auto end = high_resolution_clock::now();
+            auto duration = duration_cast<microseconds>(end - start);
+            
+            assert_test(success, "set_bits_per_value(4) succeeds on large vector");
+            assert_test(vec.size() == original_size, "Size preserved after bit width change");
+            assert_test(duration.count() < 10000, "set_bits_per_value completes quickly (< 10ms)");
+            
+            std::cout << "Performance: set_bits_per_value on vector with ~" << original_size 
+                      << " elements took " << duration.count() << " μs" << std::endl;
+        }
+    }
+
     void run_all_tests() {
         std::cout << "🚀 Starting Comprehensive ID_vector Test Suite" << std::endl;
         std::cout << std::string(60, '=') << std::endl;
@@ -1548,6 +1760,7 @@ public:
         test_vector_subtraction();
         test_enhanced_static_assertions();
         test_enhanced_edge_cases();
+        test_dynamic_bits_per_value();
         
         print_results();
     }

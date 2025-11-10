@@ -103,48 +103,6 @@ namespace mcu {
     // enum Rf_training_score;     // score types for training process (oob, validation, k-fold)
     // ...
 
-    static void buildThresholdCandidates(uint8_t bits, b_vector<uint16_t>& out) {
-        out.clear();
-        // santize bits input
-        if (bits < 1) bits = 1;
-        if (bits > 8) bits = 8;
-
-        if (bits <= 1) {
-            out.push_back(0);
-            return;
-        }
-        if (bits == 2) {
-            out.push_back(0);
-            out.push_back(1);
-            out.push_back(2);
-            return;
-        }
-
-        uint16_t maxValue = static_cast<uint16_t>((1u << bits) - 1);
-        uint16_t availableOdd = maxValue / 2;
-        if (availableOdd == 0) {
-            out.push_back(maxValue ? (maxValue - 1) : 0);
-            return;
-        }
-
-        uint16_t desired = min<uint16_t>(8, availableOdd);
-        for (uint16_t i = 0; i < desired; ++i) {
-            uint32_t numerator = static_cast<uint32_t>(2 * i + 1) * static_cast<uint32_t>(availableOdd);
-            uint16_t oddIndex = static_cast<uint16_t>(numerator / (2 * desired));
-            if (oddIndex >= availableOdd) oddIndex = availableOdd - 1;
-            uint16_t threshold = static_cast<uint16_t>(2 * oddIndex + 1);
-            if (threshold >= maxValue) {
-                threshold = static_cast<uint16_t>(maxValue - 1);
-            }
-            if (!out.empty() && threshold <= out.back()) {
-                uint16_t candidate = static_cast<uint16_t>(out.back() + 2);
-                if (candidate >= maxValue) candidate = static_cast<uint16_t>(maxValue - 1);
-                threshold = candidate;
-            }
-            out.push_back(threshold);
-        }
-    }
-
     /*
     ------------------------------------------------------------------------------------------------------------------
     -------------------------------------------------- RF_BASE -------------------------------------------------------
@@ -523,11 +481,18 @@ namespace mcu {
 
         // Dataset parameters 
         sample_type num_samples;
+        sample_type max_samples = 0; // Maximum samples allowed (0 = unlimited). When exceeded, oldest samples are removed
         uint16_t num_features;
         label_type  num_labels;
         uint8_t  quantization_coefficient; // Bits per feature value (1-8)
         float lowest_distribution; 
         b_vector<sample_type> samples_per_label; // index = label, value = count
+
+        // MCU node layout bits (loaded from PC-trained model config)
+        uint8_t threshold_bits = 0;
+        uint8_t feature_bits = 0;
+        uint8_t label_bits = 0;
+        uint8_t child_bits = 0;
 
         void init(Rf_base* base) {
             base_ptr = base;
@@ -556,6 +521,7 @@ namespace mcu {
             enable_auto_config  = false;
             enable_partial_loading = false;
             quantization_coefficient = 2; 
+            max_samples = 0; // unlimited by default
         }
         
         Rf_config() {
@@ -663,23 +629,15 @@ namespace mcu {
         }
         
         // generate optimal ranges for min_split and min_leaf based on dataset parameters
-        void generate_ranges(){
+        void generate_ranges(bool force = false) {
             int baseline_minsplit_ratio = 100 * (num_samples / 500 + 1);
             if (baseline_minsplit_ratio > 500) baseline_minsplit_ratio = 500;
-            uint8_t min_minSplit = max(2, (int)(num_samples / baseline_minsplit_ratio));
-            if (min_minSplit > 2) {
-                min_minSplit = static_cast<uint8_t>(min_minSplit - 1);
-            }
+            uint8_t min_minSplit = 2;
 
             int dynamic_max_split = min(min_minSplit + 6, (int)(log2(num_samples) / 4 + num_features / 25.0f));
-            uint8_t max_minSplit = min<uint8_t>(24, dynamic_max_split);
+            uint8_t max_minSplit = min<uint8_t>(16, dynamic_max_split);
             if (max_minSplit <= min_minSplit) {
                 max_minSplit = static_cast<uint8_t>(min_minSplit + 4);
-            }
-
-            if (min_split == 0) {
-                min_split = static_cast<uint8_t>((min_minSplit + max_minSplit + 1) / 2);
-                RF_DEBUG_2(1, "Setting minSplit to ", min_split, " (auto)", "");
             }
 
             float samples_per_label = (num_labels > 0)
@@ -715,19 +673,23 @@ namespace mcu {
                 max_minLeaf = min_minLeaf;
             }
 
-            if (min_leaf == 0) {
-                uint8_t mid_leaf = static_cast<uint8_t>((min_minLeaf + max_minLeaf + 1) / 2);
-                min_leaf = max<uint8_t>(1, min<uint8_t>(mid_leaf, max_cap));
+            int base_maxDepth = (int)(log2(num_samples) + log2(num_features)) + 1;
+            uint16_t max_maxDepth = max(8, base_maxDepth);
+            uint16_t min_maxDepth = max_maxDepth > 18 ? max_maxDepth - 6 : max_maxDepth > 12 ? max_maxDepth - 4 : max_maxDepth > 8 ? max_maxDepth - 2 : 4;
+
+            if (min_split == 0 || force) {
+                min_split = min_minSplit;
+                RF_DEBUG_2(1, "Setting minSplit to ", min_split, " (auto)", "");
+            }
+            if (min_leaf == 0 || force) {
+                min_leaf = min_minLeaf;
                 RF_DEBUG_2(1, "Setting minLeaf to ", min_leaf, " (auto)", "");
             }
 
-            if (max_depth == 0) {
-                max_depth = 50;
-            }
-
-            // Generate max_depth range - use larger values to explore tree depth
-            uint16_t min_maxDepth = 8;  // Start from depth 8
-            uint16_t max_maxDepth = max<uint16_t>(32, min<uint16_t>(250, static_cast<uint16_t>(log2(num_samples) * 4)));
+            if (max_depth == 0 || force) {
+                max_depth = max_maxDepth;
+                RF_DEBUG_2(1, "Setting maxDepth to ", max_depth, " (auto)", "");
+            } 
             
             RF_DEBUG_2(1, "⚙️ Setting minSplit range: ", min_minSplit, "to ", max_minSplit);
             RF_DEBUG_2(1, "⚙️ Setting minLeaf range: ", min_minLeaf, "to ", max_minLeaf);
@@ -816,7 +778,7 @@ namespace mcu {
                 training_score = VALID_SCORE;
             }
             validate_ratios();
-            generate_ranges();
+            generate_ranges(true); // force generate min_split, min_leaf, max_depth
             generate_impurity_threshold(); // no prior distribution info
         }
         
@@ -1060,6 +1022,7 @@ namespace mcu {
             file.printf("  \"enableAutoConfig\": %s,\n", enable_auto_config ? "true" : "false");
             file.printf("  \"enablePartialLoading\": %s,\n", enable_partial_loading ? "true" : "false");
             file.printf("  \"resultScore\": %.4f,\n", result_score);
+            file.printf("  \"max_samples\": %d,\n", max_samples);
             file.printf("  \"Estimated RAM (bytes)\": %d,\n", estimatedRAM);
 
             if (existingTimestamp.length() > 0) {
@@ -1116,6 +1079,13 @@ namespace mcu {
             enable_partial_loading = extractBoolValue(jsonStr, "enablePartialLoading");
             result_score = extractFloatValue(jsonStr, "resultScore");      
             estimatedRAM = extractIntValue(jsonStr, "Estimated RAM (bytes)");
+            
+            // Load layout bits if available (from PC-trained model)
+            threshold_bits = extractIntValue(jsonStr, "threshold_bits");
+            feature_bits = extractIntValue(jsonStr, "feature_bits");
+            label_bits = extractIntValue(jsonStr, "label_bits");
+            child_bits = extractIntValue(jsonStr, "child_bits");
+            max_samples = extractIntValue(jsonStr, "max_samples");
         }
 
         // Convert flag string to uint8_t
@@ -2283,6 +2253,11 @@ namespace mcu {
          * @note Directly writes to file system file to save RAM. File must exist and be properly initialized.
          */
         b_vector<label_type> addNewData(const b_vector<Rf_sample>& samples, bool extend = true) {
+            return addNewData(samples, extend, 0); // 0 = no max limit
+        }
+
+        // Overload with max_samples limit
+        b_vector<label_type> addNewData(const b_vector<Rf_sample>& samples, bool extend, sample_type max_samples) {
             b_vector<label_type> deletedLabels;
 
             if (!isProperlyInitialized()) {
@@ -2335,7 +2310,64 @@ namespace mcu {
                 // Append mode: add to existing samples
                 newNumSamples = currentNumSamples + samples.size();
                 
-                // Check limits
+                // Apply max_samples limit if specified
+                if (max_samples > 0 && newNumSamples > max_samples) {
+                    RF_DEBUG_2(1, "📊 Applying max_samples limit: ", max_samples, " (current: ", currentNumSamples);
+                    // Calculate how many oldest samples to remove
+                    sample_type samples_to_remove = newNumSamples - max_samples;
+                    newNumSamples = max_samples;
+                    
+                    // Read labels of samples that will be removed (oldest samples at the beginning)
+                    File readFile = RF_FS_OPEN(file_path, RF_FILE_READ);
+                    if (readFile) {
+                        readFile.seek(headerSize); // Skip to data section
+                        for (sample_type i = 0; i < samples_to_remove && i < currentNumSamples; i++) {
+                            uint8_t label;
+                            if (readFile.read(&label, sizeof(label)) == sizeof(label)) {
+                                deletedLabels.push_back(label);
+                            }
+                            // Skip the packed features to get to next sample
+                            readFile.seek(readFile.position() + packedFeatureBytes);
+                        }
+                        readFile.close();
+                    }
+                    
+                    // Shift remaining samples to the beginning (remove oldest)
+                    // This is done by reading samples after the removed ones and writing them at the beginning
+                    if (samples_to_remove < currentNumSamples) {
+                        sample_type samples_to_keep = currentNumSamples - samples_to_remove;
+                        b_vector<uint8_t> temp_buffer;
+                        temp_buffer.reserve(sampleDataSize);
+                        
+                        File shiftFile = RF_FS_OPEN(file_path, "r+");
+                        if (shiftFile) {
+                            // Read and shift each sample
+                            for (sample_type i = 0; i < samples_to_keep; i++) {
+                                size_t read_pos = headerSize + (samples_to_remove + i) * sampleDataSize;
+                                size_t write_pos = headerSize + i * sampleDataSize;
+                                
+                                shiftFile.seek(read_pos);
+                                temp_buffer.clear();
+                                for (size_t b = 0; b < sampleDataSize; b++) {
+                                    int byte_val = shiftFile.read();
+                                    if (byte_val < 0) break;
+                                    temp_buffer.push_back(static_cast<uint8_t>(byte_val));
+                                }
+                                
+                                if (temp_buffer.size() == sampleDataSize) {
+                                    shiftFile.seek(write_pos);
+                                    shiftFile.write(temp_buffer.data(), temp_buffer.size());
+                                }
+                            }
+                            shiftFile.close();
+                        }
+                        
+                        currentNumSamples = samples_to_keep;
+                        RF_DEBUG_2(1, "♻️  Removed ", samples_to_remove, " oldest samples, kept ", samples_to_keep);
+                    }
+                }
+                
+                // Check RF_MAX_SAMPLES limit
                 if (newNumSamples > RF_MAX_SAMPLES) {
                     size_t maxAddable = RF_MAX_SAMPLES - currentNumSamples;
                     RF_DEBUG(2, "⚠️ Reaching maximum sample limit, limiting to ", maxAddable);
@@ -2963,25 +2995,34 @@ namespace mcu {
     ------------------------------------------------------------------------------------------------------------------
     */
     struct node_layout{
+        pair<uint8_t, uint8_t> threshold_layout;  // start bit, length in bits
         pair<uint8_t, uint8_t> featureID_layout; // start bit, length in bits
         pair<uint8_t, uint8_t> label_layout;     // start bit, length in bits
         pair<uint8_t, uint8_t> left_child_layout; // start bit, length in bits
 
-        //default constructor
         node_layout() {
-            featureID_layout  = make_pair(4, 10);       // 10 bits for featureID - max 1024 features
-            label_layout      = make_pair(14, 8);       // 8 bits for label - max 256 classes
-            left_child_layout = make_pair(22, 10);      // 10 bits for left child index - max 1024 nodes
-        }
-        // constructor
-        node_layout(uint8_t feature_bits, uint8_t label_bits, uint8_t child_index_bits) {
-            set_layout(feature_bits, label_bits, child_index_bits);
+            set_layout(10, 8, 10, 3);
         }
 
-        void set_layout(uint8_t feature_bits, uint8_t label_bits, uint8_t child_index_bits) {
-            featureID_layout = make_pair(4, feature_bits);
-            label_layout = make_pair(featureID_layout.first + featureID_layout.second, label_bits);
-            left_child_layout = make_pair(label_layout.first + label_layout.second, child_index_bits);
+        node_layout(uint8_t feature_bits, uint8_t label_bits, uint8_t child_index_bits) {
+            set_layout(feature_bits, label_bits, child_index_bits, 3);
+        }
+
+        node_layout(uint8_t feature_bits, uint8_t label_bits, uint8_t child_index_bits, uint8_t threshold_bits) {
+            set_layout(feature_bits, label_bits, child_index_bits, threshold_bits);
+        }
+
+        void set_layout(uint8_t feature_bits, uint8_t label_bits, uint8_t child_index_bits, uint8_t threshold_bits = 3) {
+            if (threshold_bits < 1) {
+                threshold_bits = 1;
+            }
+            if (threshold_bits > 8) {
+                threshold_bits = 8;
+            }
+            threshold_layout = make_pair(static_cast<uint8_t>(1), threshold_bits);
+            featureID_layout = make_pair(static_cast<uint8_t>(threshold_layout.first + threshold_layout.second), feature_bits);
+            label_layout = make_pair(static_cast<uint8_t>(featureID_layout.first + featureID_layout.second), label_bits);
+            left_child_layout = make_pair(static_cast<uint8_t>(label_layout.first + label_layout.second), child_index_bits);
         }
         // return max_features, allow exceed RF_MAX_FEATURES
         uint16_t max_features() const {
@@ -3001,7 +3042,7 @@ namespace mcu {
             return mn > RF_MAX_NODES ? mn : RF_MAX_NODES;
         }
         uint8_t bits_per_node() const {
-            return 1 + 3 + featureID_layout.second + label_layout.second + left_child_layout.second;
+            return static_cast<uint8_t>(1 + threshold_layout.second + featureID_layout.second + label_layout.second + left_child_layout.second);
         }
     };
 
@@ -3009,12 +3050,11 @@ namespace mcu {
         uint32_t packed_data; 
         
         /** Bit layout optimized for breadth-first tree building:
-            * bit   0      : is_leaf        
-            * bits  1-3    : threshold slot
-            * bits  4-o1   : featureID    (o1 - offset_1 = 4 + feature_bits)
-            * bits  s1-o2  : label        (s1 - start_1 = o1 + 1, o2 - offset_2 = s1 + label_bits)
-            * bits  s2-o3  : left child index   (s2 - start_2 = o2 + 1, o3 - offset_3 = s2 + child_index_bits)
-        @note: right child index = left child index + 1 
+            * bit   0      : is_leaf
+            * bits  threshold_layout       : threshold slot (dataset-dependent width)
+            * bits  featureID_layout       : feature ID
+            * bits  label_layout           : label ID
+            * bits  left_child_layout      : left child index (right child = left + 1)
         */
 
         Tree_node() : packed_data(0) {}
@@ -3022,8 +3062,12 @@ namespace mcu {
         inline bool getIsLeaf() const {
             return (packed_data >> 0) & 0x01;  // Bit 0
         }
-        inline uint8_t getThresholdSlot() const {
-            return (packed_data >> 1) & 0x07;  // Bits 1-3 (3 bits)
+        inline uint16_t getThresholdSlot(const pair<uint8_t, uint8_t>& layout) const noexcept {
+            if (layout.second == 0) {
+                return 0;
+            }
+            const uint16_t mask = static_cast<uint16_t>((1u << layout.second) - 1u);
+            return static_cast<uint16_t>((packed_data >> layout.first) & mask);
         }
         inline uint16_t getFeatureID(const pair<uint8_t, uint8_t>& layout) const noexcept{
             return (packed_data >> layout.first) & ((1 << layout.second) - 1);  
@@ -3046,9 +3090,13 @@ namespace mcu {
             packed_data &= ~(0x01); // Clear bit 0
             packed_data |= (isLeaf ? 1 : 0) << 0; // Set bit 0
         }
-        inline void setThresholdSlot(uint8_t slot) {
-            packed_data &= ~(0x07 << 1); // Clear bits 1-3
-            packed_data |= (slot & 0x07) << 1; // Set bits 1-3
+        inline void setThresholdSlot(uint16_t slot, const pair<uint8_t, uint8_t>& layout) noexcept {
+            if (layout.second == 0) {
+                return;
+            }
+            const uint32_t mask = ((1u << layout.second) - 1u) << layout.first;
+            packed_data &= ~mask;
+            packed_data |= (static_cast<uint32_t>(slot) & ((1u << layout.second) - 1u)) << layout.first;
         }
         inline void setFeatureID(uint16_t featureID, const pair<uint8_t, uint8_t>& layout) noexcept{
             packed_data &= ~(((1 << layout.second) - 1) << layout.first); // Clear featureID bits
@@ -3284,19 +3332,15 @@ namespace mcu {
         }
 
         __attribute__((always_inline)) inline label_type predict_features(
-            const packed_vector<8>& packed_features,
-            const b_vector<uint16_t>& thresholds) const {
+            const packed_vector<8>& packed_features) const {
             if (!layout || nodes.empty()) {
-                return RF_ERROR_LABEL;
-            }
-
-            if (thresholds.empty()) {
                 return RF_ERROR_LABEL;
             }
 
             const auto& featureLayout = layout->featureID_layout;
             const auto& labelLayout = layout->label_layout;
             const auto& childLayout = layout->left_child_layout;
+            const auto& thresholdLayout = layout->threshold_layout;
 
             uint16_t currentIndex = 0;
             const uint16_t nodeCount = static_cast<uint16_t>(nodes.size());
@@ -3310,10 +3354,7 @@ namespace mcu {
                 }
 
                 const uint16_t featureID = node.getFeatureID(featureLayout);
-                const uint8_t thresholdSlot = node.getThresholdSlot();
-                const uint16_t threshold = (thresholdSlot < thresholds.size())
-                                               ? thresholds[thresholdSlot]
-                                               : thresholds.back();
+                const uint16_t threshold = node.getThresholdSlot(thresholdLayout);
 
                 const uint16_t featureValue = static_cast<uint16_t>(packed_features[featureID]);
                 const uint16_t leftChild = node.getLeftChildIndex(childLayout);
@@ -4297,7 +4338,7 @@ namespace mcu {
                     firstLine.trim();
                     checkFile.close();
                     // If header doesn't contain "max_depth", delete the old file
-                    if (firstLine.indexOf("max_depth") < 0 || firstLine.indexOf("min_split,min_leaf,max_depth,total_nodes") < 0) {
+                    if (firstLine.indexOf("max_depth") < 0 || firstLine.indexOf("min_split,min_leaf,max_depth,max_nodes") < 0) {
                         RF_DEBUG(1, "🔄 Detected old node log format, removing: ", node_predictor_log);
                         RF_FS_REMOVE(node_predictor_log);
                     }
@@ -4307,7 +4348,7 @@ namespace mcu {
             if (node_predictor_log[0] != '\0' && !RF_FS_EXISTS(node_predictor_log)) {
                 File logFile = RF_FS_OPEN(node_predictor_log, FILE_WRITE);
                 if (logFile) {
-                    logFile.println("min_split,min_leaf,max_depth,total_nodes");
+                    logFile.println("min_split,min_leaf,max_depth,max_nodes");
                     logFile.close();
                 }
             }
@@ -4738,7 +4779,10 @@ namespace mcu {
             float acc = accuracy;
             if(acc < 80.0f) acc = 85.0f;
             uint16_t estimate = static_cast<uint16_t>(raw_est * 100 / acc);
-            return estimate < RF_MAX_NODES ? estimate : 512;       // 2kB RAM
+            uint16_t safe_estimate;
+            if(config_ptr->num_samples < 2024) safe_estimate = 512;
+            else safe_estimate = 2047;
+            return estimate < RF_MAX_NODES ? estimate : safe_estimate;       // 2kB RAM
         }
 
         uint16_t estimate_nodes(const Rf_config& config) {
@@ -4753,7 +4797,10 @@ namespace mcu {
             if(config.training_score == K_FOLD_SCORE){
                 estimate = estimate * config.k_folds / (config.k_folds + 1);
             }
-            return estimate < RF_MAX_NODES ? estimate : 512;       // 2kB RAM
+            uint16_t safe_estimate;
+            if(config.num_samples < 2024) safe_estimate = 512;
+            else safe_estimate = 2047;
+            return estimate < RF_MAX_NODES ? estimate : safe_estimate;       // 2kB RAM
         }
 
         uint16_t queue_peak_size(uint8_t min_split, uint8_t min_leaf, uint16_t max_depth = 250) {
@@ -5279,11 +5326,13 @@ namespace mcu {
             size_t   total_depths;       // store total depth of all trees
             size_t   total_nodes;        // store total nodes of all trees
             size_t   total_leaves;       // store total leaves of all trees
-            b_vector<NodeToBuild> queue_nodes; // Queue for breadth-first tree building
-
+            vector<NodeToBuild> queue_nodes; // Queue for breadth-first tree building
             unordered_map<label_type, sample_type> predictClass; // Map to count predictions per class during inference
-
             bool is_unified = true;  // Default to unified form (used at the end of training and inference)
+
+            inline bool has_base() const { 
+                return config_ptr!= nullptr && base_ptr != nullptr && base_ptr->ready_to_use(); 
+            }
 
             void rebuild_tree_slots(uint8_t count, bool reset_storage = true) {
                 trees.clear();
@@ -5315,9 +5364,6 @@ namespace mcu {
                 }
             }
 
-            inline bool has_base() const { 
-                return config_ptr!= nullptr && base_ptr != nullptr && base_ptr->ready_to_use(); 
-            }
 
             uint8_t bits_required(uint32_t max_value) {
                 uint8_t bits = 0;
@@ -5344,6 +5390,12 @@ namespace mcu {
                 uint8_t label_bits       = bits_required(max_label_id);
                 uint8_t feature_bits     = bits_required(max_feature_id);
                 uint8_t child_index_bits = bits_required(max_node_index);
+                uint8_t threshold_bits   = config_ptr ? config_ptr->quantization_coefficient : 1;
+                if (threshold_bits < 1) {
+                    threshold_bits = 1;
+                } else if (threshold_bits > 8) {
+                    threshold_bits = 8;
+                }
 
                 if (label_bits > 8) {
                     label_bits = 8;
@@ -5352,10 +5404,39 @@ namespace mcu {
                     feature_bits = 10;
                 }
 
-                const uint8_t max_child_bits_word = static_cast<uint8_t>((4 + feature_bits + label_bits) >= 32
-                    ? 0
-                    : 32 - (4 + feature_bits + label_bits));
                 const uint8_t max_child_bits_limit = bits_required(fallback_node_index);
+
+                auto compute_available_child_bits = [&](uint8_t tb) -> uint8_t {
+                    if ((1 + tb + feature_bits + label_bits) >= 32) {
+                        return static_cast<uint8_t>(0);
+                    }
+                    return static_cast<uint8_t>(32 - (1 + tb + feature_bits + label_bits));
+                };
+
+                uint8_t desired_child_bits = child_index_bits;
+                if (desired_child_bits > max_child_bits_limit) {
+                    desired_child_bits = max_child_bits_limit;
+                }
+                if (desired_child_bits == 0) {
+                    desired_child_bits = 1;
+                }
+
+                uint8_t available_child_bits = compute_available_child_bits(threshold_bits);
+                while (threshold_bits > 1 && available_child_bits < desired_child_bits) {
+                    --threshold_bits;
+                    available_child_bits = compute_available_child_bits(threshold_bits);
+                }
+                if (available_child_bits == 0) {
+                    threshold_bits = 1;
+                    available_child_bits = compute_available_child_bits(threshold_bits);
+                }
+
+                if (config_ptr && threshold_bits < config_ptr->quantization_coefficient) {
+                    RF_DEBUG_2(2, "⚙️ Adjusted threshold bits from ", static_cast<int>(config_ptr->quantization_coefficient),
+                             " to ", static_cast<int>(threshold_bits));
+                }
+
+                const uint8_t max_child_bits_word = available_child_bits;
 
                 if (max_child_bits_word == 0) {
                     child_index_bits = 1;
@@ -5371,7 +5452,7 @@ namespace mcu {
                     }
                 }
 
-                layout.set_layout(feature_bits, label_bits, child_index_bits);
+                layout.set_layout(feature_bits, label_bits, child_index_bits, threshold_bits);
             }
             
         public:
@@ -5403,9 +5484,22 @@ namespace mcu {
                 if (node_pred_ptr && node_pred_ptr->is_trained) {
                     est_nodes = node_pred_ptr->estimate_nodes(*config_ptr);
                 } else {
-                    est_nodes = static_cast<uint16_t>(2046); // Safe default when predictor not available/trained
+                    if (config_ptr->num_samples < 2048) est_nodes = 512;
+                    else est_nodes = 2046;
                 }
-                calculate_layout(config_ptr->num_labels, config_ptr->num_features, est_nodes);
+                
+                // Check if layout bits are provided in config (from PC-trained model)
+                if (config_ptr->threshold_bits > 0 && config_ptr->feature_bits > 0 && 
+                    config_ptr->label_bits > 0 && config_ptr->child_bits > 0) {
+                    // Use the exact layout from PC training
+                    RF_DEBUG(1, "📐 Using layout from config file");
+                    layout.set_layout(config_ptr->feature_bits, config_ptr->label_bits, 
+                                     config_ptr->child_bits, config_ptr->threshold_bits);
+                } else {
+                    // Calculate layout based on estimation
+                    RF_DEBUG(1, "📐 Calculating layout from dataset parameters");
+                    calculate_layout(config_ptr->num_labels, config_ptr->num_features, est_nodes);
+                }
                 rebuild_tree_slots(config_ptr->num_trees, true);
 
                 // restore old config values
@@ -5502,7 +5596,7 @@ namespace mcu {
                 return true;
             }
 
-            label_type predict_features(const packed_vector<8>& features, const b_vector<uint16_t>& thresholds) {
+            label_type predict_features(const packed_vector<8>& features) {
                 if(__builtin_expect(trees.empty() || !is_loaded, 0)) {
                     RF_DEBUG(2, "❌ Forest not loaded or empty, cannot predict.");
                     return RF_ERROR_LABEL; // Unknown class
@@ -5518,7 +5612,7 @@ namespace mcu {
                     
                     const uint8_t numTrees = trees.size();
                     for(uint8_t t = 0; t < numTrees; ++t) {
-                        label_type predict = trees[t].predict_features(features, thresholds);
+                        label_type predict = trees[t].predict_features(features);
                         if(__builtin_expect(predict < numLabels, 1)) {
                             votes[predict]++;
                         }
@@ -5540,7 +5634,7 @@ namespace mcu {
                     
                     const uint8_t numTrees = trees.size();
                     for(uint8_t t = 0; t < numTrees; ++t) {
-                        label_type predict = trees[t].predict_features(features, thresholds);
+                        label_type predict = trees[t].predict_features(features);
                         if(__builtin_expect(predict < numLabels, 1)) {
                             predictClass[predict]++;
                         }
@@ -6005,7 +6099,7 @@ namespace mcu {
             }
 
             // Get queue_nodes for tree building
-            b_vector<NodeToBuild>& getQueueNodes() {
+            vector<NodeToBuild>& getQueueNodes() {
                 return queue_nodes;
             }
 
@@ -6141,7 +6235,7 @@ namespace mcu {
                 return false; // No valid samples to add
             }
 
-            auto deleted_labels = base_data.addNewData(valid_samples, config_ptr->extend_base_data);
+            auto deleted_labels = base_data.addNewData(valid_samples, config_ptr->extend_base_data, config_ptr->max_samples);
 
             // update config 
             if(config_ptr->extend_base_data) {

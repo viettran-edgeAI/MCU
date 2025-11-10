@@ -3,7 +3,8 @@
  * Upload this sketch to ESP32, then use transfer_quantizer.py to send files
  * Saves files to file system with model_name/filename structure and CRC verification
  */
-
+// #define RF_USE_SDCARD    // Uncomment to use SD card storage instead of LittleFS(default using built-in SD slot)
+// #define RF_USE_SDSPI    // Uncomment to use SD card over SPI interface (external module)
 #include "Rf_file_manager.h"
 
 // Transfer timing and size configuration

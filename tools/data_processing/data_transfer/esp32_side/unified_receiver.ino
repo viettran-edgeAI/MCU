@@ -7,6 +7,8 @@
  * 
  * It is designed to work with the 'unified_transfer.py' script.
  */
+// #define RF_USE_SDCARD    // Uncomment to use SD card storage instead of LittleFS(default using built-in SD slot)
+// #define RF_USE_SDSPI    // Uncomment to use SD card over SPI interface (external module)
 #include "Rf_file_manager.h"
 
 // --- Protocol Constants ---

@@ -20,7 +20,8 @@
  * 
  * Designed to work with 'transfer_model.py' script.
  */
-
+// #define RF_USE_SDCARD    // Uncomment to use SD card storage instead of LittleFS(default using built-in SD slot)
+// #define RF_USE_SDSPI    // Uncomment to use SD card over SPI interface (external module)
 #include "Rf_file_manager.h"
 
 // --- Protocol Constants ---
@@ -303,7 +304,7 @@ bool read_header() {
     uint8_t header_buffer[sizeof(CMD_HEADER) - 1];
     size_t bytes_read = Serial.readBytes(header_buffer, sizeof(header_buffer));
     if (bytes_read != sizeof(header_buffer) || memcmp(header_buffer, CMD_HEADER, sizeof(header_buffer)) != 0) {
-        return false;
+        return false; 
     }
     return true;
 }

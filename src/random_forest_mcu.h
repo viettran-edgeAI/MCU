@@ -509,16 +509,16 @@ namespace mcu{
                 RF_DEBUG(2, "No bootstrap, unique sample IDs only");
             }
 
-            // uint8_t bits = 3;       // bits per sample ID (for bootstrap sampling)
-            // if(!config.use_boostrap){
-            //     bits = 1;
-            // }else{
-            //     if(config.num_samples < 2048){
-            //         bits = 3;
-            //     }else{
-            //         bits = 3;
-            //     }
-            // }
+            uint8_t bits = 3;       // bits per sample ID (for bootstrap sampling)
+            if(!config.use_boostrap){
+                bits = 1;
+            }else{
+                if(config.num_samples < 2048){
+                    bits = 2;
+                }else{
+                    bits = 3;
+                }
+            }
 
             // Track hashes of each tree dataset to avoid duplicates across trees
             unordered_set<uint64_t> seen_hashes;
@@ -527,7 +527,7 @@ namespace mcu{
             for (uint8_t i = 0; i < config.num_trees; i++) {
                 // Create a new ID_vector for this tree with proper range [0, numSample-1]
                 TreeSampleIDs sub_data;
-                // sub_data.set_bits_per_value(bits);
+                sub_data.set_bits_per_value(bits);
                 
                 // CRITICAL: Set the ID range to match the sample IDs (0 to numSample-1)
                 if(numSample > 1){

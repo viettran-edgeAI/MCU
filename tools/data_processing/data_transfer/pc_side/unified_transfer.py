@@ -35,7 +35,20 @@ RESP_ERROR = b"ERROR"
 
 # The following 2 parameters must match exactly esp32 side sketch
 # changed them when transfer process failed
-CHUNK_SIZE = 256 # bytes per chunk - further reduced for USB CDC compatibility
+#
+# CHUNK_SIZE trade-offs:
+#   - Larger chunks = faster transfer (fewer round-trips)
+#   - Smaller chunks = more reliable (less USB CDC buffer saturation)
+#
+# Board-specific guidance:
+#   - ESP32-C3/C6: 220 bytes (USB CDC buffer ~384 bytes; conservative margin)
+#   - ESP32-S3:    256 bytes (larger CDC buffer available)
+#   - ESP32:       256 bytes (standard board, good throughput)
+#
+# Default is 220 for maximum compatibility. To use higher speeds on larger boards,
+# increase CHUNK_SIZE, but MUST coordinate with ESP32 receiver's USER_CHUNK_SIZE
+# (define USER_CHUNK_SIZE before including board_config.h in the sketch).
+CHUNK_SIZE = 220 # bytes per chunk - sized to fit low-RAM USB CDC buffers
 CHUNK_DELAY = 0.025  # delay between chunks in seconds - V2 uses ACKs, so keep small
 
 # Timeout settings
@@ -169,6 +182,8 @@ def transfer_file(ser, file_path, esp32_filename):
                     success = True
                     break
             elif line.startswith("NACK "):
+                if line:
+                    print(f"   ↩ {line}")
                 # Retry
                 if attempt < MAX_RETRIES:
                     sys.stdout.write('\n')

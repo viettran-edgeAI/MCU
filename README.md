@@ -139,6 +139,50 @@ bool saveToBinary(const char* filename) const;
 bool loadFromBinary(const char* filename);
 ```
 
+## Configuration
+
+### Storage Configuration (Runtime - Recommended)
+
+Choose your storage backend at runtime for maximum flexibility:
+
+```cpp
+#include "Rf_file_manager.h"
+
+// Choose one:
+const RfStorageType STORAGE_MODE = RfStorageType::LITTLEFS;  // Internal flash (default)
+// const RfStorageType STORAGE_MODE = RfStorageType::SD_MMC;    // Built-in SD slot (ESP32-CAM)
+// const RfStorageType STORAGE_MODE = RfStorageType::SD_SPI;    // External SD module
+
+void setup() {
+    Serial.begin(115200);
+    
+    if (!RF_FS_BEGIN(STORAGE_MODE)) {
+        Serial.println("❌ Storage init failed!");
+        return;
+    }
+    
+    Serial.println("✅ Storage ready!");
+}
+```
+
+### PSRAM Configuration (Compile-Time)
+
+For ESP32 boards with PSRAM (WROVER, S3), enable PSRAM **before** including headers:
+
+```cpp
+#define RF_USE_PSRAM  // Must be BEFORE includes
+#include "random_forest_mcu.h"
+
+void setup() {
+    Serial.begin(115200);
+    
+    // Containers automatically use PSRAM when available
+    mcu::vector<uint8_t> largeData(100000);  // Allocated in PSRAM
+}
+```
+
+**📖 See [Configuration_Macros.md](docs/Configuration_Macros.md) for complete details on all configuration options.**
+
 ## Memory Usage Guidelines
 
 ### PSRAM Support (ESP32 with External RAM)

@@ -14,29 +14,16 @@
 #include <cassert>
 #include <utility>
 
+#include "Rf_board_config.h"
+#if defined(ESP_PLATFORM) || defined(ARDUINO_ARCH_ESP32)
+#include <esp_heap_caps.h>
+#endif
 #include "hash_kernel.h"
 #include "initializer_list.h"
 
 #define hashers best_hashers_16 // change to best_hashers_8 to save 255 bytes of disk space, but more collisions
 
-// PSRAM Configuration
-// Users can define RF_USE_PSRAM before including this header to enable PSRAM allocation
-// Example: #define RF_USE_PSRAM
-#if defined(RF_USE_PSRAM)
-    #if defined(CONFIG_SPIRAM_SUPPORT)        /* For ESP-IDF builds */ || \
-        defined(BOARD_HAS_PSRAM)              /* Arduino core defines this for PSRAM boards */ || \
-        defined(ESP32S3) || defined(ESP32WROVER) || defined(ESP32WROVER_E) || \
-        defined(ESP32_PICO) /* optional fallback if your target uses it */
-
-        #include "esp_heap_caps.h"
-        #define RF_PSRAM_AVAILABLE 1
-    #else
-        #warning "RF_USE_PSRAM is defined but board does not support PSRAM. Using regular DRAM instead."
-        #define RF_PSRAM_AVAILABLE 0
-    #endif
-#else
-    #define RF_PSRAM_AVAILABLE 0
-#endif
+// PSRAM availability is configured in board_config.h
 
 namespace mcu {
     // Memory allocation helpers - automatically use PSRAM when enabled
@@ -88,7 +75,7 @@ namespace mcu {
             }
 
             auto* base = static_cast<uint8_t*>(raw);
-            auto* header = new(raw) detail::AllocationHeader(recorded_count, flags);
+            auto* header [[maybe_unused]] = new(raw) detail::AllocationHeader(recorded_count, flags);
 
             uint8_t* data_start = base + stride;
             uintptr_t aligned_addr = (reinterpret_cast<uintptr_t>(data_start) + alignment - 1) & ~(alignment - 1);
@@ -131,7 +118,7 @@ namespace mcu {
                 }
             }
 
-            const bool uses_psram = header->uses_psram();
+            const bool uses_psram [[maybe_unused]] = header->uses_psram();
             header->~AllocationHeader();
 
             #if RF_PSRAM_AVAILABLE

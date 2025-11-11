@@ -1,5 +1,6 @@
 #include <iostream>
 #include <filesystem>
+#include <system_error>
 #include <fstream>
 #include <sstream>
 #include <regex>
@@ -25,37 +26,135 @@ struct Config {
     
     struct Preprocessing {
         struct TargetSize {
-            int width;
-            int height;
+            int width = 32;
+            int height = 32;
         } target_size;
-        bool grayscale;
-        bool normalize;
+        bool grayscale = true;
+        bool normalize = true;
         std::string description;
     } preprocessing;
     
     struct HOGParameters {
-        int img_width;
-        int img_height;
-        int cell_size;
-        int block_size;
-        int block_stride;
-        int nbins;
+        int img_width = 32;
+        int img_height = 32;
+        int cell_size = 8;
+        int block_size = 16;
+        int block_stride = 6;
+        int nbins = 4;
         std::string description;
     } hog_parameters;
     
     struct Output {
         std::string intermediate_path;
-        std::string csv_path;
-        bool shuffle_data;
+        std::string model_name = "hog_features";
+        bool shuffle_data = true;
         std::string description;
     } output;
     
     struct Processing {
-        int max_images_per_class;
-        bool verbose;
+        int max_images_per_class = -1;
+        bool verbose = false;
         std::string description;
     } processing;
+
+    struct Esp32 {
+        std::string input_format = "GRAYSCALE";
+        int input_width = 320;
+        int input_height = 240;
+        std::string resize_method = "BILINEAR";
+        bool maintain_aspect_ratio = false;
+        int jpeg_quality = 80;
+    } esp32;
 };
+
+namespace {
+
+std::filesystem::path computeModelBasePath(const std::string& modelName) {
+    if (modelName.empty()) {
+        return std::filesystem::path("hog_features");
+    }
+
+    std::filesystem::path base(modelName);
+    if (base.extension() == ".csv") {
+        base.replace_extension("");
+    }
+    if (base.filename().empty()) {
+        base /= "hog_features";
+    }
+    return base;
+}
+
+bool ensureParentDirectoryExists(const std::filesystem::path& target) {
+    const auto parent = target.parent_path();
+    if (parent.empty()) {
+        return true;
+    }
+
+    std::error_code ec;
+    std::filesystem::create_directories(parent, ec);
+    if (ec) {
+        std::cerr << "Error: Failed to create directory " << parent << " (" << ec.message() << ")" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+bool writeModelConfigFile(const Config& config,
+                          size_t featureLength,
+                          const std::string& modelName,
+                          const std::string& csvOutputPath,
+                          const std::filesystem::path& cfgPath) {
+    if (featureLength == 0) {
+        std::cerr << "Error: Feature length is zero, cannot write model configuration." << std::endl;
+        return false;
+    }
+
+    if (!ensureParentDirectoryExists(cfgPath)) {
+        return false;
+    }
+
+    const std::string featureFileName = std::filesystem::path(csvOutputPath).filename().string();
+
+    std::ofstream cfgFile(cfgPath, std::ios::trunc);
+    if (!cfgFile.is_open()) {
+        std::cerr << "Error: Cannot open config file " << cfgPath << " for writing." << std::endl;
+        return false;
+    }
+
+    cfgFile << "{\n";
+    // cfgFile << "  \"model_name\": \"" << modelName << "\",\n";
+    // cfgFile << "  \"feature_csv\": \"" << csvOutputPath << "\",\n";
+    // cfgFile << "  \"feature_file_name\": \"" << featureFileName << "\",\n";
+    // cfgFile << "  \"feature_length\": " << featureLength << ",\n";
+    // cfgFile << "  \"preprocessing\": {\n";
+    // cfgFile << "    \"grayscale\": " << (config.preprocessing.grayscale ? "true" : "false") << ",\n";
+    // cfgFile << "    \"normalize\": " << (config.preprocessing.normalize ? "true" : "false") << ",\n";
+    // cfgFile << "    \"target_width\": " << config.preprocessing.target_size.width << ",\n";
+    // cfgFile << "    \"target_height\": " << config.preprocessing.target_size.height << "\n";
+    // cfgFile << "  },\n";
+    cfgFile << "  \"hog\": {\n";
+    cfgFile << "    \"hog_img_width\": " << config.hog_parameters.img_width << ",\n";
+    cfgFile << "    \"hog_img_height\": " << config.hog_parameters.img_height << ",\n";
+    cfgFile << "    \"cell_size\": " << config.hog_parameters.cell_size << ",\n";
+    cfgFile << "    \"block_size\": " << config.hog_parameters.block_size << ",\n";
+    cfgFile << "    \"block_stride\": " << config.hog_parameters.block_stride << ",\n";
+    cfgFile << "    \"nbins\": " << config.hog_parameters.nbins << "\n";
+    cfgFile << "  },\n";
+    cfgFile << "  \"esp32\": {\n";
+    cfgFile << "    \"input_format\": \"" << config.esp32.input_format << "\",\n";
+    cfgFile << "    \"input_width\": " << config.esp32.input_width << ",\n";
+    cfgFile << "    \"input_height\": " << config.esp32.input_height << ",\n";
+    cfgFile << "    \"resize_method\": \"" << config.esp32.resize_method << "\",\n";
+    cfgFile << "    \"maintain_aspect_ratio\": " << (config.esp32.maintain_aspect_ratio ? "true" : "false") << ",\n";
+    cfgFile << "    \"jpeg_quality\": " << config.esp32.jpeg_quality << "\n";
+    cfgFile << "  }\n";
+    cfgFile << "}\n";
+
+    cfgFile.close();
+    return true;
+}
+
+} // namespace
 
 class SimpleJSONParser {
 public:
@@ -96,17 +195,53 @@ public:
         
         // Parse output
         config.output.intermediate_path = extractStringValue(content, "intermediate_path");
-        config.output.csv_path = extractStringValue(content, "csv_path");
-        config.output.shuffle_data = extractBoolValue(content, "shuffle_data");
+        const std::string parsedModelName = extractStringValue(content, "model_name");
+        if (!parsedModelName.empty()) {
+            config.output.model_name = parsedModelName;
+        }
+        if (containsKey(content, "shuffle_data")) {
+            config.output.shuffle_data = extractBoolValue(content, "shuffle_data");
+        }
         
         // Parse processing
-        config.processing.max_images_per_class = extractIntValue(content, "max_images_per_class");
-        config.processing.verbose = extractBoolValue(content, "verbose");
+        if (containsKey(content, "max_images_per_class")) {
+            config.processing.max_images_per_class = extractIntValue(content, "max_images_per_class");
+        }
+        if (containsKey(content, "verbose")) {
+            config.processing.verbose = extractBoolValue(content, "verbose");
+        }
+
+        // Parse ESP32 settings
+        const std::string parsedInputFormat = extractStringValue(content, "input_format");
+        if (!parsedInputFormat.empty()) {
+            config.esp32.input_format = parsedInputFormat;
+        }
+        if (containsKey(content, "input_width")) {
+            config.esp32.input_width = extractIntValue(content, "input_width");
+        }
+        if (containsKey(content, "input_height")) {
+            config.esp32.input_height = extractIntValue(content, "input_height");
+        }
+        const std::string parsedResizeMethod = extractStringValue(content, "resize_method");
+        if (!parsedResizeMethod.empty()) {
+            config.esp32.resize_method = parsedResizeMethod;
+        }
+        if (containsKey(content, "maintain_aspect_ratio")) {
+            config.esp32.maintain_aspect_ratio = extractBoolValue(content, "maintain_aspect_ratio");
+        }
+        if (containsKey(content, "jpeg_quality")) {
+            config.esp32.jpeg_quality = extractIntValue(content, "jpeg_quality");
+        }
         
         return config;
     }
     
 private:
+    static bool containsKey(const std::string& json, const std::string& key) {
+        std::regex pattern("\\\"" + key + "\\\"\\s*:");
+        return std::regex_search(json, pattern);
+    }
+
     static std::string extractStringValue(const std::string& json, const std::string& key) {
         std::regex pattern("\"" + key + "\"\\s*:\\s*\"([^\"]+)\"");
         std::smatch match;
@@ -229,10 +364,6 @@ private:
     static mcu::vector<uint8_t> parse_image_file(const std::string& path, const Config& config) {
         mcu::vector<uint8_t> data;
         
-        if (config.processing.verbose) {
-            std::cout << "    Loading image: " << path << std::endl;
-        }
-        
         // Load image using OpenCV
         cv::Mat img = cv::imread(path, cv::IMREAD_COLOR);
         if (img.empty()) {
@@ -292,12 +423,6 @@ private:
                     data.push_back(gray_value);
                 }
             }
-        }
-        
-        if (config.processing.verbose) {
-            std::cout << "    Processed to " << data.size() << " pixels (" 
-                      << config.preprocessing.target_size.width << "x" 
-                      << config.preprocessing.target_size.height << ")" << std::endl;
         }
         
         return data;
@@ -375,11 +500,27 @@ private:
 class UnifiedProcessor {
 public:
     static int processDataset(const Config& config) {
+        std::filesystem::path basePath = computeModelBasePath(config.output.model_name);
+        const std::string modelNameForConfig = basePath.generic_string();
+        std::filesystem::path csvPath = basePath;
+        csvPath += ".csv";
+        std::filesystem::path cfgPath = basePath;
+        cfgPath += "_hogcfg.json";
+        const std::string csvOutputPath = csvPath.generic_string();
+        const std::string cfgOutputPath = cfgPath.generic_string();
+
+        if (!ensureParentDirectoryExists(csvPath)) {
+            return 1;
+        }
+
+        size_t feature_length = 0;
+
         if (config.processing.verbose) {
             std::cout << "=== " << config.workflow.name << " ===" << std::endl;
             std::cout << config.workflow.description << std::endl;
             std::cout << "Dataset path: " << config.input.dataset_path << std::endl;
-            std::cout << "Output CSV: " << config.output.csv_path << std::endl;
+            std::cout << "Output CSV: " << csvOutputPath << std::endl;
+            std::cout << "ESP32 config: " << cfgOutputPath << std::endl;
             std::cout << "Max images per class: " << config.processing.max_images_per_class << std::endl;
         }
 
@@ -406,9 +547,9 @@ public:
         // Open CSV file for writing (if not shuffling, write directly)
         std::ofstream csv_file;
         if (!config.output.shuffle_data) {
-            csv_file.open(config.output.csv_path, std::ios::trunc);
+            csv_file.open(csvPath, std::ios::trunc);
             if (!csv_file.is_open()) {
-                std::cerr << "Error: Cannot open CSV file " << config.output.csv_path << " for writing." << std::endl;
+                std::cerr << "Error: Cannot open CSV file " << csvOutputPath << " for writing." << std::endl;
                 return 1;
             }
         }
@@ -426,11 +567,8 @@ public:
                 std::filesystem::path subfolder_path = subfolder_entry.path();
                 std::string class_name = subfolder_path.filename().string();
 
-                if (config.processing.verbose) {
-                    std::cout << "Processing class: " << class_name << std::endl;
-                }
-
                 int images_processed = 0;
+                int images_skipped = 0;
                 
                 // Process images in this class folder
                 for (const auto& file_entry : fs::directory_iterator(subfolder_path)) {
@@ -464,11 +602,6 @@ public:
                     }
                     
                     if (is_supported_format) {
-                        if (config.processing.verbose) {
-                            std::cout << "  Processing: " << file_entry.path().filename() 
-                                      << " (format: " << detected_format << ")" << std::endl;
-                        }
-
                         // Load and validate image data
                         mcu::vector<uint8_t> imageData = ImageProcessor::loadImageData(
                             file_entry.path().string(), 
@@ -481,17 +614,17 @@ public:
                         );
                         
                         if (imageData.size() != expected_size) {
-                            if (config.processing.verbose) {
-                                std::cerr << "  Skipping invalid image: " << file_entry.path() 
-                                          << " (expected " << expected_size << " pixels, got " 
-                                          << imageData.size() << ")" << std::endl;
-                            }
+                            images_skipped++;
                             continue;
                         }
 
                         // Extract HOG features
                         mcu::vector<float> features;
                         hog.compute(imageData.data(), features);
+
+                        if (feature_length == 0) {
+                            feature_length = features.size();
+                        }
 
                         // If not shuffling, write directly to file
                         if (!config.output.shuffle_data) {
@@ -507,30 +640,49 @@ public:
                             row.features = std::move(features);
                             csv_data.push_back(std::move(row));
                         }
-                        
+
                         images_processed++;
                     }
                 }
                 
                 if (config.processing.verbose) {
-                    std::cout << "  Processed " << images_processed << " images for class " << class_name << std::endl;
+                    std::cout << "Processing class: " << class_name << " - " << images_processed 
+                              << " processed" << (images_skipped > 0 ? " (" + std::to_string(images_skipped) + " skipped)" : "") << std::endl;
                 }
             }
         }
 
         // Close the file if we were writing directly
         if (!config.output.shuffle_data) {
-            csv_file.close();
-            
-            if (config.processing.verbose) {
-                std::cout << "Processing complete! Results written to " << config.output.csv_path << std::endl;
+            if (feature_length == 0) {
+                csv_file.close();
+                std::error_code removeEc;
+                std::filesystem::remove(csvPath, removeEc);
+                std::cerr << "Error: No valid images found for processing!" << std::endl;
+                return 1;
             }
-            
+
+            csv_file.close();
+
+            if (!writeModelConfigFile(config, feature_length, modelNameForConfig, csvOutputPath, cfgPath)) {
+                return 1;
+            }
+
+            if (config.processing.verbose) {
+                std::cout << "Processing complete! Results written to " << csvOutputPath << std::endl;
+                std::cout << "Config saved to " << cfgOutputPath << std::endl;
+            }
+
             return 0;
         }
 
         if (csv_data.empty()) {
             std::cerr << "Error: No valid images found for processing!" << std::endl;
+            return 1;
+        }
+
+        if (feature_length == 0) {
+            std::cerr << "Error: Failed to compute HOG features for the dataset." << std::endl;
             return 1;
         }
 
@@ -545,9 +697,9 @@ public:
         }
 
         // Write to CSV file
-        csv_file.open(config.output.csv_path, std::ios::trunc);
+        csv_file.open(csvPath, std::ios::trunc);
         if (!csv_file.is_open()) {
-            std::cerr << "Error: Cannot open CSV file " << config.output.csv_path << " for writing." << std::endl;
+            std::cerr << "Error: Cannot open CSV file " << csvOutputPath << " for writing." << std::endl;
             return 1;
         }
 
@@ -565,11 +717,16 @@ public:
 
         csv_file.close();
         
+        if (!writeModelConfigFile(config, feature_length, modelNameForConfig, csvOutputPath, cfgPath)) {
+            return 1;
+        }
+
         if (config.processing.verbose) {
-            std::cout << "Processing complete! Results written to " << config.output.csv_path << std::endl;
+            std::cout << "Processing complete! Results written to " << csvOutputPath << std::endl;
             if (config.output.shuffle_data) {
                 std::cout << "(Data was shuffled)" << std::endl;
             }
+            std::cout << "Config saved to " << cfgOutputPath << std::endl;
         }
 
         return 0;

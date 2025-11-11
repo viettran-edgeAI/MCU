@@ -4,11 +4,14 @@
 
 using namespace mcu;
 
+// --- Storage Configuration ---
+const RfStorageType STORAGE_MODE = RfStorageType::LITTLEFS;  // Change to SD_MMC or SD_SPI as needed
+
 Rf_quantizer categorizer;
 
 void setup() {
-    // Initialize file system
-    if (!RF_FS_BEGIN()) {
+    // Initialize file system with selected storage mode
+    if (!RF_FS_BEGIN(STORAGE_MODE)) {
         RF_DEBUGLN("❌ File system initialization failed!");
         return;
     }

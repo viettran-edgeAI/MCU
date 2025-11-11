@@ -2,17 +2,32 @@
  * Unified Data Receiver for ESP32
  * 
  * This sketch receives a complete dataset (quantizer, parameters, and binary data)
- * from a PC in a single, coordinated session and saves the files to file system
+ * from a PC in a single, coordinated session and saves the files to file system.
  * Files are saved to /model_name/file_path structure.
  * 
  * It is designed to work with the 'unified_transfer.py' script.
+ * 
+ * PERFORMANCE NOTES:
+ * - Transfer speed depends on CHUNK_SIZE; larger chunks are faster but may cause
+ *   USB CDC buffer overruns on boards like ESP32-C3.
+ * - This sketch auto-detects the board and sets CHUNK_SIZE conservatively for C3,
+ *   but allows user override via USER_CHUNK_SIZE define.
+ * - See board_config.h for board-specific recommendations.
  */
-// #define RF_USE_SDCARD    // Uncomment to use SD card storage instead of LittleFS(default using built-in SD slot)
-// #define RF_USE_SDSPI    // Uncomment to use SD card over SPI interface (external module)
+
+// CRITICAL: Disable RF_DEBUG_LEVEL BEFORE including Rf_file_manager.h
+// Debug messages to Serial will corrupt the binary protocol communication
+#define RF_DEBUG_LEVEL 0
+
+#include <Rf_board_config.h>
 #include "Rf_file_manager.h"
 
+// --- Storage Configuration ---
+// Uses LittleFS for ESP32 boards; file creation is handled by Rf_file_manager
+const RfStorageType STORAGE_MODE = RfStorageType::LITTLEFS;
+
 // --- Protocol Constants ---
-// Must match the Python sender script
+// Must match the Python sender script (unified_transfer.py)
 const uint8_t CMD_HEADER[] = "ESP32_XFER";
 const uint8_t CMD_START_SESSION = 0x01;
 const uint8_t CMD_FILE_INFO = 0x02;
@@ -24,10 +39,30 @@ const char* RESP_READY = "READY";
 const char* RESP_OK = "OK";
 const char* RESP_ERROR = "ERROR";
 
-const uint16_t CHUNK_SIZE = 256; // Further reduced for USB CDC compatibility
-const uint32_t CHUNK_DELAY = 20; // Increased delay for USB CDC stability
+/*
+ * CHUNK_SIZE Configuration:
+ * 
+ * This is the maximum bytes per transfer chunk. The PC script must match this value.
+ * 
+ * Trade-off:
+ *   - Larger chunks = faster transfers
+ *   - Smaller chunks = more reliable (less USB CDC buffer saturation)
+ * 
+ * Board-specific guidance:
+ *   - ESP32-C3/C6: 220 bytes (USB CDC buffer ~384 bytes; conservative margin)
+ *   - ESP32-S3:    256 bytes (larger CDC buffer)
+ *   - ESP32:       256 bytes (standard board)
+ * 
+ * If you need higher speed on larger boards, define USER_CHUNK_SIZE before
+ * including this file, or edit board_config.h to adjust DEFAULT_CHUNK_SIZE.
+ * 
+ * Default is set via board_config.h based on detected board variant.
+ */
+const uint16_t CHUNK_SIZE = USER_CHUNK_SIZE;
+
+const uint32_t CHUNK_DELAY = 20;        // ms delay between chunks (ACK-driven, can be small)
 const uint32_t SERIAL_TIMEOUT_MS = 30000; // Extended timeout for large files
-const uint32_t HEADER_WAIT_MS = 100; // Wait time for header assembly
+const uint32_t HEADER_WAIT_MS = 100;    // Wait time for header assembly
 
 // --- State Machine ---
 enum class State {
@@ -79,6 +114,11 @@ void blinkLed(int count, int duration) {
 }
 
 uint32_t compute_crc32(const uint8_t* data, size_t len) {
+    /*
+     * CRC32 computation for chunk validation.
+     * Both ESP32 and PC use this same polynomial (0xEDB88320) to ensure
+     * consistency. Each chunk header includes its CRC; mismatch triggers NACK.
+     */
     uint32_t crc = 0xFFFFFFFF;
     for (size_t i = 0; i < len; ++i) {
         uint8_t b = data[i];
@@ -92,6 +132,11 @@ uint32_t compute_crc32(const uint8_t* data, size_t len) {
 }
 
 bool safeDeleteFile(const char* filename) {
+    /*
+     * Safely delete a file by first closing any open handle, then removing.
+     * Retries multiple times to handle file system delays.
+     * Returns true on successful deletion, false otherwise.
+     */
     // Ensure no file handle is open for this file
     if (currentFile && String(currentFile.name()) == String(filename)) {
         currentFile.close();
@@ -115,30 +160,41 @@ bool safeDeleteFile(const char* filename) {
 }
 
 void deleteOldDatasetFiles(const char* basename) {
-    // Delete all three dataset files for this basename (basename is the model_name)
+    /*
+     * Clean up old dataset files for a given model name before receiving new data.
+     * This prevents partial file uploads or mismatched versions from persisting.
+     * basename is the model name; files are stored in /<basename>/ directory.
+     */
     char filepath[128];
     
-    // Delete quantizer file
+    // Delete quantizer file (categories/histogram info)
     snprintf(filepath, sizeof(filepath), "/%s/%s_ctg.csv", basename, basename);
     safeDeleteFile(filepath);
     
-    // Delete parameters file
+    // Delete parameters file (model hyperparameters, feature scaling)
     snprintf(filepath, sizeof(filepath), "/%s/%s_dp.csv", basename, basename);
     safeDeleteFile(filepath);
     
-    // Delete binary dataset file
+    // Delete binary dataset file (normalized/quantized training data)
     snprintf(filepath, sizeof(filepath), "/%s/%s_nml.bin", basename, basename);
     safeDeleteFile(filepath);
 }
 
 void setup() {
+    /*
+     * Initialize Serial, storage, and LED.
+     * Print board configuration (chunk size, board type) for diagnostics.
+     */
     pinMode(LED_PIN, OUTPUT);
     setLed(false);
 
     Serial.begin(115200);
     Serial.setTimeout(SERIAL_TIMEOUT_MS);
 
-    if (!RF_FS_BEGIN()) {
+    // Print board info at startup for user reference
+    print_board_info();
+
+    if (!RF_FS_BEGIN(STORAGE_MODE)) {
         currentState = State::ERROR_STATE;
         return;
     }
@@ -147,6 +203,11 @@ void setup() {
 }
 
 void loop() {
+    /*
+     * Main state machine loop.
+     * Orchestrates session start, file metadata exchange, chunk reception,
+     * CRC validation, and session end.
+     */
     switch (currentState) {
         case State::WAITING_FOR_SESSION:
             handleStartSession();
@@ -370,26 +431,31 @@ void handleFileChunk() {
         return;
     }
 
-    // Read chunk payload
+    // Read chunk payload (handle small CDC buffers by streaming byte-by-byte)
     uint8_t buffer[CHUNK_SIZE];
+    size_t bytesRead = 0;
     start_time = millis();
-    while (Serial.available() < chunk_len) {
-        if (millis() - start_time > 5000) {
-            Serial.print("NACK ");
-            Serial.println(offset);
-            Serial.flush();
-            return; // Sender will retry
+    while (bytesRead < chunk_len) {
+        if (Serial.available()) {
+            int byteVal = Serial.read();
+            if (byteVal < 0) {
+                continue; // read error, try again
+            }
+            buffer[bytesRead++] = static_cast<uint8_t>(byteVal);
+            start_time = millis();
+        } else {
+            if (millis() - start_time > 5000) {
+                Serial.print("NACK ");
+                Serial.print(offset);
+                Serial.print(" streamed=");
+                Serial.print(bytesRead);
+                Serial.println(" timeout");
+                Serial.flush();
+                return; // Sender will retry
+            }
+            delay(1);
+            yield();
         }
-        delay(1);
-        yield();
-    }
-    
-    size_t bytesRead = Serial.readBytes(buffer, chunk_len);
-    if (bytesRead != chunk_len) {
-        Serial.print("NACK ");
-        Serial.println(offset);
-        Serial.flush();
-        return; // Sender will retry
     }
 
     // Compute CRC32 of the received chunk
@@ -397,7 +463,11 @@ void handleFileChunk() {
 
     if (calc_crc != chunk_crc) {
         Serial.print("NACK ");
-        Serial.println(offset);
+        Serial.print(offset);
+        Serial.print(" crc_calc=0x");
+        Serial.print(calc_crc, HEX);
+        Serial.print(" expected=0x");
+        Serial.println(chunk_crc, HEX);
         Serial.flush();
         delay(2);
         return; // CRC mismatch, sender will retry

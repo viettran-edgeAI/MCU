@@ -3,7 +3,9 @@
 #include "STL_MCU.h"  
 #include "Rf_file_manager.h"
 #include "esp_system.h"
+#if RF_BOARD_SUPPORTS_PSRAM
 #include <esp_psram.h>
+#endif
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -486,7 +488,7 @@ namespace mcu {
         label_type  num_labels;
         uint8_t  quantization_coefficient; // Bits per feature value (1-8)
         float lowest_distribution; 
-        b_vector<sample_type> samples_per_label; // index = label, value = count
+        b_vector<sample_type,8> samples_per_label; // index = label, value = count
 
         // MCU node layout bits (loaded from PC-trained model config)
         uint8_t threshold_bits = 0;
@@ -3112,7 +3114,6 @@ namespace mcu {
         }
     };
 
-
     class Rf_tree {
     public:
         packed_vector<32, Tree_node> nodes;
@@ -4173,7 +4174,7 @@ namespace mcu {
     public:
         float coefficients[4];  // bias, min_split_coeff, min_leaf_coeff, max_depth_coeff
         bool is_trained;
-        b_vector<node_data, 5> buffer;
+        b_vector<node_data, 12> buffer;
     private:
         const Rf_base* base_ptr = nullptr;
         const Rf_config* config_ptr = nullptr;
@@ -5373,7 +5374,7 @@ namespace mcu {
                 } while (max_value != 0 && bits < 32);
                 return (bits == 0) ? static_cast<uint8_t>(1) : bits;
             }
-
+        public:
             void calculate_layout(label_type num_label, uint16_t num_feature, uint16_t max_node){
                 const uint32_t fallback_node_index = (RF_MAX_NODES > 0)
                     ? static_cast<uint32_t>(RF_MAX_NODES - 1)
@@ -5455,7 +5456,6 @@ namespace mcu {
                 layout.set_layout(feature_bits, label_bits, child_index_bits, threshold_bits);
             }
             
-        public:
             bool is_loaded = false;
 
             Rf_tree_container(){};
@@ -6136,8 +6136,8 @@ namespace mcu {
     #else 
         constexpr static uint16_t MAX_INFER_LOGFILE_SIZE = 20480;  // Max log file size in bytes (10000 inferences)
     #endif
-        b_vector<Rf_sample> pending_samples; // buffer for pending samples
-        b_vector<label_type> actual_labels; // true labels of the samples
+        vector<Rf_sample> pending_samples; // buffer for pending samples
+        vector<label_type> actual_labels; // true labels of the samples
         uint16_t max_pending_samples; // max number of pending samples in buffer
 
         // interval between 2 inferences. If after this interval the actual label is not provided, the currently labeled waiting sample will be skipped.

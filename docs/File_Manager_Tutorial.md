@@ -618,13 +618,22 @@ delay(100);
 **Solution:**
 ```cpp
 // Check if file exists
-if (!LittleFS.exists("/data.csv")) {
+if (!rf_exists("/data.csv")) {  // Use runtime function instead
     Serial.println("File not found!");
 }
 
-// Verify LittleFS is mounted
-if (!LittleFS.begin()) {
-    Serial.println("LittleFS not mounted!");
+// Verify storage is mounted
+if (!RF_FS_BEGIN()) {  // Use macro instead (with optional storage mode parameter)
+    Serial.println("Storage not mounted!");
+}
+
+// Better approach - specify storage at start:
+#include "Rf_file_manager.h"
+void setup() {
+    const RfStorageType STORAGE_MODE = RfStorageType::SD_MMC;
+    if (!RF_FS_BEGIN(STORAGE_MODE)) {
+        Serial.println("Storage not mounted!");
+    }
 }
 
 // Check path format

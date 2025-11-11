@@ -13,9 +13,22 @@ from pathlib import Path
 
 # Transfer timing and size configuration
 # IMPORTANT: Keep CHUNK_SIZE and CHUNK_DELAY in sync with the ESP32 receiver sketch.
+# 
+# CHUNK_SIZE trade-offs:
+#   - Larger chunks = faster transfer (fewer round-trips)
+#   - Smaller chunks = more reliable (less USB CDC buffer saturation)
+# 
+# Board-specific guidance:
+#   - ESP32-C3/C6: 220 bytes (USB CDC buffer ~384 bytes; conservative margin)
+#   - ESP32-S3:    256 bytes (larger CDC buffer available)
+#   - ESP32:       256 bytes (standard board, good throughput)
+# 
+# Default is 220 for maximum compatibility. To use higher speeds on larger boards,
+# increase CHUNK_SIZE, but MUST coordinate with ESP32 receiver's USER_CHUNK_SIZE
+# (define USER_CHUNK_SIZE before including board_config.h in the sketch).
 # - CHUNK_SIZE should match the ESP32's BUFFER_CHUNK
 # - CHUNK_DELAY should be long enough so the ESP32 can flush writes between chunks
-CHUNK_SIZE = 256
+CHUNK_SIZE = 220
 CHUNK_DELAY = 0.02  # seconds between chunks (V2 uses ACKs, so keep small)
 MAX_RETRIES = 5
 
@@ -108,6 +121,8 @@ def transfer_file(file_path, port, baudrate=115200):
                         success = True
                         break
                 elif line.startswith("NACK "):
+                    if line:
+                        print(f"   ↩ {line}")
                     # Retry
                     continue
                 # Anything else: small delay and retry

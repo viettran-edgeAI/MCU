@@ -3,53 +3,59 @@
 #include <Arduino.h>
 #include <FS.h>
 
+#include <Rf_board_config.h>
+
+// Always include all storage libraries for runtime flexibility
+#include <LittleFS.h>
+
+#if RF_HAS_SDMMC
+#include <SD_MMC.h>
+#endif
+
+#include <SD.h>
+#include <SPI.h>
+
+// Default SD card pins for ESP32 (SPI mode)
+#ifndef SD_CS_PIN
+    #define SD_CS_PIN 5
+#endif
+#ifndef SD_MOSI_PIN
+    #define SD_MOSI_PIN 23
+#endif
+#ifndef SD_MISO_PIN
+    #define SD_MISO_PIN 19
+#endif
+#ifndef SD_SCK_PIN
+    #define SD_SCK_PIN 18
+#endif
+
+// Default SD_MMC configuration values
+#ifndef RF_SDMMC_MOUNTPOINT
+    #define RF_SDMMC_MOUNTPOINT "/sdcard"
+#endif
+#ifndef RF_SDMMC_MODE_1BIT
+    #define RF_SDMMC_MODE_1BIT false  // use 4-bit bus by default
+#endif
+#ifndef RF_SDMMC_FORMAT_IF_FAIL
+    #define RF_SDMMC_FORMAT_IF_FAIL false
+#endif
+
 // Storage selection: Define RF_USE_SDCARD to use SD card, otherwise LittleFS
+// This is now used as a default at runtime, but can be overridden
 #ifdef RF_USE_SDCARD
-    #ifdef RF_USE_SDMMC
-        #include <SD_MMC.h>
-
-        // Default SD_MMC configuration values
-        #ifndef RF_SDMMC_MOUNTPOINT
-            #define RF_SDMMC_MOUNTPOINT "/sdcard"
-        #endif
-        #ifndef RF_SDMMC_MODE_1BIT
-            #define RF_SDMMC_MODE_1BIT false  // use 4-bit bus by default
-        #endif
-        #ifndef RF_SDMMC_FORMAT_IF_FAIL
-            #define RF_SDMMC_FORMAT_IF_FAIL false
-        #endif
-
-        // File system macros for SD_MMC interface
-        #define RF_FS SD_MMC
-        #define RF_FS_TYPE "SDMMC"
-    #else
-        #include <SD.h>
-        #include <SPI.h>
-        
-        // Default SD card pins for ESP32 (SPI mode)
-        #ifndef SD_CS_PIN
-            #define SD_CS_PIN 5
-        #endif
-        #ifndef SD_MOSI_PIN
-            #define SD_MOSI_PIN 23
-        #endif
-        #ifndef SD_MISO_PIN
-            #define SD_MISO_PIN 19
-        #endif
-        #ifndef SD_SCK_PIN
-            #define SD_SCK_PIN 18
-        #endif
-
+    #ifdef RF_USE_SDSPI // Use SD card over SPI interface(external module)
         // File system macros for SD card over SPI
         #define RF_FS SD
         #define RF_FS_TYPE "SD Card"
+    #else       // default to SD_MMC interface (esp32 built-in SD slot)
+        // File system macros for SD_MMC interface
+        #define RF_FS SD_MMC
+        #define RF_FS_TYPE "SDMMC"
     #endif
 
     #define RF_FILE_READ FILE_READ
     #define RF_FILE_WRITE FILE_WRITE
 #else
-    #include <LittleFS.h>
-    
     // File system macros for LittleFS (default)
     #define RF_FS LittleFS
     #define RF_FS_TYPE "LittleFS"
@@ -57,17 +63,17 @@
     #define RF_FILE_WRITE FILE_WRITE
 #endif
 
-// Unified file operation macros
-#define RF_FS_BEGIN() rf_storage_begin()
+// Unified file operation macros - now use runtime functions for flexibility
+#define RF_FS_BEGIN(...) rf_storage_begin(__VA_ARGS__)
 #define RF_FS_END() rf_storage_end()
-#define RF_FS_EXISTS(path) RF_FS.exists(path)
-#define RF_FS_OPEN(path, mode) RF_FS.open(path, mode)
-#define RF_FS_REMOVE(path) RF_FS.remove(path)
-#define RF_FS_RENAME(oldPath, newPath) RF_FS.rename(oldPath, newPath)
-#define RF_FS_RMDIR(path) RF_FS.rmdir(path)
-#define RF_FS_MKDIR(path) RF_FS.mkdir(path)
-#define RF_TOTAL_BYTES() RF_FS.totalBytes()
-#define RF_USED_BYTES() RF_FS.usedBytes()
+#define RF_FS_EXISTS(path) rf_exists(path)
+#define RF_FS_OPEN(path, mode) rf_open(path, mode)
+#define RF_FS_REMOVE(path) rf_remove(path)
+#define RF_FS_RENAME(oldPath, newPath) rf_rename(oldPath, newPath)
+#define RF_FS_RMDIR(path) rf_rmdir(path)
+#define RF_FS_MKDIR(path) rf_mkdir(path)
+#define RF_TOTAL_BYTES() rf_total_bytes()
+#define RF_USED_BYTES() rf_used_bytes()
 
 // Unified input operation macros
 // These allow easy switching between Serial (Arduino), stdin (PC), or other interfaces
@@ -77,15 +83,33 @@
 #define RF_INPUT_FLUSH() Serial.flush()
 
 /**
+ * @brief Storage system type for runtime selection
+ */
+enum class RfStorageType {
+    AUTO,       // Use compile-time configuration (default)
+    LITTLEFS,   // Force LittleFS
+    SD_MMC,     // Force SD_MMC (built-in SD slot)
+    SD_SPI      // Force SD over SPI
+};
+
+/**
  * @brief Initialize the selected storage system (LittleFS or SD card)
  * 
  * Automatically initializes the storage system based on compile-time configuration.
  * For LittleFS: Uses begin(true) to format if mount fails.
  * For SD card: Initializes SPI and mounts SD card with configured pins.
  * 
+ * IMPORTANT: File Creation in LittleFS
+ * - LittleFS requires the create flag to be set when opening files for writing.
+ * - rf_open() automatically detects write/append modes and applies the create flag.
+ * - This ensures files are created even if they don't exist, matching standard file
+ *   system behavior on other platforms.
+ * - USB CDC transfer protocols rely on this behavior to write binary files reliably.
+ * 
+ * @param type Storage type to use (default: AUTO = use compile-time config)
  * @return true if initialization successful, false otherwise
  */
-bool rf_storage_begin();
+bool rf_storage_begin(RfStorageType type = RfStorageType::AUTO);
 
 /**
  * @brief Unmount/end the storage system
@@ -103,6 +127,38 @@ void rf_storage_end();
 inline const char* rf_storage_type() {
     return RF_FS_TYPE;
 }
+
+/**
+ * @brief Runtime file system operations that work with any storage type
+ * 
+ * These functions automatically route to the correct storage backend
+ * based on what was initialized with rf_storage_begin().
+ * 
+ * FILE CREATION BEHAVIOR:
+ * rf_open() is especially important for data transfer operations:
+ * - When mode is FILE_WRITE or FILE_APPEND, the create flag is automatically set.
+ * - This allows binary data receivers to create files on-the-fly without pre-allocating.
+ * - Matches behavior of standard file systems (C fopen with "w" or "a" modes).
+ * - Critical for USB CDC transfer protocols that stream data incrementally.
+ */
+bool rf_mkdir(const char* path);
+bool rf_exists(const char* path);
+bool rf_remove(const char* path);
+bool rf_rename(const char* oldPath, const char* newPath);
+bool rf_rmdir(const char* path);
+File rf_open(const char* path, const char* mode);
+size_t rf_total_bytes();
+size_t rf_used_bytes();
+
+// String overloads for convenience
+inline bool rf_mkdir(const String& path) { return rf_mkdir(path.c_str()); }
+inline bool rf_exists(const String& path) { return rf_exists(path.c_str()); }
+inline bool rf_remove(const String& path) { return rf_remove(path.c_str()); }
+inline bool rf_rename(const String& oldPath, const String& newPath) { 
+    return rf_rename(oldPath.c_str(), newPath.c_str()); 
+}
+inline bool rf_rmdir(const String& path) { return rf_rmdir(path.c_str()); }
+inline File rf_open(const String& path, const char* mode) { return rf_open(path.c_str(), mode); }
 
 #ifndef RF_DEBUG_LEVEL
     #define RF_DEBUG_LEVEL 1
@@ -295,8 +351,6 @@ void printFile(String filename);
  */
 void deleteAllLittleFSFiles();
 
-// Backward compatibility alias
-inline void deleteAllSPIFFSFiles() { deleteAllLittleFSFiles(); }
 
 /**
  * @brief Interactive text data input interface (CSV/TXT/LOG/JSON)

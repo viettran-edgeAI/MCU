@@ -78,5 +78,9 @@
         "status": "enabled",
         "status_options": ["disabled", "enabled"],
         "description": "disabled by default. enable to override max_depth in training process."
+    },
+    "max_samples": {
+        "value": 0,
+        "description": "Maximum number of samples to keep in dataset (0 = unlimited). When exceeded, oldest samples are removed (FIFO). Useful for memory management during continuous learning on ESP32."
     }
 }

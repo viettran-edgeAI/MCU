@@ -885,6 +885,12 @@ public:
             }
         }
 
+        // Extract max_samples for dataset size management
+        std::string max_samples_value = extractParameterValue("max_samples");
+        if (!max_samples_value.empty()) {
+            max_samples = static_cast<uint32_t>(std::stoul(max_samples_value));
+        }
+
         // Check for invalid configuration cases and apply automatic ratio setting
         // This will be done after dataset analysis in init() method
         
@@ -900,6 +906,9 @@ public:
         // }
         // std::cout << "   Quantization bits: " << (int)quantization_coefficient << std::endl;
         std::cout << "   Random seed: " << random_seed << std::endl;
+        if (max_samples > 0) {
+            std::cout << "   Max samples limit: " << max_samples << std::endl;
+        }
     }
 
     void init(std::string data_path){
@@ -1318,6 +1327,7 @@ public:
             config_file << "  \"extendBaseData\": " << (extend_base_data ? "true" : "false") << ",\n";
             config_file << "  \"enableRetrain\": " << (enable_retrain ? "true" : "false") << ",\n";
             config_file << "  \"enableAutoConfig\": " << (enable_auto_config ? "true" : "false") << ",\n";
+            config_file << "  \"max_samples\": " << max_samples << ",\n";
             config_file << "  \"Estimated RAM (bytes)\": " << RAM_usage <<",\n";
             config_file << "  \"timestamp\": \"" << buf << "\",\n";
             config_file << "  \"author\": \"Viettran - tranvaviet@gmail.com\"\n"; 

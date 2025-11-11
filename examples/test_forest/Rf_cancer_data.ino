@@ -14,11 +14,12 @@
  * Hardware: ESP32-CAM or ESP32 with external microSD card module
  * 
  * For SDIO 4-bit mode (recommended for ESP32-CAM):
- *   - Define: RF_USE_SDCARD and RF_USE_SDMMC (before including random_forest_mcu.h)
+ *   - Define: RF_USE_SDCARD (before including random_forest_mcu.h)
+ *   - Uses built-in SD slot with SDIO interface
  *   - Pins: CLK→GPIO14, CMD→GPIO15, D0→GPIO2, D1→GPIO4, D2→GPIO12, D3→GPIO13
  * 
- * For SPI mode (if 4-bit unavailable):
- *   - Define: RF_USE_SDCARD (without RF_USE_SDMMC)
+ * For SPI mode (external SD card module):
+ *   - Define: RF_USE_SDCARD and RF_USE_SDSPI (before including random_forest_mcu.h)
  *   - Pins: CS→GPIO5, MOSI→GPIO23, MISO→GPIO19, CLK→GPIO18
  * 
  * Dataset: Breast cancer features (radius, texture, perimeter, area, etc.)
@@ -26,7 +27,7 @@
 
 // Storage configuration - uncomment for microSD card support
 #define RF_USE_SDCARD           // Enable SD card support
-#define RF_USE_SDMMC            // Use SDIO 4-bit mode (comment out for SPI mode)
+// #define RF_USE_SDSPI         // Uncomment for external SPI SD card module (comment out for built-in SDIO)
 
 #define DEV_STAGE    
 #define RF_DEBUG_LEVEL 2

@@ -2,7 +2,17 @@
 """
 Dataset Parameters Transfer Script for ESP32 with V2 Protocol
 Transfers CSV files with CRC verification and ACK/NACK
+
 Usage: python3 transfer_dp_file.py <model_name> <serial_port>
+
+PERFORMANCE NOTES:
+  - CHUNK_SIZE must match the ESP32 receiver's BUFFER_CHUNK
+  - Board-specific guidance:
+    * ESP32-C3/C6: 220 bytes (USB CDC buffer constraint)
+    * ESP32-S3: 256 bytes (larger buffer)
+    * ESP32: 256 bytes (standard board)
+  - To use higher speeds on larger boards, adjust CHUNK_SIZE and set
+    USER_CHUNK_SIZE in the ESP32 sketch before including board_config.h
 """
 
 import serial
@@ -14,7 +24,10 @@ import binascii
 from pathlib import Path
 
 # V2 Protocol Constants
-CHUNK_SIZE = 256
+# IMPORTANT: Keep CHUNK_SIZE in sync with ESP32 receiver's BUFFER_CHUNK
+# Default: 220 bytes (ESP32-C3 safe)
+# Higher boards can use 256+ bytes if coordinated with sketch
+CHUNK_SIZE = 220
 CHUNK_DELAY = 0.02  # seconds
 MAX_RETRIES = 5
 
@@ -107,6 +120,8 @@ def transfer_csv_file(file_path, port, baudrate=115200):
                         success = True
                         break
                 elif line.startswith("NACK "):
+                    if line:
+                        print(f"   ↩ {line}")
                     # Retry
                     continue
                 # Anything else: small delay and retry

@@ -1,24 +1,18 @@
 /*
- * Pre-trained Model Receiver for ESP32
+ * HOG Configuration Receiver for ESP32
  * 
- * This sketch receives pre-trained random forest model files from a PC
- * and saves them to file system with /model_name/filename structure.
+ * This sketch receives HOG configuration files from a PC
+ * and saves them to the ESP32 filesystem.
  * 
  * Files received:
- * - {model_name}_config.json (model configuration)
- * - {model_name}_npd.bin (memory estimation model)
- * - {model_name}_nlg.csv (training history and statistics)
- * - {model_name}_forest.bin (unified forest file containing all decision trees)
+ * - {model_name}_hogcfg.json (HOG configuration for ESP32)
  * 
- * The unified forest file replaces individual tree files for more efficient
- * storage and loading on the ESP32.
+ * The HOG config file contains all necessary parameters for:
+ * - Image preprocessing (resize, format conversion)
+ * - HOG feature extraction (cell size, block size, bins, etc.)
+ * - ESP32-specific settings (input format, camera resolution, etc.)
  * 
- * The node predictor enables accurate memory usage estimation for 
- * random forest configurations before model creation.
- * 
- * The tree log provides training history for analysis and debugging.
- * 
- * Designed to work with 'transfer_model.py' script.
+ * Designed to work with 'transfer_hog_config.py' script.
  * 
  * PERFORMANCE NOTES:
  * - Transfer speed depends on CHUNK_SIZE; larger chunks are faster
@@ -32,7 +26,12 @@
 #include "Rf_file_manager.h"
 
 // --- Storage Configuration ---
-const RfStorageType STORAGE_MODE = RfStorageType::LITTLEFS;
+// Choose one of the following storage modes:
+//   RfStorageType::LITTLEFS - Internal LittleFS (default, ~1.5MB)
+//   RfStorageType::SD_MMC    - Built-in SD slot (SDIO, recommended for ESP32-CAM)
+//                              ⚠️  NOT available on ESP32-C3/C6/H2 - use SD_SPI instead
+//   RfStorageType::SD_SPI    - External SD card module (SPI interface, compatible with all ESP32 variants)
+const RfStorageType STORAGE_MODE = RfStorageType::SD_MMC;
 
 // --- Protocol Constants ---
 // Must match the Python sender script
@@ -68,7 +67,7 @@ const char* RESP_ERROR = "ERROR";
  */
 const uint16_t CHUNK_SIZE = USER_CHUNK_SIZE;
 const uint32_t CHUNK_DELAY = 20;  // Delay between chunk processing
-const uint32_t SERIAL_TIMEOUT_MS = 30000;  // Extended timeout for large files
+const uint32_t SERIAL_TIMEOUT_MS = 30000;  // Extended timeout
 const uint32_t HEADER_WAIT_MS = 100;  // Wait time for header assembly
 
 // --- State Machine ---
@@ -107,7 +106,7 @@ bool safeDeleteFile(const char* filename);
 void handleStartSession();
 void handleCommand();
 void handleFileInfo();
-void handleFileChunk();
+void handleFileChunk(); 
 void handleEndSession();
 void printStorageInfo();
 void listReceivedFiles();
@@ -164,14 +163,14 @@ bool safeDeleteFile(const char* filename) {
 void printStorageInfo() {
     size_t totalBytes = RF_TOTAL_BYTES();
     size_t usedBytes = RF_USED_BYTES();
-    Serial.println("📊 file system Storage Info:");
+    Serial.println("📊 File System Storage Info:");
     Serial.printf("   Total: %u bytes (%.1f KB)\n", totalBytes, totalBytes/1024.0);
     Serial.printf("   Used:  %u bytes (%.1f KB)\n", usedBytes, usedBytes/1024.0);
     Serial.printf("   Free:  %u bytes (%.1f KB)\n", totalBytes-usedBytes, (totalBytes-usedBytes)/1024.0);
 }
 
 void listReceivedFiles() {
-    Serial.println("\n📁 Model files in file system:");
+    Serial.println("\n📁 HOG config files in file system:");
     File root = RF_FS_OPEN("/", RF_FILE_READ);
     
     if (!root) {
@@ -180,65 +179,43 @@ void listReceivedFiles() {
     }
     
     int fileCount = 0;
-    int configFiles = 0;
-    int forestFiles = 0;
-    int predictorFiles = 0;
-    int logFiles = 0;
+    int hogConfigFiles = 0;
     
     File file = root.openNextFile();
     while (file) {
-        if (!file.isDirectory()) {
-            String fileName = file.name();
-            if (fileName.endsWith(".json") && fileName.indexOf("_config") >= 0) {
-                Serial.printf("   📋 %s (%u bytes) - Configuration\n", fileName.c_str(), file.size());
-                configFiles++;
-                fileCount++;
-            } else if (fileName.indexOf("npd") >= 0 && fileName.endsWith(".bin")) {
-                Serial.printf("   🧮 %s (%u bytes) - Node Predictor\n", fileName.c_str(), file.size());
-                predictorFiles++;
-                fileCount++;
-            } else if (fileName.indexOf("nlg") >= 0 && fileName.endsWith(".csv")) {
-                Serial.printf("   📊 %s (%u bytes) - Training Log\n", fileName.c_str(), file.size());
-                logFiles++;
-                fileCount++;
-            } else if (fileName.indexOf("_forest") >= 0 && fileName.endsWith(".bin")) {
-                Serial.printf("   🌳 %s (%u bytes) - Unified Forest\n", fileName.c_str(), file.size());
-                forestFiles++;
-                fileCount++;
-            } else if (fileName.endsWith(".bin")) {
-                Serial.printf("   📄 %s (%u bytes)\n", fileName.c_str(), file.size());
-                fileCount++;
-            } else if (fileName.endsWith(".csv")) {
-                Serial.printf("   📊 %s (%u bytes) - CSV Data\n", fileName.c_str(), file.size());
-                logFiles++;
-                fileCount++;
+        if (file.isDirectory()) {
+            // Check inside each directory for HOG config files
+            String dirName = file.name();
+            File subFile = file.openNextFile();
+            while (subFile) {
+                if (!subFile.isDirectory()) {
+                    String fileName = subFile.name();
+                    if (fileName.endsWith(".json") && fileName.indexOf("_hogcfg") >= 0) {
+                        String fullPath = String(dirName) + "/" + String(fileName);
+                        Serial.printf("   📋 %s (%u bytes) - HOG Configuration\n", fullPath.c_str(), subFile.size());
+                        hogConfigFiles++;
+                        fileCount++;
+                    }
+                }
+                subFile = file.openNextFile();
             }
         }
         file = root.openNextFile();
     }
     
     if (fileCount == 0) {
-        Serial.println("   (No model files found)");
+        Serial.println("   (No config files found)");
     } else {
-        Serial.printf("   Total: %d model files", fileCount);
-        if (configFiles > 0 || predictorFiles > 0 || logFiles > 0 || forestFiles > 0) {
-            Serial.printf(" (%d config, %d predictor, %d logs, %d forests)", configFiles, predictorFiles, logFiles, forestFiles);
+        Serial.printf("   Total: %d files", fileCount);
+        if (hogConfigFiles > 0) {
+            Serial.printf(" (%d HOG configs)", hogConfigFiles);
         }
         Serial.println();
         
-        // Check if we have a complete model
-        if (configFiles > 0 && forestFiles > 0) {
-            Serial.println("   ✅ Complete model ready for use!");
-            if (predictorFiles > 0) {
-                Serial.println("   🧮 Memory estimation available!");
-            } else {
-                Serial.println("   ⚠️  No node predictor - using default memory estimation");
-            }
-            if (logFiles > 0) {
-                Serial.println("   📊 Training history available!");
-            }
-        } else {
-            Serial.println("   ⚠️  Incomplete model (need config + unified forest)");
+        if (hogConfigFiles > 0) {
+            Serial.println("   ✅ HOG configuration ready for use!");
+            Serial.println("\n   💡 Load config in your code with:");
+            Serial.println("      hog.loadConfigFromFile(\"/model_name/model_name_hogcfg.json\");");
         }
     }
 }
@@ -265,15 +242,15 @@ void setup() {
     delay(1000);  // Allow serial to stabilize
     
     Serial.println("\n==================================================");
-    Serial.println("🤖 ESP32 Pre-trained Model Receiver");
-    Serial.println("    Ready to receive Random Forest model files");
-    Serial.println("=================================================");
+    Serial.println("🤖 ESP32 HOG Configuration Receiver");
+    Serial.println("    Ready to receive HOG config files");
+    Serial.println("==================================================");
 
     // Initialize file system with selected storage mode
     Serial.print("💾 Initializing file system... ");
     if (!RF_FS_BEGIN(STORAGE_MODE)) {
         Serial.println("❌ FAILED!");
-        Serial.println("⚠️  file system initialization failed. Cannot continue.");
+        Serial.println("⚠️  File system initialization failed. Cannot continue.");
         currentState = State::ERROR_STATE;
         return;
     }
@@ -283,7 +260,7 @@ void setup() {
     listReceivedFiles();
     
     Serial.println("\n🔌 Waiting for PC connection...");
-    Serial.println("   Use: python3 transfer_model.py <serial_port>");
+    Serial.println("   Use: python3 transfer_hog_config.py <model_name> <serial_port>");
     
     blinkLed(3, 200);  // Signal ready
     setLed(true);      // Steady light = waiting for connection
@@ -304,11 +281,11 @@ void loop() {
             // Session completed, show results
             static bool resultsShown = false;
             if (!resultsShown) {
-                Serial.println("\n🎉 Model transfer completed!");
+                Serial.println("\n🎉 HOG config transfer completed!");
                 Serial.printf("📈 Successfully received %d files\n", filesReceived);
                 printStorageInfo();
                 listReceivedFiles();
-                Serial.println("\n✅ ESP32 is ready to use the trained model!");
+                Serial.println("\n✅ ESP32 is ready to use HOG feature extraction!");
                 blinkLed(5, 150);  // Celebration blink
                 setLed(false);
                 resultsShown = true;
@@ -373,12 +350,12 @@ void handleStartSession() {
     Serial.readBytes(receivedSessionName, session_len);
     receivedSessionName[session_len] = '\0';
 
-    // Extract model name from session name (remove "_transfer" suffix)
-    // Session name format: "model_name_transfer"
+    // Extract model name from session name (remove "_hog_config" suffix)
+    // Session name format: "model_name_hog_config"
     String sessionStr = String(receivedSessionName);
-    int transferSuffixIdx = sessionStr.lastIndexOf("_transfer");
-    if (transferSuffixIdx > 0) {
-        sessionStr = sessionStr.substring(0, transferSuffixIdx);
+    int configSuffixIdx = sessionStr.lastIndexOf("_hog_config");
+    if (configSuffixIdx > 0) {
+        sessionStr = sessionStr.substring(0, configSuffixIdx);
     }
     strncpy(receivedModelName, sessionStr.c_str(), sizeof(receivedModelName) - 1);
     receivedModelName[sizeof(receivedModelName) - 1] = '\0';
@@ -389,12 +366,20 @@ void handleStartSession() {
     // Create model directory if it doesn't exist
     char modelDir[80];
     snprintf(modelDir, sizeof(modelDir), "/%s", receivedModelName);
+    Serial.printf("🔍 Checking directory: %s\n", modelDir);
     if (!RF_FS_EXISTS(modelDir)) {
+        Serial.printf("📂 Creating directory: %s\n", modelDir);
         if (RF_FS_MKDIR(modelDir)) {
             Serial.printf("✅ Created model directory: %s\n", modelDir);
         } else {
-            Serial.printf("⚠️  Warning: Could not create directory %s\n", modelDir);
+            Serial.printf("❌ ERROR: Could not create directory %s\n", modelDir);
+            Serial.print(RESP_ERROR);
+            Serial.flush();
+            currentState = State::ERROR_STATE;
+            return;
         }
+    } else {
+        Serial.printf("✅ Directory already exists: %s\n", modelDir);
     }
     
     filesReceived = 0;
@@ -436,12 +421,14 @@ void handleFileInfo() {
         delay(1);
         yield();
     }
-    char baseFileName[64];
-    Serial.readBytes(baseFileName, filename_len);
-    baseFileName[filename_len] = '\0';
+    Serial.readBytes(receivedFileName, filename_len);
+    receivedFileName[filename_len] = '\0';
 
     // Construct full path with model name: /model_name/filename
-    snprintf(receivedFileName, sizeof(receivedFileName), "/%s/%s", receivedModelName, baseFileName);
+    char fullPath[80];
+    snprintf(fullPath, sizeof(fullPath), "/%s/%s", receivedModelName, receivedFileName);
+    strncpy(receivedFileName, fullPath, sizeof(receivedFileName) - 1);
+    receivedFileName[sizeof(receivedFileName) - 1] = '\0';
 
     // Wait for file size (4 bytes), file CRC (4 bytes), and chunk size (4 bytes)
     while (Serial.available() < 12) {
@@ -463,22 +450,6 @@ void handleFileInfo() {
         return;
     }
 
-    // Determine file type for better user feedback
-    String fileType = "📄 File";
-    if (strstr(receivedFileName, ".json") && strstr(receivedFileName, "_config")) {
-        fileType = "📋 Configuration";
-    } else if (strstr(receivedFileName, "npd") && strstr(receivedFileName, ".bin")) {
-        fileType = "🧮 Node Predictor";
-    } else if (strstr(receivedFileName, "nlg") && strstr(receivedFileName, ".csv")) {
-        fileType = "📊 Training Log";
-    } else if (strstr(receivedFileName, "_forest") && strstr(receivedFileName, ".bin")) {
-        fileType = "🌳 Unified Forest";
-    } else if (strstr(receivedFileName, ".csv")) {
-        fileType = "📊 CSV Data";
-    } else if (strstr(receivedFileName, ".bin")) {
-        fileType = "📄 Binary Data";
-    }
-
     // Close previous file if open
     if (currentFile) {
         currentFile.close();
@@ -494,10 +465,11 @@ void handleFileInfo() {
         return;
     }
     
-    Serial.printf("📥 Receiving %s: %s (%u bytes)\n", fileType.c_str(), baseFileName, receivedFileSize);
+    Serial.printf("📥 Receiving HOG Config: %s (%u bytes)\n", receivedFileName, receivedFileSize);
     
     currentFile = RF_FS_OPEN(receivedFileName, RF_FILE_WRITE);
     if (!currentFile) {
+        Serial.printf("❌ Failed to open file for writing: %s\n", receivedFileName);
         currentState = State::ERROR_STATE;
         Serial.print(RESP_ERROR);
         Serial.flush();
@@ -555,7 +527,7 @@ void handleFileChunk() {
         return;
     }
 
-    // Read chunk payload with streaming to support small Serial buffers
+    // Read chunk payload with streaming to handle small Serial buffers
     uint8_t buffer[CHUNK_SIZE];
     size_t bytesRead = 0;
     start_time = millis();

@@ -62,6 +62,8 @@ public:
         int input_width;                           // Input image width
         int input_height;                          // Input image height
         ImageProcessing::ResizeMethod resize_method; // Resize algorithm
+        bool maintain_aspect_ratio;                // Preserve aspect ratio during resize
+        uint8_t jpeg_quality;                      // JPEG quality if applicable
         
         // HOG parameters (optional - will use defaults if not specified)
         int hog_img_width;   // HOG processing width (default: 32)
@@ -82,6 +84,8 @@ public:
             input_width(320),
             input_height(240),
             resize_method(ImageProcessing::ResizeMethod::BILINEAR),
+            maintain_aspect_ratio(false),
+            jpeg_quality(80),
             hog_img_width(32),
             hog_img_height(32),
             cell_size(8),
@@ -100,6 +104,8 @@ public:
             input_width(in_w),
             input_height(in_h),
             resize_method(ImageProcessing::ResizeMethod::BILINEAR),
+            maintain_aspect_ratio(false),
+            jpeg_quality(80),
             hog_img_width(32),
             hog_img_height(32),
             cell_size(8),
@@ -144,6 +150,18 @@ public:
     void setConfig(const Config& config);
     
     /**
+     * Load configuration from JSON file stored on the MCU filesystem
+     * @param path Path to the configuration file (LittleFS/SD)
+     * @return true if configuration successfully applied
+     */
+    bool loadConfigFromFile(const char* path);
+
+    /**
+     * Convenience overload for Arduino String paths
+     */
+    bool loadConfigFromFile(const String& path) { return loadConfigFromFile(path.c_str()); }
+    
+    /**
      * Quick setup method for ESP32-CAM with optimal defaults
      * Perfect for getting started quickly!
      * @param input_format Camera pixel format (default: GRAYSCALE)
@@ -185,6 +203,16 @@ public:
      */
     const ImageProcessing::ProcessingConfig& getImageProcessingConfig() const;
 
+    /**
+     * Get the CSV path specified in the loaded configuration (if any)
+     */
+    const String& getFeatureCsvPath() const { return feature_csv_path_; }
+
+    /**
+     * Get the feature file name (without path) specified in the config (if any)
+     */
+    const String& getFeatureFileName() const { return feature_file_name_; }
+
 public:
     /**
      * Feature vector to store computed HOG descriptors
@@ -197,13 +225,29 @@ private:
     Params params;
     ImageProcessing::ProcessingConfig img_config;
     uint8_t* processed_image_buffer;  // Internal buffer for processed image
+    String feature_csv_path_;
+    String feature_file_name_;
+    
+    // Optimization: Pre-allocated buffers to avoid repeated allocations
+    int16_t* gradient_x_buffer;       // Gradient X components
+    int16_t* gradient_y_buffer;       // Gradient Y components
+    uint16_t* magnitude_buffer;       // Gradient magnitudes (integer)
+    uint8_t* angle_bin_buffer;        // Pre-computed angle bins
+    float* block_histogram_buffer;    // Reusable block histogram buffer
+    float* cell_histogram_buffer;     // Reusable cell histogram buffer
     
     // Internal computation method
     void compute(const uint8_t* grayImage);
     
+    // Optimized computation with pre-allocated buffers
+    void computeOptimized(const uint8_t* grayImage);
+    
     // Helper methods for gradient computation
     float computeGradientMagnitude(int gx, int gy);
     float computeGradientAngle(int gx, int gy);
+    
+    // Optimized gradient computation using integer arithmetic
+    inline void computeGradientsOptimized(const uint8_t* grayImage);
     
     // Initialize internal buffers
     void initializeBuffers();

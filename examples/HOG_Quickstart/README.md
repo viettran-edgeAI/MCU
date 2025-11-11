@@ -4,22 +4,79 @@ The **fastest way** to get HOG feature extraction working on ESP32-CAM!
 
 ## 🎯 Purpose
 
-This example is designed for **beginners** who want to start extracting HOG features immediately without dealing with complex configurations. Just 3 lines of code and you're ready!
+This example is designed for **beginners** who want to start extracting HOG features immediately without dealing with complex configurations. Just 3 lines of code and you're ready! Also demonstrates loading configuration from files for production deployments.
 
 ## 🚀 What You Get
 
 - ✅ **One-line setup** with optimal defaults
+- ✅ **Config file support** for production deployment
 - ✅ **Minimal code** - easy to understand and modify
 - ✅ **Production ready** performance (~40-60ms processing)
 - ✅ **ML integration ready** with example code snippets
+- ✅ **Perfect parameter matching** between training and inference
 
-## 💡 The Magic 3 Lines
+## 💡 Two Setup Methods
 
+### Method 1: Quick Start (3 Lines)
 ```cpp
 HOG_MCU hog;                           // 1. Create HOG processor
 hog.setupForESP32CAM();                // 2. Configure with defaults
 hog.transform(camera_buffer);          // 3. Extract features!
 ```
+
+### Method 2: Config File (Recommended for Production)
+```cpp
+#include "Rf_file_manager.h"
+
+HOG_MCU hog;
+RF_FS_BEGIN();                         // Mount filesystem
+hog.loadConfigFromFile("/model_hogcfg.json");  // Load config
+hog.transform(camera_buffer);          // Extract features!
+```
+
+## 📁 Using Configuration Files
+
+Configuration files ensure **exact parameter matching** between training (PC) and inference (ESP32).
+
+### Step 1: Generate Config on PC
+```bash
+cd tools/hog_transform
+./hog_processor hog_config.json
+```
+
+This creates two files:
+- `model_name.csv` - Training features for ML
+- `model_name_hogcfg.json` - ESP32 configuration
+
+### Step 2: Upload Config to ESP32
+Upload `model_name_hogcfg.json` to LittleFS or SD card using:
+- Arduino IDE: Tools → ESP32 Sketch Data Upload
+- Manual file copy to storage
+
+### Step 3: Load in Your Sketch
+```cpp
+#define USE_CONFIG_FILE "/model_name_hogcfg.json"
+#include "Rf_file_manager.h"
+
+void setup() {
+    // Initialize filesystem
+    RF_FS_BEGIN();
+    
+    // Load configuration
+    if (hog.loadConfigFromFile(USE_CONFIG_FILE)) {
+        Serial.println("Config loaded successfully!");
+        Serial.printf("Feature CSV: %s\n", hog.getFeatureCsvPath().c_str());
+        Serial.printf("Feature count: %d\n", hog.getFeatures().capacity());
+    }
+}
+```
+
+### Benefits of Config Files
+✓ **Guaranteed consistency** - Same parameters used in training and inference  
+✓ **Easy updates** - Change parameters without recompiling  
+✓ **Documentation** - Config file documents exact training setup  
+✓ **Multi-device** - Deploy same config to multiple devices  
+✓ **Version control** - Track configuration changes over time
 
 ## 📋 Default Configuration
 

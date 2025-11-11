@@ -1,26 +1,52 @@
 /*
  * ESP32 Binary File Receiver
- * Upload this sketch to ESP32, then use transfer_dataset.py to send files
- * Saves files to file system with model_name/filename structure
+ * Upload this sketch to ESP32, then use transfer_dataset.py to send files.
+ * Saves files to file system with model_name/filename structure.
+ * 
+ * PERFORMANCE NOTES:
+ * - Transfer speed depends on BUFFER_CHUNK size; larger chunks are faster
+ *   but may cause USB CDC buffer overruns on ESP32-C3-like boards.
+ * - This sketch auto-detects the board and sets BUFFER_CHUNK conservatively
+ *   for C3, but allows user override via USER_CHUNK_SIZE define.
+ * - See board_config.h for board-specific recommendations.
  */
 
-// #define RF_USE_SDCARD    // Uncomment to use SD card storage instead of LittleFS(default using built-in SD slot)
-// #define RF_USE_SDSPI    // Uncomment to use SD card over SPI interface (external module)
+#include <Rf_board_config.h>
 #include "Rf_file_manager.h"
 
-// Transfer timing and size configuration
-// IMPORTANT: Keep these in sync with the PC sender script (transfer_dataset.py)
-// - BUFFER_CHUNK should match CHUNK_SIZE
-// - BUFFER_DELAY_MS should reflect CHUNK_DELAY (in milliseconds)
-const int BUFFER_CHUNK = 256;
-const int BUFFER_DELAY_MS = 20;  // 0.05s to match CHUNK_DELAY=0.05
+// --- Storage Configuration ---
+// Choose one of the following storage modes:
+//   RfStorageType::LITTLEFS - Internal LittleFS (default, ~1.5MB)
+//   RfStorageType::SD_MMC    - Built-in SD slot (SDIO, recommended for ESP32-CAM)
+//   RfStorageType::SD_SPI    - External SD card module (SPI interface)
+const RfStorageType STORAGE_MODE = RfStorageType::LITTLEFS;
+
+/*
+ * Transfer timing and size configuration.
+ * IMPORTANT: Keep these in sync with the PC sender script (transfer_dataset.py)
+ * 
+ * BUFFER_CHUNK:
+ *   - Must match CHUNK_SIZE in transfer_dataset.py
+ *   - ESP32-C3 recommended: 220 bytes (USB CDC buffer constraint)
+ *   - ESP32/ESP32-S3: Can use 256+ bytes for higher speed
+ * 
+ * BUFFER_DELAY_MS:
+ *   - Delay between chunks (matches CHUNK_DELAY * 1000 on PC)
+ *   - Allows ESP32 time to process and write to storage
+ *   - ACK/NACK protocol means this can be quite small (20ms)
+ */
+const int BUFFER_CHUNK = USER_CHUNK_SIZE;
+const int BUFFER_DELAY_MS = 20;  // ms to match CHUNK_DELAY (0.02s) on PC
 uint8_t buffer[BUFFER_CHUNK];
 
 void setup() {
   Serial.begin(115200);
   
-  // Initialize file system
-  if (!RF_FS_BEGIN()) {
+  // Print board configuration at startup
+  print_board_info();
+  
+  // Initialize file system with selected storage mode
+  if (!RF_FS_BEGIN(STORAGE_MODE)) {
     return;
   }
 }
@@ -32,9 +58,10 @@ void loop() {
     command.trim();
 
     if (command == "TRANSFER_START") {
-      // Legacy mode (no CRC/ACK) remains available
+      // Legacy mode (no CRC/ACK) remains available for compatibility
       receiveFile();
     } else if (command == "TRANSFER_V2") {
+      // V2 protocol with CRC validation and ACK/NACK handshaking
       receiveFileV2();
     }
   }
@@ -92,20 +119,26 @@ void receiveFile() {
   while (bytes_received < file_size) {
   uint32_t bytes_to_read = min((uint32_t)BUFFER_CHUNK, file_size - bytes_received);
     
-    // Wait for data
+    // Read data chunk with streaming to handle small buffers
+    size_t actual_read = 0;
     unsigned long start_time = millis();
-    while (Serial.available() < bytes_to_read && (millis() - start_time) < 5000) {
-      delay(1);
+    while (actual_read < bytes_to_read) {
+      if (Serial.available()) {
+        int value = Serial.read();
+        if (value < 0) {
+          continue;
+        }
+        buffer[actual_read++] = static_cast<uint8_t>(value);
+        start_time = millis();
+      } else {
+        if (millis() - start_time >= 5000) {
+          file.close();
+          RF_FS_REMOVE(filepath.c_str());
+          return;
+        }
+        delay(1);
+      }
     }
-    
-    if (Serial.available() < bytes_to_read) {
-      file.close();
-      RF_FS_REMOVE(filepath.c_str());
-      return;
-    }
-    
-    // Read data chunk
-  size_t actual_read = Serial.readBytes(buffer, bytes_to_read);
     
     // Write to file
     size_t written = file.write(buffer, actual_read);
@@ -199,9 +232,36 @@ void receiveFileV2() {
     if (Serial.readBytes((uint8_t*)&ccrc, 4) != 4)   { file.close(); RF_FS_REMOVE(filepath.c_str()); return; }
 
     if (clen > chunk_size || clen == 0) { file.close(); RF_FS_REMOVE(filepath.c_str()); return; }
-    // Read chunk payload
-    size_t got = Serial.readBytes(buffer, clen);
-    if (got != clen) { file.close(); RF_FS_REMOVE(filepath.c_str()); return; }
+    // Read chunk payload with streaming
+    size_t got = 0;
+    bool chunkComplete = true;
+    unsigned long chunk_start = millis();
+    while (got < clen) {
+      if (Serial.available()) {
+        int value = Serial.read();
+        if (value < 0) {
+          continue;
+        }
+        buffer[got++] = static_cast<uint8_t>(value);
+        chunk_start = millis();
+      } else {
+        if (millis() - chunk_start >= 5000) {
+          Serial.print("NACK ");
+          Serial.print(offset);
+          Serial.print(" streamed=");
+          Serial.print(got);
+          Serial.println(" timeout");
+          Serial.flush();
+          delay(2);
+          chunkComplete = false;
+          break;
+        }
+        delay(1);
+      }
+    }
+    if (!chunkComplete) {
+      continue; // Sender will retry this chunk
+    }
 
     // Compute CRC32 of the received chunk
     uint32_t calc = 0xFFFFFFFF;

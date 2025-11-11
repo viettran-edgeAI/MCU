@@ -1,92 +1,283 @@
 #include "Rf_file_manager.h"
 
-bool rf_storage_begin() {
+// Track which storage system is actually active at runtime
+static RfStorageType g_active_storage = RfStorageType::AUTO;
+
+bool rf_storage_begin(RfStorageType type) {
+    // Determine which storage to use
+    RfStorageType selected = type;
+    if (selected == RfStorageType::AUTO) {
+        // Use compile-time configuration
 #ifdef RF_USE_SDCARD
-    #ifdef RF_USE_SDMMC
-    bool mounted = SD_MMC.begin(RF_SDMMC_MOUNTPOINT, RF_SDMMC_MODE_1BIT, RF_SDMMC_FORMAT_IF_FAIL);
-        if (!mounted) {
-            RF_DEBUG(0, RF_SDMMC_FORMAT_IF_FAIL ? "❌ SD_MMC mount failed (format attempted)." : "❌ SD_MMC Mount Failed!");
-            return false;
-        }
-
-        uint8_t cardType = SD_MMC.cardType();
-        if (cardType == CARD_NONE) {
-            RF_DEBUG(0, "❌ No SD card attached!");
-            return false;
-        }
-
-        RF_DEBUG(0, "✅ SD_MMC initialized successfully");
-
-        if (RF_DEBUG_LEVEL >= 1) {
-            const char* cardTypeStr = "UNKNOWN";
-            if (cardType == CARD_MMC) cardTypeStr = "MMC";
-            else if (cardType == CARD_SD) cardTypeStr = "SDSC";
-            else if (cardType == CARD_SDHC) cardTypeStr = "SDHC";
-
-            uint64_t cardSize = SD_MMC.cardSize() / (1024 * 1024);
-            char buffer[128];
-            snprintf(buffer, sizeof(buffer), "📊 SD_MMC Type: %s, Size: %llu MB", cardTypeStr, cardSize);
-            RF_DEBUG(0, "", buffer);
-
-            RF_DEBUG(0, RF_SDMMC_MODE_1BIT ? "ℹ️ SD_MMC running in 1-bit mode" : "ℹ️ SD_MMC running in 4-bit mode");
-        }
-
-        return true;
+    #ifdef RF_USE_SDSPI
+        selected = RfStorageType::SD_SPI;
     #else
-        // Initialize SPI with custom pins
-        SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
-        
-        if (!SD.begin(SD_CS_PIN)) {
-            RF_DEBUG(0, "❌ SD Card Mount Failed!");
-            return false;
-        }
-        
-        uint8_t cardType = SD.cardType();
-        if (cardType == CARD_NONE) {
-            RF_DEBUG(0, "❌ No SD card attached!");
-            return false;
-        }
-        
-        RF_DEBUG(0, "✅ SD Card initialized successfully");
-        
-        // Print card info at debug level 1+
-        if (RF_DEBUG_LEVEL >= 1) {
-            const char* cardTypeStr = "UNKNOWN";
-            if (cardType == CARD_MMC) cardTypeStr = "MMC";
-            else if (cardType == CARD_SD) cardTypeStr = "SDSC";
-            else if (cardType == CARD_SDHC) cardTypeStr = "SDHC";
-            
-            uint64_t cardSize = SD.cardSize() / (1024 * 1024);
-            char buffer[128];
-            snprintf(buffer, sizeof(buffer), "📊 SD Card Type: %s, Size: %llu MB", cardTypeStr, cardSize);
-            RF_DEBUG(0, "", buffer);
-        }
-        
-        return true;
+        selected = RfStorageType::SD_MMC;
     #endif
 #else
-    if (!LittleFS.begin(true)) {
-        RF_DEBUG(0, "❌ LittleFS Mount Failed!");
-        return false;
-    }
-    RF_DEBUG(0, "✅ LittleFS initialized successfully");
-    return true;
+        selected = RfStorageType::LITTLEFS;
 #endif
+    }
+    
+    g_active_storage = selected;
+    
+    // Initialize based on selected storage type
+    switch (selected) {
+        case RfStorageType::SD_SPI:
+            {
+                // Initialize SPI with custom pins
+                SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
+                
+                if (!SD.begin(SD_CS_PIN)) {
+                    RF_DEBUG(0, "❌ SD Card Mount Failed!");
+                    return false;
+                }
+                
+                uint8_t cardType = SD.cardType();
+                if (cardType == CARD_NONE) {
+                    RF_DEBUG(0, "❌ No SD card attached!");
+                    return false;
+                }
+                
+                RF_DEBUG(1, "✅ SD Card initialized successfully");
+                
+                // Print card info at debug level 1+
+                if (RF_DEBUG_LEVEL >= 1) {
+                    const char* cardTypeStr = "UNKNOWN";
+                    if (cardType == CARD_MMC) cardTypeStr = "MMC";
+                    else if (cardType == CARD_SD) cardTypeStr = "SDSC";
+                    else if (cardType == CARD_SDHC) cardTypeStr = "SDHC";
+                    
+                    uint64_t cardSize = SD.cardSize() / (1024 * 1024);
+                    char buffer[128];
+                    snprintf(buffer, sizeof(buffer), "📊 SD Card Type: %s, Size: %llu MB", cardTypeStr, cardSize);
+                    RF_DEBUG(0, "", buffer);
+                }
+                
+                return true;
+            }
+            
+        case RfStorageType::SD_MMC:
+            {
+#if RF_HAS_SDMMC
+                // SD_MMC mode (default for RF_USE_SDCARD)
+                bool mounted = SD_MMC.begin(RF_SDMMC_MOUNTPOINT, RF_SDMMC_MODE_1BIT, RF_SDMMC_FORMAT_IF_FAIL);
+                if (!mounted) {
+                    RF_DEBUG(0, RF_SDMMC_FORMAT_IF_FAIL ? "❌ SD_MMC mount failed (format attempted)." : "❌ SD_MMC Mount Failed!");
+                    return false;
+                }
+
+                uint8_t cardType = SD_MMC.cardType();
+                if (cardType == CARD_NONE) {
+                    RF_DEBUG(0, "❌ No SD card attached!");
+                    return false;
+                }
+
+                // RF_DEBUG(1, "✅ SD_MMC initialized successfully");
+
+                if (RF_DEBUG_LEVEL >= 1) {
+                    const char* cardTypeStr = "UNKNOWN";
+                    if (cardType == CARD_MMC) cardTypeStr = "MMC";
+                    else if (cardType == CARD_SD) cardTypeStr = "SDSC";
+                    else if (cardType == CARD_SDHC) cardTypeStr = "SDHC";
+
+                    uint64_t cardSize = SD_MMC.cardSize() / (1024 * 1024);
+                    char buffer[128];
+                    snprintf(buffer, sizeof(buffer), "📊 SD_MMC Type: %s, Size: %llu MB", cardTypeStr, cardSize);
+                    RF_DEBUG(0, "", buffer);
+
+                    RF_DEBUG(0, RF_SDMMC_MODE_1BIT ? "ℹ️ SD_MMC running in 1-bit mode" : "ℹ️ SD_MMC running in 4-bit mode");
+                }
+
+                return true;
+#else
+                RF_DEBUG(0, "❌ SD_MMC not available on this platform");
+                return false;
+#endif
+            }
+            
+        case RfStorageType::LITTLEFS:
+        default:
+            {
+                if (!LittleFS.begin(true)) {
+                    RF_DEBUG(0, "❌ LittleFS Mount Failed!");
+                    return false;
+                }
+                // RF_DEBUG(1, "✅ LittleFS initialized successfully");
+                return true;
+            }
+    }
 }
 
 void rf_storage_end() {
-#ifdef RF_USE_SDCARD
-    #ifdef RF_USE_SDMMC
-        SD_MMC.end();
-        RF_DEBUG(0, "✅ SD_MMC unmounted");
-    #else
-        SD.end();
-        RF_DEBUG(0, "✅ SD Card unmounted");
-    #endif
-#else
-    LittleFS.end();
-    RF_DEBUG(0, "✅ LittleFS unmounted");
+    switch (g_active_storage) {
+        case RfStorageType::SD_SPI:
+            SD.end();
+            RF_DEBUG(1, "✅ SD Card unmounted");
+            break;
+        case RfStorageType::SD_MMC:
+#if RF_HAS_SDMMC
+            SD_MMC.end();
+            RF_DEBUG(1, "✅ SD_MMC unmounted");
 #endif
+            break;
+        case RfStorageType::LITTLEFS:
+        case RfStorageType::AUTO:
+        default:
+            LittleFS.end();
+            RF_DEBUG(1, "✅ LittleFS unmounted");
+            break;
+    }
+}
+
+// Runtime file system operations
+bool rf_mkdir(const char* path) {
+    switch (g_active_storage) {
+        case RfStorageType::SD_SPI:
+            return SD.mkdir(path);
+        case RfStorageType::SD_MMC:
+#if RF_HAS_SDMMC
+            return SD_MMC.mkdir(path);
+#else
+            return false;
+#endif
+        case RfStorageType::LITTLEFS:
+        case RfStorageType::AUTO:
+        default:
+            return LittleFS.mkdir(path);
+    }
+}
+
+bool rf_exists(const char* path) {
+    switch (g_active_storage) {
+        case RfStorageType::SD_SPI:
+            return SD.exists(path);
+        case RfStorageType::SD_MMC:
+#if RF_HAS_SDMMC
+            return SD_MMC.exists(path);
+#else
+            return false;
+#endif
+        case RfStorageType::LITTLEFS:
+        case RfStorageType::AUTO:
+        default:
+            return LittleFS.exists(path);
+    }
+}
+
+bool rf_remove(const char* path) {
+    switch (g_active_storage) {
+        case RfStorageType::SD_SPI:
+            return SD.remove(path);
+        case RfStorageType::SD_MMC:
+#if RF_HAS_SDMMC
+            return SD_MMC.remove(path);
+#else
+            return false;
+#endif
+        case RfStorageType::LITTLEFS:
+        case RfStorageType::AUTO:
+        default:
+            return LittleFS.remove(path);
+    }
+}
+
+bool rf_rename(const char* oldPath, const char* newPath) {
+    switch (g_active_storage) {
+        case RfStorageType::SD_SPI:
+            return SD.rename(oldPath, newPath);
+        case RfStorageType::SD_MMC:
+#if RF_HAS_SDMMC
+            return SD_MMC.rename(oldPath, newPath);
+#else
+            return false;
+#endif
+        case RfStorageType::LITTLEFS:
+        case RfStorageType::AUTO:
+        default:
+            return LittleFS.rename(oldPath, newPath);
+    }
+}
+
+bool rf_rmdir(const char* path) {
+    switch (g_active_storage) {
+        case RfStorageType::SD_SPI:
+            return SD.rmdir(path);
+        case RfStorageType::SD_MMC:
+#if RF_HAS_SDMMC
+            return SD_MMC.rmdir(path);
+#else
+            return false;
+#endif
+        case RfStorageType::LITTLEFS:
+        case RfStorageType::AUTO:
+        default:
+            return LittleFS.rmdir(path);
+    }
+}
+
+File rf_open(const char* path, const char* mode) {
+    bool needsCreate = false;
+    if (mode != nullptr) {
+        for (const char* p = mode; *p != '\0'; ++p) {
+            if (*p == 'w' || *p == 'a' || *p == '+') {
+                needsCreate = true;
+                break;
+            }
+        }
+    }
+
+    switch (g_active_storage) {
+        case RfStorageType::SD_SPI:
+            return SD.open(path, mode);
+        case RfStorageType::SD_MMC:
+#if RF_HAS_SDMMC
+            return SD_MMC.open(path, mode);
+#else
+            return File();
+#endif
+        case RfStorageType::LITTLEFS:
+        case RfStorageType::AUTO:
+        default:
+            if (needsCreate) {
+                return LittleFS.open(path, mode, true);
+            }
+            return LittleFS.open(path, mode);
+    }
+}
+
+size_t rf_total_bytes() {
+    switch (g_active_storage) {
+        case RfStorageType::SD_SPI:
+            return SD.totalBytes();
+        case RfStorageType::SD_MMC:
+#if RF_HAS_SDMMC
+            return SD_MMC.totalBytes();
+#else
+            return 0;
+#endif
+        case RfStorageType::LITTLEFS:
+        case RfStorageType::AUTO:
+        default:
+            return LittleFS.totalBytes();
+    }
+}
+
+size_t rf_used_bytes() {
+    switch (g_active_storage) {
+        case RfStorageType::SD_SPI:
+            return SD.usedBytes();
+        case RfStorageType::SD_MMC:
+#if RF_HAS_SDMMC
+            return SD_MMC.usedBytes();
+#else
+            return 0;
+#endif
+        case RfStorageType::LITTLEFS:
+        case RfStorageType::AUTO:
+        default:
+            return LittleFS.usedBytes();
+    }
 }
 
 // Helper function to normalize file paths

@@ -27,7 +27,7 @@
     "description": "HOG descriptor parameters - produces 144 features per image"
   },
   "output": {
-    "csv_path": "dataset_features.csv",
+    "model_name": "digit",
     "shuffle_data": true,
     "description": "Output CSV file with HOG features"
   },
@@ -35,5 +35,14 @@
     "max_images_per_class": -1,
     "verbose": true,
     "description": "Processing options: -1 = process all images, >0 = limit per class"
+  },
+  "esp32": {
+    "input_format": "GRAYSCALE",
+    "input_width": 96,
+    "input_height": 96,
+    "resize_method": "NEAREST_NEIGHBOR",
+    "maintain_aspect_ratio": false,
+    "jpeg_quality": 80,
+    "description": "ESP32 camera configuration: input_format (GRAYSCALE|RGB565|RGB888|YUV422|JPEG), resize_method (NEAREST_NEIGHBOR|BILINEAR|AREA_AVERAGE). Use 96x96 for optimal performance (3x downscale to 32x32)"
   }
 }

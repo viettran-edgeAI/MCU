@@ -35,8 +35,9 @@ RESP_OK = b"OK"
 RESP_ERROR = b"ERROR"
 
 # Transfer parameters optimized for ESP32 - V2 Protocol
-CHUNK_SIZE =  256  # bytes per chunk
-CHUNK_DELAY = 0.03  # delay between chunks in seconds (V2 uses ACKs)
+# IMPORTANT: Keep CHUNK_SIZE in sync with ESP32 receivers to avoid CDC buffer overrun.
+CHUNK_SIZE = 220   # bytes per chunk
+CHUNK_DELAY = 0.02  # small delay between chunks (ACK-driven retries handle backpressure)
 MAX_RETRIES = 5     # max retries per chunk
 
 # Timeout settings
@@ -200,6 +201,8 @@ def transfer_file(ser, file_path, show_progress=True, progress_callback=None, qu
                     success = True
                     break
             elif line.startswith("NACK "):
+                if line:
+                    print(f"   ↩ {line}")
                 # Retry
                 if attempt < MAX_RETRIES and show_progress:
                     sys.stdout.write('\n')

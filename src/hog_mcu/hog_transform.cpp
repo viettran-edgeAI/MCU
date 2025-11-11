@@ -1,7 +1,164 @@
 #include "hog_transform.h"
+#include "Rf_file_manager.h"
+#include <cctype>
+
+namespace {
+
+bool findValueStart(const String& json, const char* key, int& valueIndex) {
+    String pattern = "\"" + String(key) + "\"";
+    int keyIndex = json.indexOf(pattern);
+    if (keyIndex < 0) {
+        return false;
+    }
+
+    int colonIndex = json.indexOf(':', keyIndex + pattern.length());
+    if (colonIndex < 0) {
+        return false;
+    }
+
+    int index = colonIndex + 1;
+    while (index < json.length() && isspace(static_cast<unsigned char>(json[index]))) {
+        ++index;
+    }
+
+    if (index >= json.length()) {
+        return false;
+    }
+
+    valueIndex = index;
+    return true;
+}
+
+bool extractStringValue(const String& json, const char* key, String& out) {
+    int index = 0;
+    if (!findValueStart(json, key, index)) {
+        return false;
+    }
+
+    if (json[index] != '"') {
+        return false;
+    }
+    ++index;
+    int end = json.indexOf('"', index);
+    if (end < 0) {
+        return false;
+    }
+    out = json.substring(index, end);
+    out.trim();
+    return true;
+}
+
+bool extractIntValue(const String& json, const char* key, int& out) {
+    int index = 0;
+    if (!findValueStart(json, key, index)) {
+        return false;
+    }
+
+    int start = index;
+    if (json[index] == '-') {
+        ++index;
+    }
+    while (index < json.length() && isdigit(static_cast<unsigned char>(json[index]))) {
+        ++index;
+    }
+
+    if (index == start) {
+        return false;
+    }
+
+    out = json.substring(start, index).toInt();
+    return true;
+}
+
+bool extractBoolValue(const String& json, const char* key, bool& out) {
+    int index = 0;
+    if (!findValueStart(json, key, index)) {
+        return false;
+    }
+
+    int end = index;
+    while (end < json.length() && isalpha(static_cast<unsigned char>(json[end]))) {
+        ++end;
+    }
+
+    if (end == index) {
+        return false;
+    }
+
+    String token = json.substring(index, end);
+    token.toLowerCase();
+    token.trim();
+
+    if (token.startsWith("true")) {
+        out = true;
+        return true;
+    }
+    if (token.startsWith("false")) {
+        out = false;
+        return true;
+    }
+    return false;
+}
+
+ImageProcessing::PixelFormat parsePixelFormat(String value) {
+    value.trim();
+    value.toUpperCase();
+
+    if (value == "RGB565") {
+        return ImageProcessing::PixelFormat::RGB565;
+    }
+    if (value == "RGB888") {
+        return ImageProcessing::PixelFormat::RGB888;
+    }
+    if (value == "YUV422") {
+        return ImageProcessing::PixelFormat::YUV422;
+    }
+    if (value == "JPEG") {
+        return ImageProcessing::PixelFormat::JPEG;
+    }
+
+    return ImageProcessing::PixelFormat::GRAYSCALE;
+}
+
+ImageProcessing::ResizeMethod parseResizeMethod(String value) {
+    value.trim();
+    value.toUpperCase();
+
+    if (value == "NEAREST" || value == "NEAREST_NEIGHBOR") {
+        return ImageProcessing::ResizeMethod::NEAREST_NEIGHBOR;
+    }
+    if (value == "AREA" || value == "AREA_AVERAGE") {
+        return ImageProcessing::ResizeMethod::AREA_AVERAGE;
+    }
+
+    return ImageProcessing::ResizeMethod::BILINEAR;
+}
+
+String extractFileName(String path) {
+    path.trim();
+    if (path.length() == 0) {
+        return path;
+    }
+
+    path.replace('\\', '/');
+    int slash = path.lastIndexOf('/');
+    if (slash < 0) {
+        return path;
+    }
+    if (slash == path.length() - 1) {
+        return String();
+    }
+    return path.substring(slash + 1);
+}
+
+} // namespace
 
 // Default constructor with optimal parameters for 32x32 images
-HOG_MCU::HOG_MCU() : processed_image_buffer(nullptr) {
+HOG_MCU::HOG_MCU() : processed_image_buffer(nullptr), 
+                     gradient_x_buffer(nullptr), gradient_y_buffer(nullptr),
+                     magnitude_buffer(nullptr), angle_bin_buffer(nullptr),
+                     block_histogram_buffer(nullptr), cell_histogram_buffer(nullptr),
+                     feature_csv_path_(), feature_file_name_() {
     params.img_width = 32;
     params.img_height = 32;
     params.cell_size = 8;
@@ -23,7 +180,11 @@ HOG_MCU::HOG_MCU() : processed_image_buffer(nullptr) {
 }
 
 // Constructor with custom parameters
-HOG_MCU::HOG_MCU(const Params& p) : params(p), processed_image_buffer(nullptr) {
+HOG_MCU::HOG_MCU(const Params& p) : params(p), processed_image_buffer(nullptr),
+                                    gradient_x_buffer(nullptr), gradient_y_buffer(nullptr),
+                                    magnitude_buffer(nullptr), angle_bin_buffer(nullptr),
+                                    block_histogram_buffer(nullptr), cell_histogram_buffer(nullptr),
+                                    feature_csv_path_(), feature_file_name_() {
     // Set default image processing configuration
     img_config.input_format = ImageProcessing::PixelFormat::GRAYSCALE;
     img_config.output_format = ImageProcessing::PixelFormat::GRAYSCALE;
@@ -60,13 +221,25 @@ const ImageProcessing::ProcessingConfig& HOG_MCU::getImageProcessingConfig() con
 void HOG_MCU::transform(const void* cameraBuffer) {
     features.clear();
     
-    if (!cameraBuffer || !processed_image_buffer) {
+    if (!cameraBuffer) {
         return;
     }
     
-    // Process the camera buffer (format conversion + resizing)
+    // Fast path: if input already matches HOG dimensions and is grayscale, skip processing
+    if (img_config.input_format == ImageProcessing::PixelFormat::GRAYSCALE &&
+        img_config.input_width == params.img_width && 
+        img_config.input_height == params.img_height) {
+        computeOptimized((const uint8_t*)cameraBuffer);
+        return;
+    }
+    
+    // Normal path: process the camera buffer (format conversion + resizing)
+    if (!processed_image_buffer) {
+        return;
+    }
+    
     if (ImageProcessing::processImage(cameraBuffer, img_config, processed_image_buffer)) {
-        compute(processed_image_buffer);
+        computeOptimized(processed_image_buffer);
     }
 }
 
@@ -80,7 +253,7 @@ void HOG_MCU::transformGrayscale(const uint8_t* grayscaleImage) {
     // If the input is already the correct size, use it directly
     if (img_config.input_width == params.img_width && 
         img_config.input_height == params.img_height) {
-        compute(grayscaleImage);
+        computeOptimized(grayscaleImage);
     } else {
         // Need to resize the grayscale image
         if (processed_image_buffer) {
@@ -88,7 +261,7 @@ void HOG_MCU::transformGrayscale(const uint8_t* grayscaleImage) {
                                               img_config.input_width, img_config.input_height,
                                               processed_image_buffer, 
                                               params.img_width, params.img_height)) {
-                compute(processed_image_buffer);
+                computeOptimized(processed_image_buffer);
             }
         }
     }
@@ -124,7 +297,8 @@ void HOG_MCU::setConfig(const Config& config) {
     img_config.output_width = config.hog_img_width;
     img_config.output_height = config.hog_img_height;
     img_config.resize_method = config.resize_method;
-    img_config.maintain_aspect_ratio = false;
+    img_config.maintain_aspect_ratio = config.maintain_aspect_ratio;
+    img_config.jpeg_quality = config.jpeg_quality;
     
     // Configure HOG parameters
     params.img_width = config.hog_img_width;
@@ -137,6 +311,149 @@ void HOG_MCU::setConfig(const Config& config) {
     // Reinitialize buffers with new configuration
     cleanupBuffers();
     initializeBuffers();
+}
+
+bool HOG_MCU::loadConfigFromFile(const char* path) {
+    if (!path || path[0] == '\0') {
+        Serial.println("HOG_MCU: Invalid configuration path");
+        return false;
+    }
+
+    String requestedPath(path);
+    File configFile = RF_FS_OPEN(requestedPath, RF_FILE_READ);
+    if (!configFile && !requestedPath.startsWith("/")) {
+        String altPath = "/" + requestedPath;
+        configFile = RF_FS_OPEN(altPath, RF_FILE_READ);
+        if (configFile) {
+            requestedPath = altPath;
+        }
+    }
+
+    if (!configFile) {
+        Serial.print("HOG_MCU: Failed to open config file ");
+        Serial.println(path);
+        return false;
+    }
+
+    String content;
+    size_t fileSize = configFile.size();
+    if (fileSize > 0) {
+        content.reserve(fileSize);
+    }
+
+    while (configFile.available()) {
+        content += char(configFile.read());
+    }
+    configFile.close();
+
+    if (content.length() == 0) {
+        Serial.println("HOG_MCU: Config file is empty");
+        return false;
+    }
+
+    Config newConfig;
+    String parsedString;
+    String parsedModelName;
+    String parsedFeatureCsv;
+    String parsedFeatureFile;
+    int parsedInt = 0;
+    bool parsedBool = false;
+    int featureLength = 0;
+
+    if (extractStringValue(content, "input_format", parsedString)) {
+        newConfig.input_format = parsePixelFormat(parsedString);
+    }
+    if (extractIntValue(content, "input_width", parsedInt)) {
+        newConfig.input_width = parsedInt;
+    }
+    if (extractIntValue(content, "input_height", parsedInt)) {
+        newConfig.input_height = parsedInt;
+    }
+    if (extractStringValue(content, "resize_method", parsedString)) {
+        newConfig.resize_method = parseResizeMethod(parsedString);
+    }
+    if (extractBoolValue(content, "maintain_aspect_ratio", parsedBool)) {
+        newConfig.maintain_aspect_ratio = parsedBool;
+    }
+    if (extractIntValue(content, "jpeg_quality", parsedInt)) {
+        if (parsedInt < 0) parsedInt = 0;
+        if (parsedInt > 100) parsedInt = 100;
+        newConfig.jpeg_quality = static_cast<uint8_t>(parsedInt);
+    }
+
+    if (extractIntValue(content, "hog_img_width", parsedInt)) {
+        newConfig.hog_img_width = parsedInt;
+    }
+    if (extractIntValue(content, "hog_img_height", parsedInt)) {
+        newConfig.hog_img_height = parsedInt;
+    }
+    if (extractIntValue(content, "cell_size", parsedInt)) {
+        newConfig.cell_size = parsedInt;
+    }
+    if (extractIntValue(content, "block_size", parsedInt)) {
+        newConfig.block_size = parsedInt;
+    }
+    if (extractIntValue(content, "block_stride", parsedInt)) {
+        newConfig.block_stride = parsedInt;
+    }
+    if (extractIntValue(content, "nbins", parsedInt)) {
+        newConfig.nbins = parsedInt;
+    }
+
+    extractStringValue(content, "model_name", parsedModelName);
+    if (extractStringValue(content, "feature_csv", parsedFeatureCsv)) {
+        parsedFeatureCsv.trim();
+    }
+    if (extractStringValue(content, "feature_file_name", parsedFeatureFile)) {
+        parsedFeatureFile.trim();
+    }
+    if (extractIntValue(content, "feature_length", featureLength)) {
+        if (featureLength > 144) {
+            Serial.println("HOG_MCU: Warning - feature length exceeds 144; extra values will be ignored.");
+        }
+    }
+
+    if (parsedFeatureCsv.length() == 0 && parsedModelName.length() > 0) {
+        parsedFeatureCsv = parsedModelName + ".csv";
+    }
+    if (parsedFeatureFile.length() == 0 && parsedFeatureCsv.length() > 0) {
+        parsedFeatureFile = extractFileName(parsedFeatureCsv);
+    }
+
+    if (newConfig.input_width <= 0 || newConfig.input_height <= 0 ||
+        newConfig.hog_img_width <= 0 || newConfig.hog_img_height <= 0 ||
+        newConfig.cell_size <= 0 || newConfig.block_size <= 0 ||
+        newConfig.block_stride <= 0 || newConfig.nbins <= 0) {
+        Serial.println("HOG_MCU: Invalid parameters in configuration file");
+        return false;
+    }
+
+    if (newConfig.block_size > newConfig.hog_img_width || newConfig.block_size > newConfig.hog_img_height) {
+        Serial.println("HOG_MCU: Block size must fit within HOG image dimensions");
+        return false;
+    }
+
+    if (newConfig.cell_size > newConfig.block_size) {
+        Serial.println("HOG_MCU: Cell size must not exceed block size");
+        return false;
+    }
+
+    int blocksX = (newConfig.hog_img_width - newConfig.block_size) / newConfig.block_stride + 1;
+    int blocksY = (newConfig.hog_img_height - newConfig.block_size) / newConfig.block_stride + 1;
+    if (blocksX <= 0 || blocksY <= 0) {
+        Serial.println("HOG_MCU: Invalid block stride or dimensions in configuration");
+        return false;
+    }
+
+    setConfig(newConfig);
+
+    feature_csv_path_ = parsedFeatureCsv;
+    feature_file_name_ = parsedFeatureFile;
+
+    Serial.print("HOG_MCU: Loaded configuration from ");
+    Serial.println(requestedPath);
+
+    return true;
 }
 
 void HOG_MCU::setupForESP32CAM(ImageProcessing::PixelFormat input_format, int input_width, int input_height) {
@@ -152,6 +469,22 @@ void HOG_MCU::initializeBuffers() {
         if (!processed_image_buffer) {
             Serial.println("Error: Failed to allocate image processing buffer");
         }
+        
+        // Allocate gradient computation buffers
+        gradient_x_buffer = new int16_t[buffer_size];
+        gradient_y_buffer = new int16_t[buffer_size];
+        magnitude_buffer = new uint16_t[buffer_size];
+        angle_bin_buffer = new uint8_t[buffer_size];
+        
+        // Allocate histogram buffers (max size for typical HOG configs)
+        block_histogram_buffer = new float[16];  // 4 cells * 4 bins
+        cell_histogram_buffer = new float[9];    // Max 9 bins
+        
+        if (!gradient_x_buffer || !gradient_y_buffer || !magnitude_buffer || 
+            !angle_bin_buffer || !block_histogram_buffer || !cell_histogram_buffer) {
+            Serial.println("Error: Failed to allocate HOG optimization buffers");
+            cleanupBuffers();
+        }
     }
 }
 
@@ -159,6 +492,30 @@ void HOG_MCU::cleanupBuffers() {
     if (processed_image_buffer) {
         delete[] processed_image_buffer;
         processed_image_buffer = nullptr;
+    }
+    if (gradient_x_buffer) {
+        delete[] gradient_x_buffer;
+        gradient_x_buffer = nullptr;
+    }
+    if (gradient_y_buffer) {
+        delete[] gradient_y_buffer;
+        gradient_y_buffer = nullptr;
+    }
+    if (magnitude_buffer) {
+        delete[] magnitude_buffer;
+        magnitude_buffer = nullptr;
+    }
+    if (angle_bin_buffer) {
+        delete[] angle_bin_buffer;
+        angle_bin_buffer = nullptr;
+    }
+    if (block_histogram_buffer) {
+        delete[] block_histogram_buffer;
+        block_histogram_buffer = nullptr;
+    }
+    if (cell_histogram_buffer) {
+        delete[] cell_histogram_buffer;
+        cell_histogram_buffer = nullptr;
     }
 }
 
@@ -244,3 +601,111 @@ float HOG_MCU::computeGradientAngle(int gx, int gy) {
     return atan2(gy, gx) * 180.0f / PI;
 }
 
+// Optimized gradient computation using integer arithmetic
+void HOG_MCU::computeGradientsOptimized(const uint8_t* grayImage) {
+    const int width = params.img_width;
+    const int height = params.img_height;
+    const float angle_scale = 180.0f / params.nbins;
+    
+    // Compute gradients for all pixels
+    for (int y = 1; y < height - 1; ++y) {
+        for (int x = 1; x < width - 1; ++x) {
+            int idx = y * width + x;
+            
+            // Compute gradients using integer arithmetic
+            int gx = (int)grayImage[idx + 1] - (int)grayImage[idx - 1];
+            int gy = (int)grayImage[idx + width] - (int)grayImage[idx - width];
+            
+            gradient_x_buffer[idx] = gx;
+            gradient_y_buffer[idx] = gy;
+            
+            // Magnitude: use integer approximation |gx| + |gy| (faster than sqrt)
+            int abs_gx = gx >= 0 ? gx : -gx;
+            int abs_gy = gy >= 0 ? gy : -gy;
+            magnitude_buffer[idx] = abs_gx + abs_gy;
+            
+            // Angle bin: compute using atan2 and quantize
+            float angle = atan2f(gy, gx) * 180.0f / PI;
+            if (angle < 0) angle += 180.0f;
+            
+            int bin = (int)(angle / angle_scale);
+            if (bin >= params.nbins) bin = params.nbins - 1;
+            angle_bin_buffer[idx] = bin;
+        }
+    }
+}
+
+// Optimized compute method using pre-allocated buffers
+void HOG_MCU::computeOptimized(const uint8_t* grayImage) {
+    if (!grayImage || !gradient_x_buffer || !gradient_y_buffer || 
+        !magnitude_buffer || !angle_bin_buffer || !block_histogram_buffer) {
+        // Fallback to original compute if buffers not initialized
+        compute(grayImage);
+        return;
+    }
+    
+    // Pre-compute all gradients once
+    computeGradientsOptimized(grayImage);
+    
+    const int width = params.img_width;
+    const int numBlocksY = (params.img_height - params.block_size) / params.block_stride + 1;
+    const int numBlocksX = (params.img_width - params.block_size) / params.block_stride + 1;
+    const int nbins = params.nbins;
+    
+    for (int by = 0; by < numBlocksY; ++by) {
+        for (int bx = 0; bx < numBlocksX; ++bx) {
+            // Clear block histogram
+            for (int i = 0; i < nbins * 4; ++i) {
+                block_histogram_buffer[i] = 0.0f;
+            }
+            
+            // Process 4 cells in the block (2x2)
+            for (int cy = 0; cy < 2; ++cy) {
+                for (int cx = 0; cx < 2; ++cx) {
+                    // Clear cell histogram
+                    for (int i = 0; i < nbins; ++i) {
+                        cell_histogram_buffer[i] = 0.0f;
+                    }
+                    
+                    int startX = bx * params.block_stride + cx * params.cell_size;
+                    int startY = by * params.block_stride + cy * params.cell_size;
+                    
+                    // Accumulate histogram for this cell
+                    for (int y = 0; y < params.cell_size; ++y) {
+                        for (int x = 0; x < params.cell_size; ++x) {
+                            int ix = startX + x;
+                            int iy = startY + y;
+                            
+                            if (ix <= 0 || ix >= width - 1 || iy <= 0 || iy >= params.img_height - 1)
+                                continue;
+                            
+                            int idx = iy * width + ix;
+                            uint8_t bin = angle_bin_buffer[idx];
+                            cell_histogram_buffer[bin] += magnitude_buffer[idx];
+                        }
+                    }
+                    
+                    // Copy cell histogram to block histogram
+                    int cell_offset = (cy * 2 + cx) * nbins;
+                    for (int i = 0; i < nbins; ++i) {
+                        block_histogram_buffer[cell_offset + i] = cell_histogram_buffer[i];
+                    }
+                }
+            }
+            
+            // Normalize block histogram
+            float norm = 0.0f;
+            for (int i = 0; i < nbins * 4; ++i) {
+                norm += block_histogram_buffer[i] * block_histogram_buffer[i];
+            }
+            norm = sqrtf(norm + 1e-6f);
+            
+            // Add normalized features to output
+            for (int i = 0; i < nbins * 4; ++i) {
+                if (features.size() < 144) {
+                    features.push_back(block_histogram_buffer[i] / norm);
+                }
+            }
+        }
+    }
+}

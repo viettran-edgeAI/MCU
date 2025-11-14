@@ -20,6 +20,14 @@ import struct
 import binascii
 from pathlib import Path
 
+# Import configuration parser to sync with ESP32
+try:
+    from config_parser import get_user_chunk_size
+except ImportError:
+    print("⚠️  Warning: config_parser.py not found. Using default CHUNK_SIZE.")
+    def get_user_chunk_size(config_file_path=None, default=220):
+        return default
+
 # --- Protocol Constants ---
 # Must match the ESP32 receiver sketch
 CMD_HEADER = b"ESP32_XFER"
@@ -33,22 +41,19 @@ RESP_READY = b"READY"
 RESP_OK = b"OK"
 RESP_ERROR = b"ERROR"
 
-# The following 2 parameters must match exactly esp32 side sketch
-# changed them when transfer process failed
+# CHUNK_SIZE is now automatically extracted from Rf_board_config.h
+# This ensures synchronization with ESP32 side configuration.
+# The value is determined by USER_CHUNK_SIZE in Rf_board_config.h
 #
 # CHUNK_SIZE trade-offs:
 #   - Larger chunks = faster transfer (fewer round-trips)
 #   - Smaller chunks = more reliable (less USB CDC buffer saturation)
 #
-# Board-specific guidance:
+# Board-specific defaults in Rf_board_config.h:
 #   - ESP32-C3/C6: 220 bytes (USB CDC buffer ~384 bytes; conservative margin)
 #   - ESP32-S3:    256 bytes (larger CDC buffer available)
 #   - ESP32:       256 bytes (standard board, good throughput)
-#
-# Default is 220 for maximum compatibility. To use higher speeds on larger boards,
-# increase CHUNK_SIZE, but MUST coordinate with ESP32 receiver's USER_CHUNK_SIZE
-# (define USER_CHUNK_SIZE before including board_config.h in the sketch).
-CHUNK_SIZE = 220 # bytes per chunk - sized to fit low-RAM USB CDC buffers
+CHUNK_SIZE = get_user_chunk_size(default=220)  # Auto-synced with Rf_board_config.h
 CHUNK_DELAY = 0.025  # delay between chunks in seconds - V2 uses ACKs, so keep small
 
 # Timeout settings
@@ -235,6 +240,13 @@ def main():
     base_name = sys.argv[1]
     port = sys.argv[2]
     baudrate = 115200
+    
+    # Display configuration
+    print("\n" + "=" * 50)
+    print("📡 ESP32 Unified Data Transfer")
+    print("=" * 50)
+    print(f"CHUNK_SIZE: {CHUNK_SIZE} bytes (auto-synced with Rf_board_config.h)")
+    print("=" * 50 + "\n")
 
     files_to_send = get_file_paths(base_name)
 

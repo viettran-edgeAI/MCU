@@ -86,7 +86,7 @@ void setup() {
     printFile("/config.json");
     
     // Delete all files (use with caution!)
-    // deleteAllLittleFSFiles();
+    // deleteAllFiles();
 }
 ```
 
@@ -358,14 +358,14 @@ printFile(filepath);  // Display cleaned data
 
 ```cpp
 // ⚠️ DANGER: This deletes EVERYTHING!
-deleteAllLittleFSFiles();
+deleteAllFiles();
 
 // Use with confirmation
 Serial.println("Type YES to delete all files:");
 while (!Serial.available()) delay(10);
 String confirm = Serial.readStringUntil('\n');
 if (confirm.equals("YES")) {
-    deleteAllLittleFSFiles();
+    deleteAllFiles();
 }
 ```
 
@@ -422,7 +422,7 @@ void loop() {
             backupAllFiles();
             break;
         case '4':
-            deleteAllLittleFSFiles();
+            deleteAllFiles();
             break;
     }
 }

@@ -6,6 +6,13 @@
 
 namespace mcu{
 
+    typedef struct rf_predict_result_t {
+        size_t prediction_time;
+        char label[RF_MAX_LABEL_LENGTH] = {'\0'};
+        label_type i_label = RF_ERROR_LABEL;
+        bool success = false;
+    } rf_predict_result_t;
+
     class RandomForest{
         using TreeSampleIDs = ID_vector<sample_type,3>;
 #if RF_ENABLE_TRAINING
@@ -37,7 +44,7 @@ namespace mcu{
         Rf_data* base_data_stub = nullptr;
 
         // Pre-allocated buffers for inference
-    packed_vector<8> categorization_buffer;
+        packed_vector<8> categorization_buffer;
         mutable char path_buffer[RF_PATH_BUFFER] = {'\0'};
 
     #if RF_ENABLE_TRAINING
@@ -193,7 +200,7 @@ namespace mcu{
 
             // remove copy of base data
             base.get_temp_base_data_path(path_buffer);
-            RF_FS.remove(path_buffer);
+            RF_FS_REMOVE(path_buffer);
 
             forest_container.end_training_phase();
 
@@ -1931,12 +1938,6 @@ namespace mcu{
 #endif
         }
 
-        typedef struct rf_predict_result_t {
-            size_t prediction_time;
-            char label[RF_MAX_LABEL_LENGTH] = {'\0'};
-            label_type i_label = RF_ERROR_LABEL;
-            bool success = false;
-        } rf_predict_result_t;
 
         /**
          * @brief: Warmup prediction to initialize internal caches and structures.
@@ -1952,12 +1953,19 @@ namespace mcu{
 
         // Public API: predict() fills the provided label buffer with the predicted label
         template<typename T>
-        void predict(const T& features, rf_predict_result_t& result) {
+        void predict(const T& features, rf_predict_result_t& result, bool get_original_label = true) {
             static_assert(mcu::is_supported_vector<T>::value, "Unsupported type. Use mcu::vector or mcu::b_vector.");
-            predict(features.data(), features.size(), result);
+            predict(features.data(), features.size(), result, get_original_label);
         }
 
-        void predict(const float* features, size_t length, rf_predict_result_t& result) {
+        /**
+         * @brief: Predict the label for given features.
+         * @param features: Pointer to the feature array.
+         * @param length: Number of features in the array.
+         * @param result: Reference to rf_predict_result_t structure to store the prediction result.
+         * @param get_original_label: <true> retrieves the original label; <false> for extremely fast prediction without original label retrieval (do it later using get_original_label())
+         */
+        void predict(const float* features, size_t length, rf_predict_result_t& result, bool get_original_label = true) {
             uint32_t start = GET_CURRENT_TIME_IN_MICROSECONDS();
 
             if (__builtin_expect(length != config.num_features, 0)) {
@@ -1983,29 +1991,51 @@ namespace mcu{
                     }
                 }
             }
+            if (__builtin_expect(get_original_label,1)){
+                const char* labelPtr = nullptr;
+                uint16_t labelLen = 0;
+                if (!quantizer.getOriginalLabelView(result.i_label, &labelPtr, &labelLen)) {
+                    result.label[0] = '\0';
+                    result.success = false;
+                    result.prediction_time = GET_CURRENT_TIME_IN_MICROSECONDS() - start;
+                    return;
+                }
 
-            const char* labelPtr = nullptr;
-            uint16_t labelLen = 0;
-            if (!quantizer.getOriginalLabelView(result.i_label, &labelPtr, &labelLen)) {
-                result.label[0] = '\0';
-                result.success = false;
-                result.prediction_time = GET_CURRENT_TIME_IN_MICROSECONDS() - start;
-                return;
-            }
-
-            // Copy safely into result.label
-            if (labelLen >= RF_MAX_LABEL_LENGTH) {
-                memcpy(result.label, labelPtr, RF_MAX_LABEL_LENGTH - 1);
-                result.label[RF_MAX_LABEL_LENGTH - 1] = '\0';
-            } else if (labelLen > 0) {
-                memcpy(result.label, labelPtr, labelLen);
-                result.label[labelLen] = '\0';
+                // Copy safely into result.label
+                if (labelLen >= RF_MAX_LABEL_LENGTH) {
+                    memcpy(result.label, labelPtr, RF_MAX_LABEL_LENGTH - 1);
+                    result.label[RF_MAX_LABEL_LENGTH - 1] = '\0';
+                } else if (labelLen > 0) {
+                    memcpy(result.label, labelPtr, labelLen);
+                    result.label[labelLen] = '\0';
+                } else {
+                    result.label[0] = '\0';
+                }
             } else {
                 result.label[0] = '\0';
             }
 
             result.success = true;
             result.prediction_time = GET_CURRENT_TIME_IN_MICROSECONDS() - start;
+        }
+
+        // get original label from internal normalized label
+        bool get_original_label(label_type i_label, char* out_label, size_t out_label_size){
+            const char* labelPtr = nullptr;
+            uint16_t labelLen = 0;
+            if (!quantizer.getOriginalLabelView(i_label, &labelPtr, &labelLen)) {
+                return false;
+            }   
+            if (labelLen >= out_label_size) {
+                memcpy(out_label, labelPtr, out_label_size - 1);
+                out_label[out_label_size - 1] = '\0';
+            } else if (labelLen > 0) {
+                memcpy(out_label, labelPtr, labelLen);
+                out_label[labelLen] = '\0';
+            } else {
+                out_label[0] = '\0';
+            }
+            return true;
         }
 
         /**

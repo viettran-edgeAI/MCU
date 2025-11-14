@@ -107,7 +107,7 @@ Edit `hog_config_receiver.ino` and change the storage mode:
 // Choose one of:
 const RfStorageType STORAGE_MODE = RfStorageType::SD_MMC;    // Built-in SD slot (ESP32-CAM)
 // const RfStorageType STORAGE_MODE = RfStorageType::SD_SPI; // External SPI SD card module
-// const RfStorageType STORAGE_MODE = RfStorageType::LITTLEFS; // Internal flash (default)
+// const RfStorageType STORAGE_MODE = RfStorageType::FLASH; // Internal flash (default)
 ```
 
 The storage mode is passed to `RF_FS_BEGIN()` during initialization, ensuring the correct backend is used.

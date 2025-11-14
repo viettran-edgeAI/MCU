@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Transfer binary files from PC to ESP32 via serial
-# Usage: python3 transfer_dataset.py model_name /dev/ttyACM0
+# Usage: python3 transfer_dataset.py <model_name> <serial_port>
+# example: python3 transfer_dataset.py model_name /dev/ttyACM0
 # Automatically finds files in ../../data/result/ folder
 
 import os
@@ -11,24 +12,27 @@ import struct
 import binascii
 from pathlib import Path
 
-# Transfer timing and size configuration
-# IMPORTANT: Keep CHUNK_SIZE and CHUNK_DELAY in sync with the ESP32 receiver sketch.
-# 
+# Import configuration parser to sync with ESP32
+try:
+    from config_parser import get_user_chunk_size
+except ImportError:
+    print("⚠️  Warning: config_parser.py not found. Using default CHUNK_SIZE.")
+    def get_user_chunk_size(config_file_path=None, default=220):
+        return default
+
+# CHUNK_SIZE is now automatically extracted from Rf_board_config.h
+# This ensures synchronization with ESP32 side configuration.
+# The value is determined by USER_CHUNK_SIZE in Rf_board_config.h
+#
 # CHUNK_SIZE trade-offs:
 #   - Larger chunks = faster transfer (fewer round-trips)
 #   - Smaller chunks = more reliable (less USB CDC buffer saturation)
 # 
-# Board-specific guidance:
+# Board-specific defaults in Rf_board_config.h:
 #   - ESP32-C3/C6: 220 bytes (USB CDC buffer ~384 bytes; conservative margin)
 #   - ESP32-S3:    256 bytes (larger CDC buffer available)
 #   - ESP32:       256 bytes (standard board, good throughput)
-# 
-# Default is 220 for maximum compatibility. To use higher speeds on larger boards,
-# increase CHUNK_SIZE, but MUST coordinate with ESP32 receiver's USER_CHUNK_SIZE
-# (define USER_CHUNK_SIZE before including board_config.h in the sketch).
-# - CHUNK_SIZE should match the ESP32's BUFFER_CHUNK
-# - CHUNK_DELAY should be long enough so the ESP32 can flush writes between chunks
-CHUNK_SIZE = 220
+CHUNK_SIZE = get_user_chunk_size(default=220)  # Auto-synced with Rf_board_config.h
 CHUNK_DELAY = 0.02  # seconds between chunks (V2 uses ACKs, so keep small)
 MAX_RETRIES = 5
 

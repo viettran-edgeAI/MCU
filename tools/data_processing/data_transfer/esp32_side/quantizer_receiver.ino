@@ -11,11 +11,10 @@
  * - See board_config.h for board-specific recommendations.
  */
 
-#include <Rf_board_config.h>
-#include "Rf_file_manager.h"
+#include "Rf_file_manager.h"  // Includes Rf_board_config.h internally
 
 // --- Storage Configuration ---
-const RfStorageType STORAGE_MODE = RfStorageType::LITTLEFS;
+const RfStorageType STORAGE_MODE = RfStorageType::FLASH;
 
 /*
  * Transfer timing and size configuration.

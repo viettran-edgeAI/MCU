@@ -17,6 +17,7 @@ NC='\033[0m' # No Color
 
 # Default values
 CSV_PATH=""
+MODEL_NAME=""  # Model name for output filenames (if not provided, extracted from CSV filename)
 HEADER_MODE=""  # Empty means auto-detect
 MAX_FEATURES=""  # Empty means use default (1023)
 QUANT_BITS=""  # Empty uses processing tool default (2 bits)
@@ -32,6 +33,7 @@ show_usage() {
     echo ""
     echo "Options:"
     echo "  -p, --path <file>         Path to input CSV file (required)"
+    echo "  -m, --model <name>        Model name for output filenames (optional; if not provided, extracted from CSV filename)"
     echo "  -he, --header <yes/no>    Skip header if 'yes', process all lines if 'no' (auto-detect if not specified)"
     echo "  -f, --features <number>   Maximum number of features (default: 1023, range: 1-1023)"
     echo "  -q, --bits <1-8>          Quantization coefficient in bits per feature (default: 2)"
@@ -46,6 +48,7 @@ show_usage() {
     echo "  $0 -p data/iris_data.csv -f 512                    # Limit to 512 features max"
     echo "  $0 -p data/iris_data.csv -nv                       # Skip visualization"
     echo "  $0 -p data/iris_data.csv -q 3                      # Quantize with 3 bits per feature"
+    echo "  $0 -p data/iris_data.csv -m my_iris_classifier     # Use custom model name for output files"
     echo "  $0 -p data/iris_data.csv --header yes -f 256       # Skip header + 256 features + visualize (default)"
     echo ""
     echo -e "${YELLOW}Note: Header detection analyzes first two rows to determine if dataset has headers${NC}"
@@ -61,6 +64,10 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         -p|--path)
             CSV_PATH="$2"
+            shift 2
+            ;;
+        -m|--model)
+            MODEL_NAME="$2"
             shift 2
             ;;
         -he|--header)
@@ -132,6 +139,11 @@ fi
 echo -e "${CYAN}=== ESP32 Dataset Processing and Visualization ===${NC}"
 echo -e "${BLUE}Configuration:${NC}"
 echo -e "  📁 Input file: ${GREEN}$CSV_PATH${NC}"
+if [[ -n "$MODEL_NAME" ]]; then
+    echo -e "  📛 Model name: ${GREEN}$MODEL_NAME${NC} (user-specified)"
+else
+    echo -e "  📛 Model name: ${GREEN}(extracted from filename)${NC}"
+fi
 if [[ -n "$HEADER_MODE" ]]; then
     echo -e "  📋 Header mode: ${GREEN}$HEADER_MODE${NC} (user-specified)"
 else
@@ -167,6 +179,11 @@ fi
 echo -e "\n${PURPLE}Step 2: Processing dataset...${NC}"
 PROCESS_ARGS="-p $CSV_PATH"
 
+# Add model name argument if user specified it
+if [[ -n "$MODEL_NAME" ]]; then
+    PROCESS_ARGS="$PROCESS_ARGS -m $MODEL_NAME"
+fi
+
 # Add header argument only if user specified it
 if [[ -n "$HEADER_MODE" ]]; then
     PROCESS_ARGS="$PROCESS_ARGS -he $HEADER_MODE"
@@ -195,7 +212,11 @@ fi
 echo -e "\n${GREEN}✅ ESP32 Dataset Processing and Visualization completed successfully!${NC}"
 
 # Extract base name for further operations
-BASENAME=$(basename "$CSV_PATH" .csv)
+if [[ -n "$MODEL_NAME" ]]; then
+    BASENAME="$MODEL_NAME"
+else
+    BASENAME=$(basename "$CSV_PATH" .csv)
+fi
 DIRNAME=$(dirname "$CSV_PATH")
 RESULT_DIR="$DIRNAME/result"
 

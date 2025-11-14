@@ -19,12 +19,11 @@
 // Debug messages to Serial will corrupt the binary protocol communication
 #define RF_DEBUG_LEVEL 0
 
-#include <Rf_board_config.h>
-#include "Rf_file_manager.h"
+#include "Rf_file_manager.h"  // Includes Rf_board_config.h internally
 
 // --- Storage Configuration ---
 // Uses LittleFS for ESP32 boards; file creation is handled by Rf_file_manager
-const RfStorageType STORAGE_MODE = RfStorageType::LITTLEFS;
+const RfStorageType STORAGE_MODE = RfStorageType::FLASH;
 
 // --- Protocol Constants ---
 // Must match the Python sender script (unified_transfer.py)

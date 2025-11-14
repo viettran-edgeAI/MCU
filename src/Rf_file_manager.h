@@ -33,33 +33,14 @@
 #ifndef RF_SDMMC_MOUNTPOINT
     #define RF_SDMMC_MOUNTPOINT "/sdcard"
 #endif
-#ifndef RF_SDMMC_MODE_1BIT
-    #define RF_SDMMC_MODE_1BIT false  // use 4-bit bus by default
-#endif
 #ifndef RF_SDMMC_FORMAT_IF_FAIL
     #define RF_SDMMC_FORMAT_IF_FAIL false
 #endif
 
-// Storage selection: Define RF_USE_SDCARD to use SD card, otherwise LittleFS
-// This is now used as a default at runtime, but can be overridden
-#ifdef RF_USE_SDCARD
-    #ifdef RF_USE_SDSPI // Use SD card over SPI interface(external module)
-        // File system macros for SD card over SPI
-        #define RF_FS SD
-        #define RF_FS_TYPE "SD Card"
-    #else       // default to SD_MMC interface (esp32 built-in SD slot)
-        // File system macros for SD_MMC interface
-        #define RF_FS SD_MMC
-        #define RF_FS_TYPE "SDMMC"
-    #endif
-
+#ifndef RF_FILE_READ
     #define RF_FILE_READ FILE_READ
-    #define RF_FILE_WRITE FILE_WRITE
-#else
-    // File system macros for LittleFS (default)
-    #define RF_FS LittleFS
-    #define RF_FS_TYPE "LittleFS"
-    #define RF_FILE_READ FILE_READ
+#endif
+#ifndef RF_FILE_WRITE
     #define RF_FILE_WRITE FILE_WRITE
 #endif
 
@@ -86,18 +67,29 @@
  * @brief Storage system type for runtime selection
  */
 enum class RfStorageType {
-    AUTO,       // Use compile-time configuration (default)
-    LITTLEFS,   // Force LittleFS
-    SD_MMC,     // Force SD_MMC (built-in SD slot)
-    SD_SPI      // Force SD over SPI
+    AUTO,          // Use board-default selection
+    FLASH,         // Internal flash (LittleFS)
+    SD_MMC_1BIT,   // SD_MMC in 1-bit mode
+    SD_MMC_4BIT,   // SD_MMC in 4-bit mode
+    SD_SPI,        // SD over SPI bus
+    LITTLEFS = FLASH,       // Legacy alias for backward compatibility
+    SD_MMC = SD_MMC_1BIT    // Legacy alias for backward compatibility
 };
 
 /**
- * @brief Initialize the selected storage system (LittleFS or SD card)
+ * @brief Initialize the selected storage backend (LittleFS or SD variants)
  * 
- * Automatically initializes the storage system based on compile-time configuration.
+ * Automatically initializes the storage system based on the requested
+ * RfStorageType. When AUTO is provided (or no argument), the library falls
+ * back to the board default — currently LittleFS/flash. For SD_MMC targets,
+ * you can explicitly choose between 1-bit and 4-bit bus modes. For SPI-based
+ * readers, select SD_SPI.
+ *
  * For LittleFS: Uses begin(true) to format if mount fails.
- * For SD card: Initializes SPI and mounts SD card with configured pins.
+ * For SD_MMC: Mounts the bus in the requested width and logs card metadata.
+ * For SD SPI: Initializes SPI with the default pinout before mounting.
+ * If an SD backend cannot be mounted, the function automatically falls back
+ * to LittleFS to keep file access available.
  * 
  * IMPORTANT: File Creation in LittleFS
  * - LittleFS requires the create flag to be set when opening files for writing.
@@ -120,13 +112,38 @@ bool rf_storage_begin(RfStorageType type = RfStorageType::AUTO);
 void rf_storage_end();
 
 /**
- * @brief Get the name of the currently active storage system
- * 
- * @return const char* "LittleFS" or "SD Card"
+ * @brief Get the human-readable name of the currently active storage backend.
+ *
+ * Returns the runtime selection made by rf_storage_begin(), so the value
+ * reflects any overrides provided at runtime instead of just the compile-time
+ * default.
  */
-inline const char* rf_storage_type() {
-    return RF_FS_TYPE;
-}
+const char* rf_storage_type();
+
+/**
+ * @brief Retrieve the currently active storage enum value.
+ */
+RfStorageType rf_current_storage();
+
+/**
+ * @brief Returns true when an SD-based backend is active (SD_MMC or SD_SPI).
+ */
+bool rf_storage_is_sd_based();
+
+/**
+ * @brief Returns true when LittleFS/flash is the active backend.
+ */
+bool rf_storage_is_flash();
+
+/**
+ * @brief Maximum dataset size (in bytes) supported by the active storage backend.
+ */
+size_t rf_storage_max_dataset_bytes();
+
+/**
+ * @brief Maximum persisted inference log size (in bytes) supported by the active backend.
+ */
+size_t rf_storage_max_infer_log_bytes();
 
 /**
  * @brief Runtime file system operations that work with any storage type
@@ -147,8 +164,8 @@ bool rf_remove(const char* path);
 bool rf_rename(const char* oldPath, const char* newPath);
 bool rf_rmdir(const char* path);
 File rf_open(const char* path, const char* mode);
-size_t rf_total_bytes();
-size_t rf_used_bytes();
+uint64_t rf_total_bytes();
+uint64_t rf_used_bytes();
 
 // String overloads for convenience
 inline bool rf_mkdir(const String& path) { return rf_mkdir(path.c_str()); }
@@ -349,7 +366,7 @@ void printFile(String filename);
  * 
  * @note Prints a summary of deleted vs failed files at completion
  */
-void deleteAllLittleFSFiles();
+void deleteAllFiles();
 
 
 /**

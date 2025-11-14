@@ -13,21 +13,14 @@
  * 
  * Hardware: ESP32-CAM or ESP32 with external microSD card module
  * 
- * For SDIO 4-bit mode (recommended for ESP32-CAM):
- *   - Define: RF_USE_SDCARD (before including random_forest_mcu.h)
- *   - Uses built-in SD slot with SDIO interface
- *   - Pins: CLK→GPIO14, CMD→GPIO15, D0→GPIO2, D1→GPIO4, D2→GPIO12, D3→GPIO13
- * 
- * For SPI mode (external SD card module):
- *   - Define: RF_USE_SDCARD and RF_USE_SDSPI (before including random_forest_mcu.h)
- *   - Pins: CS→GPIO5, MOSI→GPIO23, MISO→GPIO19, CLK→GPIO18
+ * Storage selection:
+ *   - Set STORAGE_MODE below to RfStorageType::FLASH for LittleFS (internal flash)
+ *   - Use RfStorageType::SD_MMC_4BIT for the ESP32 SDIO slot (ESP32-CAM default)
+ *   - Use RfStorageType::SD_MMC_1BIT if your board shares SD lines with the camera
+ *   - Use RfStorageType::SD_SPI for external SPI-based SD readers
  * 
  * Dataset: Breast cancer features (radius, texture, perimeter, area, etc.)
  */
-
-// Storage configuration - uncomment for microSD card support
-#define RF_USE_SDCARD           // Enable SD card support
-// #define RF_USE_SDSPI         // Uncomment for external SPI SD card module (comment out for built-in SDIO)
 
 #define DEV_STAGE    
 #define RF_DEBUG_LEVEL 2
@@ -35,6 +28,8 @@
 #include "random_forest_mcu.h"
 
 using namespace mcu;
+
+const RfStorageType STORAGE_MODE = RfStorageType::SD_MMC_4BIT;
 
 void setup() {
     Serial.begin(115200);  
@@ -47,28 +42,42 @@ void setup() {
     delay(1000);
 
     // Initialize storage (microSD or LittleFS)
-    Serial.print("Initializing storage... ");
-    #ifdef RF_USE_SDCARD
-        #ifdef RF_USE_SDMMC
-            Serial.println();
-            Serial.println("📍 Using SDIO 4-bit mode (SD_MMC)");
+    auto storageLabel = [](RfStorageType type) {
+        switch (type) {
+            case RfStorageType::FLASH: return "FLASH (LittleFS)";
+            case RfStorageType::SD_MMC_1BIT: return "SD_MMC (1-bit)";
+            case RfStorageType::SD_MMC_4BIT: return "SD_MMC (4-bit)";
+            case RfStorageType::SD_SPI: return "SD over SPI";
+            default: return "AUTO";
+        }
+    };
+
+    Serial.printf("Initializing storage (%s)...\n", storageLabel(STORAGE_MODE));
+    if (!rf_storage_begin(STORAGE_MODE)) {
+        Serial.println("❌ Storage mount failed!");
+        return;
+    }
+
+    Serial.printf("✅ Storage initialized: %s\n", rf_storage_type());
+
+    switch (STORAGE_MODE) {
+        case RfStorageType::SD_MMC_4BIT:
+            Serial.println("📍 SDIO 4-bit mode");
             Serial.println("   Pins: CLK→GPIO14, CMD→GPIO15, D0→GPIO2, D1→GPIO4, D2→GPIO12, D3→GPIO13");
-        #else
-            Serial.println();
-            Serial.println("📍 Using SPI mode");
+            break;
+        case RfStorageType::SD_MMC_1BIT:
+            Serial.println("📍 SDIO 1-bit mode (shared bus)");
+            Serial.println("   Pins: CLK→GPIO14, CMD→GPIO15, D0→GPIO2");
+            break;
+        case RfStorageType::SD_SPI:
+            Serial.println("📍 SPI mode");
             Serial.println("   Pins: CS→GPIO5, MOSI→GPIO23, MISO→GPIO19, CLK→GPIO18");
-        #endif
-        if (!rf_storage_begin()) {
-            Serial.println("❌ microSD Mount Failed!");
-            return;
-        }
-    #else
-        if (!LittleFS.begin(true)) {
-            Serial.println("❌ LittleFS Mount Failed!");
-            return;
-        }
-    #endif
-    Serial.println("✅ Storage initialized");
+            break;
+        case RfStorageType::FLASH:
+        default:
+            Serial.println("📍 Using LittleFS (internal flash)");
+            break;
+    }
     
     manage_files();
     delay(500);
@@ -144,7 +153,7 @@ void setup() {
     Serial.println("-------|-----------|--------|-----------|------");
     
     for (int i = 0; i < samples.size(); i++){
-        RandomForest::rf_predict_result_t result;
+        rf_predict_result_t result result;
         forest.predict(samples[i], result);
         
         if (!result.success) {

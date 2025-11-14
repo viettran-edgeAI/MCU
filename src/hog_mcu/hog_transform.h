@@ -235,6 +235,9 @@ private:
     uint8_t* angle_bin_buffer;        // Pre-computed angle bins
     float* block_histogram_buffer;    // Reusable block histogram buffer
     float* cell_histogram_buffer;     // Reusable cell histogram buffer
+    float* cell_grid_buffer;          // Pre-computed grid of all cell histograms
+    int cells_x;                      // Number of cells in X direction
+    int cells_y;                      // Number of cells in Y direction
     
     // Internal computation method
     void compute(const uint8_t* grayImage);
@@ -248,6 +251,9 @@ private:
     
     // Optimized gradient computation using integer arithmetic
     inline void computeGradientsOptimized(const uint8_t* grayImage);
+    
+    // Pre-compute all cell histograms once
+    inline void computeCellGrid(const uint8_t* grayImage);
     
     // Initialize internal buffers
     void initializeBuffers();

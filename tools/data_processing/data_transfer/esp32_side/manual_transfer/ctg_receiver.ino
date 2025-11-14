@@ -5,7 +5,7 @@
 using namespace mcu;
 
 // --- Storage Configuration ---
-const RfStorageType STORAGE_MODE = RfStorageType::LITTLEFS;  // Change to SD_MMC or SD_SPI as needed
+const RfStorageType STORAGE_MODE = RfStorageType::FLASH;  // Change to SD_MMC_1BIT, SD_MMC_4BIT, or SD_SPI as needed
 
 Rf_quantizer categorizer;
 

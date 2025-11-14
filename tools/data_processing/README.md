@@ -48,13 +48,19 @@ flowchart LR
 
 ## 📛 Model Name Concept
 
-**Important:** The system uses your CSV filename (without .csv extension) as the `model_name` throughout the entire pipeline.
+**Model Name Usage:**
+The system uses your CSV filename (without .csv extension) as the `model_name` by default. However, you can now **override this with the `-m` / `--model` option** to use a custom model name for your output files.
 
-**Example:**
-- Input: `digit_data.csv` → Model name: `digit_data`
-- Input: `walker_fall.csv` → Model name: `walker_fall`
+**Examples:**
+- **Default (from filename):**
+  - Input: `digit_data.csv` → Model name: `digit_data`
+  - Input: `walker_fall.csv` → Model name: `walker_fall`
 
-**All generated files use this model_name:**
+- **Custom model name:**
+  - Input: `digit_data.csv` with `-m digit_classifier` → Model name: `digit_classifier`
+  - Input: `walker_fall.csv` with `-m fall_detector_v2` → Model name: `fall_detector_v2`
+
+**All generated files use the model_name:**
 - `{model_name}_nml.bin` - Standard format for transfer to ESP32
 - `{model_name}_nml.csv` - Used for pre_train tool or manual transfer
 - `{model_name}_dp.csv` - File containing general parameters of the dataset
@@ -78,7 +84,7 @@ For details on how variable quantization (1-8 bits) and quantizer work, please r
 **On the ESP32 side:**
 - `model_name` is used to load and manage datasets, initialize model, file components, etc.
 
-💡 **Remember:** Choose meaningful CSV filenames as they become your model identifiers!
+💡 **Remember:** Choose meaningful model names for easy identification of your datasets!
 
 ## 📋 Requirements
 
@@ -95,6 +101,9 @@ For details on how variable quantization (1-8 bits) and quantizer work, please r
 # Process with default settings (2-bit quantization, auto-detect header, visualization enabled)
 ./quantize_dataset.sh -p data/iris_data.csv
 
+# Use custom model name for output files
+./quantize_dataset.sh -p data/iris_data.csv -m iris_classifier
+
 # Use 3-bit quantization instead of default 2-bit
 ./quantize_dataset.sh -p data/iris_data.csv -q 3
 
@@ -110,8 +119,8 @@ For details on how variable quantization (1-8 bits) and quantizer work, please r
 # Limit to 512 features maximum
 ./quantize_dataset.sh -p data/iris_data.csv -f 512
 
-# Combine options: 4-bit quantization + 256 features + no visualization
-./quantize_dataset.sh -p data/iris_data.csv -q 4 -f 256 -nv
+# Combine options: 4-bit quantization + custom model name + 256 features + no visualization
+./quantize_dataset.sh -p data/iris_data.csv -m iris_v2 -q 4 -f 256 -nv
 ```
 
 ### With/Without Visualization and Quantization Options
@@ -145,6 +154,7 @@ Generated files will be in `data/result/` directory, ready for ESP32 transfer.
 
 ### Available Options
 - `-p, --path <file>`: input CSV (required)
+- `-m, --model <name>`: Model name for output filenames (optional; if not provided, extracted from input filename)
 - `-he, --header <yes/no>`: Skip header if 'yes', process all lines if 'no' (auto-detect if not specified)
 - `-f, --features <number>`: Maximum number of features (default: 1023, range: 1-65535)
 - `-q, --bits <1-8>`: Quantization coefficient in bits per feature (default: 2, range: 1-8)
@@ -247,6 +257,7 @@ python3 unified_transfer.py iris_data /dev/ttyUSB0
 `quantize_dataset.sh`
 - Options:
   - `-p, --path <file>`: input CSV (required)
+  - `-m, --model <name>`: Model name for output filenames (optional; if not provided, extracted from input filename)
   - `-he, --header <yes/no>`: Skip header if 'yes', process all lines if 'no' (auto-detect if not specified)
   - `-f, --features <number>`: Maximum number of features (default: 1023, range: 1-65535)
   - `-q, --bits <1-8>`: Quantization coefficient in bits per feature (default: 2, range: 1-8)
@@ -256,14 +267,15 @@ python3 unified_transfer.py iris_data /dev/ttyUSB0
 
 Examples:
 - Auto-detect header: `./quantize_dataset.sh -p data/iris_data.csv`
+- Custom model name: `./quantize_dataset.sh -p data/iris_data.csv -m iris_classifier`
 - Force skip header: `./quantize_dataset.sh -p data/iris_data.csv --header yes`
 - Force process all lines: `./quantize_dataset.sh -p data/iris_data.csv --header no`
 - Limit to 512 features: `./quantize_dataset.sh -p data/iris_data.csv -f 512`
 - Use 3-bit quantization: `./quantize_dataset.sh -p data/iris_data.csv -q 3`
 - Binary features (1-bit): `./quantize_dataset.sh -p data/iris_data.csv -q 1 -nv`
-- High precision (4-bit) with custom features: `./quantize_dataset.sh -p data/iris_data.csv -q 4 -f 256`
+- High precision (4-bit) with custom model name: `./quantize_dataset.sh -p data/iris_data.csv -m iris_precise -q 4 -f 256`
 - Skip visualization: `./quantize_dataset.sh -p data/iris_data.csv -nv`
-- Combined options: `./quantize_dataset.sh -p data/iris_data.csv -q 2 -f 256 --header yes -nv`
+- Combined options: `./quantize_dataset.sh -p data/iris_data.csv -m iris_v2 -q 2 -f 256 --header yes -nv`
 
 **Header Detection Logic:**
 - Analyzes first two rows to detect header presence
@@ -307,6 +319,7 @@ Examples:
 - Binary: `processing_data`
 - Options:
   - `-p, -path <file>`: input CSV
+  - `-m, -model <name>`: Model name for output filenames (optional; if not provided, extracted from input filename)
   - `-he, -header <yes/no>`: Skip header if 'yes', process all lines if 'no' (auto-detect if not specified)
   - `-f, -features <number>`: Maximum number of features (default: 1023, range: 1-65535)
   - `-q, -bits <1-8>`: Quantization coefficient in bits per feature (default: 2, range: 1-8)

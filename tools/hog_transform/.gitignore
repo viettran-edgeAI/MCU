@@ -1,0 +1,14 @@
+# Build artifacts
+hog_processor
+*.o
+*.out
+
+# Test files
+test_config.json
+
+# Generated output files (keep in result/ folder)
+# result/
+
+# Dataset (optional - uncomment if you don't want to track datasets)
+# digit_dataset/
+# *.csv

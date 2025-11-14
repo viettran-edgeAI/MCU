@@ -158,6 +158,7 @@ HOG_MCU::HOG_MCU() : processed_image_buffer(nullptr),
                      gradient_x_buffer(nullptr), gradient_y_buffer(nullptr),
                      magnitude_buffer(nullptr), angle_bin_buffer(nullptr),
                      block_histogram_buffer(nullptr), cell_histogram_buffer(nullptr),
+                     cell_grid_buffer(nullptr), cells_x(0), cells_y(0),
                      feature_csv_path_(), feature_file_name_() {
     params.img_width = 32;
     params.img_height = 32;
@@ -184,6 +185,7 @@ HOG_MCU::HOG_MCU(const Params& p) : params(p), processed_image_buffer(nullptr),
                                     gradient_x_buffer(nullptr), gradient_y_buffer(nullptr),
                                     magnitude_buffer(nullptr), angle_bin_buffer(nullptr),
                                     block_histogram_buffer(nullptr), cell_histogram_buffer(nullptr),
+                                    cell_grid_buffer(nullptr), cells_x(0), cells_y(0),
                                     feature_csv_path_(), feature_file_name_() {
     // Set default image processing configuration
     img_config.input_format = ImageProcessing::PixelFormat::GRAYSCALE;
@@ -480,8 +482,15 @@ void HOG_MCU::initializeBuffers() {
         block_histogram_buffer = new float[16];  // 4 cells * 4 bins
         cell_histogram_buffer = new float[9];    // Max 9 bins
         
+        // Allocate cell grid buffer for caching all cell histograms
+        cells_x = params.img_width / params.cell_size;
+        cells_y = params.img_height / params.cell_size;
+        size_t cell_grid_size = cells_x * cells_y * params.nbins;
+        cell_grid_buffer = new float[cell_grid_size];
+        
         if (!gradient_x_buffer || !gradient_y_buffer || !magnitude_buffer || 
-            !angle_bin_buffer || !block_histogram_buffer || !cell_histogram_buffer) {
+            !angle_bin_buffer || !block_histogram_buffer || !cell_histogram_buffer ||
+            !cell_grid_buffer) {
             Serial.println("Error: Failed to allocate HOG optimization buffers");
             cleanupBuffers();
         }
@@ -516,6 +525,10 @@ void HOG_MCU::cleanupBuffers() {
     if (cell_histogram_buffer) {
         delete[] cell_histogram_buffer;
         cell_histogram_buffer = nullptr;
+    }
+    if (cell_grid_buffer) {
+        delete[] cell_grid_buffer;
+        cell_grid_buffer = nullptr;
     }
 }
 
@@ -605,7 +618,6 @@ float HOG_MCU::computeGradientAngle(int gx, int gy) {
 void HOG_MCU::computeGradientsOptimized(const uint8_t* grayImage) {
     const int width = params.img_width;
     const int height = params.img_height;
-    const float angle_scale = 180.0f / params.nbins;
     
     // Compute gradients for all pixels
     for (int y = 1; y < height - 1; ++y) {
@@ -624,13 +636,65 @@ void HOG_MCU::computeGradientsOptimized(const uint8_t* grayImage) {
             int abs_gy = gy >= 0 ? gy : -gy;
             magnitude_buffer[idx] = abs_gx + abs_gy;
             
-            // Angle bin: compute using atan2 and quantize
-            float angle = atan2f(gy, gx) * 180.0f / PI;
-            if (angle < 0) angle += 180.0f;
-            
-            int bin = (int)(angle / angle_scale);
-            if (bin >= params.nbins) bin = params.nbins - 1;
+            // Integer-based bin classification (no atan2!)
+            // For 4 bins: [0°-45°, 45°-90°, 90°-135°, 135°-180°]
+            uint8_t bin = 0;
+            if (params.nbins == 4) {
+                // Compare abs_gx and abs_gy to determine bin
+                if (abs_gx >= abs_gy) {
+                    // Dominantly horizontal (0°-45° or 135°-180°)
+                    bin = (gx >= 0) ? 0 : 2;  // 0° or 180° quadrant
+                } else {
+                    // Dominantly vertical (45°-90° or 90°-135°)
+                    bin = (gy >= 0) ? 1 : 3;  // 90° quadrant or opposite
+                }
+            } else {
+                // Fallback for non-4-bin configs (rarely used)
+                float angle = atan2f(gy, gx) * 180.0f / PI;
+                if (angle < 0) angle += 180.0f;
+                bin = (int)(angle / (180.0f / params.nbins));
+                if (bin >= params.nbins) bin = params.nbins - 1;
+            }
             angle_bin_buffer[idx] = bin;
+        }
+    }
+}
+
+// Pre-compute all cell histograms once to avoid redundant pixel walks
+void HOG_MCU::computeCellGrid(const uint8_t* grayImage) {
+    const int width = params.img_width;
+    const int height = params.img_height;
+    const int nbins = params.nbins;
+    
+    // Clear cell grid
+    size_t cell_grid_size = cells_x * cells_y * nbins;
+    for (size_t i = 0; i < cell_grid_size; ++i) {
+        cell_grid_buffer[i] = 0.0f;
+    }
+    
+    // Compute histogram for each cell in the grid
+    for (int cell_y = 0; cell_y < cells_y; ++cell_y) {
+        for (int cell_x = 0; cell_x < cells_x; ++cell_x) {
+            int startX = cell_x * params.cell_size;
+            int startY = cell_y * params.cell_size;
+            
+            // Index into cell grid buffer: (cell_y * cells_x + cell_x) * nbins
+            int cell_idx = (cell_y * cells_x + cell_x) * nbins;
+            
+            // Accumulate histogram for this cell
+            for (int y = 0; y < params.cell_size; ++y) {
+                for (int x = 0; x < params.cell_size; ++x) {
+                    int ix = startX + x;
+                    int iy = startY + y;
+                    
+                    if (ix <= 0 || ix >= width - 1 || iy <= 0 || iy >= height - 1)
+                        continue;
+                    
+                    int idx = iy * width + ix;
+                    uint8_t bin = angle_bin_buffer[idx];
+                    cell_grid_buffer[cell_idx + bin] += magnitude_buffer[idx];
+                }
+            }
         }
     }
 }
@@ -638,20 +702,25 @@ void HOG_MCU::computeGradientsOptimized(const uint8_t* grayImage) {
 // Optimized compute method using pre-allocated buffers
 void HOG_MCU::computeOptimized(const uint8_t* grayImage) {
     if (!grayImage || !gradient_x_buffer || !gradient_y_buffer || 
-        !magnitude_buffer || !angle_bin_buffer || !block_histogram_buffer) {
+        !magnitude_buffer || !angle_bin_buffer || !block_histogram_buffer ||
+        !cell_grid_buffer) {
         // Fallback to original compute if buffers not initialized
         compute(grayImage);
         return;
     }
     
-    // Pre-compute all gradients once
+    // Step 1: Pre-compute all gradients once
     computeGradientsOptimized(grayImage);
     
-    const int width = params.img_width;
+    // Step 2: Pre-compute all cell histograms once
+    computeCellGrid(grayImage);
+    
     const int numBlocksY = (params.img_height - params.block_size) / params.block_stride + 1;
     const int numBlocksX = (params.img_width - params.block_size) / params.block_stride + 1;
     const int nbins = params.nbins;
+    const int cells_per_block = params.block_size / params.cell_size; // typically 2
     
+    // Step 3: Build blocks from cached cells
     for (int by = 0; by < numBlocksY; ++by) {
         for (int bx = 0; bx < numBlocksX; ++bx) {
             // Clear block histogram
@@ -659,36 +728,26 @@ void HOG_MCU::computeOptimized(const uint8_t* grayImage) {
                 block_histogram_buffer[i] = 0.0f;
             }
             
-            // Process 4 cells in the block (2x2)
-            for (int cy = 0; cy < 2; ++cy) {
-                for (int cx = 0; cx < 2; ++cx) {
-                    // Clear cell histogram
-                    for (int i = 0; i < nbins; ++i) {
-                        cell_histogram_buffer[i] = 0.0f;
-                    }
+            // Determine which cells this block spans
+            int block_start_x = bx * params.block_stride;
+            int block_start_y = by * params.block_stride;
+            int start_cell_x = block_start_x / params.cell_size;
+            int start_cell_y = block_start_y / params.cell_size;
+            
+            // Assemble block histogram from cached cells (2x2 cells per block)
+            for (int cy = 0; cy < cells_per_block; ++cy) {
+                for (int cx = 0; cx < cells_per_block; ++cx) {
+                    int cell_x = start_cell_x + cx;
+                    int cell_y = start_cell_y + cy;
                     
-                    int startX = bx * params.block_stride + cx * params.cell_size;
-                    int startY = by * params.block_stride + cy * params.cell_size;
-                    
-                    // Accumulate histogram for this cell
-                    for (int y = 0; y < params.cell_size; ++y) {
-                        for (int x = 0; x < params.cell_size; ++x) {
-                            int ix = startX + x;
-                            int iy = startY + y;
-                            
-                            if (ix <= 0 || ix >= width - 1 || iy <= 0 || iy >= params.img_height - 1)
-                                continue;
-                            
-                            int idx = iy * width + ix;
-                            uint8_t bin = angle_bin_buffer[idx];
-                            cell_histogram_buffer[bin] += magnitude_buffer[idx];
+                    if (cell_x < cells_x && cell_y < cells_y) {
+                        int cell_idx = (cell_y * cells_x + cell_x) * nbins;
+                        int block_offset = (cy * cells_per_block + cx) * nbins;
+                        
+                        // Copy cell histogram to block histogram
+                        for (int i = 0; i < nbins; ++i) {
+                            block_histogram_buffer[block_offset + i] = cell_grid_buffer[cell_idx + i];
                         }
-                    }
-                    
-                    // Copy cell histogram to block histogram
-                    int cell_offset = (cy * 2 + cx) * nbins;
-                    for (int i = 0; i < nbins; ++i) {
-                        block_histogram_buffer[cell_offset + i] = cell_histogram_buffer[i];
                     }
                 }
             }

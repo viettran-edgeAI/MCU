@@ -16,9 +16,9 @@
  *   - Override specific capabilities by defining macros such as
  *       RF_BOARD_NAME, RF_BOARD_SUPPORTS_PSRAM, RF_BOARD_SUPPORTS_SDMMC,
  *       RF_BOARD_DEFAULT_CHUNK, RF_BOARD_USB_RX_BUFFER, etc. prior to include.
- *   - Use RF_USE_PSRAM, RF_USE_SDCARD, RF_USE_SDSPI in your sketch or project
- *     to control PSRAM usage and storage backends per build without editing
- *     this file.
+ *   - Use RF_USE_PSRAM in your sketch or project to control PSRAM usage without
+ *     editing this file. Storage backends are now selected at runtime via
+ *     RfStorageType (FLASH, SD_MMC_1BIT, SD_MMC_4BIT, SD_SPI).
  *
  * The goal is to prevent impossible configurations (e.g. enabling PSRAM on a
  * C3) while leaving users in control of feature toggles that are valid for
@@ -167,6 +167,8 @@
     #ifndef RF_BOARD_IS_ESP32
       #define RF_BOARD_IS_ESP32 1
     #endif
+    // ESP32-CAM (and many classic ESP32 boards) share SDMMC pins with the camera;
+    // default to 1-bit mode unless the user explicitly opts out before include.
   #elif defined(ARDUINO_ARCH_STM32) || defined(STM32F4) || defined(STM32F7)
     #ifndef RF_BOARD_NAME
       #define RF_BOARD_NAME "STM32"
@@ -313,11 +315,6 @@
 #endif
 #define RF_HAS_SDMMC (RF_BOARD_SUPPORTS_SDMMC)
 
-#if defined(RF_USE_SDCARD) && !defined(RF_USE_SDSPI) && !RF_BOARD_SUPPORTS_SDMMC
-  #define RF_USE_SDSPI 1
-  #warning "RF_USE_SDCARD selected; board lacks SD_MMC so enabling SPI fallback."
-#endif
-
 // -----------------------------------------------------------------------------
 // USB transfer tuning defaults
 // -----------------------------------------------------------------------------
@@ -345,18 +342,8 @@ inline void print_board_info() {
     Serial.println(RF_PSRAM_AVAILABLE ? "yes" : "no");
     Serial.print("SD_MMC available: ");
     Serial.println(RF_HAS_SDMMC ? "yes" : "no");
-    Serial.print("Storage preference: ");
-    Serial.println(
-        #ifdef RF_USE_SDCARD
-            #ifdef RF_USE_SDSPI
-                "SD (SPI)"
-            #else
-                "SD (SD_MMC)"
-            #endif
-        #else
-            "Flash"
-        #endif
-    );
+  Serial.println("Storage options: FLASH, SD_MMC_1BIT, SD_MMC_4BIT, SD_SPI");
+  Serial.println("Select runtime backend via RfStorageType in your sketch.");
     if (RF_BOARD_CDC_WARNING) {
         Serial.println("Note: board has a compact USB CDC buffer. Keep chunks conservative or define USER_CHUNK_SIZE manually.");
     }

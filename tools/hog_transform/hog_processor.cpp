@@ -28,6 +28,7 @@ struct Config {
         struct TargetSize {
             int width = 32;
             int height = 32;
+            bool enabled = true;
         } target_size;
         bool grayscale = true;
         bool normalize = true;
@@ -176,12 +177,15 @@ public:
         config.workflow.description = extractStringValue(content, "description");
         
         // Parse input
-        config.input.dataset_path = extractStringValue(content, "dataset_path");
+        config.input.dataset_path = extractStringValue(content, "dataset_name");
         config.input.image_format = extractStringValue(content, "image_format");
         
         // Parse preprocessing
         config.preprocessing.target_size.width = extractIntValue(content, "width");
         config.preprocessing.target_size.height = extractIntValue(content, "height");
+        if (containsKey(content, "enabled")) {
+            config.preprocessing.target_size.enabled = extractBoolValue(content, "enabled");
+        }
         config.preprocessing.grayscale = extractBoolValue(content, "grayscale");
         config.preprocessing.normalize = extractBoolValue(content, "normalize");
         
@@ -281,50 +285,65 @@ public:
         int nbins;
     };
 
-    HOGDescriptorMCU(const Params& p) : params(p) {}
+    HOGDescriptorMCU(const Params& p) : params(p) {
+        // Allocate buffers for optimization
+        size_t buffer_size = params.img_width * params.img_height;
+        gradient_x_buffer.resize(buffer_size);
+        gradient_y_buffer.resize(buffer_size);
+        magnitude_buffer.resize(buffer_size);
+        angle_bin_buffer.resize(buffer_size);
+        
+        // Allocate cell grid buffer
+        cells_x = params.img_width / params.cell_size;
+        cells_y = params.img_height / params.cell_size;
+        size_t cell_grid_size = cells_x * cells_y * params.nbins;
+        cell_grid_buffer.resize(cell_grid_size);
+    }
 
     void compute(const uint8_t* grayImage, mcu::vector<float>& outVec) {
+        // Step 1: Pre-compute all gradients once
+        computeGradientsOptimized(grayImage);
+        
+        // Step 2: Pre-compute all cell histograms once
+        computeCellGrid(grayImage);
+        
         int numBlocksY = (params.img_height - params.block_size) / params.block_stride + 1;
         int numBlocksX = (params.img_width - params.block_size) / params.block_stride + 1;
 
         outVec.clear();
         outVec.reserve(numBlocksX * numBlocksY * (4 * params.nbins));
 
+        const int cells_per_block = params.block_size / params.cell_size; // typically 2
+        mcu::vector<float> blockHist(params.nbins * 4, 0.0f);
+        
+        // Step 3: Build blocks from cached cells
         for (int by = 0; by < numBlocksY; ++by) {
             for (int bx = 0; bx < numBlocksX; ++bx) {
-                mcu::vector<float> blockHist(params.nbins * 4, 0.0f); // 2x2 cells
-
-                for (int cy = 0; cy < 2; ++cy) {
-                    for (int cx = 0; cx < 2; ++cx) {
-                        mcu::vector<float> hist(params.nbins, 0.0f);
-                        int startX = bx * params.block_stride + cx * params.cell_size;
-                        int startY = by * params.block_stride + cy * params.cell_size;
-
-                        for (int y = 0; y < params.cell_size; ++y) {
-                            for (int x = 0; x < params.cell_size; ++x) {
-                                int ix = startX + x;
-                                int iy = startY + y;
-                                if (ix <= 0 || ix >= params.img_width - 1 || iy <= 0 || iy >= params.img_height - 1)
-                                    continue;
-
-                                int gx = grayImage[iy * params.img_width + (ix + 1)] -
-                                         grayImage[iy * params.img_width + (ix - 1)];
-                                int gy = grayImage[(iy + 1) * params.img_width + ix] -
-                                         grayImage[(iy - 1) * params.img_width + ix];
-
-                                float magnitude = std::sqrt(gx * gx + gy * gy);
-                                float angle = std::atan2(gy, gx);
-                                if (angle < 0) angle += 2 * M_PI;
-
-                                float binSize = (2 * M_PI) / params.nbins;
-                                int bin = static_cast<int>(angle / binSize) % params.nbins;
-
-                                hist[bin] += magnitude;
+                // Clear block histogram
+                for (int i = 0; i < params.nbins * 4; ++i) {
+                    blockHist[i] = 0.0f;
+                }
+                
+                // Determine which cells this block spans
+                int block_start_x = bx * params.block_stride;
+                int block_start_y = by * params.block_stride;
+                int start_cell_x = block_start_x / params.cell_size;
+                int start_cell_y = block_start_y / params.cell_size;
+                
+                // Assemble block histogram from cached cells (2x2 cells per block)
+                for (int cy = 0; cy < cells_per_block; ++cy) {
+                    for (int cx = 0; cx < cells_per_block; ++cx) {
+                        int cell_x = start_cell_x + cx;
+                        int cell_y = start_cell_y + cy;
+                        
+                        if (cell_x < cells_x && cell_y < cells_y) {
+                            int cell_idx = (cell_y * cells_x + cell_x) * params.nbins;
+                            int block_offset = (cy * cells_per_block + cx) * params.nbins;
+                            
+                            // Copy cell histogram to block histogram
+                            for (int i = 0; i < params.nbins; ++i) {
+                                blockHist[block_offset + i] = cell_grid_buffer[cell_idx + i];
                             }
-                        }
-
-                        for (int i = 0; i < params.nbins; ++i) {
-                            blockHist[cy * 2 * params.nbins + cx * params.nbins + i] = hist[i];
                         }
                     }
                 }
@@ -345,6 +364,95 @@ public:
 
 private:
     Params params;
+    mcu::vector<int16_t> gradient_x_buffer;
+    mcu::vector<int16_t> gradient_y_buffer;
+    mcu::vector<uint16_t> magnitude_buffer;
+    mcu::vector<uint8_t> angle_bin_buffer;
+    mcu::vector<float> cell_grid_buffer;
+    int cells_x;
+    int cells_y;
+    
+    void computeGradientsOptimized(const uint8_t* grayImage) {
+        const int width = params.img_width;
+        const int height = params.img_height;
+        
+        // Compute gradients for all pixels
+        for (int y = 1; y < height - 1; ++y) {
+            for (int x = 1; x < width - 1; ++x) {
+                int idx = y * width + x;
+                
+                // Compute gradients using integer arithmetic
+                int gx = (int)grayImage[idx + 1] - (int)grayImage[idx - 1];
+                int gy = (int)grayImage[idx + width] - (int)grayImage[idx - width];
+                
+                gradient_x_buffer[idx] = gx;
+                gradient_y_buffer[idx] = gy;
+                
+                // Magnitude: use integer approximation |gx| + |gy| (faster than sqrt)
+                int abs_gx = gx >= 0 ? gx : -gx;
+                int abs_gy = gy >= 0 ? gy : -gy;
+                magnitude_buffer[idx] = abs_gx + abs_gy;
+                
+                // Integer-based bin classification (no atan2!)
+                // For 4 bins: [0°-45°, 45°-90°, 90°-135°, 135°-180°]
+                uint8_t bin = 0;
+                if (params.nbins == 4) {
+                    // Compare abs_gx and abs_gy to determine bin
+                    if (abs_gx >= abs_gy) {
+                        // Dominantly horizontal (0°-45° or 135°-180°)
+                        bin = (gx >= 0) ? 0 : 2;  // 0° or 180° quadrant
+                    } else {
+                        // Dominantly vertical (45°-90° or 90°-135°)
+                        bin = (gy >= 0) ? 1 : 3;  // 90° quadrant or opposite
+                    }
+                } else {
+                    // Fallback for non-4-bin configs (rarely used)
+                    float angle = std::atan2(gy, gx) * 180.0f / M_PI;
+                    if (angle < 0) angle += 180.0f;
+                    bin = static_cast<int>(angle / (180.0f / params.nbins));
+                    if (bin >= params.nbins) bin = params.nbins - 1;
+                }
+                angle_bin_buffer[idx] = bin;
+            }
+        }
+    }
+    
+    void computeCellGrid(const uint8_t* grayImage) {
+        const int width = params.img_width;
+        const int height = params.img_height;
+        const int nbins = params.nbins;
+        
+        // Clear cell grid
+        for (size_t i = 0; i < cell_grid_buffer.size(); ++i) {
+            cell_grid_buffer[i] = 0.0f;
+        }
+        
+        // Compute histogram for each cell in the grid
+        for (int cell_y = 0; cell_y < cells_y; ++cell_y) {
+            for (int cell_x = 0; cell_x < cells_x; ++cell_x) {
+                int startX = cell_x * params.cell_size;
+                int startY = cell_y * params.cell_size;
+                
+                // Index into cell grid buffer: (cell_y * cells_x + cell_x) * nbins
+                int cell_idx = (cell_y * cells_x + cell_x) * nbins;
+                
+                // Accumulate histogram for this cell
+                for (int y = 0; y < params.cell_size; ++y) {
+                    for (int x = 0; x < params.cell_size; ++x) {
+                        int ix = startX + x;
+                        int iy = startY + y;
+                        
+                        if (ix <= 0 || ix >= width - 1 || iy <= 0 || iy >= height - 1)
+                            continue;
+                        
+                        int idx = iy * width + ix;
+                        uint8_t bin = angle_bin_buffer[idx];
+                        cell_grid_buffer[cell_idx + bin] += magnitude_buffer[idx];
+                    }
+                }
+            }
+        }
+    }
 };
 
 class ImageProcessor {
@@ -379,15 +487,18 @@ private:
             gray_img = img;
         }
         
-        // Resize to target size
+        // Resize to target size if enabled
         cv::Mat resized_img;
-        cv::Size target_size(config.preprocessing.target_size.width, 
-                           config.preprocessing.target_size.height);
-        cv::resize(gray_img, resized_img, target_size);
+        if (config.preprocessing.target_size.enabled) {
+            cv::Size target_size(config.preprocessing.target_size.width, 
+                               config.preprocessing.target_size.height);
+            cv::resize(gray_img, resized_img, target_size);
+        } else {
+            resized_img = gray_img;
+        }
         
         // Convert to uint8_t vector
-        int expected_size = config.preprocessing.target_size.width * 
-                           config.preprocessing.target_size.height;
+        int expected_size = resized_img.rows * resized_img.cols;
         
         if (resized_img.channels() == 1) {
             // Grayscale image
@@ -502,9 +613,12 @@ public:
     static int processDataset(const Config& config) {
         std::filesystem::path basePath = computeModelBasePath(config.output.model_name);
         const std::string modelNameForConfig = basePath.generic_string();
-        std::filesystem::path csvPath = basePath;
+        
+        // Output to result/ directory
+        std::filesystem::path resultDir("result");
+        std::filesystem::path csvPath = resultDir / basePath.filename();
         csvPath += ".csv";
-        std::filesystem::path cfgPath = basePath;
+        std::filesystem::path cfgPath = resultDir / basePath.filename();
         cfgPath += "_hogcfg.json";
         const std::string csvOutputPath = csvPath.generic_string();
         const std::string cfgOutputPath = cfgPath.generic_string();

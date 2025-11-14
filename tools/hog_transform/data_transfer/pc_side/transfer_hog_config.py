@@ -20,6 +20,14 @@ import struct
 import binascii
 from pathlib import Path
 
+# Import configuration parser to sync with ESP32
+try:
+    from config_parser import get_user_chunk_size
+except ImportError:
+    print("⚠️  Warning: config_parser.py not found. Using default CHUNK_SIZE.")
+    def get_user_chunk_size(config_file_path=None, default=220):
+        return default
+
 # --- Protocol Constants ---
 # Must match the ESP32 receiver sketch
 CMD_HEADER = b"ESP32_XFER"
@@ -33,8 +41,8 @@ RESP_READY = b"READY"
 RESP_OK = b"OK"
 RESP_ERROR = b"ERROR"
 
-# Transfer parameters optimized for ESP32
-CHUNK_SIZE = 220  # bytes per chunk, matches ESP32 receiver buffer
+# CHUNK_SIZE is now automatically extracted from Rf_board_config.h
+CHUNK_SIZE = get_user_chunk_size(default=220)  # Auto-synced with Rf_board_config.h
 CHUNK_DELAY = 0.03  # delay between chunks in seconds
 MAX_RETRIES = 5     # max retries per chunk
 
@@ -43,17 +51,24 @@ SERIAL_TIMEOUT = 5  # seconds
 ACK_TIMEOUT = 5    # seconds
 
 def get_hog_config_file(model_name):
-    """Get HOG config file from hog_transform directory for given model_name."""
+    """Get HOG config file from hog_transform/result directory for given model_name."""
     script_dir = os.path.dirname(__file__)
-    # Go up: pc_side -> data_transfer -> hog_transform
+    # Go up: pc_side -> data_transfer -> hog_transform -> result
     hog_transform_dir = os.path.join(script_dir, '../..')
     hog_transform_dir = os.path.abspath(hog_transform_dir)
+    result_dir = os.path.join(hog_transform_dir, 'result')
     
     # Look for <model_name>_hogcfg.json
-    config_file = os.path.join(hog_transform_dir, f"{model_name}_hogcfg.json")
+    config_file = os.path.join(result_dir, f"{model_name}_hogcfg.json")
     
     if os.path.exists(config_file):
         return config_file
+    
+    # Fallback to hog_transform root directory for backward compatibility
+    config_file_fallback = os.path.join(hog_transform_dir, f"{model_name}_hogcfg.json")
+    if os.path.exists(config_file_fallback):
+        print(f"⚠️  Found config in root directory. Consider moving to result/ folder.")
+        return config_file_fallback
     
     return None
 

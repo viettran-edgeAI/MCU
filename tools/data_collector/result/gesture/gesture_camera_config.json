@@ -1,0 +1,18 @@
+{
+  "hog": {
+    "hog_img_width": 32,
+    "hog_img_height": 32,
+    "cell_size": 8,
+    "block_size": 16,
+    "block_stride": 6,
+    "nbins": 4
+  },
+  "esp32": {
+    "input_format": "GRAYSCALE",
+    "input_width": 96,
+    "input_height": 96,
+    "resize_method": "NEAREST_NEIGHBOR",
+    "maintain_aspect_ratio": false,
+    "jpeg_quality": 80
+  }
+}

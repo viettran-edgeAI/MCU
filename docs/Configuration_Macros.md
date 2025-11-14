@@ -20,7 +20,7 @@ Since Arduino IDE pre-compiles libraries, **runtime configuration** is the most 
 // Choose storage mode at runtime
 const RfStorageType STORAGE_MODE = RfStorageType::SD_MMC;    // Built-in SD slot
 // const RfStorageType STORAGE_MODE = RfStorageType::SD_SPI; // External SD module  
-// const RfStorageType STORAGE_MODE = RfStorageType::LITTLEFS; // Internal flash
+// const RfStorageType STORAGE_MODE = RfStorageType::FLASH; // Internal flash
 
 void setup() {
     Serial.begin(115200);

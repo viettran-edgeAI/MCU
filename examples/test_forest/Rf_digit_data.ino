@@ -22,6 +22,8 @@
 
 using namespace mcu;
 
+const RfStorageType STORAGE_MODE = RfStorageType::SD_MMC_1BIT;
+
 void setup() {
     Serial.begin(115200);  
     while (!Serial);       // <-- Waits for Serial monitor to connect (important for USB CDC)
@@ -33,9 +35,10 @@ void setup() {
     delay(1000);
 
     // Initialize filesystem
-    Serial.print("Initializing LittleFS... ");
-    if (!LittleFS.begin(true)) {
-        Serial.println("❌ FAILED");
+    Serial.print("💾 Initializing file system... ");
+    if (!RF_FS_BEGIN(STORAGE_MODE)) {
+        Serial.println("❌ FAILED!");
+        Serial.println("⚠️  File system initialization failed. Cannot continue.");
         return;
     }
     Serial.println("✅ OK");
@@ -115,7 +118,7 @@ void setup() {
     Serial.println("Sample | Predicted | Actual | Time (μs) | Match");
     Serial.println("-------|-----------|--------|-----------|------");
     
-    RandomForest::rf_predict_result_t result;
+    rf_predict_result_t result result;
     for (int i = 0; i < samples.size(); i++){
         forest.predict(samples[i], result); 
         if (!result.success) {

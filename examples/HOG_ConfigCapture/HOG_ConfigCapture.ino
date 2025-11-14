@@ -6,7 +6,7 @@
 
 // --- Storage Configuration ---
 // Choose storage mode: LITTLEFS (internal flash), SD_MMC (ESP32-CAM SD slot), or SD_SPI (external module)
-const RfStorageType STORAGE_MODE = RfStorageType::SD_MMC;  // Change to LITTLEFS if no SD card
+const RfStorageType STORAGE_MODE = RfStorageType::SD_MMC_1BIT;  // Change to FLASH if no SD card
 
 // ESP32-CAM (AI-Thinker) pin configuration
 #define PWDN_GPIO_NUM     32

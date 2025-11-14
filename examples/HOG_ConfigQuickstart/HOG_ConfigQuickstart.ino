@@ -10,7 +10,7 @@
 #include "hog_mcu/hog_transform.h"
 #include "Rf_file_manager.h"
 
-const RfStorageType STORAGE_MODE = RfStorageType::SD_MMC;
+const RfStorageType STORAGE_MODE = RfStorageType::SD_MMC_1BIT;
 
 // ESP32-CAM (AI-Thinker) pin configuration
 #define PWDN_GPIO_NUM     32

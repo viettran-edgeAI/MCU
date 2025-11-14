@@ -56,7 +56,7 @@ This example expects a configuration file at: `/digit/digit_hogcfg.json`
 
 **Key optimization:** Use 96x96 input (3x downscale) instead of 320x240 (10x downscale) for 70% faster processing.
 
-See `tools/hog_transform/CONFIG_FORMAT.md` for supported enum values.
+See `tools/hog_transform/README.md` (Configuration File Format section) for supported enum values.
 
 ## Setup
 

@@ -1,0 +1,94 @@
+# Data Processing Files Transfer Guide
+
+This directory contains tools for transferring processed dataset files from PC to ESP32.
+
+## Quick Start
+
+### 1. Unified Transfer (Recommended)
+Transfer all dataset files in one session:
+
+```bash
+cd pc_side
+python3 unified_transfer.py <base_name> <serial_port>
+```
+
+**Example:**
+```bash
+python3 unified_transfer.py digit_data /dev/ttyUSB0
+```
+
+**Transfers:**
+- `<base_name>_ctg.csv` - Categorizer mapping
+- `<base_name>_dp.csv` - Dataset parameters  
+- `<base_name>_nml.bin` - Normalized binary dataset
+
+### 2. Individual File Transfer
+Transfer files separately if needed:
+
+```bash
+# Transfer categorizer
+python3 transfer_categorizer.py <model_name> <serial_port>
+
+# Transfer dataset parameters
+python3 transfer_dp_file.py <model_name> <serial_port>
+
+# Transfer binary dataset
+python3 transfer_dataset.py <model_name> <serial_port>
+```
+
+## ESP32 Setup
+
+Upload the corresponding receiver sketch to your ESP32:
+
+- **Unified receiver**: `esp32_side/unified_receiver.ino` (recommended)
+- **Individual receivers**: Available in `esp32_side/` folder
+
+## File Locations
+
+**Generated files** (source):
+```
+tools/data_processing/data/result/
+├── <model_name>_ctg.csv
+├── <model_name>_dp.csv
+└── <model_name>_nml.bin
+```
+
+**ESP32 storage** (destination):
+```
+/<model_name>/
+├── <model_name>_ctg.csv
+├── <model_name>_dp.csv
+└── <model_name>_nml.bin
+```
+
+## Requirements
+
+- Python 3.x
+- pyserial: `pip install pyserial`
+- ESP32 connected via USB
+
+## Troubleshooting
+
+**Permission denied:**
+```bash
+sudo usermod -a -G dialout $USER
+# Log out and back in
+```
+
+**Port not found:**
+```bash
+ls /dev/tty*  # Linux/Mac
+```
+
+**Transfer fails:**
+- Close Arduino IDE Serial Monitor
+- Check serial port is correct
+- Ensure ESP32 receiver sketch is running
+- Try resetting ESP32
+
+## Notes
+
+- Chunk size is automatically synchronized with ESP32 configuration
+- Transfer speed depends on your ESP32 board variant
+- Large files may take several minutes
+- All transfers use CRC32 verification for data integrity

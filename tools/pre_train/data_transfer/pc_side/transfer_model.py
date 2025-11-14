@@ -21,6 +21,14 @@ import glob
 import binascii
 from pathlib import Path
 
+# Import configuration parser to sync with ESP32
+try:
+    from config_parser import get_user_chunk_size
+except ImportError:
+    print("⚠️  Warning: config_parser.py not found. Using default CHUNK_SIZE.")
+    def get_user_chunk_size(config_file_path=None, default=220):
+        return default
+
 # --- Protocol Constants ---
 # Must match the ESP32 receiver sketch
 CMD_HEADER = b"ESP32_XFER"
@@ -34,9 +42,9 @@ RESP_READY = b"READY"
 RESP_OK = b"OK"
 RESP_ERROR = b"ERROR"
 
-# Transfer parameters optimized for ESP32 - V2 Protocol
+# CHUNK_SIZE is now automatically extracted from Rf_board_config.h
 # IMPORTANT: Keep CHUNK_SIZE in sync with ESP32 receivers to avoid CDC buffer overrun.
-CHUNK_SIZE = 220   # bytes per chunk
+CHUNK_SIZE = get_user_chunk_size(default=220)  # Auto-synced with Rf_board_config.h
 CHUNK_DELAY = 0.02  # small delay between chunks (ACK-driven retries handle backpressure)
 MAX_RETRIES = 5     # max retries per chunk
 

@@ -27,7 +27,7 @@
 #include "Rf_file_manager.h"  // For config file loading
 
 // --- Storage Configuration ---
-const RfStorageType STORAGE_MODE = RfStorageType::SD_MMC;  // Change to LITTLEFS if no SD card
+const RfStorageType STORAGE_MODE = RfStorageType::SD_MMC_1BIT;  // Change to FLASH if no SD card
 
 // Camera pin definitions for ESP32-CAM (AI-Thinker model)
 #define PWDN_GPIO_NUM     32

@@ -149,9 +149,10 @@ Choose your storage backend at runtime for maximum flexibility:
 #include "Rf_file_manager.h"
 
 // Choose one:
-const RfStorageType STORAGE_MODE = RfStorageType::LITTLEFS;  // Internal flash (default)
-// const RfStorageType STORAGE_MODE = RfStorageType::SD_MMC;    // Built-in SD slot (ESP32-CAM)
-// const RfStorageType STORAGE_MODE = RfStorageType::SD_SPI;    // External SD module
+const RfStorageType STORAGE_MODE = RfStorageType::FLASH;          // Internal flash (LittleFS)
+// const RfStorageType STORAGE_MODE = RfStorageType::SD_MMC_1BIT; // Built-in SD slot (1-bit mode)
+// const RfStorageType STORAGE_MODE = RfStorageType::SD_MMC_4BIT; // Built-in SD slot (4-bit mode)
+// const RfStorageType STORAGE_MODE = RfStorageType::SD_SPI;      // External SD module (SPI)
 
 void setup() {
     Serial.begin(115200);

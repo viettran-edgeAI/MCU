@@ -40,18 +40,9 @@ static constexpr label_type   RF_MAX_LABELS          = 255;    // maximum number
 static constexpr uint16_t     RF_MAX_FEATURES        = 1023;   // maximum number of features
 static constexpr sample_type  RF_MAX_SAMPLES         = 65535;  // maximum number of samples in a dataset
 static constexpr uint32_t     RF_MAX_NODES           = 131071; // Maximum nodes per tree 
-#ifdef RF_USE_SDCARD
-    #if defined(RF_PSRAM_AVAILABLE)
-        // SD card + PSRAM: allow largest dataset
-        static constexpr size_t RF_MAX_DATASET_SIZE = 20000000; // Max dataset file size - 20MB for SD card
-    #else
-        // SD card without PSRAM: moderate size
-        static constexpr size_t RF_MAX_DATASET_SIZE = 5000000;  // Max dataset file size - 5MB for SD card
-    #endif
-#else
-    // No SD card: use internal flash - smaller limit
-    static constexpr size_t RF_MAX_DATASET_SIZE = 150000; // Max dataset file size - 150kB
-#endif
+inline size_t rf_max_dataset_size() {
+    return rf_storage_max_dataset_bytes();
+}
 
 // define error label base on label_type
 template<typename T>
@@ -63,17 +54,17 @@ static constexpr label_type RF_ERROR_LABEL = Rf_err_label<label_type>::value;
 
 /*
  NOTE : Forest file components (with each model)
-    1. model_name_nml.bin       : base data (dataset)
-    2. model_name_config.json   : model configuration file 
-    3. model_name_ctg.csv       : quantizer (feature quantizer and label mapping)
-    4. model_name_dp.csv        : information about dataset (num_features, num_labels...)
-    5. model_name_forest.bin    : model file (all trees) in unified format
-    6. model_name_tree_*.bin    : model files (tree files) in individual format. (Given from pc/use during training)
-    7. model_name_npd.bin       : node predictor file 
-    8. model_name_nlg.csv       : node splitting log file during training (for retraining node predictor)
-    9. model_name_ifl.bin :     inference log file (predictions, actual labels, metrics over time)
-    10. model_name_tlog.csv     : time log file (detailed timing of forest events)
-    11. model_name_mlog.csv     : memory log file (detailed memory usage of forest events)
+    1.  model_name_nml.bin       : base data (dataset)
+    2.  model_name_config.json   : model configuration file 
+    3.  model_name_ctg.csv       : quantizer (feature quantizer and label mapping)
+    4.  model_name_dp.csv        : information about dataset (num_features, num_labels...)
+    5.  model_name_forest.bin    : model file (all trees) in unified format
+    6.  model_name_hogcfg.json   : HOG & Camera configuration file (for hog_transform - model preprocessing)
+    7.  model_name_npd.bin       : node predictor file 
+    8.  model_name_nlg.csv       : node splitting log file during training (for retraining node predictor)
+    9.  model_name_ifl.bin       : inference log file (predictions, actual labels, metrics over time)
+    10. model_name_tlog.csv      : time log file (detailed timing of forest events)
+    11. model_name_mlog.csv      : memory log file (detailed memory usage of forest events)
 */
 
 namespace mcu {
@@ -2377,8 +2368,9 @@ namespace mcu {
                 }
                 
                 size_t newFileSize = headerSize + (newNumSamples * sampleDataSize);
-                if (newFileSize > RF_MAX_DATASET_SIZE) {
-                    size_t maxSamplesBySize = (RF_MAX_DATASET_SIZE - headerSize) / sampleDataSize;
+                const size_t datasetLimit = rf_max_dataset_size();
+                if (newFileSize > datasetLimit) {
+                    size_t maxSamplesBySize = (datasetLimit - headerSize) / sampleDataSize;
                     RF_DEBUG(2, "⚠️ Limiting samples by file size to ", maxSamplesBySize);
                     newNumSamples = maxSamplesBySize;
                 }
@@ -6131,11 +6123,9 @@ namespace mcu {
     */
 
     class Rf_pending_data{
-    #ifndef RF_USE_SDCARD
-        constexpr static uint16_t MAX_INFER_LOGFILE_SIZE = 2048;   // Max log file size in bytes (1000 inferences)
-    #else 
-        constexpr static uint16_t MAX_INFER_LOGFILE_SIZE = 20480;  // Max log file size in bytes (10000 inferences)
-    #endif
+        static size_t max_infer_logfile_size() {
+            return rf_storage_max_infer_log_bytes();
+        }
         vector<Rf_sample> pending_samples; // buffer for pending samples
         vector<label_type> actual_labels; // true labels of the samples
         uint16_t max_pending_samples; // max number of pending samples in buffer
@@ -6386,7 +6376,7 @@ namespace mcu {
         }
 
     private:
-        // trim log file if it exceeds max size (MAX_INFER_LOGFILE_SIZE)
+        // trim log file if it exceeds the storage-dependent limit
         bool trim_log_file(const char* infer_log_path) {
             if(!RF_FS_EXISTS(infer_log_path)) return false;
             
@@ -6396,7 +6386,8 @@ namespace mcu {
             size_t file_size = file.size();
             file.close();
             
-            if(file_size <= MAX_INFER_LOGFILE_SIZE) return true; // No trimming needed;
+            const size_t limit = max_infer_logfile_size();
+            if(file_size <= limit) return true; // No trimming needed;
             
             // File is too large, trim from the beginning (keep most recent data)
             file = RF_FS_OPEN(infer_log_path, RF_FILE_READ);
@@ -6424,8 +6415,7 @@ namespace mcu {
             size_t data_size = file_size - header_size;
             size_t prediction_pairs_count = data_size / 2; // Each prediction is 2 bytes (predicted + actual)
             
-            // Calculate how many prediction pairs to keep
-            size_t max_data_size = MAX_INFER_LOGFILE_SIZE - header_size;
+            size_t max_data_size = limit > header_size ? (limit - header_size) : 0;
             size_t max_pairs_to_keep = max_data_size / 2;
             
             if(prediction_pairs_count <= max_pairs_to_keep) {
@@ -6553,17 +6543,19 @@ namespace mcu {
         }
 
         void m_log(const char* msg, bool log = true){
+            const uint32_t internalCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+
             #if RF_PSRAM_AVAILABLE
                 if(esp_psram_is_initialized()){
                     freeHeap = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
                     largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
                 } else {
-                    freeHeap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-                    largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+                    freeHeap = heap_caps_get_free_size(internalCaps);
+                    largestBlock = heap_caps_get_largest_free_block(internalCaps);
                 }
             #else
-                freeHeap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-                largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+                freeHeap = heap_caps_get_free_size(internalCaps);
+                largestBlock = heap_caps_get_largest_free_block(internalCaps);
             #endif
             freeDisk = RF_TOTAL_BYTES() - RF_USED_BYTES();
 

@@ -1,10 +1,10 @@
 {
     "data_path": {
-        "value": "../data_processing/data/result/digit_data_nml.csv",
+        "value": "../data_processing/data/result/gesture_nml.csv",
         "description": "Path to the normalized cv dataset."
     },
     "random_seed": {
-        "value": 37,
+        "value":37,
         "description": "Random seed for Rf_random."
     },
     "num_trees": {
@@ -62,20 +62,20 @@
         "description": "Number of folds for cross-validation when using k_fold_score."
     },
     "min_split": {
-        "value": 5,
+        "value": 2,
         "status": "disabled",
         "status_options": ["disabled", "enabled"],
         "description": "disabled by default. enable to override min_split_range in training process"
     },
     "min_leaf": {
-        "value": 2,
-        "status": "enabled",
+        "value": 1,
+        "status": "disabled",
         "status_options": ["disabled", "enabled"],
         "description": "disabled by default. enable to override min_leaf_range in training process. Minimum number of samples required to be at a leaf node."
     },
     "max_depth": {
         "value": 50,
-        "status": "enabled",
+        "status": "disabled",
         "status_options": ["disabled", "enabled"],
         "description": "disabled by default. enable to override max_depth in training process."
     },

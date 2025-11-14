@@ -11,15 +11,15 @@
  * - See board_config.h for board-specific recommendations.
  */
 
-#include <Rf_board_config.h>
-#include "Rf_file_manager.h"
+#include "Rf_file_manager.h"  // Includes Rf_board_config.h internally
 
 // --- Storage Configuration ---
 // Choose one of the following storage modes:
-//   RfStorageType::LITTLEFS - Internal LittleFS (default, ~1.5MB)
-//   RfStorageType::SD_MMC    - Built-in SD slot (SDIO, recommended for ESP32-CAM)
-//   RfStorageType::SD_SPI    - External SD card module (SPI interface)
-const RfStorageType STORAGE_MODE = RfStorageType::LITTLEFS;
+//   RfStorageType::FLASH      - Internal LittleFS (default, ~1.5MB)
+//   RfStorageType::SD_MMC_1BIT - Built-in SD slot (1-bit mode)
+//   RfStorageType::SD_MMC_4BIT - Built-in SD slot (4-bit mode)
+//   RfStorageType::SD_SPI     - External SD card module (SPI interface, compatible with all ESP32 variants)
+const RfStorageType STORAGE_MODE = RfStorageType::FLASH;
 
 /*
  * Transfer timing and size configuration.

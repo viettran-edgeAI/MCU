@@ -1285,6 +1285,7 @@ int main(int argc, char* argv[]) {
         bool headerSpecified = false; // Track if user explicitly specified header option
         bool runVisualization = true; // Default to running visualization
         std::string inputFile;
+        std::string modelName; // Model name for output filenames
         
         // Parse command line arguments
         for (int i = 1; i < argc; i++) {
@@ -1294,6 +1295,13 @@ int main(int argc, char* argv[]) {
                     inputFile = argv[++i];
                 } else {
                     std::cerr << "Error: -p/-path requires a file path\n";
+                    return 1;
+                }
+            } else if (arg == "-m" || arg == "-model") {
+                if (i + 1 < argc) {
+                    modelName = argv[++i];
+                } else {
+                    std::cerr << "Error: -m/-model requires a model name\n";
                     return 1;
                 }
             } else if (arg == "-he" || arg == "-header") {
@@ -1345,13 +1353,15 @@ int main(int argc, char* argv[]) {
                 std::cout << "Usage: " << argv[0] << " [options]\n";
                 std::cout << "Options:\n";
                 std::cout << "  -p, -path <file>        Path to input CSV file (required)\n";
+                std::cout << "  -m, -model <name>       Model name for output filenames (optional; if not provided, extracted from input filename)\n";
                 std::cout << "  -he, -header <yes/no>   Skip header if 'yes', process all lines if 'no' (auto-detect if not specified)\n";
                 std::cout << "  -f, -features <number>  Maximum number of features (default: 1023, range: 1-1023)\n";
                 std::cout << "  -q, -bits <1-8>         Quantization coefficient in bits per feature (default: 2)\n";
                 std::cout << "  -v, -visualize          Run quantization visualization after processing (default: enabled)\n";
                 std::cout << "  -h, --help              Show this help message\n";
-                std::cout << "\nExample:\n";
+                std::cout << "\nExamples:\n";
                 std::cout << "  " << argv[0] << " -p data/mydata.csv -header yes -features 512 -q 3\n";
+                std::cout << "  " << argv[0] << " -p data/mydata.csv -model my_rf_model -q 3\n";
                 return 0;
             } else if (inputFile.empty() && arg.find('-') != 0) {
                 // If no flags and inputFile not set, treat as positional argument (backward compatibility)
@@ -1365,17 +1375,35 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // Generate output file names based on inputFile
-        std::string inputName(inputFile);
+        // Generate output file names based on inputFile or modelName
+        std::string baseName;
         std::string inputDir = ".";
-        size_t slash = inputName.find_last_of("/\\");
-        if (slash != std::string::npos) {
-            inputDir = inputName.substr(0, slash);
-            inputName = inputName.substr(slash + 1);
+        
+        if (!modelName.empty()) {
+            // Use the provided model name
+            baseName = modelName;
+            
+            // Extract directory from input file path for output location
+            std::string inputName(inputFile);
+            size_t slash = inputName.find_last_of("/\\");
+            if (slash != std::string::npos) {
+                inputDir = inputName.substr(0, slash);
+            }
+        } else {
+            // Extract base name from input file
+            std::string inputName(inputFile);
+            size_t slash = inputName.find_last_of("/\\");
+            if (slash != std::string::npos) {
+                inputDir = inputName.substr(0, slash);
+                inputName = inputName.substr(slash + 1);
+            }
+            baseName = inputName;
+            size_t dot = baseName.find_last_of('.');
+            if (dot != std::string::npos) {
+                baseName = baseName.substr(0, dot);
+            }
         }
-        std::string baseName = inputName;
-        size_t dot = baseName.find_last_of('.') ;
-        if (dot != std::string::npos) baseName = baseName.substr(0, dot);
+        
         // All result files in the same directory as input
         std::string resultDir = inputDir + "/result";
         if (!std::filesystem::exists(resultDir)) {

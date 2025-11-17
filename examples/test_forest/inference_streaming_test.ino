@@ -14,8 +14,8 @@
 
 using namespace mcu;
 
-const char* WIFI_SSID = "YOUR_SSID";
-const char* WIFI_PASSWORD = "YOUR_PASSWORD";
+const char* WIFI_SSID = "YOUR SSID";
+const char* WIFI_PASSWORD = "YOUR PASSWORD";
 
 // HTTP streaming
 #define PART_BOUNDARY "123456789000000000000987654321"
@@ -26,7 +26,7 @@ static const char* STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u
 httpd_handle_t stream_httpd = nullptr;
 httpd_handle_t camera_httpd = nullptr;
 
-const RfStorageType STORAGE_MODE = RfStorageType::SD_MMC_1BIT;
+const RfStorageType STORAGE_MODE = RfStorageType::SD_MMC;
 
 // FreeRTOS task handles
 TaskHandle_t inferenceTaskHandle = nullptr;
@@ -58,7 +58,7 @@ volatile unsigned long lastStatusMillis = 0;
 #define PCLK_GPIO_NUM     22
 
 HOG_MCU hog;
-constexpr const char* CONFIG_FILE_PATH = "/digit/digit_hogcfg.json";
+constexpr const char* CONFIG_FILE_PATH = "/gesture/gesture_hogcfg.json";
 constexpr unsigned long INFERENCE_DELAY_MS = 500;
 
 bool initCamera(const ImageProcessing::ProcessingConfig& cfg);
@@ -67,111 +67,38 @@ void startCameraServer();
 void inferenceTask(void* parameter);
 void streamTask(void* parameter);
 
-framesize_t resolveFrameSize(int width, int height);
-pixformat_t resolvePixelFormat(ImageProcessing::PixelFormat format);
-
-framesize_t resolveFrameSize(int width, int height) {
-    const auto matches = [&](int w, int h) {
-        return (width == w && height == h) || (width == h && height == w);
-    };
-
-#ifdef FRAMESIZE_96X96
-    if (matches(96, 96)) return FRAMESIZE_96X96;
-#endif
-#ifdef FRAMESIZE_160X120
-    if (matches(160, 120)) return FRAMESIZE_160X120;
-#endif
-#ifdef FRAMESIZE_QQVGA
-    if (matches(160, 120)) return FRAMESIZE_QQVGA;
-#endif
-#ifdef FRAMESIZE_QQVGA2
-    if (matches(128, 160)) return FRAMESIZE_QQVGA2;
-#endif
-#ifdef FRAMESIZE_QCIF
-    if (matches(176, 144)) return FRAMESIZE_QCIF;
-#endif
-#ifdef FRAMESIZE_HQVGA
-    if (matches(240, 176)) return FRAMESIZE_HQVGA;
-#endif
-#ifdef FRAMESIZE_240X240
-    if (matches(240, 240)) return FRAMESIZE_240X240;
-#endif
-#ifdef FRAMESIZE_QVGA
-    if (matches(320, 240)) return FRAMESIZE_QVGA;
-#endif
-#ifdef FRAMESIZE_CIF
-    if (matches(352, 288)) return FRAMESIZE_CIF;
-#endif
-#ifdef FRAMESIZE_HVGA
-    if (matches(480, 320)) return FRAMESIZE_HVGA;
-#endif
-#ifdef FRAMESIZE_VGA
-    if (matches(640, 480)) return FRAMESIZE_VGA;
-#endif
-#ifdef FRAMESIZE_SVGA
-    if (matches(800, 600)) return FRAMESIZE_SVGA;
-#endif
-#ifdef FRAMESIZE_XGA
-    if (matches(1024, 768)) return FRAMESIZE_XGA;
-#endif
-#ifdef FRAMESIZE_SXGA
-    if (matches(1280, 1024)) return FRAMESIZE_SXGA;
-#endif
-#ifdef FRAMESIZE_SXGA2
-    if (matches(1280, 960)) return FRAMESIZE_SXGA2;
-#endif
-#ifdef FRAMESIZE_720P
-    if (matches(1280, 720)) return FRAMESIZE_720P;
-#endif
-#ifdef FRAMESIZE_HD
-    if (matches(1280, 720)) return FRAMESIZE_HD;
-#endif
-#ifdef FRAMESIZE_UXGA
-    if (matches(1600, 1200)) return FRAMESIZE_UXGA;
-#endif
-#ifdef FRAMESIZE_1080P
-    if (matches(1920, 1080)) return FRAMESIZE_1080P;
-#endif
-#ifdef FRAMESIZE_FHD
-    if (matches(1920, 1080)) return FRAMESIZE_FHD;
-#endif
-#ifdef FRAMESIZE_P_FHD
-    if (matches(1920, 1080)) return FRAMESIZE_P_FHD;
-#endif
-#ifdef FRAMESIZE_QXGA
-    if (matches(2048, 1536)) return FRAMESIZE_QXGA;
-#endif
-#ifdef FRAMESIZE_QHD
-    if (matches(2560, 1440)) return FRAMESIZE_QHD;
-#endif
-#ifdef FRAMESIZE_WQXGA
-    if (matches(2560, 1600)) return FRAMESIZE_WQXGA;
-#endif
-#ifdef FRAMESIZE_P_3MP
-    if (matches(2048, 1536) || matches(2304, 1536)) return FRAMESIZE_P_3MP;
-#endif
-#ifdef FRAMESIZE_5MP
-    if (matches(2592, 1944)) return FRAMESIZE_5MP;
-#endif
-
-    Serial.printf("[Camera] Unsupported resolution %dx%d, defaulting to QVGA\n", width, height);
+// Convert ImageProcessing dimensions to ESP32 camera framesize_t
+framesize_t getESP32FrameSize(int width, int height) {
+    // Match exact dimensions to ESP32 camera frame sizes
+    if (width == 96 && height == 96) return FRAMESIZE_96X96;
+    if (width == 160 && height == 120) return FRAMESIZE_QQVGA;
+    if (width == 176 && height == 144) return FRAMESIZE_QCIF;
+    if (width == 240 && height == 176) return FRAMESIZE_HQVGA;
+    if (width == 240 && height == 240) return FRAMESIZE_240X240;
+    if (width == 320 && height == 240) return FRAMESIZE_QVGA;
+    if (width == 400 && height == 296) return FRAMESIZE_CIF;
+    if (width == 480 && height == 320) return FRAMESIZE_HVGA;
+    if (width == 640 && height == 480) return FRAMESIZE_VGA;
+    if (width == 800 && height == 600) return FRAMESIZE_SVGA;
+    if (width == 1024 && height == 768) return FRAMESIZE_XGA;
+    if (width == 1280 && height == 720) return FRAMESIZE_HD;
+    if (width == 1280 && height == 1024) return FRAMESIZE_SXGA;
+    if (width == 1600 && height == 1200) return FRAMESIZE_UXGA;
+    
+    // Fallback: return QVGA as default
+    Serial.printf("[Camera] Warning: Unsupported resolution %dx%d, using QVGA (320x240)\n", width, height);
     return FRAMESIZE_QVGA;
 }
 
-pixformat_t resolvePixelFormat(ImageProcessing::PixelFormat format) {
+pixformat_t getESP32PixelFormat(ImageProcessing::PixelFormat format) {
     switch (format) {
-        case ImageProcessing::PixelFormat::GRAYSCALE:
-            return PIXFORMAT_GRAYSCALE;
-        case ImageProcessing::PixelFormat::RGB565:
-            return PIXFORMAT_RGB565;
-        case ImageProcessing::PixelFormat::RGB888:
-            return PIXFORMAT_RGB888;
-        case ImageProcessing::PixelFormat::YUV422:
-            return PIXFORMAT_YUV422;
-        case ImageProcessing::PixelFormat::JPEG:
-            return PIXFORMAT_JPEG;
+        case ImageProcessing::PixelFormat::GRAYSCALE: return PIXFORMAT_GRAYSCALE;
+        case ImageProcessing::PixelFormat::RGB565:    return PIXFORMAT_RGB565;
+        case ImageProcessing::PixelFormat::RGB888:    return PIXFORMAT_RGB888;
+        case ImageProcessing::PixelFormat::YUV422:    return PIXFORMAT_YUV422;
+        case ImageProcessing::PixelFormat::JPEG:      return PIXFORMAT_JPEG;
         default:
-            Serial.println("[Camera] Unknown pixel format, defaulting to GRAYSCALE");
+            Serial.println("[Camera] Unknown pixel format, using GRAYSCALE");
             return PIXFORMAT_GRAYSCALE;
     }
 }
@@ -233,7 +160,7 @@ void setup() {
     // manage_files();
 
     // Initialize and load model
-    const char* model_name = "digit_data";
+    const char* model_name = "gesture";
     forest.init(model_name);
 
     Serial.print("Loading forest... ");
@@ -318,7 +245,7 @@ void inferenceTask(void* parameter) {
                 hog.transform(fb->buf);
                 
                 const auto& features = hog.getFeatures();
-                rf_predict_result_t result result;
+                rf_predict_result_t result;
                 forest.predict(features, result);
                 
                 inferenceTime = millis() - start;
@@ -666,8 +593,8 @@ bool initCamera(const ImageProcessing::ProcessingConfig& cfg) {
     config.ledc_timer = LEDC_TIMER_0;
     config.xclk_freq_hz = 10000000;  // Reduced from 20MHz for stability
 
-    pixformat_t pixelFormat = resolvePixelFormat(cfg.input_format);
-    framesize_t frameSize = resolveFrameSize(cfg.input_width, cfg.input_height);
+    pixformat_t pixelFormat = getESP32PixelFormat(cfg.input_format);
+    framesize_t frameSize = getESP32FrameSize(cfg.input_width, cfg.input_height);
 
     uint8_t quality = cfg.jpeg_quality == 0 ? 12 : cfg.jpeg_quality;
     if (quality < 10) {

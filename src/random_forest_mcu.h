@@ -1167,7 +1167,7 @@ namespace mcu{
             // Serial.println("here 1");
             while (!queue_nodes.empty()) {
                 NodeToBuild current = std::move(queue_nodes.front());
-                queue_nodes.erase(0);
+                queue_nodes.erase(queue_nodes.begin());
 
                 NodeStats stats(config.num_labels);
                 stats.analyzeSamples(indices, current.begin, current.end, config.num_labels, ctx->train_data);
@@ -1365,7 +1365,7 @@ namespace mcu{
             
             while (!queue_nodes.empty()) {
                 NodeToBuild current = std::move(queue_nodes.front());
-                queue_nodes.erase(0);
+                queue_nodes.erase(queue_nodes.begin());
 
                 NodeStats stats(config.num_labels);
                 stats.analyzeSamples(indices, current.begin, current.end, config.num_labels, accessor);
@@ -2141,7 +2141,7 @@ namespace mcu{
                 pd->write_to_infer_log();
             }
         }
-
+ 
     // ----------------------------------------setters---------------------------------------
 
         void enable_retrain(){
@@ -2155,6 +2155,7 @@ namespace mcu{
             release_pending_data();
             release_base_data_stub();
         }
+    
     #ifdef DEV_STAGE
         // Enable partial loading mode 
         void enable_partial_loading(){
@@ -2257,6 +2258,14 @@ namespace mcu{
             config.num_trees = n_trees;
         }
     // ----------------------------------------getters---------------------------------------
+        bool able_to_inference() const {
+            return base.able_to_inference();
+        }
+
+        float best_training_score() const {
+            return config.result_score;
+        }
+
         /**
          * @brief: Calculate inference score based on the last N logged predictions.
          * @param num_inference: Number of recent predictions to consider for score calculation.
@@ -2367,10 +2376,43 @@ namespace mcu{
             base.get_model_name(name, length);
         }
 
+        // get original label view from internal normalized label
         bool get_label_view(label_type normalizedLabel, const char** outLabel, uint16_t* outLength = nullptr) const {
             return quantizer.getOriginalLabelView(normalizedLabel, outLabel, outLength);
         }
 
+    #ifdef ARDUINO
+        // get all original labels as Arduino String vector
+        vector<String> get_all_original_labels() const {
+            vector<String> labels;
+            for(label_type i = 0; i < config.num_labels; i++) {
+                const char* labelPtr = nullptr;
+                uint16_t labelLen = 0;
+                if (quantizer.getOriginalLabelView(i, &labelPtr, &labelLen)) {
+                    labels.emplace_back(String(labelPtr, labelLen));
+                } else {
+                    labels.emplace_back(String("UNKNOWN"));
+                }
+            }
+            return labels;
+        }
+    #else
+        // get all original labels as std::string vector
+        vector<std::string> get_all_original_labels() const {
+            vector<std::string> labels;
+            for(label_type i = 0; i < config.num_labels; i++) {
+                const char* labelPtr = nullptr;
+                uint16_t labelLen = 0;
+                if (quantizer.getOriginalLabelView(i, &labelPtr, &labelLen)) {
+                    labels.emplace_back(std::string(labelPtr, labelLen));
+                } else {
+                    labels.emplace_back("UNKNOWN");
+                }
+            }
+            return labels;
+        }
+    #endif
+    
         size_t lowest_ram() const {
             return logger.lowest_ram;
         }

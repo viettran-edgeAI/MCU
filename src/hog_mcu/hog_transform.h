@@ -172,6 +172,14 @@ public:
                          int input_width = 320, int input_height = 240);
     
     /**
+     * Quick setup method for ESP32-CAM using standard frame size enum
+     * @param framesize Standard camera frame size
+     * @param input_format Camera pixel format (default: GRAYSCALE)
+     */
+    void setupForESP32CAM(ImageProcessing::CameraFrameSize framesize,
+                         ImageProcessing::PixelFormat input_format = ImageProcessing::PixelFormat::GRAYSCALE);
+    
+    /**
      * Set image processing configuration only
      * @param config Image processing configuration
      */

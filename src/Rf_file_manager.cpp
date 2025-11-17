@@ -650,7 +650,7 @@ void manage_files() {
                 fileList[fileCount] = fullPath;
                 uint64_t fileSize = entry.size();
                 char buffer[80];
-                snprintf(buffer, sizeof(buffer), "📄 %2d: %-30s (%d bytes)", fileCount + 1, displayName.c_str(), fileSize);
+                snprintf(buffer, sizeof(buffer), "📄 %2d: %-30s (%llu bytes)", fileCount + 1, displayName.c_str(), (unsigned long long)fileSize);
                 RF_DEBUG(0, "", buffer);
                 fileCount++;
             }
@@ -674,13 +674,16 @@ void manage_files() {
         RF_DEBUG(0, "c: ✏️  Rename file");
         RF_DEBUG(0, "d: 🗑️  Delete file/folder");
         RF_DEBUG(0, "e: ➕ Add new file");
+        RF_DEBUG(0, "f: 🔐 Delete non-empty directory");
         RF_DEBUG(0, "Type operation letter, or 'exit' to quit:");
 
+        String rawOperation = "";
         String operation = "";
         while (operation.length() == 0) {
             if (RF_INPUT_AVAILABLE()) {
-                operation = RF_INPUT_READ_LINE_UNTIL('\n');
-                operation.trim();
+                rawOperation = RF_INPUT_READ_LINE_UNTIL('\n');
+                rawOperation.trim();
+                operation = rawOperation;
                 operation.toLowerCase();
             }
             delay(10);
@@ -689,6 +692,109 @@ void manage_files() {
         if (operation.equals("exit")) {
             RF_DEBUG(0, "🔚 Exiting file manager.");
             break;
+        }
+
+        if (rawOperation.equalsIgnoreCase("f")) {
+            RF_DEBUG(0, "\n========== 🔐 DELETE NON-EMPTY DIRECTORY ==========");
+            while (true) {
+                File refreshDir = RF_FS_OPEN(currentDir, RF_FILE_READ);
+                if (!refreshDir || !refreshDir.isDirectory()) {
+                    RF_DEBUG(0, "❌ Failed to inspect current directory!");
+                    break;
+                }
+
+                static String recursiveFolderList[50];
+                int recursiveFolderCount = 0;
+
+                File refreshEntry = refreshDir.openNextFile();
+                while (refreshEntry && recursiveFolderCount < 50) {
+                    if (refreshEntry.isDirectory()) {
+                        String name = String(refreshEntry.name());
+                        String fullPath = name;
+                        if (!name.startsWith("/")) {
+                            fullPath = currentDir;
+                            if (!fullPath.endsWith("/")) {
+                                fullPath += "/";
+                            }
+                            fullPath += name;
+                            if (!fullPath.startsWith("/")) {
+                                fullPath = "/" + fullPath;
+                            }
+                        }
+                        recursiveFolderList[recursiveFolderCount++] = fullPath;
+                    }
+                    refreshEntry.close();
+                    refreshEntry = refreshDir.openNextFile();
+                }
+                refreshDir.close();
+
+                if (recursiveFolderCount == 0) {
+                    RF_DEBUG(0, "⚠️ No folders to delete.");
+                    break;
+                }
+
+                RF_DEBUG(0, "\n📂 Available folders:");
+                for (int i = 0; i < recursiveFolderCount; i++) {
+                    int lastSlash = recursiveFolderList[i].lastIndexOf('/');
+                    String displayName = (lastSlash >= 0) ? recursiveFolderList[i].substring(lastSlash + 1) : recursiveFolderList[i];
+                    char buffer[80];
+                    snprintf(buffer, sizeof(buffer), "  F%d: %s/", i + 1, displayName.c_str());
+                    RF_DEBUG(0, "", buffer);
+                }
+
+                RF_DEBUG(0, "\nEnter folder number to delete recursively, or 'end' to return:");
+                String folderInput = "";
+                while (folderInput.length() == 0) {
+                    if (RF_INPUT_AVAILABLE()) {
+                        folderInput = RF_INPUT_READ_LINE_UNTIL('\n');
+                        folderInput.trim();
+                    }
+                    delay(10);
+                }
+
+                if (folderInput.equalsIgnoreCase("end")) {
+                    RF_DEBUG(0, "🔙 Returning to main menu...");
+                    break;
+                }
+
+                int folderIdx = folderInput.toInt();
+                if (folderIdx < 1 || folderIdx > recursiveFolderCount) {
+                    RF_DEBUG(0, "⚠️ Invalid folder number.");
+                    continue;
+                }
+
+                String targetFolder = recursiveFolderList[folderIdx - 1];
+                char confirmPrompt[128];
+                snprintf(confirmPrompt, sizeof(confirmPrompt), "Type 'DELETE' to remove %s (all contents will be lost):", targetFolder.c_str());
+                RF_DEBUG(0, "", confirmPrompt);
+
+                String confirm = "";
+                while (confirm.length() == 0) {
+                    if (RF_INPUT_AVAILABLE()) {
+                        confirm = RF_INPUT_READ_LINE_UNTIL('\n');
+                        confirm.trim();
+                    }
+                    delay(10);
+                }
+
+                if (!confirm.equals("DELETE")) {
+                    RF_DEBUG(0, "❎ Cancellation received. Directory not deleted.");
+                    continue;
+                }
+
+                RF_DEBUG(0, "🗑️ Deleting directory recursively...");
+                if (deleteDirectoryRecursive(targetFolder)) {
+                    char result[128];
+                    snprintf(result, sizeof(result), "✅ Removed directory: %s", targetFolder.c_str());
+                    RF_DEBUG(0, "", result);
+                } else {
+                    char result[128];
+                    snprintf(result, sizeof(result), "❌ Failed to remove directory: %s", targetFolder.c_str());
+                    RF_DEBUG(0, "", result);
+                }
+                delay(100);
+            }
+            continue;
         }
 
         // Navigate to parent directory
@@ -1245,7 +1351,7 @@ void manage_files() {
             RF_DEBUG(0, "🔙 Returning to main menu...");
         }
         else {
-            RF_DEBUG(0, "⚠️ Invalid operation. Use a, b, c, d, e, or 'exit'.");
+            RF_DEBUG(0, "⚠️ Invalid operation. Use a, b, c, d, f, e, or 'exit'.");
         }
     }
 }
@@ -1457,4 +1563,61 @@ void cleanMalformedRows(const String& filename, int exact_columns) {
     snprintf(buffer, sizeof(buffer), "✅ Cleaned %s: %u rows kept, %u rows removed (not exactly %u elements).",
              filename.c_str(), kept, removed, exact_columns);
     RF_DEBUG(0, "", buffer);
+}
+
+bool deleteDirectoryRecursive(const String& path) {
+    String normalizedPath = normalizePath(path, "/");
+    normalizedPath.trim();
+
+    while (normalizedPath.endsWith("/") && normalizedPath.length() > 1) {
+        normalizedPath.remove(normalizedPath.length() - 1);
+    }
+
+    if (normalizedPath.length() == 0 || normalizedPath == "/") {
+        return false;
+    }
+
+    File dir = RF_FS_OPEN(normalizedPath.c_str(), RF_FILE_READ);
+    if (!dir || !dir.isDirectory()) {
+        return false;
+    }
+
+    File entry = dir.openNextFile();
+    while (entry) {
+        String childName = String(entry.name());
+        String childPath;
+
+        if (childName.startsWith("/")) {
+            childPath = childName;
+        } else {
+            childPath = normalizedPath;
+            if (!childPath.endsWith("/")) {
+                childPath += "/";
+            }
+            childPath += childName;
+            if (!childPath.startsWith("/")) {
+                childPath = "/" + childPath;
+            }
+        }
+
+        bool isDirectory = entry.isDirectory();
+        entry.close();
+
+        bool childSuccess = false;
+        if (isDirectory) {
+            childSuccess = deleteDirectoryRecursive(childPath);
+        } else {
+            childSuccess = RF_FS_REMOVE(childPath);
+        }
+
+        if (!childSuccess) {
+            dir.close();
+            return false;
+        }
+
+        entry = dir.openNextFile();
+    }
+
+    dir.close();
+    return RF_FS_RMDIR(normalizedPath);
 }

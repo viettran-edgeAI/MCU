@@ -133,14 +133,18 @@ Edit `hog_config.json`:
     "description": "Folder containing class subfolders with images (auto-detects PNG, JPG, JPEG, BMP, TIFF, TXT)"
   },
   "preprocessing": {
-    "target_size": {
-      "width": 32,
-      "height": 32,
-      "enabled": true
+    "esp32": {
+      "input_format": "GRAYSCALE",
+      "input_width": 96,
+      "input_height": 96,
+      "resize_method": "NEAREST_NEIGHBOR",
+      "maintain_aspect_ratio": false,
+      "jpeg_quality": 80,
+      "description": "ESP32 camera config(for hog lib esp32 ver): input_format (GRAYSCALE|RGB565|RGB888|YUV422|JPEG), resize_method (NEAREST_NEIGHBOR|BILINEAR|AREA_AVERAGE)"
     },
     "grayscale": true,
     "normalize": true,
-    "description": "Image preprocessing: resize (if enabled) and convert to grayscale"
+    "description": "Image preprocessing and ESP32 camera configuration"
   },
   "hog_parameters": {
     "img_width": 32,
@@ -160,22 +164,13 @@ Edit `hog_config.json`:
     "max_images_per_class": -1,
     "verbose": true,
     "description": "Processing options: -1 = process all images, >0 = limit per class"
-  },
-  "esp32": {
-    "input_format": "GRAYSCALE",
-    "input_width": 96,
-    "input_height": 96,
-    "resize_method": "NEAREST_NEIGHBOR",
-    "maintain_aspect_ratio": false,
-    "jpeg_quality": 80,
-    "description": "ESP32 camera config(for hog lib esp32 ver): input_format (GRAYSCALE|RGB565|RGB888|YUV422|JPEG), resize_method (NEAREST_NEIGHBOR|BILINEAR|AREA_AVERAGE)"
   }
 }
 ```
 
 **Key Settings:**
-- `target_size.enabled`: Set to `false` to skip resizing (use original image dimensions)
-- `esp32` section: Settings for ESP32 camera input and resizing, use for generating the output config file and tranfer to ESP32 to using hog_transform library esp32 version.
+- `preprocessing.esp32` section: Settings for ESP32 camera input configuration. These settings are used to generate the output config file (`_hogcfg.json`) which is transferred to ESP32 for use with the hog_transform library ESP32 version.
+- `hog_parameters.img_width/img_height`: Target size for image resizing during feature extraction. Images are always resized to these dimensions.
 
 ### Output Configuration (`model_name_hogcfg.json`)
 
@@ -183,6 +178,14 @@ Generated in `result/` folder and used by ESP32:
 
 ```json
 {
+  "camera_config": {
+    "input_format": "GRAYSCALE",
+    "input_width": 96,
+    "input_height": 96,
+    "resize_method": "NEAREST_NEIGHBOR",
+    "maintain_aspect_ratio": false,
+    "jpeg_quality": 80
+  },
   "hog": {
     "hog_img_width": 32,
     "hog_img_height": 32,
@@ -190,14 +193,6 @@ Generated in `result/` folder and used by ESP32:
     "block_size": 16,
     "block_stride": 6,
     "nbins": 4
-  },
-  "esp32": {
-    "input_format": "GRAYSCALE",
-    "input_width": 96,
-    "input_height": 96,
-    "resize_method": "NEAREST_NEIGHBOR",
-    "maintain_aspect_ratio": false,
-    "jpeg_quality": 80
   }
 }
 ```
@@ -339,10 +334,8 @@ class_name,feature_1,feature_2,...,feature_N
 2. **`model_name_hogcfg.json`** - ESP32 configuration:
 ```json
 {
-  "workflow": {...},
-  "preprocessing": {...},
-  "hog_parameters": {...},
-  "esp32": {...}
+  "camera_config": {...},
+  "hog": {...}
 }
 ```
 
@@ -584,7 +577,14 @@ cat > test_config.json << 'EOF'
     "image_format": "auto"
   },
   "preprocessing": {
-    "target_size": {"width": 32, "height": 32},
+    "esp32": {
+      "input_format": "GRAYSCALE",
+      "input_width": 96,
+      "input_height": 96,
+      "resize_method": "BILINEAR",
+      "maintain_aspect_ratio": false,
+      "jpeg_quality": 80
+    },
     "grayscale": true,
     "normalize": true
   },

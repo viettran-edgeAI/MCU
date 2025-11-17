@@ -21,6 +21,45 @@ namespace ImageProcessing {
         AREA_AVERAGE       // Good for downsampling
     };
 
+    // Standard camera frame sizes (compatible with ESP32-CAM)
+    enum class CameraFrameSize {
+        FRAMESIZE_96X96,      // 96x96
+        FRAMESIZE_QQVGA,      // 160x120
+        FRAMESIZE_QCIF,       // 176x144
+        FRAMESIZE_HQVGA,      // 240x176
+        FRAMESIZE_240X240,    // 240x240
+        FRAMESIZE_QVGA,       // 320x240
+        FRAMESIZE_CIF,        // 400x296
+        FRAMESIZE_HVGA,       // 480x320
+        FRAMESIZE_VGA,        // 640x480
+        FRAMESIZE_SVGA,       // 800x600
+        FRAMESIZE_XGA,        // 1024x768
+        FRAMESIZE_HD,         // 1280x720
+        FRAMESIZE_SXGA,       // 1280x1024
+        FRAMESIZE_UXGA        // 1600x1200
+    };
+
+    // Helper function to get width and height from CameraFrameSize
+    inline void getFrameSizeDimensions(CameraFrameSize framesize, int& width, int& height) {
+        switch (framesize) {
+            case CameraFrameSize::FRAMESIZE_96X96:    width = 96;   height = 96;   break;
+            case CameraFrameSize::FRAMESIZE_QQVGA:    width = 160;  height = 120;  break;
+            case CameraFrameSize::FRAMESIZE_QCIF:     width = 176;  height = 144;  break;
+            case CameraFrameSize::FRAMESIZE_HQVGA:    width = 240;  height = 176;  break;
+            case CameraFrameSize::FRAMESIZE_240X240:  width = 240;  height = 240;  break;
+            case CameraFrameSize::FRAMESIZE_QVGA:     width = 320;  height = 240;  break;
+            case CameraFrameSize::FRAMESIZE_CIF:      width = 400;  height = 296;  break;
+            case CameraFrameSize::FRAMESIZE_HVGA:     width = 480;  height = 320;  break;
+            case CameraFrameSize::FRAMESIZE_VGA:      width = 640;  height = 480;  break;
+            case CameraFrameSize::FRAMESIZE_SVGA:     width = 800;  height = 600;  break;
+            case CameraFrameSize::FRAMESIZE_XGA:      width = 1024; height = 768;  break;
+            case CameraFrameSize::FRAMESIZE_HD:       width = 1280; height = 720;  break;
+            case CameraFrameSize::FRAMESIZE_SXGA:     width = 1280; height = 1024; break;
+            case CameraFrameSize::FRAMESIZE_UXGA:     width = 1600; height = 1200; break;
+            default:                                   width = 320;  height = 240;  break;
+        }
+    }
+
     // Configuration structure for image processing
     struct ProcessingConfig {
         PixelFormat input_format;

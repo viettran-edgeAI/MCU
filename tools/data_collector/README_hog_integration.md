@@ -66,7 +66,7 @@ You will reuse **exactly** these ESP32 camera settings in the next step.
 
 [2] Transfer to PC
     - ESP32 side: tools/data_collector/data_transfer/esp32_side/dataset_transfer_sender.ino
-    - PC side:    tools/data_collector/data_transfer/pc_side/fetch_dataset_from_esp32.py
+    - PC side:    tools/data_collector/data_transfer/pc_side/dataset_receiver.py
 
 [3] Result on PC
   - Dataset:    tools/data_collector/result/<dataset_name>/<dataset_name>.csv (or equivalent dataset files) at the root of the dataset folder.
@@ -163,7 +163,7 @@ This ensures that the HOG transform is computed with the **same geometry and for
             |  3. Transfer to PC          |
             |  - dataset_transfer_sender  |
             |    (ESP32)                  |
-            |  - fetch_dataset_from_esp32 |
+            |  - dataset_receiver.py      |
             |    (Python, PC)             |
             +-------------+---------------+
                           |

@@ -25,11 +25,14 @@ struct Config {
     } input;
     
     struct Preprocessing {
-        struct TargetSize {
-            int width = 32;
-            int height = 32;
-            bool enabled = true;
-        } target_size;
+        struct InputCameraConfig {
+            std::string input_format = "GRAYSCALE";
+            int input_width = 320;
+            int input_height = 240;
+            std::string resize_method = "BILINEAR";
+            bool maintain_aspect_ratio = false;
+            int jpeg_quality = 80;
+        } input_camera_config;
         bool grayscale = true;
         bool normalize = true;
         std::string description;
@@ -57,15 +60,6 @@ struct Config {
         bool verbose = false;
         std::string description;
     } processing;
-
-    struct Esp32 {
-        std::string input_format = "GRAYSCALE";
-        int input_width = 320;
-        int input_height = 240;
-        std::string resize_method = "BILINEAR";
-        bool maintain_aspect_ratio = false;
-        int jpeg_quality = 80;
-    } esp32;
 };
 
 namespace {
@@ -133,6 +127,14 @@ bool writeModelConfigFile(const Config& config,
     // cfgFile << "    \"target_width\": " << config.preprocessing.target_size.width << ",\n";
     // cfgFile << "    \"target_height\": " << config.preprocessing.target_size.height << "\n";
     // cfgFile << "  },\n";
+    cfgFile << "  \"camera_config\": {\n";
+    cfgFile << "    \"input_format\": \"" << config.preprocessing.input_camera_config.input_format << "\",\n";
+    cfgFile << "    \"input_width\": " << config.preprocessing.input_camera_config.input_width << ",\n";
+    cfgFile << "    \"input_height\": " << config.preprocessing.input_camera_config.input_height << ",\n";
+    cfgFile << "    \"resize_method\": \"" << config.preprocessing.input_camera_config.resize_method << "\",\n";
+    cfgFile << "    \"maintain_aspect_ratio\": " << (config.preprocessing.input_camera_config.maintain_aspect_ratio ? "true" : "false") << ",\n";
+    cfgFile << "    \"jpeg_quality\": " << config.preprocessing.input_camera_config.jpeg_quality << "\n";
+    cfgFile << "  },\n";
     cfgFile << "  \"hog\": {\n";
     cfgFile << "    \"hog_img_width\": " << config.hog_parameters.img_width << ",\n";
     cfgFile << "    \"hog_img_height\": " << config.hog_parameters.img_height << ",\n";
@@ -140,14 +142,6 @@ bool writeModelConfigFile(const Config& config,
     cfgFile << "    \"block_size\": " << config.hog_parameters.block_size << ",\n";
     cfgFile << "    \"block_stride\": " << config.hog_parameters.block_stride << ",\n";
     cfgFile << "    \"nbins\": " << config.hog_parameters.nbins << "\n";
-    cfgFile << "  },\n";
-    cfgFile << "  \"esp32\": {\n";
-    cfgFile << "    \"input_format\": \"" << config.esp32.input_format << "\",\n";
-    cfgFile << "    \"input_width\": " << config.esp32.input_width << ",\n";
-    cfgFile << "    \"input_height\": " << config.esp32.input_height << ",\n";
-    cfgFile << "    \"resize_method\": \"" << config.esp32.resize_method << "\",\n";
-    cfgFile << "    \"maintain_aspect_ratio\": " << (config.esp32.maintain_aspect_ratio ? "true" : "false") << ",\n";
-    cfgFile << "    \"jpeg_quality\": " << config.esp32.jpeg_quality << "\n";
     cfgFile << "  }\n";
     cfgFile << "}\n";
 
@@ -181,13 +175,30 @@ public:
         config.input.image_format = extractStringValue(content, "image_format");
         
         // Parse preprocessing
-        config.preprocessing.target_size.width = extractIntValue(content, "width");
-        config.preprocessing.target_size.height = extractIntValue(content, "height");
-        if (containsKey(content, "enabled")) {
-            config.preprocessing.target_size.enabled = extractBoolValue(content, "enabled");
-        }
         config.preprocessing.grayscale = extractBoolValue(content, "grayscale");
         config.preprocessing.normalize = extractBoolValue(content, "normalize");
+        
+        // Parse input_camera_config settings from preprocessing section
+        const std::string parsedInputFormat = extractStringValue(content, "input_format");
+        if (!parsedInputFormat.empty()) {
+            config.preprocessing.input_camera_config.input_format = parsedInputFormat;
+        }
+        if (containsKey(content, "input_width")) {
+            config.preprocessing.input_camera_config.input_width = extractIntValue(content, "input_width");
+        }
+        if (containsKey(content, "input_height")) {
+            config.preprocessing.input_camera_config.input_height = extractIntValue(content, "input_height");
+        }
+        const std::string parsedResizeMethod = extractStringValue(content, "resize_method");
+        if (!parsedResizeMethod.empty()) {
+            config.preprocessing.input_camera_config.resize_method = parsedResizeMethod;
+        }
+        if (containsKey(content, "maintain_aspect_ratio")) {
+            config.preprocessing.input_camera_config.maintain_aspect_ratio = extractBoolValue(content, "maintain_aspect_ratio");
+        }
+        if (containsKey(content, "jpeg_quality")) {
+            config.preprocessing.input_camera_config.jpeg_quality = extractIntValue(content, "jpeg_quality");
+        }
         
         // Parse HOG parameters
         config.hog_parameters.img_width = extractIntValue(content, "img_width");
@@ -213,28 +224,6 @@ public:
         }
         if (containsKey(content, "verbose")) {
             config.processing.verbose = extractBoolValue(content, "verbose");
-        }
-
-        // Parse ESP32 settings
-        const std::string parsedInputFormat = extractStringValue(content, "input_format");
-        if (!parsedInputFormat.empty()) {
-            config.esp32.input_format = parsedInputFormat;
-        }
-        if (containsKey(content, "input_width")) {
-            config.esp32.input_width = extractIntValue(content, "input_width");
-        }
-        if (containsKey(content, "input_height")) {
-            config.esp32.input_height = extractIntValue(content, "input_height");
-        }
-        const std::string parsedResizeMethod = extractStringValue(content, "resize_method");
-        if (!parsedResizeMethod.empty()) {
-            config.esp32.resize_method = parsedResizeMethod;
-        }
-        if (containsKey(content, "maintain_aspect_ratio")) {
-            config.esp32.maintain_aspect_ratio = extractBoolValue(content, "maintain_aspect_ratio");
-        }
-        if (containsKey(content, "jpeg_quality")) {
-            config.esp32.jpeg_quality = extractIntValue(content, "jpeg_quality");
         }
         
         return config;
@@ -487,15 +476,11 @@ private:
             gray_img = img;
         }
         
-        // Resize to target size if enabled
+        // Resize to HOG image size
         cv::Mat resized_img;
-        if (config.preprocessing.target_size.enabled) {
-            cv::Size target_size(config.preprocessing.target_size.width, 
-                               config.preprocessing.target_size.height);
-            cv::resize(gray_img, resized_img, target_size);
-        } else {
-            resized_img = gray_img;
-        }
+        cv::Size target_size(config.hog_parameters.img_width, 
+                           config.hog_parameters.img_height);
+        cv::resize(gray_img, resized_img, target_size);
         
         // Convert to uint8_t vector
         int expected_size = resized_img.rows * resized_img.cols;
@@ -634,7 +619,7 @@ public:
             std::cout << config.workflow.description << std::endl;
             std::cout << "Dataset path: " << config.input.dataset_path << std::endl;
             std::cout << "Output CSV: " << csvOutputPath << std::endl;
-            std::cout << "ESP32 config: " << cfgOutputPath << std::endl;
+            std::cout << "Input camera config: " << cfgOutputPath << std::endl;
             std::cout << "Max images per class: " << config.processing.max_images_per_class << std::endl;
         }
 

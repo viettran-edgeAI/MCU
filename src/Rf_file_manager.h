@@ -413,6 +413,13 @@ String reception_data(int exact_columns = 0, bool print_file = true, String curr
  * @note Original file is replaced with cleaned version. Backup recommended before use.
  */
 void cleanMalformedRows(const String& filename, int exact_columns);
+
+/**
+ * @brief Helper to recursively delete a directory and its contents
+ *
+ * Returns true if every file/subdirectory was deleted successfully.
+ */
+bool deleteDirectoryRecursive(const String& path);
 /**
  * @brief Alias for printFile for backward compatibility
  * 

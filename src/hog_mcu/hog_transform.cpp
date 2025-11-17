@@ -464,6 +464,14 @@ void HOG_MCU::setupForESP32CAM(ImageProcessing::PixelFormat input_format, int in
     setConfig(config);
 }
 
+void HOG_MCU::setupForESP32CAM(ImageProcessing::CameraFrameSize framesize, ImageProcessing::PixelFormat input_format) {
+    int width, height;
+    ImageProcessing::getFrameSizeDimensions(framesize, width, height);
+    Config config(input_format, width, height);
+    // Use default HOG parameters (32x32, cell_size=8, block_size=16, block_stride=6, nbins=4)
+    setConfig(config);
+}
+
 void HOG_MCU::initializeBuffers() {
     size_t buffer_size = params.img_width * params.img_height;
     if (buffer_size > 0) {

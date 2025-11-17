@@ -2055,6 +2055,26 @@ namespace mcu {
             data_ptr()[size_++] = value;
         }
 
+        // Construct element in place at the end
+        template<typename... Args>
+        void emplace_back(Args&&... args) noexcept {
+            if (size_ == capacity_) {
+                size_t doubled;
+                if(VECTOR_MAX_CAP == 255)
+                    doubled = capacity_ ? capacity_ + 20 : 1;
+                else
+                    doubled = capacity_ ? capacity_ + 100 : 1;
+                if (doubled > VECTOR_MAX_CAP) doubled = VECTOR_MAX_CAP;
+                
+                if (doubled > SBO_SIZE && !using_heap) {
+                    switch_to_heap(doubled);
+                } else if (using_heap) {
+                    i_resize(doubled);
+                }
+            }
+            new (&data_ptr()[size_++]) T(std::forward<Args>(args)...);
+        }
+
         // Insert at position
         void insert(vector_index_type pos, const T& value) noexcept {
             if (pos > size_) return;
@@ -2077,6 +2097,32 @@ namespace mcu {
                 ptr[i] = ptr[i - 1];
             }
             ptr[pos] = value;
+            ++size_;
+        }
+
+        // Construct element in place at position
+        template<typename... Args>
+        void emplace(vector_index_type pos, Args&&... args) noexcept {
+            if (pos > size_) return;
+            if (size_ == capacity_) {
+                size_t doubled;
+                if(VECTOR_MAX_CAP == 255)
+                    doubled = capacity_ ? capacity_ + 10 : 1;
+                else
+                    doubled = capacity_ ? capacity_ * 2 : 1;
+                if (doubled > VECTOR_MAX_CAP) doubled = VECTOR_MAX_CAP;
+                
+                if (doubled > SBO_SIZE && !using_heap) {
+                    switch_to_heap(doubled);
+                } else if (using_heap) {
+                    i_resize(doubled);
+                }
+            }
+            T* ptr = data_ptr();
+            for (vector_index_type i = size_; i > pos; --i) {
+                ptr[i] = ptr[i - 1];
+            }
+            new (&ptr[pos]) T(std::forward<Args>(args)...);
             ++size_;
         }
 
@@ -2111,6 +2157,51 @@ namespace mcu {
             T* ptr = data_ptr();
             customCopy(ptr + pos + 1, ptr + pos, size_ - pos - 1);
             --size_;
+        }
+
+        /**
+         * @brief Removes a single element at the given iterator position.
+         * @param position Iterator pointing to the element to be removed.
+         * @return Iterator pointing to the element that followed the erased element, or end() if the last element was erased.
+         */
+        T* erase(const T* position) noexcept {
+            if (position < begin() || position >= end()) {
+                return end();
+            }
+            vector_index_type idx = static_cast<vector_index_type>(position - begin());
+            erase(idx);
+            return begin() + idx;
+        }
+
+        /**
+         * @brief Removes a range of elements [first, last).
+         * @param first Iterator to the first element to be removed.
+         * @param last Iterator to one past the last element to be removed.
+         * @return Iterator pointing to the element that followed the last erased element, or end() if all elements to the end were erased.
+         */
+        T* erase(const T* first, const T* last) noexcept {
+            if (first < begin()) {
+                first = begin();
+            }
+            if (last > end()) {
+                last = end();
+            }
+            if (first >= last) {
+                return begin() + static_cast<vector_index_type>(first - begin());
+            }
+
+            vector_index_type start = static_cast<vector_index_type>(first - begin());
+            vector_index_type stop = static_cast<vector_index_type>(last - begin());
+            if (stop > size_) stop = size_;
+            vector_index_type count = stop - start;
+            if (count == 0) {
+                return begin() + start;
+            }
+
+            T* ptr = data_ptr();
+            customCopy(ptr + stop, ptr + start, size_ - stop);
+            size_ -= count;
+            return begin() + start;
         }
 
         bool empty() const noexcept {
@@ -2641,6 +2732,21 @@ namespace mcu {
             array[size_++] = value;
         }
 
+        // Construct element in place at the end
+        template<typename... Args>
+        void emplace_back(Args&&... args) noexcept {
+            if (size_ == capacity_) {
+                size_t doubled;
+                if(VECTOR_MAX_CAP == 255)
+                    doubled = capacity_ ? capacity_ + 10 : 1;
+                else
+                    doubled = capacity_ ? capacity_ * 20 : 1;
+                if (doubled > VECTOR_MAX_CAP) doubled = VECTOR_MAX_CAP;
+                i_resize(doubled);
+            }
+            new (&array[size_++]) T(std::forward<Args>(args)...);
+        }
+
         // Insert at position
         void insert(size_t pos, const T& value) noexcept {
             if (pos > size_) return;
@@ -2659,6 +2765,27 @@ namespace mcu {
             array[pos] = value;
             ++size_;
         }
+
+        // Construct element in place at position
+        template<typename... Args>
+        void emplace(size_t pos, Args&&... args) noexcept {
+            if (pos > size_) return;
+            if (size_ == capacity_) {
+                size_t doubled;
+                if(VECTOR_MAX_CAP == 255)
+                    doubled = capacity_ ? capacity_ + 10 : 1;
+                else
+                    doubled = capacity_ ? capacity_ * 20 : 1;
+                if (doubled > VECTOR_MAX_CAP) doubled = VECTOR_MAX_CAP;
+                i_resize(doubled);
+            }
+            for (size_t i = size_; i > pos; --i) {
+                array[i] = array[i - 1];
+            }
+            new (&array[pos]) T(std::forward<Args>(args)...);
+            ++size_;
+        }
+
         /*
         Inserts a range into the %vector.
 
@@ -2838,6 +2965,50 @@ namespace mcu {
             if (pos >= size_) return;
             customCopy(array + pos + 1, array + pos, size_ - pos - 1);
             --size_;
+        }
+
+        /**
+         * @brief Removes a single element at the given iterator position.
+         * @param position Iterator pointing to the element to be removed.
+         * @return Iterator pointing to the element that followed the erased element, or end() if the last element was erased.
+         */
+        T* erase(const T* position) noexcept {
+            if (position < begin() || position >= end()) {
+                return end();
+            }
+            size_t idx = static_cast<size_t>(position - begin());
+            erase(idx);
+            return begin() + idx;
+        }
+
+        /**
+         * @brief Removes a range of elements [first, last).
+         * @param first Iterator to the first element to be removed.
+         * @param last Iterator to one past the last element to be removed.
+         * @return Iterator pointing to the element that followed the last erased element, or end() if all elements to the end were erased.
+         */
+        T* erase(const T* first, const T* last) noexcept {
+            if (first < begin()) {
+                first = begin();
+            }
+            if (last > end()) {
+                last = end();
+            }
+            if (first >= last) {
+                return begin() + static_cast<size_t>(first - begin());
+            }
+
+            size_t start = static_cast<size_t>(first - begin());
+            size_t stop = static_cast<size_t>(last - begin());
+            if (stop > size_) stop = size_;
+            size_t count = stop - start;
+            if (count == 0) {
+                return begin() + start;
+            }
+
+            customCopy(array + stop, array + start, size_ - stop);
+            size_ -= count;
+            return begin() + start;
         }
 
         bool empty() const noexcept {

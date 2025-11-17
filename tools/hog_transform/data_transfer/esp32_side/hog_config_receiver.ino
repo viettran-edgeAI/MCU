@@ -30,7 +30,7 @@
 //   RfStorageType::SD_MMC_1BIT - Built-in SD slot (1-bit mode, safe with camera sharing)
 //   RfStorageType::SD_MMC_4BIT - Built-in SD slot (4-bit mode, requires dedicated SD bus)
 //   RfStorageType::SD_SPI     - External SD card module (SPI interface, compatible with all ESP32 variants)
-const RfStorageType STORAGE_MODE = RfStorageType::SD_MMC_1BIT;
+const RfStorageType STORAGE_MODE = RfStorageType::SD_MMC;
 
 // --- Protocol Constants ---
 // Must match the Python sender script

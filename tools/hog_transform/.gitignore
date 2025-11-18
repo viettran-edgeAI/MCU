@@ -6,6 +6,10 @@ hog_processor
 # Test files
 test_config.json
 
+hog_processor
+
+
+
 # Generated output files (keep in result/ folder)
 # result/
 

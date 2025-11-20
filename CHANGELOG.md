@@ -5,19 +5,9 @@ Entries are grouped: small and close commits are consolidated into date-based re
 
 ## [unreleased] 2025-11-20 — Repo overwrite (force-push)
 
-- Overwrite remote `main` with local `main` after removing large dataset/result CSVs from history to satisfy GitHub size limits.
-  - Local rewritten commit: a3fb6bb64d9a12ed9a59a4528fd5dc64721961bb (Viettran) — 2025-11-20
-  - Note: large CSVs under `tools/data_processing/data` and `tools/hog_transform/result` were removed from history.
-  - Action: forced update of `origin/main` to match local branch (history was rewritten). Collaborators must re-clone or reset their local branches.
-
-
-## [unreleased] 2025-11-20 — Repo overwrite (force-push)
-
-- Overwrite remote `main` with local `main` after removing large dataset/result CSVs from history to satisfy GitHub size limits.
-  - Local rewritten commit: a3fb6bb64d9a12ed9a59a4528fd5dc64721961bb (Viettran) — 2025-11-20
-  - Note: large CSVs under `tools/data_processing/data` and `tools/hog_transform/result` were removed from history.
-  - Action: forced update of `origin/main` to match local branch (history was rewritten). Collaborators must re-clone or reset their local branches.
-
+- Speed up tree buliding process: Reworked node statistics and feature selection: replaced per-node unordered_set with compact label-count arrays + a purity flag and added a deterministic vector-based feature sampler to eliminate costly allocations. now treee bulding 40-70% faster.
+- Critical : fix node_layput calculation issue (caused of drop large model accuracy before)
+- Solved : failed problem on  large dataset (~1.000.000 samples)
 
 ------------------------------------------------------------
 

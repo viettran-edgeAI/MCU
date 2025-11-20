@@ -1511,7 +1511,7 @@ namespace mcu{
                 tree.nodes.set(current.nodeIndex, splitNode);
 
                 // OPTIMIZATION: Batch extract split feature for all samples in node
-                b_vector<uint16_t> split_feature_values;
+                b_vector<sample_type> split_feature_values;
                 accessor->batch_extract_feature(indices, current.begin, current.end, 
                                                bestSplit.featureID, split_feature_values);
                 

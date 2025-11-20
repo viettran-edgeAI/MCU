@@ -26,3 +26,9 @@ Thumbs.db
 *~
 
 processing_data
+
+data/mnist_copy.csv
+data/result/mnist_copy_nml.bin
+data/result/mnist_copy_nml.csv
+data/result/mnist_copy_dp.csv
+data/result/mnist_copy_ctg.csv

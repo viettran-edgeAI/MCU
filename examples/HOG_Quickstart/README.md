@@ -194,7 +194,7 @@ if (prediction > 0.7) {
 - **Lighting is key**: Consistent, good lighting improves feature quality significantly
 - **Keep it simple**: Start with defaults, optimize later if needed
 - **Test thoroughly**: Try different scenes and lighting conditions
-- **Monitor memory**: Use `ESP.getFreeHeap()` to check available memory
+- **Monitor memory**: Use `Rf_memory_status().first` to check available memory
 - **Power matters**: Use a quality 5V/2A power supply for stable operation
 
 ## 📚 Related Examples

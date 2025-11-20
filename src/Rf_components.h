@@ -73,6 +73,26 @@ namespace mcu {
     ------------------------------------------------ RF_COMPONENTS ---------------------------------------------------
     ------------------------------------------------------------------------------------------------------------------
     */
+    // func to check memory status (free heap size, largest free block)
+    static pair<size_t, size_t> Rf_memory_status(){
+        const uint32_t internalCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+        size_t freeHeap, largestBlock;
+
+        #if RF_PSRAM_AVAILABLE && RF_USE_PSRAM
+            if(esp_psram_is_initialized()){
+                freeHeap = static_cast<size_t>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+                largestBlock = static_cast<size_t>(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+            } else {
+                freeHeap = static_cast<size_t>(heap_caps_get_free_size(internalCaps));
+                largestBlock = static_cast<size_t>(heap_caps_get_largest_free_block(internalCaps));
+            }
+        #else
+            freeHeap = static_cast<size_t>(heap_caps_get_free_size(internalCaps));
+            largestBlock = static_cast<size_t>(heap_caps_get_largest_free_block(internalCaps));
+        #endif
+
+        return make_pair(freeHeap, largestBlock);
+    }
 
     // struct Rf_sample;           // single data sample
     // struct Tree_node;           // single tree node
@@ -1010,11 +1030,15 @@ namespace mcu {
             file.printf("  \"k_folds\": %d,\n", k_folds);
             file.printf("  \"impurityThreshold\": %.4f,\n", impurity_threshold);
             file.printf("  \"metric_score\": \"%s\",\n", getFlagString(metric_score).c_str());
+            file.printf("  \"resultScore\": %.4f,\n", result_score);
+            file.printf("  \"threshold_bits\": %d,\n", threshold_bits);
+            file.printf("  \"feature_bits\": %d,\n", feature_bits);
+            file.printf("  \"label_bits\": %d,\n", label_bits);
+            file.printf("  \"child_bits\": %d,\n", child_bits);
             file.printf("  \"extendBaseData\": %s,\n", extend_base_data ? "true" : "false");
             file.printf("  \"enableRetrain\": %s,\n", enable_retrain ? "true" : "false");
             file.printf("  \"enableAutoConfig\": %s,\n", enable_auto_config ? "true" : "false");
             file.printf("  \"enablePartialLoading\": %s,\n", enable_partial_loading ? "true" : "false");
-            file.printf("  \"resultScore\": %.4f,\n", result_score);
             file.printf("  \"max_samples\": %d,\n", max_samples);
             file.printf("  \"Estimated RAM (bytes)\": %d,\n", estimatedRAM);
 
@@ -1267,6 +1291,10 @@ namespace mcu {
             RF_DEBUG(1, "   - criterion: ", use_gini ? "gini" : "entropy");
             RF_DEBUG(1, "   - k_folds: ", k_folds);
             RF_DEBUG(1, "   - impurity_threshold: ", impurity_threshold);
+            RF_DEBUG(1, "   - threshold_bits: ", threshold_bits);
+            RF_DEBUG(1, "   - feature_bits: ", feature_bits);
+            RF_DEBUG(1, "   - label_bits: ", label_bits);
+            RF_DEBUG(1, "   - child_bits: ", child_bits);
             RF_DEBUG(1, "   - training_score: ", getTrainingScoreString(training_score).c_str());
             RF_DEBUG(1, "   - metric_score: ", getFlagString(metric_score).c_str());
             RF_DEBUG(1, "   - extend_base_data: ", extend_base_data ? "true" : "false");
@@ -2874,7 +2902,7 @@ namespace mcu {
         void batch_extract_feature(const b_vector<sample_type, 8>& sample_ids, 
                                    sample_type begin, sample_type end,
                                    uint16_t feature_id, 
-                                   b_vector<uint16_t>& out_values) {
+                                   b_vector<sample_type>& out_values) {
             if (feature_id >= num_features || begin >= end) {
                 return;
             }
@@ -2935,7 +2963,7 @@ namespace mcu {
         
         // OPTIMIZATION: Batch extract labels for multiple samples
         // Reduces chunk lookup overhead compared to individual label() calls
-        void batch_extract_labels(const b_vector<sample_type, 8>& sample_ids,
+        void batch_extract_labels(const vector<sample_type>& sample_ids,
                                  sample_type begin, sample_type end,
                                  b_vector<label_type>& out_labels) {
             if (begin >= end) {
@@ -3037,6 +3065,19 @@ namespace mcu {
         }
         uint8_t bits_per_node() const {
             return static_cast<uint8_t>(1 + threshold_layout.second + featureID_layout.second + label_layout.second + left_child_layout.second);
+        }
+
+        uint8_t threshold_bits() const {
+            return threshold_layout.second;
+        }
+        uint8_t feature_bits() const {
+            return featureID_layout.second;
+        }
+        uint8_t label_bits() const {
+            return label_layout.second;
+        }
+        uint8_t child_bits() const {
+            return left_child_layout.second;
         }
     };
 
@@ -4322,21 +4363,6 @@ namespace mcu {
             if (base_ptr) {
                 base_ptr->get_node_log_path(node_predictor_log);
             }
-            // Check if node_log file exists
-            if (node_predictor_log[0] != '\0' && RF_FS_EXISTS(node_predictor_log)) {
-                // Check if it has the old format and delete it
-                File checkFile = RF_FS_OPEN(node_predictor_log, RF_FILE_READ);
-                if (checkFile) {
-                    String firstLine = checkFile.readStringUntil('\n');
-                    firstLine.trim();
-                    checkFile.close();
-                    // If header doesn't contain "max_depth", delete the old file
-                    if (firstLine.indexOf("max_depth") < 0 || firstLine.indexOf("min_split,min_leaf,max_depth,max_nodes") < 0) {
-                        RF_DEBUG(1, "🔄 Detected old node log format, removing: ", node_predictor_log);
-                        RF_FS_REMOVE(node_predictor_log);
-                    }
-                }
-            }
             // Create new file with correct header if it doesn't exist
             if (node_predictor_log[0] != '\0' && !RF_FS_EXISTS(node_predictor_log)) {
                 File logFile = RF_FS_OPEN(node_predictor_log, FILE_WRITE);
@@ -4770,30 +4796,19 @@ namespace mcu {
             node_data data(min_split, min_leaf, max_depth);
             float raw_est = raw_estimate(data);
             float acc = accuracy;
-            if(acc < 80.0f) acc = 85.0f;
+            if(acc < 90.0f) acc = 90.0f;
             uint16_t estimate = static_cast<uint16_t>(raw_est * 100 / acc);
             uint16_t safe_estimate;
             if(config_ptr->num_samples < 2024) safe_estimate = 512;
-            else safe_estimate = 2047;
-            return estimate < RF_MAX_NODES ? estimate : safe_estimate;       // 2kB RAM
+            else safe_estimate = max(static_cast<sample_type>((config_ptr->num_samples / config_ptr->min_leaf)), RF_MAX_NODES);
+            return estimate < RF_MAX_NODES ? estimate : safe_estimate;       
         }
 
         uint16_t estimate_nodes(const Rf_config& config) {
             uint8_t min_split = config.min_split;
             uint8_t min_leaf = config.min_leaf > 0 ? config.min_leaf : static_cast<uint8_t>(1);
             uint16_t max_depth = config.max_depth > 0 ? config.max_depth : 25;
-            node_data data(min_split, min_leaf, max_depth);
-            float raw_est = raw_estimate(data);
-            float acc = accuracy;
-            if(acc < 80.0f) acc = 85.0f;
-            uint16_t estimate = static_cast<uint16_t>(raw_est * 100 / acc);
-            if(config.training_score == K_FOLD_SCORE){
-                estimate = estimate * config.k_folds / (config.k_folds + 1);
-            }
-            uint16_t safe_estimate;
-            if(config.num_samples < 2024) safe_estimate = 512;
-            else safe_estimate = 2047;
-            return estimate < RF_MAX_NODES ? estimate : safe_estimate;       // 2kB RAM
+            return estimate_nodes(min_split, min_leaf, max_depth);
         }
 
         uint16_t queue_peak_size(uint8_t min_split, uint8_t min_leaf, uint16_t max_depth = 250) {
@@ -4806,7 +4821,7 @@ namespace mcu {
                 est_nodes = est_nodes * config.k_folds / (config.k_folds + 1);
             }
             est_nodes = static_cast<uint16_t>(est_nodes * peak_percent / 100);
-            uint16_t max_peak_theory = static_cast<uint16_t>(RF_MAX_NODES * 0.3f * 0.05);
+            uint16_t max_peak_theory = max(static_cast<sample_type>((config_ptr->num_samples / config_ptr->min_leaf)), RF_MAX_NODES) * 0.3; // 30% of theoretical max nodes
             uint16_t min_peak_theory = 30;
             if (est_nodes > max_peak_theory) return max_peak_theory;
             if (est_nodes < min_peak_theory) return min_peak_theory;
@@ -5357,7 +5372,6 @@ namespace mcu {
                 }
             }
 
-
             uint8_t bits_required(uint32_t max_value) {
                 uint8_t bits = 0;
                 do {
@@ -5366,6 +5380,7 @@ namespace mcu {
                 } while (max_value != 0 && bits < 32);
                 return (bits == 0) ? static_cast<uint8_t>(1) : bits;
             }
+
         public:
             void calculate_layout(label_type num_label, uint16_t num_feature, uint16_t max_node){
                 const uint32_t fallback_node_index = (RF_MAX_NODES > 0)
@@ -5445,6 +5460,12 @@ namespace mcu {
                     }
                 }
 
+                RF_DEBUG(1, "📐 Calculated node layout :");
+                RF_DEBUG(1, "   - Threshold bits : ", static_cast<int>(threshold_bits));
+                RF_DEBUG(1, "   - Feature bits   : ", static_cast<int>(feature_bits));
+                RF_DEBUG(1, "   - Label bits     : ", static_cast<int>(label_bits));
+                RF_DEBUG(1, "   - Child index bits: ", static_cast<int>(child_index_bits));
+
                 layout.set_layout(feature_bits, label_bits, child_index_bits, threshold_bits);
             }
             
@@ -5455,57 +5476,37 @@ namespace mcu {
                 init(base, config, node_pred);
             }
 
-            void init(Rf_base* base, Rf_config* config, Rf_node_predictor* node_pred){
+            bool init(Rf_base* base, Rf_config* config, Rf_node_predictor* node_pred){
                 base_ptr = base;
                 config_ptr = config;
                 node_pred_ptr = node_pred;
                 if (!config_ptr) {
                     trees.clear();
-                    return;
-                }
-                // pretend to set max depth, min split, min leaf to extreme values to estimate max nodes
-                auto old_max_depth = config_ptr->max_depth;
-                auto old_min_split = config_ptr->min_split;
-                auto old_min_leaf  = config_ptr->min_leaf;
-                config_ptr->max_depth = config_ptr->max_depth_range.second;
-                config_ptr->min_split = config_ptr->min_split_range.first;
-                config_ptr->min_leaf  = config_ptr->min_leaf_range.first;
-
-                // Use predictor only if it's trained; otherwise use safe default of 2046 nodes
-                uint16_t est_nodes;
-                if (node_pred_ptr && node_pred_ptr->is_trained) {
-                    est_nodes = node_pred_ptr->estimate_nodes(*config_ptr);
-                } else {
-                    if (config_ptr->num_samples < 2048) est_nodes = 512;
-                    else est_nodes = 2046;
+                    RF_DEBUG(0, "❌ Cannot initialize tree container: config pointer is null.");
+                    return false;
                 }
                 
-                // Check if layout bits are provided in config (from PC-trained model)
+                // Check if layout bits are provided in config 
                 if (config_ptr->threshold_bits > 0 && config_ptr->feature_bits > 0 && 
                     config_ptr->label_bits > 0 && config_ptr->child_bits > 0) {
-                    // Use the exact layout from PC training
-                    RF_DEBUG(1, "📐 Using layout from config file");
+                    RF_DEBUG(2, "📐 Setting node layout from config file");
                     layout.set_layout(config_ptr->feature_bits, config_ptr->label_bits, 
                                      config_ptr->child_bits, config_ptr->threshold_bits);
                 } else {
-                    // Calculate layout based on estimation
-                    RF_DEBUG(1, "📐 Calculating layout from dataset parameters");
-                    calculate_layout(config_ptr->num_labels, config_ptr->num_features, est_nodes);
+                    RF_DEBUG(0, "❌ Cannot initialize tree container: layout bits missing in config.");
+                    return false; 
                 }
-                rebuild_tree_slots(config_ptr->num_trees, true);
 
-                // restore old config values
-                config_ptr->max_depth = old_max_depth;
-                config_ptr->min_split = old_min_split;
-                config_ptr->min_leaf  = old_min_leaf;
+                rebuild_tree_slots(config_ptr->num_trees, true);
                 predictClass.reserve(config_ptr->num_trees);
                 queue_nodes.clear();
                 total_depths = 0;
                 total_nodes = 0;
                 total_leaves = 0;
                 is_loaded = false; // Initially in individual form
+                return true;
             }
-
+            
             ~Rf_tree_container(){
                 // save to file system in unified form 
                 releaseForest();
@@ -5526,7 +5527,6 @@ namespace mcu {
                 for (size_t i = 0; i < trees.size(); i++) {
                     base_ptr->build_tree_file_path(tree_path_buffer, trees[i].index);
                     trees[i].purgeTree(tree_path_buffer); 
-                    // Force yield to allow garbage collection
                     yield();        
                     delay(10);
                 }
@@ -5536,6 +5536,7 @@ namespace mcu {
                     if (node_pred_ptr && node_pred_ptr->is_trained) {
                         est_nodes = node_pred_ptr->estimate_nodes(*config_ptr);
                     } else {
+                        RF_DEBUG(2, "⚠️ Node predictor not available or not trained, using safe default for layout calculation.");
                         est_nodes = static_cast<uint16_t>(2046); // Safe default when predictor not available/trained
                     }
                     calculate_layout(config_ptr->num_labels, config_ptr->num_features, est_nodes);
@@ -5699,7 +5700,7 @@ namespace mcu {
                     }
                 }
                 // Memory safety check
-                size_t freeMemory = ESP.getFreeHeap();
+                size_t freeMemory = Rf_memory_status().first;
                 if(freeMemory < config_ptr->estimatedRAM + 8000) {
                     RF_DEBUG_2(1, "❌ Insufficient memory to load forest (need", 
                                 config_ptr->estimatedRAM + 8000, "bytes, have", freeMemory);
@@ -5735,7 +5736,6 @@ namespace mcu {
                 }
                 
                 is_loaded = true;
-                RF_DEBUG_2(1, "✅ Forest loaded(", loadedTrees, "trees). Total nodes:", total_nodes);
                 return true;
             }
 
@@ -5787,7 +5787,7 @@ namespace mcu {
                 uint8_t successfullyLoaded = 0;
                 for(uint8_t i = 0; i < treeCount; i++) {
                     // Memory check during loading
-                    if(ESP.getFreeHeap() < 10000) { // 10KB safety buffer
+                    if(Rf_memory_status().first < 10000) { // 10KB safety buffer
                         RF_DEBUG(1, "⚠️ Insufficient memory during tree loading, stopping.");
                         break;
                     }
@@ -5978,7 +5978,7 @@ namespace mcu {
                             totalBytes += sizeof(node.packed_data);
                             
                             // Check for memory issues during write
-                            if(ESP.getFreeHeap() < 5000) { // 5KB safety threshold
+                            if(Rf_memory_status().first < 5000) { // 5KB safety threshold
                                 RF_DEBUG(1, "⚠️ Low memory during write, stopping.");
                                 writeSuccess = false;
                                 break;
@@ -6543,20 +6543,9 @@ namespace mcu {
         }
 
         void m_log(const char* msg, bool log = true){
-            const uint32_t internalCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
-
-            #if RF_PSRAM_AVAILABLE
-                if(esp_psram_is_initialized()){
-                    freeHeap = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-                    largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
-                } else {
-                    freeHeap = heap_caps_get_free_size(internalCaps);
-                    largestBlock = heap_caps_get_largest_free_block(internalCaps);
-                }
-            #else
-                freeHeap = heap_caps_get_free_size(internalCaps);
-                largestBlock = heap_caps_get_largest_free_block(internalCaps);
-            #endif
+            auto heap_status = Rf_memory_status();
+            freeHeap = heap_status.first;
+            largestBlock = heap_status.second;
             freeDisk = RF_TOTAL_BYTES() - RF_USED_BYTES();
 
             if(freeHeap < lowest_ram) lowest_ram = freeHeap;

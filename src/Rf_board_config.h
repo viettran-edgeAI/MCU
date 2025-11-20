@@ -308,6 +308,15 @@
 #endif
 
 // -----------------------------------------------------------------------------
+#if defined(RF_USE_PSRAM)
+  /* User opted in without an explicit value - treat as 1 */
+  #undef RF_USE_PSRAM
+  #define RF_USE_PSRAM 1
+#else
+  #define RF_USE_PSRAM 0
+#endif
+
+// -----------------------------------------------------------------------------
 // Storage helpers
 // -----------------------------------------------------------------------------
 #ifdef RF_HAS_SDMMC

@@ -50,7 +50,7 @@ struct QuantizationHelper {
 };
 
 using sampleID_set = ID_vector<uint32_t>; // Sample ID set type - supports large datasets
-using sample_set = b_vector<Rf_sample>; // set of samples
+using sample_set   = vector<Rf_sample>; // set of samples
 
 
 struct Tree_node{
@@ -147,7 +147,7 @@ struct NodeToBuild {
 
 class Rf_tree {
   public:
-    b_vector<Tree_node> nodes;  // Vector-based tree storage
+    vector<Tree_node> nodes;  // Vector-based tree storage
     std::string filename;
 
     Rf_tree() : filename("") {}
@@ -318,7 +318,7 @@ class Rf_tree {
 
 class Rf_data {
 public:
-    b_vector<Rf_sample> allSamples;    // vector storage for all samples
+    sample_set allSamples;    // vector storage for all samples
     std::string filename = "";
     uint8_t feature_bits = 2;
  
@@ -509,10 +509,10 @@ struct Rf_config{
     float valid_ratio = 0.15f; // ratio of validation data to total data, automatically set
     float boostrap_ratio = 0.632f; // ratio of samples taken from train data to create subdata
 
-    b_vector<uint16_t> min_leaf_range;       // for training
-    b_vector<uint16_t> min_split_range;      // for training 
-    b_vector<uint16_t> max_depth_range;      // for training
-    b_vector<bool> overwrite{3}; // min_split, min_leaf, max_depth
+    vector<uint16_t> min_leaf_range;       // for training
+    vector<uint16_t> min_split_range;      // for training 
+    vector<uint16_t> max_depth_range;      // for training
+    vector<bool> overwrite{3}; // min_split, min_leaf, max_depth
 
     uint16_t max_feature_value = 0;
     uint8_t dataset_quantization_bits = 1;
@@ -1371,7 +1371,7 @@ public:
     // Regression coefficients for the prediction formula
     // Formula: nodes = a0 + a1*min_split + a2*min_leaf + a3*max_depth
     float coefficients[4];    
-    b_vector<float> peak_nodes;
+    vector<float> peak_nodes;
 public:
     bool is_trained;
     uint8_t accuracy; // in percentage
@@ -1602,7 +1602,7 @@ public:
     // Train the predictor using loaded data
     void train() {
         compute_coefficients();
-        b_vector<int> percent_count{10};
+        vector<int> percent_count{10};
         for(auto peak : peak_nodes) {
             if(peak > 25) percent_count[0]++;
             if(peak > 26) percent_count[1]++;

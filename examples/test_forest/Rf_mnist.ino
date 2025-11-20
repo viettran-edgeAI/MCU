@@ -114,7 +114,7 @@ void setup() {
     Serial.println("Sample | Predicted | Actual | Time (μs) | Match");
     Serial.println("-------|-----------|--------|-----------|------");
     
-    rf_predict_result_t result result;
+    rf_predict_result_t result;
     for (int i = 0; i < samples.size(); i++){
         forest.predict(samples[i], result); 
         if (!result.success) {

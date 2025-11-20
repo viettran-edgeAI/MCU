@@ -118,7 +118,7 @@ namespace mcu{
             init(model_name);
         }
 
-        void init(const char* model_name){
+        bool init(const char* model_name){
         #if defined(ESP32) && (RF_DEBUG_LEVEL > 0)
             // Check stack size to prevent overflow on ESP32-C3
             UBaseType_t stackRemaining = uxTaskGetStackHighWaterMark(NULL);
@@ -129,7 +129,7 @@ namespace mcu{
                 RF_DEBUG(0, "   See docs/ESP32_Stack_Fix.md for details");
             }
         #endif
-            // initial components
+            // initial components and load resources
             base.init(model_name);      // base must be init first
 
             logger.init(&base);
@@ -138,9 +138,9 @@ namespace mcu{
             quantizer.init(&base);
             node_pred.init(&base, &config);
 
-            // load resources
-            forest_container.init(&base, &config, &node_pred);
             quantizer.loadQuantizer();  // Load quantizer first to get quantization_coefficient
+            node_pred.loadPredictor();
+            forest_container.init(&base, &config, &node_pred);
             
             // Synchronize quantization_coefficient from quantizer to config if not already set
             if (quantizer.loaded() && config.quantization_coefficient != quantizer.getQuantizationCoefficient()) {
@@ -156,6 +156,7 @@ namespace mcu{
             // Initialize inference optimization buffers
             categorization_buffer.set_bits_per_value(config.quantization_coefficient);
             categorization_buffer.resize(config.num_features, 0);
+            return true;
         }
         
         // Enhanced destructor
@@ -248,17 +249,6 @@ namespace mcu{
                     break;
                 }
 
-                // Recalculate layout based on current dataset size for adaptive node capacity
-                RF_DEBUG(1, "📐 Recalculating layout for current dataset size");
-                uint16_t est_nodes;
-                if (node_pred.is_trained) {
-                    est_nodes = node_pred.estimate_nodes(config);
-                } else {
-                    if (config.num_samples < 2048) est_nodes = 512;
-                    else est_nodes = 2046;
-                }
-                forest_container.calculate_layout(config.num_labels, config.num_features, est_nodes);
-
                 // build forest
                 if(!build_forest()){
                     RF_DEBUG(0, "❌ Error building forest");
@@ -266,12 +256,16 @@ namespace mcu{
                 }
             } while(false);
 
-        #ifdef DEV_STAGE
-            // Print model report on test data after building
             if(success){
+                // update config with layout info after forest is built
+                config.threshold_bits = forest_container.layout_ptr()->threshold_bits();
+                config.feature_bits = forest_container.layout_ptr()->feature_bits();
+                config.label_bits = forest_container.layout_ptr()->label_bits();
+                config.child_bits = forest_container.layout_ptr()->child_bits();
+        #ifdef DEV_STAGE
                 model_report();
-            }
         #endif
+            }
             end_training_session();
             return success;
 #else
@@ -305,7 +299,7 @@ namespace mcu{
             size_t train_size = static_cast<size_t>(ctx->train_data.size()) * 
                                     (config.num_features * config.quantization_coefficient / 8 + 1);
             #if defined(ESP32)
-            size_t available_ram = ESP.getFreeHeap();
+            size_t available_ram = Rf_memory_status().first;
             if (available_ram < train_size + 12000){
                 config.enable_partial_loading = true;
                 RF_DEBUG_2(1, "🔄 Auto-enabling partial loading: train_data=", train_size, "bytes, RAM=", available_ram);
@@ -387,6 +381,7 @@ namespace mcu{
             
             forest_container.is_loaded = false;
             node_pred.add_new_samples(config.min_split, config.min_leaf,config.max_depth, max_nodes);
+            config.estimatedRAM = forest_container.size_in_ram();
 
             RF_DEBUG_2(0, "🌲 Forest built successfully: ", forest_container.get_total_nodes(), "nodes","");
             RF_DEBUG_2(1, "Min split: ", config.min_split, "- Min leaf: ", config.min_leaf);
@@ -476,9 +471,6 @@ namespace mcu{
             for(uint8_t i=0; i< dest.size(); i++){
                 sink_IDs.clear();
                 sample_type sink_require = static_cast<sample_type>(static_cast<float>(maxID) * dest[i].first);
-                // CRITICAL: Must call bounded() on every iteration to match PC RNG consumption
-                // PC's 1-bit ID_vector doesn't increase size() on duplicate push_back(),
-                // so loop keeps calling bounded() even for duplicates
                 while(sink_IDs.size() < sink_require) {
                     sample_type sampleId = static_cast<sample_type>(ctx->random_generator.bounded(static_cast<uint32_t>(maxID)));
                     // Only add if not already used (1-bit ID_vector behavior)
@@ -486,7 +478,6 @@ namespace mcu{
                         sink_IDs.push_back(sampleId);
                         used.push_back(sampleId);
                     }
-                    // Note: If sampleId already in used, we still consumed an RNG call (matching PC)
                 }
                 dest[i].second->loadData(source, sink_IDs, true);
                 dest[i].second->releaseData(false); 
@@ -621,41 +612,70 @@ namespace mcu{
         } SplitInfo;
 
         struct NodeStats {
-            unordered_set<label_type> labels;
-            b_vector<sample_type> labelCounts; 
+            b_vector<sample_type, 16> labelCounts; 
             sample_type totalSamples;
             label_type majorityLabel;
+            bool pure;
             
-            NodeStats(label_type numLabels) : totalSamples(0), majorityLabel(0) {
+            NodeStats(label_type numLabels) : totalSamples(0), majorityLabel(0), pure(true) {
                 labelCounts.resize(numLabels, static_cast<sample_type>(0));
+            }
+
+            void resetCounts(label_type numLabels) {
+                if (labelCounts.size() < static_cast<size_t>(numLabels)) {
+                    labelCounts.resize(numLabels, static_cast<sample_type>(0));
+                } else {
+                    for (label_type i = 0; i < numLabels; ++i) {
+                        labelCounts[i] = 0;
+                    }
+                }
             }
             
             // analyze a slice [begin,end) over a shared indices array (standard path with loaded data)
-            void analyzeSamples(const b_vector<sample_type, 8>& indices, sample_type begin, sample_type end,
+            void analyzeSamples(const vector<sample_type>& indices, sample_type begin, sample_type end,
                                     label_type numLabels, const Rf_data& data) {
                 totalSamples = (begin < end) ? (end - begin) : 0;
                 sample_type maxCount = 0;
+                pure = true;
+                bool hasLabel = false;
+                label_type firstLabel = 0;
+                
+                resetCounts(numLabels);
                 for (sample_type k = begin; k < end; ++k) {
                     sample_type sampleID = indices[k];
-                    if (sampleID < data.size()) {
-                        label_type label = data.getLabel(sampleID);
-                        labels.insert(label);
-                        if (label < numLabels && label < RF_MAX_LABELS) {
-                            labelCounts[label]++;
-                            if (labelCounts[label] > maxCount) {
-                                maxCount = labelCounts[label];
-                                majorityLabel = label;
-                            }
-                        }
+                    if (sampleID >= data.size()) {
+                        continue;
+                    }
+                    label_type label = data.getLabel(sampleID);
+                    if (label >= numLabels || label >= RF_MAX_LABELS) {
+                        continue;
+                    }
+
+                    if (!hasLabel) {
+                        firstLabel = label;
+                        hasLabel = true;
+                    } else if (pure && label != firstLabel) {
+                        pure = false;
+                    }
+
+                    labelCounts[label]++;
+                    if (labelCounts[label] > maxCount) {
+                        maxCount = labelCounts[label];
+                        majorityLabel = label;
                     }
                 }
             }
 
             // analyze a slice [begin,end) using chunk accessor (partial loading path)
-            void analyzeSamples(const b_vector<sample_type, 8>& indices, sample_type begin, sample_type end,
+            void analyzeSamples(const vector<sample_type>& indices, sample_type begin, sample_type end,
                                     label_type numLabels, TrainChunkAccessor* accessor) {
                 totalSamples = (begin < end) ? (end - begin) : 0;
                 sample_type maxCount = 0;
+                pure = true;
+                bool hasLabel = false;
+                label_type firstLabel = 0;
+                
+                resetCounts(numLabels);
                 
                 // OPTIMIZATION: Batch extract all labels at once
                 b_vector<label_type> batch_labels;
@@ -663,20 +683,82 @@ namespace mcu{
                 
                 for (sample_type k = 0; k < totalSamples; ++k) {
                     label_type label = batch_labels[k];
-                    labels.insert(label);
-                    if (label < numLabels && label < RF_MAX_LABELS) {
-                        labelCounts[label]++;
-                        if (labelCounts[label] > maxCount) {
-                            maxCount = labelCounts[label];
-                            majorityLabel = label;
-                        }
+                    if (label >= numLabels || label >= RF_MAX_LABELS) {
+                        continue;
+                    }
+
+                    if (!hasLabel) {
+                        firstLabel = label;
+                        hasLabel = true;
+                    } else if (pure && label != firstLabel) {
+                        pure = false;
+                    }
+
+                    labelCounts[label]++;
+                    if (labelCounts[label] > maxCount) {
+                        maxCount = labelCounts[label];
+                        majorityLabel = label;
                     }
                 }
             }
+
+            bool isPure() const {
+                return pure;
+            }
         };
 
-        SplitInfo findBestSplit(const b_vector<sample_type, 8>& indices, sample_type begin, sample_type end,
-                                    const unordered_set<uint16_t>& selectedFeatures, bool use_Gini, label_type numLabels) {
+        // Utility to select feature subset deterministically 
+        vector<uint16_t> selectFeatureSubset(uint16_t num_selected_features, Rf_random& rng) {
+            uint16_t total_features = config.num_features;
+            if (total_features == 0) {
+                total_features = 1;
+            }
+            uint16_t limit = (num_selected_features > total_features) ? total_features : num_selected_features;
+            if (limit == 0) {
+                limit = 1;
+            }
+            vector<uint16_t> selected;
+            selected.reserve(limit);
+            vector<uint8_t> used;
+            used.reserve(total_features);
+            for (uint16_t i = 0; i < total_features; ++i) {
+                used.push_back(0);
+            }
+
+            for (uint16_t j = total_features - limit; j < total_features; ++j) {
+                uint16_t t = static_cast<uint16_t>(rng.bounded(j + 1));
+                uint16_t candidate = (t < total_features) ? t : static_cast<uint16_t>(total_features - 1);
+                if (used[candidate] == 0) {
+                    used[candidate] = 1;
+                    selected.push_back(candidate);
+                    continue;
+                }
+
+                uint16_t fallback = (j < total_features) ? j : static_cast<uint16_t>(total_features - 1);
+                if (used[fallback] == 0) {
+                    used[fallback] = 1;
+                    selected.push_back(fallback);
+                    continue;
+                }
+
+                for (uint16_t scan = 0; scan < total_features; ++scan) {
+                    if (used[scan] == 0) {
+                        used[scan] = 1;
+                        selected.push_back(scan);
+                        break;
+                    }
+                }
+            }
+
+            if (selected.empty()) {
+                selected.push_back(0);
+            }
+
+            return selected;
+        }
+
+        SplitInfo findBestSplit(const vector<sample_type>& indices, sample_type begin, sample_type end,
+                    const b_vector<uint16_t>& selectedFeatures, bool use_Gini, label_type numLabels) {
             SplitInfo bestSplit;
             auto* ctx = training_ctx;
             if(!ctx){
@@ -696,7 +778,7 @@ namespace mcu{
             const uint16_t maxFeatureValue = static_cast<uint16_t>((1u << quant_bits) - 1u);
 
             // Base label counts
-            b_vector<sample_type> baseLabelCounts(numLabels, 0);
+            b_vector<sample_type, 16> baseLabelCounts(numLabels, 0);
             for (sample_type k = begin; k < end; ++k) {
                 sample_type sid = indices[k];
                 if (sid < ctx->train_data.size()) {
@@ -726,7 +808,7 @@ namespace mcu{
 
             // Pre-allocate count arrays (for up to 256 unique values)
             const uint16_t numPossibleValues = maxFeatureValue + 1;
-            b_vector<sample_type> counts;
+            b_vector<sample_type, 16> counts;
             counts.resize(numPossibleValues * numLabels, 0);
             
             // Fast path for 1-bit quantization (only 2 values: 0 and 1)
@@ -751,7 +833,7 @@ namespace mcu{
                     
                     // Single threshold: 0 (left) vs 1 (right)
                     uint32_t leftTotal = 0, rightTotal = 0;
-                    b_vector<sample_type> leftCounts(numLabels, 0), rightCounts(numLabels, 0);
+                    b_vector<sample_type, 16> leftCounts(numLabels, 0), rightCounts(numLabels, 0);
                     
                     // Left side: value == 0
                     for (label_type label = 0; label < numLabels; label++) {
@@ -796,8 +878,6 @@ namespace mcu{
                 for (const auto& featureID : selectedFeatures) {
                     // Reset counts for this feature
                     for (size_t i = 0; i < counts.size(); i++) counts[i] = 0;
-                    
-                    b_vector<uint32_t> value_totals(numPossibleValues, 0);
 
                     // Collect feature value distributions
                     for (sample_type k = begin; k < end; ++k) {
@@ -808,7 +888,6 @@ namespace mcu{
                                 uint16_t fv = ctx->train_data.getFeature(sid, featureID);
                                 if (fv <= maxFeatureValue) {
                                     counts[fv * numLabels + lbl]++;
-                                    value_totals[fv]++;
                                 }
                             }
                         }
@@ -819,7 +898,7 @@ namespace mcu{
                         const uint16_t threshold = (slot > maxFeatureValue) ? maxFeatureValue : slot;
                         
                         uint32_t leftTotal = 0, rightTotal = 0;
-                        b_vector<sample_type> leftCounts(numLabels, 0), rightCounts(numLabels, 0);
+                        b_vector<sample_type, 16> leftCounts(numLabels, 0), rightCounts(numLabels, 0);
                         
                         // Split samples based on threshold
                         for (uint16_t value = 0; value <= maxFeatureValue; value++) {
@@ -870,8 +949,8 @@ namespace mcu{
         }
 
         // Overloaded findBestSplit using chunk accessor for partial loading
-        SplitInfo findBestSplit(const b_vector<sample_type, 8>& indices, sample_type begin, sample_type end,
-                                    const unordered_set<uint16_t>& selectedFeatures, bool use_Gini, label_type numLabels,
+        SplitInfo findBestSplit(const vector<sample_type>& indices, sample_type begin, sample_type end,
+                    const b_vector<uint16_t>& selectedFeatures, bool use_Gini, label_type numLabels,
                                     TrainChunkAccessor* accessor) {
             SplitInfo bestSplit;
             if(!accessor){
@@ -925,7 +1004,7 @@ namespace mcu{
             counts.resize(numPossibleValues * numLabels, 0);
             
             // OPTIMIZATION: Pre-allocate buffer for batch feature extraction
-            b_vector<uint16_t> feature_values;
+            b_vector<sample_type> feature_values;
             feature_values.reserve(totalSamples);
             
             // Fast path for 1-bit quantization
@@ -992,8 +1071,6 @@ namespace mcu{
                     // Reset counts
                     for (size_t i = 0; i < counts.size(); i++) counts[i] = 0;
                     
-                    b_vector<uint32_t> value_totals(numPossibleValues, 0);
-
                     // OPTIMIZATION: Batch extract features for all samples at once
                     accessor->batch_extract_feature(indices, begin, end, featureID, feature_values);
                     
@@ -1003,7 +1080,6 @@ namespace mcu{
                             uint16_t fv = feature_values[k];
                             if (fv <= maxFeatureValue) {
                                 counts[fv * numLabels + lbl]++;
-                                value_totals[fv]++;
                             }
                         }
                     }
@@ -1066,7 +1142,7 @@ namespace mcu{
          * @brief Sort indices by chunk_idx to reduce cache thrashing in partial loading mode
          * Uses lightweight counting sort - stable within each chunk
          */
-        void sortIndicesByChunk(b_vector<sample_type, 8>& indices, sample_type begin, sample_type end, sample_type samples_per_chunk) {
+        void sortIndicesByChunk(vector<sample_type>& indices, sample_type begin, sample_type end, sample_type samples_per_chunk) {
             if (begin >= end || samples_per_chunk == 0) return;
             
             sample_type count = end - begin;
@@ -1085,14 +1161,14 @@ namespace mcu{
             if (num_chunks <= 1) return; // All in same chunk, no need to sort
             
             // Count samples per chunk
-            b_vector<sample_type> chunk_counts(num_chunks, 0);
+            vector<sample_type> chunk_counts(num_chunks, 0);
             for (sample_type i = begin; i < end; ++i) {
                 sample_type chunk = indices[i] / samples_per_chunk;
                 chunk_counts[chunk - first_chunk]++;
             }
             
             // Calculate chunk start positions
-            b_vector<sample_type> chunk_starts(num_chunks, 0);
+            vector<sample_type> chunk_starts(num_chunks, 0);
             sample_type pos = begin;
             for (size_t c = 0; c < num_chunks; ++c) {
                 chunk_starts[c] = pos;
@@ -1100,7 +1176,7 @@ namespace mcu{
             }
             
             // Create temporary buffer and redistribute
-            b_vector<sample_type, 8> temp;
+            vector<sample_type> temp;
             temp.reserve(count);
             for (sample_type i = begin; i < end; ++i) {
                 temp.push_back(indices[i]);
@@ -1155,7 +1231,7 @@ namespace mcu{
             rootNode.setLeftChildIndex(0, layout->left_child_layout);
             tree.nodes.push_back(rootNode);
 
-            b_vector<sample_type, 8> indices;
+            vector<sample_type> indices;
             indices.reserve(sampleIDs.size());
             for (const auto& sid : sampleIDs) {
                 indices.push_back(sid);
@@ -1186,9 +1262,9 @@ namespace mcu{
                 bool shouldBeLeaf = false;
                 label_type leafLabel = stats.majorityLabel;
 
-                if (stats.labels.size() == 1) {
+                if (stats.isPure() && stats.totalSamples > 0) {
                     shouldBeLeaf = true;
-                    leafLabel = *stats.labels.begin();
+                    leafLabel = stats.majorityLabel;
                 } else if (stats.totalSamples < config.min_split || current.depth >= config.max_depth - 1) {
                     shouldBeLeaf = true;
                 }
@@ -1203,15 +1279,7 @@ namespace mcu{
 
                 uint8_t num_selected_features = static_cast<uint8_t>(sqrt(config.num_features));
                 if (num_selected_features == 0) num_selected_features = 1;
-                unordered_set<uint16_t> selectedFeatures;
-                selectedFeatures.reserve(num_selected_features);
-                uint16_t N = config.num_features;
-                uint16_t K = num_selected_features > N ? N : num_selected_features;
-                for (uint16_t j = N - K; j < N; ++j) {
-                    uint16_t t = static_cast<uint16_t>(ctx->random_generator.bounded(j + 1));
-                    if (selectedFeatures.find(t) == selectedFeatures.end()) selectedFeatures.insert(t);
-                    else selectedFeatures.insert(j);
-                }
+                vector<uint16_t> selectedFeatures = selectFeatureSubset(num_selected_features, ctx->random_generator);
 
                 SplitInfo bestSplit = findBestSplit(indices, current.begin, current.end,
                                                 selectedFeatures, config.use_gini, config.num_labels);
@@ -1351,7 +1419,7 @@ namespace mcu{
             rootNode.setLeftChildIndex(0, layout->left_child_layout);
             tree.nodes.push_back(rootNode);
 
-            b_vector<sample_type, 8> indices;
+            vector<sample_type> indices;
             indices.reserve(sampleIDs.size());
             for (const auto& sid : sampleIDs) {
                 indices.push_back(sid);
@@ -1384,9 +1452,9 @@ namespace mcu{
                 bool shouldBeLeaf = false;
                 label_type leafLabel = stats.majorityLabel;
 
-                if (stats.labels.size() == 1) {
+                if (stats.isPure() && stats.totalSamples > 0) {
                     shouldBeLeaf = true;
-                    leafLabel = *stats.labels.begin();
+                    leafLabel = stats.majorityLabel;
                 } else if (stats.totalSamples < config.min_split || current.depth >= config.max_depth - 1) {
                     shouldBeLeaf = true;
                 }
@@ -1401,15 +1469,7 @@ namespace mcu{
 
                 uint8_t num_selected_features = static_cast<uint8_t>(sqrt(config.num_features));
                 if (num_selected_features == 0) num_selected_features = 1;
-                unordered_set<uint16_t> selectedFeatures;
-                selectedFeatures.reserve(num_selected_features);
-                uint16_t N = config.num_features;
-                uint16_t K = num_selected_features > N ? N : num_selected_features;
-                for (uint16_t j = N - K; j < N; ++j) {
-                    uint16_t t = static_cast<uint16_t>(ctx->random_generator.bounded(j + 1));
-                    if (selectedFeatures.find(t) == selectedFeatures.end()) selectedFeatures.insert(t);
-                    else selectedFeatures.insert(j);
-                }
+                vector<uint16_t> selectedFeatures = selectFeatureSubset(num_selected_features, ctx->random_generator);
 
                 SplitInfo bestSplit = findBestSplit(indices, current.begin, current.end,
                                                 selectedFeatures, config.use_gini, config.num_labels, accessor);
@@ -1778,23 +1838,12 @@ namespace mcu{
     public:
         // load forest into RAM
         bool loadForest() {
-            bool success = forest_container.loadForest();
-            if(success)
-                RF_DEBUG_2(1, "✅ Forest loaded: ",config.num_trees, "trees. Total nodes: ", forest_container.get_total_nodes());
-            else
-                RF_DEBUG(0, "❌ Failed to load forest from storage");
-            return success;
+            return forest_container.loadForest();
         }
         
         // release forest from RAM to storage
         bool releaseForest() {
-            bool success = forest_container.releaseForest();
-            if (!success) {
-                RF_DEBUG(0, "❌ Failed to release forest to storage");
-            }else{
-                RF_DEBUG_2(1, "✅ Forest released to storage: ",config.num_trees, "trees. Total nodes: ", forest_container.get_total_nodes());
-            }
-            return success;
+            return forest_container.releaseForest();
         }
 
         // Memory-Efficient Grid Search Training Function
@@ -1827,17 +1876,6 @@ namespace mcu{
                 end_training_session();
                 return;
             }
-            
-            // Recalculate layout based on current dataset size for adaptive node capacity
-            RF_DEBUG(1, "📐 Recalculating layout for current dataset size");
-            uint16_t est_nodes;
-            if (node_pred.is_trained) {
-                est_nodes = node_pred.estimate_nodes(config);
-            } else {
-                if (config.num_samples < 2048) est_nodes = 512;
-                else est_nodes = 2046;
-            }
-            forest_container.calculate_layout(config.num_labels, config.num_features, est_nodes);
             
             training_ctx->build_model = false;
 

@@ -1588,9 +1588,9 @@ namespace mcu {
                 } else if constexpr (type_size == 4) {
                     return 8;   // 8 elements for 4-byte types (int, float, uint32_t, etc.)
                 } else if constexpr (type_size == 8) {
-                    return 4;   // 4 elements for 8-byte types (double, uint64_t, etc.)
-                } else if constexpr (type_size <= 16) {
-                    return 2;   // 2 elements for types up to 16 bytes
+                    return 6;   // 4 elements for 8-byte types (double, uint64_t, etc.)
+                } else if constexpr (type_size <= 64) {
+                    return 4;  
                 } else {
                     return 1;   // 1 element for very large types
                 }
@@ -2043,7 +2043,7 @@ namespace mcu {
                 if(VECTOR_MAX_CAP == 255)
                     doubled = capacity_ ? capacity_ + 20 : 1;
                 else
-                    doubled = capacity_ ? capacity_ + 100 : 1;
+                    doubled = capacity_ ? capacity_ * 2 : 1;
                 if (doubled > VECTOR_MAX_CAP) doubled = VECTOR_MAX_CAP;
                 
                 if (doubled > SBO_SIZE && !using_heap) {
@@ -2725,7 +2725,7 @@ namespace mcu {
                 if(VECTOR_MAX_CAP == 255)
                     doubled = capacity_ ? capacity_ + 10 : 1;
                 else
-                    doubled = capacity_ ? capacity_ * 20 : 1;
+                    doubled = capacity_ ? capacity_ * 2 : 1;
                 if (doubled > VECTOR_MAX_CAP) doubled = VECTOR_MAX_CAP;
                 i_resize(doubled);
             }

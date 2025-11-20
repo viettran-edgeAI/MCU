@@ -8,7 +8,7 @@ test_config.json
 
 hog_processor
 
-
+datasets/mnist/
 
 # Generated output files (keep in result/ folder)
 # result/

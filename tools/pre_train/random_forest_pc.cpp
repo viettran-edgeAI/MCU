@@ -47,8 +47,8 @@ public:
 
 private:
     using TreeSampleIDs = ID_vector<uint32_t, 3>; // 3-bit allow up to 7 instances per sample ID
-    vector<Rf_tree> root;                     // b_vector storing root nodes of trees (now manages SPIFFS filenames)
-    b_vector<TreeSampleIDs> dataList; // list of training data sample IDs for each tree, matches MCU ID_vector layout
+    vector<Rf_tree> root;                     // vector storing root nodes of trees (now manages SPIFFS filenames)
+    vector<TreeSampleIDs> dataList; // list of training data sample IDs for each tree, matches MCU ID_vector layout
     Rf_random rng;
 
     std::string node_log_path;
@@ -76,13 +76,14 @@ public:
         train_data.setFeatureBits(config.quantization_coefficient);
         test_data.setFeatureBits(config.quantization_coefficient);
         validation_data.setFeatureBits(config.quantization_coefficient);
+        std::cout << "Loading dataset...\n";
         base_data.loadCSVData(temp_base_data, config.num_features);
         
         // OOB.reserve(numTree);
         dataList.reserve(config.num_trees);
-
+        std::cout << "Splitting dataset...\n";
         splitData(config.train_ratio);
-
+        // std::cout << "Dataset split completed.\n";
         ClonesData();
     }
     
@@ -197,7 +198,7 @@ public:
             MetricsSummary metrics;
         };
 
-        ConsensusResult computeConsensus(const Rf_sample& sample, const b_vector<uint16_t>* tree_indices = nullptr);
+        ConsensusResult computeConsensus(const Rf_sample& sample, const vector<uint16_t>* tree_indices = nullptr);
         vector<EvaluationSample> collectOOBSamples(uint16_t min_votes_required, vector<uint16_t>* vote_histogram = nullptr);
         vector<EvaluationSample> collectValidationSamples(const Rf_data& dataset);
         vector<EvaluationSample> collectCrossValidationSamples(float& max_nodes_out);
@@ -474,7 +475,7 @@ public:
                 }
             }
             dataList.push_back(treeDataset);
-    }
+        }
     }
 
 
@@ -488,47 +489,76 @@ public:
     };
 
     struct NodeStats {
-        unordered_set<uint16_t> labels;
-        b_vector<uint16_t> labelCounts;
+        vector<uint32_t> labelCounts;
         uint16_t majorityLabel;
         uint32_t totalSamples;
+        bool pure;
 
-        NodeStats(uint16_t numLabels) : majorityLabel(0), totalSamples(0) {
-            labelCounts.reserve(numLabels);
-            labelCounts.fill(0);
+        NodeStats(uint16_t numLabels) : majorityLabel(0), totalSamples(0), pure(true) {
+            labelCounts.resize(numLabels, 0);
+        }
+
+        void resetCounts(uint16_t numLabels) {
+            if (labelCounts.size() < numLabels) {
+                labelCounts.resize(numLabels, 0);
+            } else {
+                for (uint16_t i = 0; i < numLabels; ++i) {
+                    labelCounts[i] = 0;
+                }
+            }
         }
 
         // New: analyze a slice [begin,end) over a shared indices array
-        void analyzeSamplesRange(const b_vector<uint32_t, 8>& indices, uint32_t begin, uint32_t end,
+        void analyzeSamplesRange(const vector<uint32_t>& indices, uint32_t begin, uint32_t end,
                                  uint16_t numLabels, const Rf_data& data) {
             totalSamples = (begin < end) ? (end - begin) : 0;
+            pure = true;
             uint32_t maxCount = 0;
+            bool hasLabel = false;
+            uint16_t firstLabel = 0;
+
+            resetCounts(numLabels);
+
             for (uint32_t k = begin; k < end; ++k) {
                 uint32_t sampleID = indices[k];
-                if (sampleID < data.allSamples.size()) {
-                    uint16_t label = data.allSamples[sampleID].label;
-                    labels.insert(label);
-                    if (label < numLabels && label < 32) {
-                        labelCounts[label]++;
-                        if (labelCounts[label] > maxCount) {
-                            maxCount = labelCounts[label];
-                            majorityLabel = label;
-                        }
-                    }
+                if (sampleID >= data.allSamples.size()) {
+                    continue;
+                }
+
+                uint16_t label = data.allSamples[sampleID].label;
+                if (label >= numLabels) {
+                    continue;
+                }
+
+                if (!hasLabel) {
+                    firstLabel = label;
+                    hasLabel = true;
+                } else if (pure && label != firstLabel) {
+                    pure = false;
+                }
+
+                labelCounts[label]++;
+                if (labelCounts[label] > maxCount) {
+                    maxCount = labelCounts[label];
+                    majorityLabel = label;
                 }
             }
+        }
+
+        bool isPure() const {
+            return pure;
         }
     };
 
     // New: Range-based variant operating on a shared indices array
-    SplitInfo findBestSplitRange(const b_vector<uint32_t, 8>& indices, uint32_t begin, uint32_t end,
-                                 const unordered_set<uint16_t>& selectedFeatures, bool use_Gini, uint16_t numLabels) {
+    SplitInfo findBestSplitRange(const vector<uint32_t>& indices, uint32_t begin, uint32_t end,
+                                 const vector<uint16_t>& selectedFeatures, bool use_Gini, uint16_t numLabels) {
         SplitInfo bestSplit;
         uint32_t totalSamples = (begin < end) ? (end - begin) : 0;
         if (totalSamples < 2) return bestSplit;
 
         // Base label counts
-    vector<uint16_t> baseLabelCounts(numLabels, 0);
+        b_vector<uint32_t,16> baseLabelCounts(numLabels, 0);
         for (uint32_t k = begin; k < end; ++k) {
             uint32_t sid = indices[k];
             if (sid < train_data.allSamples.size()) {
@@ -562,13 +592,13 @@ public:
         }
         const uint16_t maxThresholdValue = static_cast<uint16_t>(numCandidates - 1u);
 
-        b_vector<uint16_t> leftCounts;
-        b_vector<uint16_t> rightCounts;
+        b_vector<uint32_t, 16> leftCounts;
+        b_vector<uint32_t, 16> rightCounts;
         leftCounts.resize(numLabels, 0);
         rightCounts.resize(numLabels, 0);
 
         // Fast path for 1-bit quantization (only 2 values: 0 and 1)
-    if (quantBits == 1) {
+        if (quantBits == 1) {
             for (const auto& featureID : selectedFeatures) {
                 // Reset counts
                 for (uint16_t i = 0; i < numLabels; ++i) {
@@ -727,11 +757,11 @@ public:
         if (train_data.allSamples.empty()) return;
         
         // Queue for breadth-first processing
-        b_vector<NodeToBuild> queue_nodes;
+        vector<NodeToBuild> queue_nodes;
         queue_nodes.reserve(200); // Reserve space for efficiency
 
         // Build a single contiguous index array for this tree
-        b_vector<uint32_t, 8> indices;
+        vector<uint32_t> indices;
         indices.reserve(static_cast<size_t>(sampleIDs.size()));
         for (auto sid : sampleIDs) {
             indices.push_back(static_cast<uint32_t>(sid));
@@ -753,7 +783,7 @@ public:
         // Process nodes breadth-first with minimal allocations
         while (!queue_nodes.empty()) {
             NodeToBuild current = std::move(queue_nodes.front());
-            queue_nodes.erase(0);
+            queue_nodes.erase(queue_nodes.begin());
             
             // Analyze node samples over the slice
             NodeStats stats(config.num_labels);
@@ -770,9 +800,9 @@ public:
             bool shouldBeLeaf = false;
             uint16_t leafLabel = stats.majorityLabel;
             
-            if (stats.labels.size() == 1) {
+            if (stats.isPure() && stats.totalSamples > 0) {
                 shouldBeLeaf = true;
-                leafLabel = *stats.labels.begin();
+                leafLabel = stats.majorityLabel;
             } else if (stats.totalSamples < config.min_split || current.depth >= config.max_depth - 1) {
                 shouldBeLeaf = true;
             }
@@ -786,14 +816,38 @@ public:
             // Random feature subset
             uint16_t num_selected_features = static_cast<uint16_t>(sqrt(config.num_features));
             if (num_selected_features == 0) num_selected_features = 1;
-            unordered_set<uint16_t> selectedFeatures;
-            selectedFeatures.reserve(num_selected_features);
+            vector<uint16_t> selectedFeatures;
             uint16_t N = static_cast<uint16_t>(config.num_features);
+            if (N == 0) N = 1;
             uint16_t K = num_selected_features > N ? N : num_selected_features;
+            selectedFeatures.reserve(K);
+            vector<uint8_t> featureUsed(N, 0);
             for (uint16_t j = N - K; j < N; ++j) {
                 uint16_t t = static_cast<uint16_t>(rng.bounded(j + 1));
-                if (selectedFeatures.find(t) == selectedFeatures.end()) selectedFeatures.insert(t);
-                else selectedFeatures.insert(j);
+                uint16_t candidate = (t < N) ? t : (N - 1);
+                if (featureUsed[candidate] == 0) {
+                    featureUsed[candidate] = 1;
+                    selectedFeatures.push_back(candidate);
+                    continue;
+                }
+
+                uint16_t fallback = (j < N) ? j : (N - 1);
+                if (featureUsed[fallback] == 0) {
+                    featureUsed[fallback] = 1;
+                    selectedFeatures.push_back(fallback);
+                    continue;
+                }
+
+                for (uint16_t scan = 0; scan < N; ++scan) {
+                    if (featureUsed[scan] == 0) {
+                        featureUsed[scan] = 1;
+                        selectedFeatures.push_back(scan);
+                        break;
+                    }
+                }
+            }
+            if (selectedFeatures.empty()) {
+                selectedFeatures.push_back(0);
             }
             
             // Find best split on the slice
@@ -1183,8 +1237,6 @@ public:
             if(depth > maxTreeDepth) maxTreeDepth = depth;
             if(depth < minTreeDepth) minTreeDepth = depth;
         }
-        config.RAM_usage = (totalNodes + totalLeafNodes) * 4;
-        
         // Save config in both JSON and CSV formats
         config.saveConfig(result_config_path);
 
@@ -1222,8 +1274,8 @@ public:
         uint32_t maxFeatureId = 0;
         uint32_t maxLabelId = 0;
         uint32_t maxChildIndex = 0;
-    uint32_t maxNodesPerTree = 0;
-    uint32_t maxThresholdSlot = 0;
+        uint32_t maxNodesPerTree = 0;
+        uint32_t maxThresholdSlot = 0;
         bool hasNodes = false;
         bool missingTree = false;
 
@@ -1403,6 +1455,9 @@ public:
         config.label_bits = layout.label_bits;
         config.child_bits = layout.child_bits;
 
+        // estimate RAM usage
+        config.RAM_usage = static_cast<uint32_t>((totalNodes + totalLeafNodes) * static_cast<uint32_t>(layout.bits_per_node()));
+        
         auto mask_for_bits = [](uint8_t bits) -> uint32_t {
             if (bits >= 32) {
                 return 0xFFFFFFFFu;
@@ -1580,7 +1635,7 @@ public:
         uint16_t num_flags = 0;
 
         // Helper: average a vector of (label, value) pairs
-        auto avg_metric = [](const b_vector<pair<uint16_t, float>>& vec) -> float {
+        auto avg_metric = [](const b_vector<pair<uint16_t, float>, 16>& vec) -> float {
             float sum = 0.0f;
             for (const auto& p : vec) sum += p.second;
             return vec.size() ? sum / vec.size() : 0.0f;
@@ -1607,7 +1662,7 @@ public:
     }
 };
 
-RandomForest::ConsensusResult RandomForest::computeConsensus(const Rf_sample& sample, const b_vector<uint16_t>* tree_indices) {
+RandomForest::ConsensusResult RandomForest::computeConsensus(const Rf_sample& sample, const vector<uint16_t>* tree_indices) {
     ConsensusResult result;
     if (root.empty()) {
         return result;
@@ -1684,7 +1739,7 @@ vector<RandomForest::EvaluationSample> RandomForest::collectOOBSamples(uint16_t 
         }
     }
 
-    b_vector<uint16_t> active_trees;
+    vector<uint16_t> active_trees;
     active_trees.reserve(config.num_trees);
 
     uint32_t sample_id = 0;
@@ -1763,7 +1818,7 @@ vector<RandomForest::EvaluationSample> RandomForest::collectCrossValidationSampl
         k_folds = 4;
     }
 
-    b_vector<uint32_t> allTrainIndices;
+    vector<uint32_t> allTrainIndices;
     allTrainIndices.reserve(train_data.allSamples.size());
     for (uint32_t i = 0; i < train_data.allSamples.size(); ++i) {
         allTrainIndices.push_back(i);
@@ -1783,8 +1838,8 @@ vector<RandomForest::EvaluationSample> RandomForest::collectCrossValidationSampl
     uint16_t valid_folds = 0;
 
     for (uint16_t fold = 0; fold < k_folds; ++fold) {
-        b_vector<uint32_t> cv_train_indices;
-        b_vector<uint32_t> cv_test_indices;
+        vector<uint32_t> cv_train_indices;
+        vector<uint32_t> cv_test_indices;
 
         uint32_t test_start = static_cast<uint32_t>(fold * fold_size);
         uint32_t test_end = (fold == k_folds - 1) ? static_cast<uint32_t>(allTrainIndices.size())
@@ -2069,7 +2124,7 @@ int main(int argc, char** argv) {
 
     // Calculate Precision
     std::cout << "Precision in test set:\n";
-    b_vector<pair<uint16_t, float>> precision = result[0];
+    b_vector<pair<uint16_t, float>, 16> precision = result[0];
     for (const auto& p : precision) {
     //   Serial.printf("Label: %d - %.3f\n", p.first, p.second);
         std::cout << "Label: " << (int)p.first << " - " << p.second << "\n";
@@ -2083,7 +2138,7 @@ int main(int argc, char** argv) {
 
     // Calculate Recall
     std::cout << "Recall in test set:\n";
-    b_vector<pair<uint16_t, float>> recall = result[1];
+    b_vector<pair<uint16_t, float>, 16> recall = result[1];
     for (const auto& r : recall) {
     std::cout << "Label: " << (int)r.first << " - " << r.second << "\n";
     }
@@ -2096,7 +2151,7 @@ int main(int argc, char** argv) {
 
     // Calculate F1 Score
     std::cout << "F1 Score in test set:\n";
-    b_vector<pair<uint16_t, float>> f1_scores = result[2];
+    b_vector<pair<uint16_t, float>, 16> f1_scores = result[2];
     for (const auto& f1 : f1_scores) {
         std::cout << "Label: " << (int)f1.first << " - " << f1.second << "\n";
     }
@@ -2109,7 +2164,7 @@ int main(int argc, char** argv) {
 
     // Calculate Overall Accuracy
     std::cout << "Overall Accuracy in test set:\n";
-    b_vector<pair<uint16_t, float>> accuracies = result[3];
+    b_vector<pair<uint16_t, float>, 16> accuracies = result[3];
     for (const auto& acc : accuracies) {
       std::cout << "Label: " << (int)acc.first << " - " << acc.second << "\n";
     }

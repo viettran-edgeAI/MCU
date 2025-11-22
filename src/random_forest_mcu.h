@@ -607,8 +607,8 @@ namespace mcu{
             uint16_t featureID = 0;
             uint16_t thresholdValue = 0; // Actual threshold value for splitting
             uint16_t thresholdSlot = 0;   // Slot index into quantized threshold cache
-            uint32_t leftCount = 0;
-            uint32_t rightCount = 0;
+            sample_type leftCount = 0;
+            sample_type rightCount = 0;
         } SplitInfo;
 
         struct NodeStats {
@@ -1338,8 +1338,8 @@ namespace mcu{
                 sample_type rightBegin = iLeft;
                 sample_type rightEnd = current.end;
 
-                uint16_t leftChildIndex = static_cast<uint16_t>(tree.nodes.size());
-                uint16_t rightChildIndex = static_cast<uint16_t>(leftChildIndex + 1);
+                node_type leftChildIndex = tree.nodes.size();
+                node_type rightChildIndex = static_cast<node_type>(leftChildIndex + 1);
 
                 Tree_node parentNode = tree.nodes.get(current.nodeIndex);
                 parentNode.setLeftChildIndex(leftChildIndex, layout->left_child_layout);
@@ -1541,8 +1541,8 @@ namespace mcu{
                     sortIndicesByChunk(indices, rightBegin, rightEnd, accessor->get_samples_per_chunk());
                 }
 
-                uint16_t leftChildIndex = static_cast<uint16_t>(tree.nodes.size());
-                uint16_t rightChildIndex = static_cast<uint16_t>(leftChildIndex + 1);
+                node_type leftChildIndex = tree.nodes.size();
+                node_type rightChildIndex = static_cast<node_type>(leftChildIndex + 1);
 
                 Tree_node parentNode = tree.nodes.get(current.nodeIndex);
                 parentNode.setLeftChildIndex(leftChildIndex, layout->left_child_layout);

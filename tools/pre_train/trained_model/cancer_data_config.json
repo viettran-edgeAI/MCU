@@ -5,9 +5,9 @@
   "train_ratio": 0.8,
   "test_ratio": 0.2,
   "valid_ratio": 0,
-  "minSplit": 4,
+  "minSplit": 2,
   "minLeaf": 1,
-  "maxDepth": 50,
+  "maxDepth": 12,
   "useBootstrap": true,
   "boostrapRatio": 0.632,
   "criterion": "entropy",
@@ -24,7 +24,7 @@
   "enableRetrain": true,
   "enableAutoConfig": false,
   "max_samples": 0,
-  "Estimated RAM (bytes)": 22192,
-  "timestamp": "2025-11-20T03:17:04+0700",
+  "Estimated RAM (bytes)": 2656,
+  "timestamp": "2025-11-24T03:43:38+0700",
   "author": "Viettran - tranvaviet@gmail.com"
 }

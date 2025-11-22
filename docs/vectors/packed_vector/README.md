@@ -7,9 +7,9 @@ A `packed_vector` stores small integers using only the minimum number of bits pe
 ## 🧠 Core idea
 
 - Template parameters:
-  - `BitsPerElement` (1–8) – compile-time bit width for each value when the vector is created.
+  - `BitsPerElement` (1.. platform-word-limit) – compile-time bit width for each value when the vector is created. The implementation now supports BitsPerElement > 32 using multi-word reads/writes; the exact practical maximum depends on your target's word size (see "Word size & multi-word support" below).
   - `SizeFlag` – chooses index size (`TINY`, `SMALL`, `MEDIUM`, `LARGE`). Defaults to `MEDIUM` (`uint16_t`)- max 65535 elements.
-- Internally uses `PackedArray` to bit-pack data with the current runtime bits-per-value (`bpv`).
+- Internally uses `PackedArray` to bit-pack data with the current runtime bits-per-value (`bpv`). `PackedArray` now uses a platform-dependent `word_t` (alias for `size_t`) as its storage word. Elements may span multiple words when `bpv > WORD_BITS` (where `WORD_BITS == sizeof(size_t)*8`).
 - Supports runtime reconfiguration via `set_bits_per_value()` to shrink/grow element width (existing data is cleared, capacity reused).
 
 ---
@@ -18,7 +18,7 @@ A `packed_vector` stores small integers using only the minimum number of bits pe
 
 | Feature | Notes |
 | --- | --- |
-| Bit packing | Only `bpv` bits per element are stored; default equals `BitsPerElement`.
+| Bit packing | Only `bpv` bits per element are stored; default equals `BitsPerElement`. Supports bit widths larger than a single native word by splitting the element across multiple words.
 | Multiple index sizes | `TINY` (15 max elements), `SMALL` (`uint8_t`), `MEDIUM` (`uint16_t`), `LARGE` (`size_t`).
 | Constructors | Default, capacity, size+value, initializer list, range copy (same or cross bit sizes/size flags).
 | Assignment | `assign(count, value)` and `assign(min_init_list<uint8_t>)`.
@@ -36,6 +36,14 @@ using mcu::TINY;
 packed_vector<3> empty;                       // default
 packed_vector<4> with_capacity(32);           // reserve space only
 packed_vector<2> with_data(8, 3);             // size=8, value=3 (auto clamps to 2-bit max)
+
+// Wide bit-width examples (multi-word read/writes supported)
+packed_vector<48, uint64_t> wide48;           // 48-bit elements (use 64-bit ValueType for safety)
+packed_vector<40, uint64_t> wide40;
+
+// For values wider than native word (`WORD_BITS`), the implementation splits
+// values across multiple words; use a wide ValueType (e.g. `uint64_t`) to
+// avoid narrowing and to get predictable behavior across platforms.
 ```
 
 ### Initializer-list support
@@ -139,6 +147,9 @@ for (uint8_t i = 0; i < 4; ++i) {
 
 - `get_bits_per_value()` returns the active runtime bpv.
 - Changing bpv invalidates stored data but retains capacity.
+ - `get_bits_per_value()` returns the active runtime bpv.
+ - Changing bpv invalidates stored data but retains capacity.
+ - Note: When using large bpv values that span multiple words, choosing a matching ValueType (e.g., `uint64_t` for bpv >= 40) is recommended to avoid implicit narrowing.
 
 ---
 
@@ -147,6 +158,11 @@ for (uint8_t i = 0; i < 4; ++i) {
 - `memory_usage()` returns the number of bytes allocated by the packed storage.
 - `fit()` trims capacity to match the current size (minimum of 1 slot retained).
 - For `TINY` flag, size and capacity share a single byte (4 bits each).
+
+### Word size & multi-word support
+
+- The internal storage word is `word_t = size_t` and `WORD_BITS = sizeof(word_t) * 8`.
+- On 32-bit MCUs `WORD_BITS` equals 32; on 64-bit hosts it equals 64. For widths greater than `WORD_BITS`, elements are written/read across multiple words using multi-word loops. This avoids an artificial 32-bit restriction and allows large element widths (e.g., 40/48/64 bits) while remaining portable between 32-bit and 64-bit platforms.
 
 ### Memory Footprint Analysis
 

@@ -30,7 +30,7 @@ std::string extract_model_name(const std::string& data_path) {
     return (first_underscore != std::string::npos) ? filename.substr(0, first_underscore) : filename;
 }
 
-static constexpr int RF_MAX_NODES = 65535; // Maximum nodes per tree (matches MCU 32-bit layout limit)
+static constexpr uint64_t RF_MAX_NODES = 0xFFFFFFFFu; 
 
 
 class RandomForest{
@@ -38,7 +38,7 @@ public:
     Rf_data base_data;      // base data / baseFile
     Rf_data train_data;
     Rf_data test_data;
-    Rf_data validation_data; // validation data, used for evaluating the model
+    Rf_data validation_data;
 
     std::string model_name;
 
@@ -46,7 +46,7 @@ public:
     node_predictor pre;
 
 private:
-    using TreeSampleIDs = ID_vector<uint32_t, 3>; // 3-bit allow up to 7 instances per sample ID
+    using TreeSampleIDs = ID_vector<uint32_t, 8>; // 3-bit allow up to 7 instances per sample ID
     vector<Rf_tree> root;                     // vector storing root nodes of trees (now manages SPIFFS filenames)
     vector<TreeSampleIDs> dataList; // list of training data sample IDs for each tree, matches MCU ID_vector layout
     Rf_random rng;
@@ -117,13 +117,93 @@ public:
             Rf_tree tree("");
             build_tree(tree, dataList[i]);
             root.push_back(tree);
-            // std::cout << "tree " << i << std::endl;
         }
         // uint32_t total_nodes = 0;
         // for(const auto& tree : root){
         //     total_nodes += tree.countNodes();   
         // }
         // std::cout << "Total nodes in forest: " << total_nodes << std::endl;
+    }
+
+    void build_model(){
+        std::cout << "\n🌳 Building Random Forest Model...\n";
+        
+        // Set model parameters - use first value from range or config file value if enabled
+        if (config.overwrite[0]) {
+            // min_split is explicitly set in config
+            std::cout << "   Using min_split from config: " << config.min_split << "\n";
+        } else if (!config.min_split_range.empty()) {
+            config.min_split = config.min_split_range.front();
+            std::cout << "   Using min_split default: " << config.min_split << "\n";
+        }
+        
+        if (config.overwrite[1]) {
+            // min_leaf is explicitly set in config
+            std::cout << "   Using min_leaf from config: " << config.min_leaf << "\n";
+        } else if (!config.min_leaf_range.empty()) {
+            config.min_leaf = config.min_leaf_range.front();
+            std::cout << "   Using min_leaf default: " << config.min_leaf << "\n";
+        }
+        
+        if (config.overwrite[2]) {
+            // max_depth is explicitly set in config
+            std::cout << "   Using max_depth from config: " << config.max_depth << "\n";
+        } else if (!config.max_depth_range.empty()) {
+            config.max_depth = config.max_depth_range.front();
+            std::cout << "   Using max_depth default: " << config.max_depth << "\n";
+        }
+
+        // prepare node predictor log file
+        std::remove(node_log_path.c_str());
+        std::ofstream file(node_log_path);
+        if (!file.is_open()) {
+            std::cerr << "❌ Failed to create node_predictor log file\n";
+            return;
+        }
+        file << "min_split,min_leaf,max_depth,max_nodes\n";
+        file.close();
+
+        // Prepare data for forest construction
+        ClonesData();
+        
+        // Build forest with progress bar
+        root.clear();
+        root.reserve(config.num_trees);
+        uint32_t max_nodes = 0;
+        for(uint16_t i = 0; i < config.num_trees; i++){
+            // Progress bar
+            float progress = static_cast<float>(i + 1) / config.num_trees;
+            int bar_width = 50;
+            int pos = static_cast<int>(bar_width * progress);
+            std::cout << "\r[";
+            for (int j = 0; j < bar_width; ++j) {
+                if (j < pos) std::cout << "█";
+                else if (j == pos) std::cout << "▓";
+                else std::cout << "░";
+            }
+            std::cout << "] " << std::fixed << std::setprecision(1) << (progress * 100.0f) << "% ";
+            std::cout << "(" << (i + 1) << "/" << config.num_trees << " trees)";
+            std::cout.flush();
+            
+            // Build tree
+            Rf_tree tree("");
+            build_tree(tree, dataList[i]);
+            root.push_back(tree);
+            if(tree.countNodes() > max_nodes){
+                max_nodes = tree.countNodes();
+            }
+        }
+        if (max_nodes > 0.0f) {
+            std::ofstream log_file(node_log_path, std::ios::app);
+            if (log_file.is_open()) {
+                log_file << static_cast<int>(config.min_split) << ","
+                        << static_cast<int>(config.min_leaf) << ","
+                        << static_cast<int>(config.max_depth) << ","
+                        << static_cast<int>(std::round(max_nodes)) << "\n";
+            }
+        }
+
+        std::cout << "\n✅ Forest construction complete!\n";
     }
 
     // Get forest statistics
@@ -157,7 +237,7 @@ public:
         std::cout << "Total trees: " << (int)config.num_trees << "\n";
         std::cout << "Total nodes: " << totalNodes << "\n";
         std::cout << "Total leaf nodes: " << totalLeafNodes << "\n";
-        std::cout << "Average nodes per tree: " << (float)totalNodes / config.num_trees << "\n";
+        std::cout << std::fixed << std::setprecision(3) << "Average nodes per tree: " << (float)totalNodes / config.num_trees << "\n";
         std::cout << "Average leaf nodes per tree: " << (float)totalLeafNodes / config.num_trees << "\n";
         std::cout << "Depth range: " << minDepth << " - " << maxDepth << "\n";
         std::cout << "Average depth: " << (float)(maxDepth + minDepth) / 2.0f << "\n";
@@ -212,9 +292,8 @@ public:
             }
 
             size_t lastSlash = config.data_path.find_last_of("/\\");
-            std::string directory = (lastSlash == std::string::npos)
-                                        ? ""
-                                        : config.data_path.substr(0, lastSlash + 1);
+            std::string directory = (lastSlash == std::string::npos) ? ""
+                                    : config.data_path.substr(0, lastSlash + 1);
             return directory + model_name + "_dp.csv";
         }
 
@@ -953,22 +1032,13 @@ public:
         return consensus.predicted_label;
     }
 
-  public:
+    public:
     // -----------------------------------------------------------------------------------
     // Grid Search Training with Multiple Runs
     // -----------------------------------------------------------------------------------
     // Enhanced training with adaptive evaluation strategy
     void training(){
         std::cout << "\n🚀 Training Random Forest...\n";
-        std::remove(node_log_path.c_str());
-        std::ofstream file(node_log_path);
-        if (!file.is_open()) {
-            std::cerr << "❌ Failed to create node_predictor log file\n";
-            return;
-        }
-        file << "min_split,min_leaf,max_depth,max_nodes\n";
-        file.close();
-
         bool use_cv = (config.training_score == "k_fold_score");
         const int num_runs = 1; // Single run with fixed seed is sufficient
 
@@ -1028,93 +1098,93 @@ public:
                     config.min_leaf = current_min_leaf;
                     config.max_depth = current_max_depth;
 
-                float max_nodes = 0.0f; // Track maximum nodes across runs
-                bool best_forest_saved = false;
-                vector<EvaluationSample> aggregated_samples;
-                aggregated_samples.reserve(train_data.allSamples.size());
-                ThresholdSearchResult aggregated_result;
-                aggregated_result.score = -1.0f;
-                aggregated_result.threshold = 0.5f;
+                    float max_nodes = 0.0f; // Track maximum nodes across runs
+                    bool best_forest_saved = false;
+                    vector<EvaluationSample> aggregated_samples;
+                    aggregated_samples.reserve(train_data.allSamples.size());
+                    ThresholdSearchResult aggregated_result;
+                    aggregated_result.score = -1.0f;
+                    aggregated_result.threshold = 0.5f;
 
-                if (use_cv) {
-                    float cv_max_nodes = 0.0f;
-                    aggregated_samples = collectCrossValidationSamples(cv_max_nodes);
-                    max_nodes = cv_max_nodes;
+                    if (use_cv) {
+                        float cv_max_nodes = 0.0f;
+                        aggregated_samples = collectCrossValidationSamples(cv_max_nodes);
+                        max_nodes = cv_max_nodes;
 
-                    ClonesData();
-                    MakeForest();
-
-                    uint32_t forest_max_nodes = 0;
-                    for (uint16_t t = 0; t < config.num_trees; ++t) {
-                        uint32_t tree_nodes = root[t].countNodes();
-                        if (tree_nodes > forest_max_nodes) {
-                            forest_max_nodes = tree_nodes;
-                        }
-                    }
-                    max_nodes = static_cast<float>(forest_max_nodes);
-
-                    aggregated_result = findBestThreshold(aggregated_samples, config.metric_score);
-
-                    saveForest(temp_folder, true);
-                    best_forest_saved = true;
-
-                    current_iteration++;
-                    updateProgress(aggregated_result.score, current_min_split, current_min_leaf, current_max_depth);
-                } else {
-                    float total_run_score = 0.0f;
-                    float best_run_score = -1.0f;
-
-                    for (int run = 0; run < num_runs; ++run) {
                         ClonesData();
                         MakeForest();
 
-                        vector<EvaluationSample> run_samples;
-                        if (config.training_score == "valid_score") {
-                            run_samples = collectValidationSamples(validation_data);
-                        } else {
-                            uint16_t min_votes_required = std::max<uint16_t>(1, static_cast<uint16_t>(std::ceil(config.num_trees * 0.15f)));
-                            run_samples = collectOOBSamples(min_votes_required);
-                        }
-
-                        aggregated_samples.insert(aggregated_samples.end(), run_samples.begin(), run_samples.end());
-
-                        ThresholdSearchResult run_result = findBestThreshold(run_samples, config.metric_score);
-                        if (run_result.score >= 0.0f) {
-                            total_run_score += run_result.score;
-                        }
-
-                        uint32_t run_max_nodes = 0;
+                        uint32_t forest_max_nodes = 0;
                         for (uint16_t t = 0; t < config.num_trees; ++t) {
                             uint32_t tree_nodes = root[t].countNodes();
-                            if (tree_nodes > run_max_nodes) {
-                                run_max_nodes = tree_nodes;
+                            if (tree_nodes > forest_max_nodes) {
+                                forest_max_nodes = tree_nodes;
                             }
                         }
-                        if (run_max_nodes > max_nodes) {
-                            max_nodes = static_cast<float>(run_max_nodes);
-                        }
+                        max_nodes = static_cast<float>(forest_max_nodes);
 
-                        if (run_result.score > best_run_score) {
-                            best_run_score = run_result.score;
-                            saveForest(temp_folder, true);
-                            best_forest_saved = true;
-                        }
+                        aggregated_result = findBestThreshold(aggregated_samples, config.metric_score);
+
+                        saveForest(temp_folder, true);
+                        best_forest_saved = true;
 
                         current_iteration++;
-                        updateProgress(run_result.score, current_min_split, current_min_leaf, current_max_depth);
+                        updateProgress(aggregated_result.score, current_min_split, current_min_leaf, current_max_depth);
+                    } else {
+                        float total_run_score = 0.0f;
+                        float best_run_score = -1.0f;
+
+                        for (int run = 0; run < num_runs; ++run) {
+                            ClonesData();
+                            MakeForest();
+
+                            vector<EvaluationSample> run_samples;
+                            if (config.training_score == "valid_score") {
+                                run_samples = collectValidationSamples(validation_data);
+                            } else {
+                                uint16_t min_votes_required = std::max<uint16_t>(1, static_cast<uint16_t>(std::ceil(config.num_trees * 0.15f)));
+                                run_samples = collectOOBSamples(min_votes_required);
+                            }
+
+                            aggregated_samples.insert(aggregated_samples.end(), run_samples.begin(), run_samples.end());
+
+                            ThresholdSearchResult run_result = findBestThreshold(run_samples, config.metric_score);
+                            if (run_result.score >= 0.0f) {
+                                total_run_score += run_result.score;
+                            }
+
+                            uint32_t run_max_nodes = 0;
+                            for (uint16_t t = 0; t < config.num_trees; ++t) {
+                                uint32_t tree_nodes = root[t].countNodes();
+                                if (tree_nodes > run_max_nodes) {
+                                    run_max_nodes = tree_nodes;
+                                }
+                            }
+                            if (run_max_nodes > max_nodes) {
+                                max_nodes = static_cast<float>(run_max_nodes);
+                            }
+
+                            if (run_result.score > best_run_score) {
+                                best_run_score = run_result.score;
+                                saveForest(temp_folder, true);
+                                best_forest_saved = true;
+                            }
+
+                            current_iteration++;
+                            updateProgress(run_result.score, current_min_split, current_min_leaf, current_max_depth);
+                        }
+
+                        aggregated_result = findBestThreshold(aggregated_samples, config.metric_score);
                     }
 
-                    aggregated_result = findBestThreshold(aggregated_samples, config.metric_score);
-                }
-
-                if (max_nodes > 0.0f) {
-                    std::ofstream log_file(node_log_path, std::ios::app);
-                    if (log_file.is_open()) {
-                        log_file << static_cast<int>(config.min_split) << ","
-                                 << static_cast<int>(config.min_leaf) << ","
-                                 << static_cast<int>(config.max_depth) << ","
-                                 << static_cast<int>(std::round(max_nodes)) << "\n";
-                    }
+                    if (max_nodes > 0.0f) {
+                        std::ofstream log_file(node_log_path, std::ios::app);
+                        if (log_file.is_open()) {
+                            log_file << static_cast<int>(config.min_split) << ","
+                                    << static_cast<int>(config.min_leaf) << ","
+                                    << static_cast<int>(config.max_depth) << ","
+                                    << static_cast<int>(std::round(max_nodes)) << "\n";
+                        }
                     }
 
                     if (aggregated_result.score > best_score && best_forest_saved) {
@@ -1163,7 +1233,7 @@ public:
             config.result_score = 0.0f;
         }
 
-        saveForest(result_folder);
+        // saveForest(result_folder);
 
         #ifdef _WIN32
             system(("rmdir /s /q " + temp_folder).c_str());
@@ -1276,7 +1346,6 @@ public:
         uint32_t maxChildIndex = 0;
         uint32_t maxNodesPerTree = 0;
         uint32_t maxThresholdSlot = 0;
-        bool hasNodes = false;
         bool missingTree = false;
 
         for (uint16_t i = 0; i < config.num_trees; ++i) {
@@ -1286,8 +1355,6 @@ public:
                 missingTree = true;
                 continue;
             }
-
-            hasNodes = true;
             if (nodeCount > RF_MAX_NODES) {
                 if (!silent) {
                     std::cout << "❌ Tree " << static_cast<int>(i)
@@ -1330,12 +1397,6 @@ public:
             }
         }
 
-        if (!hasNodes) {
-            if (!silent) {
-                std::cout << "❌ Forest has no nodes to export\n";
-            }
-            return;
-        }
 
         if (missingTree) {
             if (!silent) {
@@ -1364,126 +1425,8 @@ public:
             }
         }
 
-        uint8_t featureBits = std::max<uint8_t>(1, std::min<uint8_t>(10, bits_required(maxFeatureId)));
-        uint8_t labelBits = std::max<uint8_t>(1, std::min<uint8_t>(8, bits_required(maxLabelId)));
-        uint8_t thresholdBitsDesired = QuantizationHelper::sanitizeBits(static_cast<int>(config.quantization_coefficient));
-        if (thresholdBitsDesired == 0) {
-            thresholdBitsDesired = 1;
-        }
-
-        const uint32_t limitIndex = (RF_MAX_NODES > 0) ? static_cast<uint32_t>(RF_MAX_NODES - 1) : 0;
-        const uint8_t maxChildBitsByLimit = bits_required(limitIndex);
-        uint8_t requiredChildBits = bits_required(maxChildIndex);
-        uint8_t targetChildBits = requiredChildBits;
-        if (targetChildBits > maxChildBitsByLimit) {
-            targetChildBits = maxChildBitsByLimit;
-        }
-        if (targetChildBits == 0) {
-            targetChildBits = 1;
-        }
-
-        auto compute_available_child_bits = [&](uint8_t tb) -> uint8_t {
-            if ((1 + tb + featureBits + labelBits) >= 32) {
-                return static_cast<uint8_t>(0);
-            }
-            return static_cast<uint8_t>(32 - (1 + tb + featureBits + labelBits));
-        };
-
-        uint8_t thresholdBits = thresholdBitsDesired;
-        uint8_t availableChildBits = compute_available_child_bits(thresholdBits);
-        while (thresholdBits > 1 && availableChildBits < targetChildBits) {
-            --thresholdBits;
-            availableChildBits = compute_available_child_bits(thresholdBits);
-        }
-        if (availableChildBits == 0) {
-            thresholdBits = 1;
-            availableChildBits = compute_available_child_bits(thresholdBits);
-        }
-
-        layout.threshold_bits = thresholdBits;
-        layout.feature_bits = featureBits;
-        layout.label_bits = labelBits;
-        layout.update_starts();
-
-        const uint8_t maxChildBitsByWord = (layout.child_start >= 32)
-            ? static_cast<uint8_t>(0)
-            : static_cast<uint8_t>(32 - layout.child_start);
-
-        if (maxChildBitsByWord == 0) {
-            if (!silent) {
-                std::cout << "❌ Unable to encode forest: no bit space left for child indices (featureBits="
-                          << static_cast<int>(layout.feature_bits) << ", labelBits="
-                          << static_cast<int>(layout.label_bits) << ", thresholdBits="
-                          << static_cast<int>(layout.threshold_bits) << ")\n";
-            }
-            return;
-        }
-
-        if (thresholdBits < thresholdBitsDesired && !silent) {
-            std::cout << "ℹ️  Reduced threshold bits from " << static_cast<int>(thresholdBitsDesired)
-                      << " to " << static_cast<int>(thresholdBits)
-                      << " to preserve child index capacity (available child bits="
-                      << static_cast<int>(maxChildBitsByWord) << ")\n";
-        }
-
-        uint8_t childBitsCap = std::min<uint8_t>(maxChildBitsByWord, maxChildBitsByLimit);
-        if (childBitsCap == 0) {
-            if (!silent) {
-                std::cout << "❌ No capacity left for child indices after layout adjustments\n";
-            }
-            return;
-        }
-
-        if (requiredChildBits > childBitsCap && !silent) {
-            std::cout << "ℹ️  Child index bits truncated from " << static_cast<int>(requiredChildBits)
-                      << " to " << static_cast<int>(childBitsCap)
-                      << " due to layout constraints" << std::endl;
-        }
-
-        layout.child_bits = std::max<uint8_t>(1, std::min<uint8_t>(requiredChildBits, childBitsCap));
-
-        if (layout.bits_per_node() > 32) {
-            if (!silent) {
-                std::cout << "❌ Calculated node layout exceeds 32 bits; cannot encode MCU forest\n";
-            }
-            return;
-        }
-
-        // Save calculated layout to config for MCU to use
-        config.threshold_bits = layout.threshold_bits;
-        config.feature_bits = layout.feature_bits;
-        config.label_bits = layout.label_bits;
-        config.child_bits = layout.child_bits;
-
-        // estimate RAM usage
-        config.RAM_usage = static_cast<uint32_t>((totalNodes + totalLeafNodes) * static_cast<uint32_t>(layout.bits_per_node()));
-        
-        auto mask_for_bits = [](uint8_t bits) -> uint32_t {
-            if (bits >= 32) {
-                return 0xFFFFFFFFu;
-            }
-            return static_cast<uint32_t>((1u << bits) - 1u);
-        };
-
-        const uint32_t featureMask = mask_for_bits(layout.feature_bits);
-        const uint32_t labelMask = mask_for_bits(layout.label_bits);
-        const uint32_t thresholdMask = mask_for_bits(layout.threshold_bits);
-        const uint32_t childMask = mask_for_bits(layout.child_bits);
-
-        if (maxFeatureId > featureMask || maxLabelId > labelMask || maxThresholdSlot > thresholdMask || maxChildIndex > childMask) {
-            if (!silent) {
-                std::cout << "❌ Forest metadata exceeds MCU bit layout."
-                          << " MaxFeature=" << maxFeatureId
-                          << " MaxLabel=" << maxLabelId
-                          << " MaxThresholdSlot=" << maxThresholdSlot
-                          << " MaxChild=" << maxChildIndex << "\n";
-            }
-            return;
-        }
-
-        // Save unified forest file directly from memory (no individual tree files)
         const uint32_t FOREST_MAGIC = 0x464F5253; // "FORS"
-        std::string unified_path = folder_path + "/" + model_name + "_forest.bin";
+        std::string unified_path = folder_path + "/" + model_name + "_forest_mcu.bin";
         std::ofstream out(unified_path, std::ios::binary);
         if (!out.is_open()) {
             if (!silent) {
@@ -1492,81 +1435,313 @@ public:
             return;
         }
 
-        // Forest header: magic + tree count (u8)
+        // Build a 64-bit layout for RAW format
+        const uint8_t raw_word_bits = 64;
+        uint8_t raw_feature_bits = std::max<uint8_t>(1, std::min<uint8_t>(16, bits_required(maxFeatureId)));
+        uint8_t raw_label_bits = std::max<uint8_t>(1, std::min<uint8_t>(16, bits_required(maxLabelId)));
+        uint8_t raw_threshold_bits = QuantizationHelper::sanitizeBits(static_cast<int>(config.quantization_coefficient));
+        if (raw_threshold_bits == 0) raw_threshold_bits = 1;
+        uint8_t remaining = static_cast<uint8_t>(raw_word_bits - 1 - raw_feature_bits - raw_label_bits - raw_threshold_bits);
+        uint8_t raw_child_bits = remaining > 0 ? remaining : 1;
+
+        // Compute starts
+        uint8_t threshold_start64 = 1;
+        uint8_t feature_start64 = static_cast<uint8_t>(threshold_start64 + raw_threshold_bits);
+        uint8_t label_start64 = static_cast<uint8_t>(feature_start64 + raw_feature_bits);
+        uint8_t child_start64 = static_cast<uint8_t>(label_start64 + raw_label_bits);
+
+        // masks
+        auto mask_for_bits64 = [](uint8_t bits) -> uint64_t {
+            if (bits >= 64) return 0xFFFFFFFFFFFFFFFFull;
+            if (bits == 0) return 0ull;
+            return ((1ull << bits) - 1ull);
+        };
+        uint64_t featureMask64 = mask_for_bits64(raw_feature_bits);
+        uint64_t labelMask64 = mask_for_bits64(raw_label_bits);
+        uint64_t thresholdMask64 = mask_for_bits64(raw_threshold_bits);
+        uint64_t childMask64 = mask_for_bits64(raw_child_bits);
+
+        // header: magic + bits_per_node(u8) + tree_count(u8) + reserved byte
         out.write(reinterpret_cast<const char*>(&FOREST_MAGIC), sizeof(FOREST_MAGIC));
+        uint8_t bits_per_node64 = static_cast<uint8_t>(1 + raw_threshold_bits + raw_feature_bits + raw_label_bits + raw_child_bits);
+        if (bits_per_node64 == 0) bits_per_node64 = 64;
+        uint8_t bytes_per_node64 = static_cast<uint8_t>((bits_per_node64 + 7) / 8);
+        out.write(reinterpret_cast<const char*>(&bits_per_node64), sizeof(bits_per_node64));
         uint8_t tree_count_written = 0;
         out.write(reinterpret_cast<const char*>(&tree_count_written), sizeof(tree_count_written));
 
         uint32_t total_nodes_written = 0;
         for (uint16_t i = 0; i < config.num_trees; ++i) {
-            if (root[i].nodes.empty()) {
-                continue; // skip empty trees
-            }
-            
+            if (root[i].nodes.empty()) continue;
             uint32_t node_count = static_cast<uint32_t>(root[i].nodes.size());
 
-            // Unified per-tree header: tree index (u8) + node_count (u32)
+            // per-tree header: index + node_count
             uint8_t tree_index = static_cast<uint8_t>(i);
             out.write(reinterpret_cast<const char*>(&tree_index), sizeof(tree_index));
             out.write(reinterpret_cast<const char*>(&node_count), sizeof(node_count));
 
             for (const auto& node : root[i].nodes) {
-                uint16_t thresholdSlot = node.getThresholdSlot();
-                uint32_t featureId = node.getFeatureID();
-                uint32_t labelId = node.getLabel();
-                uint32_t leftIndex = node.getLeftChildIndex();
+                uint64_t thresholdSlot = node.getThresholdSlot();
+                uint64_t featureId = node.getFeatureID();
+                uint64_t labelId = node.getLabel();
+                uint64_t leftIndex = node.getLeftChildIndex();
 
-                if (thresholdSlot > thresholdMask || featureId > featureMask || labelId > labelMask || leftIndex > childMask) {
+                if (thresholdSlot > thresholdMask64 || featureId > featureMask64 || labelId > labelMask64 || leftIndex > childMask64) {
                     if (!silent) {
                         std::cout << "❌ Node encoding overflow at tree " << static_cast<int>(i)
-                                  << ", feature=" << featureId
-                                  << ", label=" << labelId
-                                  << ", leftIndex=" << leftIndex << "\n";
+                                  << ", feature=" << (uint32_t)featureId
+                                  << ", label=" << (uint32_t)labelId
+                                  << ", leftIndex=" << (uint32_t)leftIndex << "\n";
                     }
                     out.close();
                     std::remove(unified_path.c_str());
                     return;
                 }
 
-                uint32_t packed32 = 0;
-                packed32 |= static_cast<uint32_t>(node.getIsLeaf() ? 1u : 0u);
-                packed32 |= (static_cast<uint32_t>(thresholdSlot) & thresholdMask) << layout.threshold_start;
-                packed32 |= (featureId & featureMask) << layout.feature_start;
-                packed32 |= (labelId & labelMask) << layout.label_start;
-                packed32 |= (leftIndex & childMask) << layout.child_start;
+                uint64_t packed64 = 0ull;
+                packed64 |= static_cast<uint64_t>(node.getIsLeaf() ? 1ull : 0ull);
+                packed64 |= (thresholdSlot & thresholdMask64) << threshold_start64;
+                packed64 |= (featureId & featureMask64) << feature_start64;
+                packed64 |= (labelId & labelMask64) << label_start64;
+                packed64 |= (leftIndex & childMask64) << child_start64;
 
-                out.write(reinterpret_cast<const char*>(&packed32), sizeof(packed32));
+                out.write(reinterpret_cast<const char*>(&packed64), bytes_per_node64);
             }
 
             ++tree_count_written;
             total_nodes_written += node_count;
         }
 
-        // Patch tree_count at byte offset sizeof(FOREST_MAGIC)
-        out.seekp(static_cast<std::streamoff>(sizeof(FOREST_MAGIC)), std::ios::beg);
+        out.seekp(static_cast<std::streamoff>(sizeof(FOREST_MAGIC) + sizeof(bits_per_node64)), std::ios::beg);
+        out.write(reinterpret_cast<const char*>(&tree_count_written), sizeof(tree_count_written));
+        out.close();
+    }
+
+    // Convert and save forest in MCU-friendly 32-bit packed format
+    bool convertForestToMCU(const std::string& folder_path = result_folder) {
+        std::cout << "🔄 Convert model to mcu format...\n";
+        // Determine MCU packing requirements
+        auto bits_required = [](uint32_t value) -> uint8_t {
+            uint8_t bits = 0;
+            do {
+                ++bits;
+                value >>= 1;
+            } while (value != 0 && bits < 32);
+            return static_cast<uint8_t>(bits == 0 ? 1 : bits);
+        };
+
+        // Collect metadata
+        uint32_t maxFeatureId = 0;
+        uint32_t maxLabelId = 0;
+        uint32_t maxChildIndex = 0;
+        uint32_t maxNodesPerTree = 0;
+        uint32_t maxThresholdSlot = 0;
+        bool missingTree = false;
+
+        for (uint16_t i = 0; i < config.num_trees; ++i) {
+            const auto& tree = root[i];
+            const size_t nodeCount = tree.nodes.size();
+            if (nodeCount == 0) {
+                missingTree = true;
+                continue;
+            }
+            if (nodeCount > RF_MAX_NODES) {
+                std::cout << "❌ Tree " << static_cast<int>(i)
+                          << " exceeds MCU node limit (" << nodeCount << "/" << RF_MAX_NODES << ")\n";
+                return false;
+            } 
+
+            maxNodesPerTree = std::max(maxNodesPerTree, static_cast<uint32_t>(nodeCount));
+            if (nodeCount > 0) {
+                uint32_t upperIndex = static_cast<uint32_t>(nodeCount - 1);
+                maxChildIndex = std::max(maxChildIndex, upperIndex);
+            }
+
+            for (const auto& node : tree.nodes) {
+                if (!node.getIsLeaf()) {
+                    uint32_t leftIndex = node.getLeftChildIndex();
+                    uint32_t rightIndex = node.getRightChildIndex();
+                    if (leftIndex > maxChildIndex) maxChildIndex = leftIndex;
+                    if (rightIndex > maxChildIndex) maxChildIndex = rightIndex;
+                }
+                maxFeatureId = std::max<uint32_t>(maxFeatureId, node.getFeatureID());
+                maxLabelId = std::max<uint32_t>(maxLabelId, node.getLabel());
+                maxThresholdSlot = std::max<uint32_t>(maxThresholdSlot, node.getThresholdSlot());
+            }
+        }
+
+
+        if (missingTree) {
+            std::cout << "❌ One or more trees are empty; aborting MCU export\n";
+            return false;
+        }
+
+        if (config.num_features > 0) {
+            uint32_t cfgMaxFeature = static_cast<uint32_t>(config.num_features - 1);
+            if (cfgMaxFeature > maxFeatureId) maxFeatureId = cfgMaxFeature;
+        }
+        if (config.num_labels > 0) {
+            uint32_t cfgMaxLabel = static_cast<uint32_t>(config.num_labels - 1);
+            if (cfgMaxLabel > maxLabelId) maxLabelId = cfgMaxLabel;
+        }
+
+        if (maxNodesPerTree > 0) {
+            uint32_t upperIndex = maxNodesPerTree - 1;
+            if (upperIndex > maxChildIndex) maxChildIndex = upperIndex;
+        }
+
+        // Basic bit layout per user principle: is_leaf(1) + threshold_bits + feature_bits + label_bits + child_bits
+        uint8_t featureBits = std::max<uint8_t>(1, bits_required(maxFeatureId));
+        uint8_t labelBits = std::max<uint8_t>(1, bits_required(maxLabelId));
+        uint8_t thresholdBits = QuantizationHelper::sanitizeBits(static_cast<int>(config.quantization_coefficient));
+        if (thresholdBits == 0) thresholdBits = 1;
+
+        // Remaining child bits in 32-bit word
+        int childBitsCalculated = 32 - (1 + thresholdBits + featureBits + labelBits);
+        if (childBitsCalculated <= 0) {
+            std::cout << "❌ Not enough bits for child index in 32-bit layout. (featureBits=" << (int)featureBits
+                    << ", labelBits=" << (int)labelBits << ", thresholdBits=" << (int)thresholdBits << ")\n";
+
+            return false;
+        }
+        uint8_t childBits = static_cast<uint8_t>(childBitsCalculated);
+
+        // Cap childBits to the required number of bits for maxChildIndex
+        uint8_t requiredChildBits = bits_required(maxChildIndex);
+        if (requiredChildBits > childBits) {
+            std::cout << "❌ Not enough bits for child index in 32-bit layout. (requiredChildBits=" << (int)requiredChildBits
+                      << ", availableChildBits=" << (int)childBits << ")\n";
+            return false;
+        } else{
+            childBits = requiredChildBits;
+        }
+
+        // compute starts
+        struct PackedLayout32 {
+            uint8_t threshold_start = 1;
+            uint8_t threshold_bits = 1;
+            uint8_t feature_start = 2;
+            uint8_t feature_bits = 1;
+            uint8_t label_start = 3;
+            uint8_t label_bits = 1;
+            uint8_t child_start = 4;
+            uint8_t child_bits = 1;
+            uint8_t bits_per_node() const { return static_cast<uint8_t>(1 + threshold_bits + feature_bits + label_bits + child_bits); }
+            void update_starts() {
+                feature_start = static_cast<uint8_t>(threshold_start + threshold_bits);
+                label_start = static_cast<uint8_t>(feature_start + feature_bits);
+                child_start = static_cast<uint8_t>(label_start + label_bits);
+            }
+        } layout32;
+        layout32.threshold_bits = thresholdBits;
+        layout32.feature_bits = featureBits;
+        layout32.label_bits = labelBits;
+        layout32.child_bits = childBits;
+        layout32.update_starts();
+
+        // Save calculated layout into config for MCU to use
+        config.threshold_bits = layout32.threshold_bits;
+        config.feature_bits = layout32.feature_bits;
+        config.label_bits = layout32.label_bits;
+        config.child_bits = layout32.child_bits;
+
+        auto mask_for_bits = [](uint8_t bits) -> uint32_t {
+            if (bits >= 32) return 0xFFFFFFFFu; 
+            if (bits == 0) return 0u;
+            return static_cast<uint32_t>(((1u << bits) - 1u));
+        };
+        const uint32_t featureMask = mask_for_bits(layout32.feature_bits);
+        const uint32_t labelMask = mask_for_bits(layout32.label_bits);
+        const uint32_t thresholdMask = mask_for_bits(layout32.threshold_bits);
+        const uint32_t childMask = mask_for_bits(layout32.child_bits);
+
+        if (static_cast<uint64_t>(maxFeatureId) > featureMask || static_cast<uint64_t>(maxLabelId) > labelMask || static_cast<uint64_t>(maxThresholdSlot) > thresholdMask || static_cast<uint64_t>(maxChildIndex) > childMask) {
+            std::cout << "❌ Forest metadata exceeds MCU bit layout."
+                        << " MaxFeature=" << maxFeatureId
+                        << " MaxLabel=" << maxLabelId
+                        << " MaxThresholdSlot=" << maxThresholdSlot
+                        << " MaxChildIndex=" << maxChildIndex << "\n";
+            return false;
+        }
+
+        // Write MCU format (32-bit packed nodes)
+        const uint32_t FOREST_MAGIC = 0x464F5253; // "FORS"
+        std::string unified_path = folder_path + "/" + model_name + "_forest.bin";
+        std::ofstream out(unified_path, std::ios::binary);
+        if (!out.is_open()) {
+            std::cout << "❌ Failed to create unified forest file: " << unified_path << "\n";
+            std::cout << "❌ MCU export aborted.\n";
+            return false;
+        }
+
+        out.write(reinterpret_cast<const char*>(&FOREST_MAGIC), sizeof(FOREST_MAGIC));
+        uint8_t bits_per_node = static_cast<uint8_t>(layout32.bits_per_node());
+        if (bits_per_node == 0) bits_per_node = 32;
+        uint8_t bytes_per_node = static_cast<uint8_t>((bits_per_node + 7) / 8);
+        out.write(reinterpret_cast<const char*>(&bits_per_node), sizeof(bits_per_node));
+        uint8_t tree_count_written = 0;
+        out.write(reinterpret_cast<const char*>(&tree_count_written), sizeof(tree_count_written));
+
+        uint32_t total_nodes_written = 0;
+        for (uint16_t i = 0; i < config.num_trees; ++i) {
+            if (root[i].nodes.empty()) continue;
+            uint32_t node_count = static_cast<uint32_t>(root[i].nodes.size());
+
+            uint8_t tree_index = static_cast<uint8_t>(i);
+            out.write(reinterpret_cast<const char*>(&tree_index), sizeof(tree_index));
+            out.write(reinterpret_cast<const char*>(&node_count), sizeof(node_count));
+
+            for (const auto& node : root[i].nodes) {
+                uint32_t thresholdSlot = node.getThresholdSlot();
+                uint32_t featureId = node.getFeatureID();
+                uint32_t labelId = node.getLabel();
+                uint32_t leftIndex = node.getLeftChildIndex();
+
+                if (thresholdSlot > thresholdMask || featureId > featureMask || labelId > labelMask || leftIndex > childMask) {
+                    std::cout << "❌ Node encoding overflow at tree " << static_cast<int>(i)
+                                << ", feature=" << featureId
+                                << ", label=" << labelId
+                                << ", leftIndex=" << leftIndex << "\n";
+                    out.close();
+                    std::remove(unified_path.c_str());
+                    return false;
+                }
+
+                uint32_t packed32 = 0u;
+                packed32 |= static_cast<uint32_t>(node.getIsLeaf() ? 1u : 0u);
+                packed32 |= (static_cast<uint32_t>(thresholdSlot) & thresholdMask) << layout32.threshold_start;
+                packed32 |= (static_cast<uint32_t>(featureId) & featureMask) << layout32.feature_start;
+                packed32 |= (static_cast<uint32_t>(labelId) & labelMask) << layout32.label_start;
+                packed32 |= (static_cast<uint32_t>(leftIndex) & childMask) << layout32.child_start;
+
+                out.write(reinterpret_cast<const char*>(&packed32), bytes_per_node);
+            }
+
+            ++tree_count_written;
+            total_nodes_written += node_count;
+        }
+
+        // Patch tree_count into header
+        out.seekp(static_cast<std::streamoff>(sizeof(FOREST_MAGIC) + sizeof(bits_per_node)), std::ios::beg);
         out.write(reinterpret_cast<const char*>(&tree_count_written), sizeof(tree_count_written));
         out.close();
 
-        if (!silent) {
-            int bits_per_node = layout.bits_per_node();
-            std::cout << "✅ Saved unified forest: " << (int)tree_count_written << "/" << (int)config.num_trees
-                      << " trees (" << total_nodes_written << " nodes - " << bits_per_node << " bits/node)\n";
-            // size of model file
-            std::ifstream in_size(unified_path, std::ifstream::ate | std::ifstream::binary);
-            if (in_size.is_open()) {
-                std::streamsize size = in_size.tellg();
-                in_size.close();
-                std::cout << "   - Model file size: " << size << " bytes\n";
-            }
-
-            // size of model in ram
-            size_t model_ram_size = (total_nodes_written * bits_per_node + 7)/ 8;
-            model_ram_size += 25 * config.num_trees; // overhead per tree
-            model_ram_size += 120;; // overhead for forest
-            std::cout << "   - Model size in RAM: ~" << model_ram_size << " bytes\n";
-
-            std::cout << "🔄 Convert model to mcu format...\n";
+        std::cout << "✅ Saved MCU unified forest: " << (int)tree_count_written << "/" << (int)config.num_trees
+                    << " trees (" << total_nodes_written << " nodes - " << (int)bits_per_node << " bits/node)\n";
+        std::ifstream in_size(unified_path, std::ifstream::ate | std::ifstream::binary);
+        if (in_size.is_open()) {
+            std::streamsize size = in_size.tellg();
+            in_size.close();
+            std::cout << "   - MCU Model file size: " << size << " bytes\n";
         }
+        size_t model_ram_size = (total_nodes_written * bits_per_node + 7)/ 8; // forest overhead
+        model_ram_size += 25 * config.num_trees; // overhead per tree
+        model_ram_size += 120; // overhead for forest
+        config.RAM_usage = model_ram_size;
+        std::cout << "   - Model size in RAM: ~" << model_ram_size << " bytes\n";
+        std::cout << "\n✅ Complete! Model files saved to 'trained_model/' directory.\n";
+        saveConfig();
+        return true;
     }
     
     // combined prediction metrics function
@@ -2101,37 +2276,29 @@ RandomForest::ThresholdSearchResult RandomForest::findBestThreshold(const vector
     return result;
 }
 
-
-int main(int argc, char** argv) {
-    (void)argc;
-    (void)argv;
-    auto start = std::chrono::high_resolution_clock::now();
-    std::cout << "Random Forest PC Training\n";
-    RandomForest forest;
-    // Build initial forest
-    forest.MakeForest();
-    // forest.printForestStatistics();
+void post_process_model(RandomForest& forest) {
+    std::cout << "\n📊 Post-processing model...\n";
     
-    // Train the forest to find optimal parameters (combine_ratio auto-calculated in first_scan)
-    forest.training();
-
-    //print forest statistics
+    // // Calculate node layout and save forest
+    // std::cout << "💾 Saving forest to binary format...\n";
+    // forest.saveForest(result_folder);
+    
+    // Print forest statistics
     forest.printForestStatistics();
     
-    
-    std::cout << "Training complete! Model saved to 'trained_model' directory.\n";
+    std::cout << "\n🧪 Evaluating model on test set...\n";
     auto result = forest.predict(forest.test_data);
 
     // Calculate Precision
     std::cout << "Precision in test set:\n";
+    std::cout << std::fixed << std::setprecision(3);
     b_vector<pair<uint16_t, float>, 16> precision = result[0];
     for (const auto& p : precision) {
-    //   Serial.printf("Label: %d - %.3f\n", p.first, p.second);
         std::cout << "Label: " << (int)p.first << " - " << p.second << "\n";
     }
     float avgPrecision = 0.0f;
     for (const auto& p : precision) {
-      avgPrecision += p.second;
+        avgPrecision += p.second;
     }
     avgPrecision /= precision.size();
     std::cout << "Avg: " << avgPrecision << "\n";
@@ -2140,11 +2307,11 @@ int main(int argc, char** argv) {
     std::cout << "Recall in test set:\n";
     b_vector<pair<uint16_t, float>, 16> recall = result[1];
     for (const auto& r : recall) {
-    std::cout << "Label: " << (int)r.first << " - " << r.second << "\n";
+        std::cout << "Label: " << (int)r.first << " - " << r.second << "\n";
     }
     float avgRecall = 0.0f;
     for (const auto& r : recall) {
-      avgRecall += r.second;
+        avgRecall += r.second;
     }
     avgRecall /= recall.size();
     std::cout << "Avg: " << avgRecall << "\n";
@@ -2157,7 +2324,7 @@ int main(int argc, char** argv) {
     }
     float avgF1 = 0.0f;
     for (const auto& f1 : f1_scores) {
-      avgF1 += f1.second;
+        avgF1 += f1.second;
     }
     avgF1 /= f1_scores.size();
     std::cout << "Avg: " << avgF1 << "\n";
@@ -2166,23 +2333,65 @@ int main(int argc, char** argv) {
     std::cout << "Overall Accuracy in test set:\n";
     b_vector<pair<uint16_t, float>, 16> accuracies = result[3];
     for (const auto& acc : accuracies) {
-      std::cout << "Label: " << (int)acc.first << " - " << acc.second << "\n";
+        std::cout << "Label: " << (int)acc.first << " - " << acc.second << "\n";
     }
     float avgAccuracy = 0.0f;
     for (const auto& acc : accuracies) {
-      avgAccuracy += acc.second;
+        avgAccuracy += acc.second;
     }
     avgAccuracy /= accuracies.size();
     std::cout << "Avg: " << avgAccuracy << "\n";
 
+    // Calculate result score based on metric flags
     float result_score = forest.predict(forest.test_data, static_cast<Rf_metric_scores>(forest.config.metric_score));
     forest.config.result_score = result_score;
-    forest.saveConfig();
-    std::cout << "result score: " << result_score << "\n";
+    std::cout << "\n✅ Result score: " << result_score << "\n";
+    forest.convertForestToMCU(result_folder);
+}
 
+int main(int argc, char** argv) {
+    // Parse command line arguments
+    bool enable_training = true;
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "-skip_training" || arg == "--skip_training") {
+            enable_training = false;
+        } else if (arg == "-h" || arg == "--help") {
+            std::cout << "Usage: " << argv[0] << " [options]\n";
+            std::cout << "Options:\n";
+            std::cout << "  -skip_training, --_skiptraining    Enable training mode (grid search for best parameters)\n";
+            std::cout << "  -h, --help              Show this help message\n";
+            return 0;
+        }
+    }
+    
+    auto start = std::chrono::high_resolution_clock::now();
+    std::cout << "Random Forest PC Training v" << VERSION << "\n";
+    
+    if (enable_training) {
+        std::cout << "🔧 Mode: Training with grid search\n";
+    } else {
+        std::cout << "🔧 Mode: Build model only (skip training)\n";
+    }
+    
+    RandomForest forest;
+    
+    // Build forest with initial/configured parameters
+    forest.build_model();
+    
+    // Optionally perform training (grid search)
+    if (enable_training) {
+        forest.training();
+    } else {
+        std::cout << "\n⏭️  Skipping training (grid search).\n";
+    }
+    
+    // Post-process: evaluate, save, and display results
+    post_process_model(forest);
     
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed = end - start;
-    std::cout << "Total time: " << elapsed.count() << " seconds\n ";
+    std::cout << "⏱️  Total time: " << elapsed.count() << " seconds\n";
+    
     return 0;
 }

@@ -239,7 +239,7 @@ private:
     // Optimization: Pre-allocated buffers to avoid repeated allocations
     int16_t* gradient_x_buffer;       // Gradient X components
     int16_t* gradient_y_buffer;       // Gradient Y components
-    uint16_t* magnitude_buffer;       // Gradient magnitudes (integer)
+    float* magnitude_buffer;          // Gradient magnitudes (float)
     uint8_t* angle_bin_buffer;        // Pre-computed angle bins
     float* block_histogram_buffer;    // Reusable block histogram buffer
     float* cell_histogram_buffer;     // Reusable cell histogram buffer
@@ -255,6 +255,7 @@ private:
     
     // Helper methods for gradient computation
     float computeGradientMagnitude(int gx, int gy);
+    // Compute gradient angle in radians (0 .. 2*PI)
     float computeGradientAngle(int gx, int gy);
     
     // Optimized gradient computation using integer arithmetic

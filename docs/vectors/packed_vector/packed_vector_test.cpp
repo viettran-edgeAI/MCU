@@ -320,6 +320,38 @@ void test_wide_bit_operations() {
         packed_vector<4> narrow_vec(10, 0xF);
         EXPECT(wide_vec.memory_usage() >= narrow_vec.memory_usage());
     } END_TEST
+
+    TEST("48-bit storage and retrieval") {
+        packed_vector<48, uint64_t> vec48;
+        uint64_t a = ((uint64_t)1 << 48) - 1ULL; // max 48-bit value
+        uint64_t b = 0x123456789ABULL & (((uint64_t)1 << 48) - 1ULL);
+        vec48.push_back(a);
+        vec48.push_back(b);
+        EXPECT(vec48.size() == 2);
+        EXPECT(vec48[0] == a && vec48[1] == b);
+    } END_TEST
+
+    TEST("64-bit storage (word size) and retrieval") {
+        packed_vector<64, uint64_t> vec64;
+        uint64_t v1 = 0xFEDCBA9876543210ULL;
+        uint64_t v2 = 0x0123456789ABCDEFULL;
+        vec64.push_back(v1);
+        vec64.push_back(v2);
+        EXPECT(vec64.size() == 2);
+        EXPECT(vec64[0] == v1 && vec64[1] == v2);
+    } END_TEST
+
+    TEST("Cross-boundary 40-bit read/write") {
+        packed_vector<40, uint64_t> vec40;
+        uint64_t x1 = (uint64_t)0xABCDEF0123ULL & ((((uint64_t)1<<40) - 1));
+        uint64_t x2 = (uint64_t)0x123456789AULL & ((((uint64_t)1<<40) - 1));
+        uint64_t x3 = (uint64_t)0x0FEDCBA987ULL & ((((uint64_t)1<<40) - 1));
+        vec40.push_back(x1);
+        vec40.push_back(x2);
+        vec40.push_back(x3);
+        EXPECT(vec40.size() == 3);
+        EXPECT(vec40[0] == x1 && vec40[1] == x2 && vec40[2] == x3);
+    } END_TEST
 }
 
 void test_iterators() {
@@ -623,8 +655,12 @@ void test_dynamic_bits_per_value() {
         v4.set_bits_per_value(10);  // valid reduction
         EXPECT(v4.get_bits_per_value() == 10);
 
-    v4.set_bits_per_value(40);  // exceeds supported range, ignored
-    EXPECT(v4.get_bits_per_value() == 10);
+        v4.set_bits_per_value(40);  // platform-dependent: check if it's accepted
+        if (sizeof(size_t) * 8 >= 40) {
+            EXPECT(v4.get_bits_per_value() == 40);
+        } else {
+            EXPECT(v4.get_bits_per_value() == 10);
+        }
     } END_TEST
 
     TEST("Memory efficiency with dynamic bpv") {

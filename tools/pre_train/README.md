@@ -10,8 +10,9 @@ This tool enables pre-training of optimized Random Forest models using normalize
 - Generates memory-efficient binary tree files
 - Supports multiple evaluation strategies (OOB, validation, cross-validation)
 - Provides comprehensive configuration override system
+- **Two execution modes**: Fast build-only mode for prototyping, full training mode for optimization
 
-> **Note:** While pre-training is recommended for optimal performance, you can still deploy raw data and run inference directly on ESP32 without this step.
+> **Note:** While pre-training is recommended for optimal performance, you can still deploy raw data and run inference directly on ESP32 without this step. Use build-only mode for quick prototyping and training mode for final optimization.
 
 ## Quick Start
 
@@ -40,11 +41,72 @@ This tool enables pre-training of optimized Random Forest models using normalize
 
 4. **Run the training:**
    ```bash
+   # Build model only (fast, no grid search)
    ./pre_train
+   
+   # Full training with grid search (slower, optimized parameters)
+   ./pre_train -training
    ```
 
 5. **Deploy results:**
    The trained model files in `trained_model/` directory are ready for ESP32 deployment
+
+## Execution Modes
+
+The tool supports two execution modes to accommodate different workflow needs:
+
+### Build Model Only Mode (Default)
+```bash
+./pre_train
+```
+**When to use:**
+- Quick model prototyping and testing
+- Large datasets where grid search would be too time-consuming
+- Memory-constrained development environments
+- When you want to use pre-configured parameters from `model_config.json`
+
+**What it does:**
+- Builds forest using first values from parameter ranges (`min_split_range[0]`, `min_leaf_range[0]`, `max_depth_range[0]`)
+- Uses config file values if parameters are marked as "enabled" in `model_config.json`
+- Calculates node layout and bit requirements for MCU deployment
+- Evaluates model on test set and saves complete configuration
+- **Fast execution** - skips expensive hyperparameter grid search
+
+### Training Mode (Grid Search)
+```bash
+./pre_train -training
+```
+**When to use:**
+- Final model optimization for production deployment
+- Small to medium datasets where grid search is feasible
+- When you want automatic hyperparameter optimization
+- Maximum accuracy requirements
+
+**What it does:**
+- Performs comprehensive grid search across all parameter combinations
+- Finds optimal `min_split`, `min_leaf`, and `max_depth` values
+- Uses cross-validation or validation sets for robust evaluation
+- Saves best-performing model configuration
+- **Slow execution** - can take hours on large datasets
+
+### Command Line Options
+
+| Option | Description |
+|--------|-------------|
+| `-training`, `--training` | Enable training mode with grid search |
+| `-h`, `--help` | Display help message and exit |
+
+**Examples:**
+```bash
+# Show help
+./pre_train --help
+
+# Quick build (default behavior)
+./pre_train
+
+# Full training with optimization
+./pre_train -training
+```
 
 ## Output Files
 
@@ -389,6 +451,13 @@ This directory includes specialized transfer tools for uploading pre-trained mod
 - **Cleaner Configuration**: Removed complex ratio combining logic for better user experience
 - **Automatic Fallback**: `valid_score` automatically switches to `oob_score` when validation set too small
 
+#### New Build Model Only Mode
+- **Fast Model Building**: New default mode that builds models quickly without grid search
+- **Command Line Control**: Use `-training` flag to enable full grid search optimization
+- **Smart Parameter Selection**: Uses first values from ranges or config overrides for rapid prototyping
+- **Complete Output**: Still generates all MCU deployment files and evaluates on test set
+- **Workflow Optimization**: Essential for large datasets and iterative development
+
 ### Migration Guide from v2024.09.1
 
 If you're upgrading from the previous version, update your `model_config.json`:
@@ -452,14 +521,22 @@ If you're upgrading from the previous version, update your `model_config.json`:
    - Reduce `num_trees`
    - Enable `max_depth` override with smaller value
    - Disable `use_bootstrap`
+   - **For large datasets**: Use build-only mode (`./pre_train`) instead of training mode
 
 4. **Poor Model Performance:**
    - Check dataset balance and adjust `metric_score` accordingly
    - Increase `num_trees` if memory allows
    - Verify data quality and normalization
    - Ensure split ratios are appropriate for your dataset size
+   - **For optimization**: Use training mode (`./pre_train -training`) for automatic hyperparameter tuning
 
-5. **Legacy Issues (Fixed in v2024.09):**
+5. **Slow Training Performance:**
+   - **Use build-only mode** for quick prototyping: `./pre_train`
+   - Enable parameter overrides in `model_config.json` to skip grid search
+   - Reduce `k_folds` for faster cross-validation
+   - Consider data sampling for very large datasets
+
+6. **Legacy Issues (Fixed in v2024.09):**
    - **Tree Building Bug**: Fixed critical feature indexing issue that caused poor accuracy
    - **Cross-Validation Crashes**: Resolved memory management issues in k-fold validation
    - **Configuration Parsing**: Enhanced robustness for nested JSON objects like `split_ratio`

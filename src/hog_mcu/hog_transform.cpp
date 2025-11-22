@@ -1,6 +1,7 @@
 #include "hog_transform.h"
 #include "Rf_file_manager.h"
 #include <cctype>
+#include <cmath>
 
 namespace {
 
@@ -481,9 +482,9 @@ void HOG_MCU::initializeBuffers() {
         }
         
         // Allocate gradient computation buffers
-        gradient_x_buffer = new int16_t[buffer_size];
-        gradient_y_buffer = new int16_t[buffer_size];
-        magnitude_buffer = new uint16_t[buffer_size];
+    gradient_x_buffer = new int16_t[buffer_size];
+    gradient_y_buffer = new int16_t[buffer_size];
+    magnitude_buffer = new float[buffer_size];
         angle_bin_buffer = new uint8_t[buffer_size];
         
         // Allocate histogram buffers (max size for typical HOG configs)
@@ -578,10 +579,9 @@ void HOG_MCU::compute(const uint8_t* grayImage) {
                                      grayImage[(iy - 1) * params.img_width + ix];
 
                             float mag = computeGradientMagnitude(gx, gy);
-                            float angle = computeGradientAngle(gx, gy);
-                            if (angle < 0) angle += 180.0f;
+                            float angle = computeGradientAngle(gx, gy); // radians [0,2PI)
 
-                            int bin = (int)(angle / (180.0f / params.nbins));
+                            int bin = (int)(angle / ((2.0f * PI) / params.nbins));
                             if (bin >= params.nbins) bin = params.nbins - 1;
 
                             hist[bin] += mag;
@@ -599,7 +599,7 @@ void HOG_MCU::compute(const uint8_t* grayImage) {
             for (int i = 0; i < blockHist.size(); ++i) {
                 norm += blockHist[i] * blockHist[i];
             }
-            norm = sqrt(norm + 1e-6f);
+            norm = sqrtf(norm) + 1e-6f;
             for (int i = 0; i < blockHist.size(); ++i) {
                 blockHist[i] /= norm;
             }
@@ -615,11 +615,15 @@ void HOG_MCU::compute(const uint8_t* grayImage) {
 }
 
 float HOG_MCU::computeGradientMagnitude(int gx, int gy) {
-    return sqrt(gx * gx + gy * gy);
+    // Use float magnitude consistent with hog_processor
+    return sqrtf(static_cast<float>(gx) * static_cast<float>(gx) + static_cast<float>(gy) * static_cast<float>(gy));
 }
 
 float HOG_MCU::computeGradientAngle(int gx, int gy) {
-    return atan2(gy, gx) * 180.0f / PI;
+    // Return angle in radians in range [0, 2*PI)
+    float angle = atan2f(static_cast<float>(gy), static_cast<float>(gx));
+    if (angle < 0.0f) angle += 2.0f * PI;
+    return angle;
 }
 
 // Optimized gradient computation using integer arithmetic
@@ -639,30 +643,16 @@ void HOG_MCU::computeGradientsOptimized(const uint8_t* grayImage) {
             gradient_x_buffer[idx] = gx;
             gradient_y_buffer[idx] = gy;
             
-            // Magnitude: use integer approximation |gx| + |gy| (faster than sqrt)
-            int abs_gx = gx >= 0 ? gx : -gx;
-            int abs_gy = gy >= 0 ? gy : -gy;
-            magnitude_buffer[idx] = abs_gx + abs_gy;
-            
-            // Integer-based bin classification (no atan2!)
-            // For 4 bins: [0°-45°, 45°-90°, 90°-135°, 135°-180°]
-            uint8_t bin = 0;
-            if (params.nbins == 4) {
-                // Compare abs_gx and abs_gy to determine bin
-                if (abs_gx >= abs_gy) {
-                    // Dominantly horizontal (0°-45° or 135°-180°)
-                    bin = (gx >= 0) ? 0 : 2;  // 0° or 180° quadrant
-                } else {
-                    // Dominantly vertical (45°-90° or 90°-135°)
-                    bin = (gy >= 0) ? 1 : 3;  // 90° quadrant or opposite
-                }
-            } else {
-                // Fallback for non-4-bin configs (rarely used)
-                float angle = atan2f(gy, gx) * 180.0f / PI;
-                if (angle < 0) angle += 180.0f;
-                bin = (int)(angle / (180.0f / params.nbins));
-                if (bin >= params.nbins) bin = params.nbins - 1;
-            }
+            // Magnitude: compute with float sqrt for accurate weighting
+            float mag = sqrtf(static_cast<float>(gx) * static_cast<float>(gx) + static_cast<float>(gy) * static_cast<float>(gy));
+            magnitude_buffer[idx] = mag;
+
+            // Angle bin classification using atan2f with range [0, 2*PI)
+            float angle = atan2f(static_cast<float>(gy), static_cast<float>(gx));
+            if (angle < 0.0f) angle += 2.0f * PI;
+
+            uint8_t bin = static_cast<uint8_t>(angle / ((2.0f * PI) / params.nbins));
+            if (bin >= params.nbins) bin = params.nbins - 1;
             angle_bin_buffer[idx] = bin;
         }
     }
@@ -765,7 +755,7 @@ void HOG_MCU::computeOptimized(const uint8_t* grayImage) {
             for (int i = 0; i < nbins * 4; ++i) {
                 norm += block_histogram_buffer[i] * block_histogram_buffer[i];
             }
-            norm = sqrtf(norm + 1e-6f);
+            norm = sqrtf(norm) + 1e-6f;
             
             // Add normalized features to output
             for (int i = 0; i < nbins * 4; ++i) {

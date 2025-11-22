@@ -54,51 +54,46 @@ using sample_set   = vector<Rf_sample>; // set of samples
 
 
 struct Tree_node{
-    uint64_t packed_data; 
+    uint32_t layout_1; // packed: feature,label,threshold,is_leaf (fits in 32 bits)
+    uint32_t layout_2; // child index (left child). right child = left + 1
 
-    // Bit layout (64 bits total) - optimized for breadth-first tree building with large dataset support:
-    // Bits 0-15:   featureID (16 bits)
-    // Bits 16-27:  label (12 bits)
-    // Bits 28-35:  threshold slot (8 bits) to cover up to 256 quantized thresholds
-    // Bit 36:      is_leaf (1 bit)
-    // Bits 37-63:  left child index (27 bits)
-    // Note: right child index = left child index + 1 (breadth-first property)
-
+    // Layout for layout_1 (32 bits): [is_leaf(1) | threshold(8) | label(8) | feature(15)]
+    // Bits: 0..14 feature (15 bits)
+    //       15..22 label (8 bits)
+    //       23..30 threshold slot (8 bits)
+    //       31     is_leaf (1 bit)
     static constexpr uint8_t FEATURE_SHIFT = 0;
-    static constexpr uint64_t FEATURE_MASK = 0xFFFFull;
+    static constexpr uint32_t FEATURE_MASK = 0x7FFFu; // 15 bits
 
-    static constexpr uint8_t LABEL_SHIFT = 16;
-    static constexpr uint64_t LABEL_MASK = 0xFFFull;
+    static constexpr uint8_t LABEL_SHIFT = 15;
+    static constexpr uint32_t LABEL_MASK = 0xFFu; // 8 bits
 
-    static constexpr uint8_t THRESHOLD_SHIFT = 28;
-    static constexpr uint64_t THRESHOLD_MASK = 0xFFull;
+    static constexpr uint8_t THRESHOLD_SHIFT = 23;
+    static constexpr uint32_t THRESHOLD_MASK = 0xFFu; // 8 bits
 
-    static constexpr uint8_t IS_LEAF_SHIFT = 36;
-    static constexpr uint64_t IS_LEAF_MASK = 0x1ull;
+    static constexpr uint8_t IS_LEAF_SHIFT = 31;
+    static constexpr uint32_t IS_LEAF_MASK = 0x1u; // 1 bit
 
-    static constexpr uint8_t LEFT_SHIFT = 37;
-    static constexpr uint64_t LEFT_MASK = 0x1FFFFFFull; // 27 bits
-
-    Tree_node() : packed_data(0) {}
+    Tree_node() : layout_1(0), layout_2(0) {}
 
     uint32_t getFeatureID() const {
-        return static_cast<uint32_t>((packed_data >> FEATURE_SHIFT) & FEATURE_MASK);
+        return static_cast<uint32_t>((layout_1 >> FEATURE_SHIFT) & FEATURE_MASK);
     }
     
     uint32_t getLabel() const {
-        return static_cast<uint32_t>((packed_data >> LABEL_SHIFT) & LABEL_MASK);
+        return static_cast<uint32_t>((layout_1 >> LABEL_SHIFT) & LABEL_MASK);
     }
     
     uint16_t getThresholdSlot() const {
-        return static_cast<uint16_t>((packed_data >> THRESHOLD_SHIFT) & THRESHOLD_MASK);
+        return static_cast<uint16_t>((layout_1 >> THRESHOLD_SHIFT) & THRESHOLD_MASK);
     }
     
     bool getIsLeaf() const {
-        return static_cast<bool>((packed_data >> IS_LEAF_SHIFT) & IS_LEAF_MASK);
+        return static_cast<bool>((layout_1 >> IS_LEAF_SHIFT) & IS_LEAF_MASK);
     }
     
     uint32_t getLeftChildIndex() const {
-        return static_cast<uint32_t>((packed_data >> LEFT_SHIFT) & LEFT_MASK);
+        return layout_2;
     }
     
     uint32_t getRightChildIndex() const {
@@ -106,31 +101,28 @@ struct Tree_node{
     }
     
     void setFeatureID(uint32_t featureID) {
-        packed_data &= ~(FEATURE_MASK << FEATURE_SHIFT);
-        packed_data |= (static_cast<uint64_t>(featureID) & FEATURE_MASK) << FEATURE_SHIFT;
+        layout_1 &= ~(static_cast<uint32_t>(FEATURE_MASK) << FEATURE_SHIFT);
+        layout_1 |= (static_cast<uint32_t>(featureID) & FEATURE_MASK) << FEATURE_SHIFT;
     }
     
     void setLabel(uint32_t label) {
-        packed_data &= ~(LABEL_MASK << LABEL_SHIFT);
-        packed_data |= (static_cast<uint64_t>(label) & LABEL_MASK) << LABEL_SHIFT;
+        layout_1 &= ~(static_cast<uint32_t>(LABEL_MASK) << LABEL_SHIFT);
+        layout_1 |= (static_cast<uint32_t>(label) & LABEL_MASK) << LABEL_SHIFT;
     }
     
     void setThresholdSlot(uint16_t slot) {
-        packed_data &= ~(THRESHOLD_MASK << THRESHOLD_SHIFT);
-        packed_data |= (static_cast<uint64_t>(slot) & THRESHOLD_MASK) << THRESHOLD_SHIFT;
+        layout_1 &= ~(static_cast<uint32_t>(THRESHOLD_MASK) << THRESHOLD_SHIFT);
+        layout_1 |= (static_cast<uint32_t>(slot) & THRESHOLD_MASK) << THRESHOLD_SHIFT;
     }
     
     void setIsLeaf(bool isLeaf) {
-        packed_data &= ~(IS_LEAF_MASK << IS_LEAF_SHIFT);
-        packed_data |= (static_cast<uint64_t>(isLeaf ? 1u : 0u) & IS_LEAF_MASK) << IS_LEAF_SHIFT;
+        layout_1 &= ~(static_cast<uint32_t>(IS_LEAF_MASK) << IS_LEAF_SHIFT);
+        layout_1 |= (static_cast<uint32_t>(isLeaf ? 1u : 0u) & IS_LEAF_MASK) << IS_LEAF_SHIFT;
     }
     
     void setLeftChildIndex(uint32_t index) {
-        packed_data &= ~(LEFT_MASK << LEFT_SHIFT);
-        packed_data |= (static_cast<uint64_t>(index) & LEFT_MASK) << LEFT_SHIFT;
+        layout_2 = index;
     }
-    
-    // Note: setRightChildIndex is not needed since right = left + 1
 };
 
 struct NodeToBuild {
@@ -160,7 +152,7 @@ class Rf_tree {
     }
 
     size_t get_memory_usage() const {
-        return nodes.size() * 8;  // 8 bytes per node (uint64_t)
+        return nodes.size() * 8;  // 8 bytes per node (two uint32_t)
     }
 
     // Count leaf nodes in the tree
@@ -192,14 +184,49 @@ class Rf_tree {
         // Write header
         uint32_t magic = 0x54524545;
         file.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
-        
-        // Write number of nodes
+
+        // Precompute packed values (32-bit for MCU export) and determine highest used bit
+        uint32_t maxPacked = 0u;
+        vector<uint32_t> packedVals;
+        packedVals.reserve(nodes.size());
+        for (const auto& node : nodes) {
+            uint32_t packed32 = 0u;
+            packed32 |= static_cast<uint32_t>(node.getIsLeaf() ? 1u : 0u);
+            packed32 |= (static_cast<uint32_t>(node.getThresholdSlot()) & 0xFFu) << 23; // THRESHOLD_SHIFT
+            packed32 |= (static_cast<uint32_t>(node.getLabel()) & 0xFFu) << 15; // LABEL_SHIFT
+            packed32 |= (static_cast<uint32_t>(node.getFeatureID()) & 0x7FFFu) << 0; // FEATURE_SHIFT
+            // Left child index stored separately in layout_2 on PC version if needed, but MCU uses only 32-bit packed layout
+            packedVals.push_back(packed32);
+            maxPacked |= packed32;
+        }
+
+        // compute bits needed
+        auto bits_required = [](uint64_t v) -> uint8_t {
+            if (v == 0) return 1;
+            uint8_t bits = 0;
+            while (v) { bits++; v >>= 1; }
+            return bits;
+        };
+
+        uint8_t bitsPerNode = bits_required(maxPacked);
+        if (bitsPerNode == 0) bitsPerNode = 32;
+        // For MCU compatibility only allow up to 32 bits per node. Abort if requiring more.
+        if (bitsPerNode > 32) {
+            std::cout << "⚠️  Node layout requires " << static_cast<int>(bitsPerNode)
+                      << " bits which exceeds MCU limit (32). Aborting save for MCU export.\n";
+            file.close();
+            return;
+        }
+        uint8_t bytesPerNode = static_cast<uint8_t>((bitsPerNode + 7) / 8);
+
+        // Write bits-per-node then number of nodes
+        file.write(reinterpret_cast<const char*>(&bitsPerNode), sizeof(bitsPerNode));
         uint32_t nodeCount = nodes.size();
         file.write(reinterpret_cast<const char*>(&nodeCount), sizeof(nodeCount));
-        
-        // Save all nodes - just save the packed_data since everything is packed into it
-        for (const auto& node : nodes) {
-            file.write(reinterpret_cast<const char*>(&node.packed_data), sizeof(node.packed_data));
+
+        // Save all nodes: write only bytesPerNode for each packed value
+        for (const auto& packed32 : packedVals) {
+            file.write(reinterpret_cast<const char*>(&packed32), bytesPerNode);
         }
         
         file.close();
@@ -223,8 +250,17 @@ class Rf_tree {
             file.close();
             return;
         }
-        
-        // Read number of nodes
+
+        // Read bits-per-node then number of nodes
+        uint8_t bitsPerNode = 0;
+        file.read(reinterpret_cast<char*>(&bitsPerNode), sizeof(bitsPerNode));
+        if (bitsPerNode == 0) bitsPerNode = 32; // fallback for older files
+        if (bitsPerNode > 32) {
+            std::cerr << "⚠️  Node bits-per-node in file exceeds MCU limit (" << static_cast<int>(bitsPerNode) << ")\n";
+            return;
+        }
+        uint8_t bytesPerNode = static_cast<uint8_t>((bitsPerNode + 7) / 8);
+
         uint32_t nodeCount;
         file.read(reinterpret_cast<char*>(&nodeCount), sizeof(nodeCount));
         if (nodeCount == 0 || nodeCount > 4294967295U) { // 32-bit limit for large trees
@@ -232,23 +268,25 @@ class Rf_tree {
             file.close();
             return;
         }
-        
+
         // Clear existing nodes and reserve space
         nodes.clear();
         nodes.reserve(nodeCount);
-        
-        // Load all nodes
+
+        // Load all nodes (read bytesPerNode into a 32-bit buffer and split into layout_1/layout_2)
         for (uint32_t i = 0; i < nodeCount; i++) {
             Tree_node node;
-            file.read(reinterpret_cast<char*>(&node.packed_data), sizeof(node.packed_data));
-            
+            uint32_t packed32 = 0u;
+            file.read(reinterpret_cast<char*>(&packed32), bytesPerNode);
             if (file.fail()) {
                 std::cout << "❌ Failed to read node " << i << " from tree file: " << file_path << std::endl;
                 nodes.clear();
                 file.close();
                 return;
             }
-            
+
+            node.layout_1 = packed32;
+            node.layout_2 = 0u;
             nodes.push_back(node);
         }
         
@@ -339,7 +377,7 @@ public:
     void loadCSVData(std::string csvFilename, uint16_t numFeatures) {
         std::ifstream file(csvFilename);
         if (!file.is_open()) {
-            std::cout << "❌ Failed to open CSV file for reading: " << csvFilename << std::endl;
+            std::cout << "❌ Failed to open data file for reading: " << csvFilename << std::endl;
             return;
         }
 
@@ -1184,7 +1222,15 @@ public:
             std::cout << "🔧 min_split override active: using fixed value " << (int)min_split << "\n";
         } else {
             // min_split automatic - build range with step 2
-            uint16_t min_split_step = 2;
+            uint16_t min_split_step;
+            size_t total_object = num_samples * num_features;
+            if (total_object < 50000) {
+                min_split_step = 1; // Finer steps for small datasets
+            } else if (total_object < 1000000) {
+                min_split_step = 2;
+            } else {
+                min_split_step = 3; // Coarser steps for large datasets
+            }
             if(overwrite[1] || max_minSplit - min_minSplit < 4) {
                 min_split_step = 1; // If min_leaf is overridden, use smaller step for min_split
             }
@@ -1221,7 +1267,16 @@ public:
             max_depth_range.push_back(max_depth);
             std::cout << "🔧 max_depth override active: using fixed value " << (int)max_depth << "\n";
         } else {
-            uint16_t max_depth_step = 2;  // Step of 3 to reduce combinations
+            // uint16_t max_depth_step = 2;  // Step of 3 to reduce combinations
+            uint16_t max_depth_step;
+            size_t total_object = num_samples * num_features;
+            if(total_object < 50000) {
+                max_depth_step = 1; // Finer steps for small datasets
+            } else if (total_object < 1000000) {
+                max_depth_step = 2;
+            } else {
+                max_depth_step = 3; // Coarser steps for large datasets
+            }
             for(uint16_t i = min_maxDepth; i <= max_maxDepth; i += max_depth_step) {
                 max_depth_range.push_back(i);
             }
@@ -1359,7 +1414,7 @@ struct node_data {
     node_data(uint16_t min_split, uint16_t min_leaf, uint16_t max_depth){
         min_split = min_split;
         min_leaf = min_leaf;
-        max_depth = max_depth;
+        max_depth = max_depth; 
         total_nodes = 0; // Default to 0, will be calculated later
     }
 };
@@ -1382,7 +1437,7 @@ public:
     // Improved multiple linear regression using least squares method with robustness
     void compute_coefficients() {
         if (training_data.empty()) {
-            std::cerr << "❌ No training data available" << std::endl;
+            std::cerr << "❌ No node_predictor training data available" << std::endl;
             return;
         }
         
@@ -1556,7 +1611,7 @@ public:
     bool init(const std::string& csv_file_path) {
         std::ifstream file(csv_file_path);
         if (!file.is_open()) {
-            std::cerr << "❌ Failed to open CSV file: " << csv_file_path << std::endl;
+            std::cerr << "❌ Failed to open node log file: " << csv_file_path << std::endl;
             return false;
         }
         
@@ -1641,7 +1696,7 @@ public:
     // Save trained model to binary file
     bool save_model(const std::string& bin_file_path) const {
         if (!is_trained) {
-            std::cerr << "❌ Model not trained yet" << std::endl;
+            std::cerr << "❌ Node predictor not trained yet" << std::endl;
             return false;
         }
         

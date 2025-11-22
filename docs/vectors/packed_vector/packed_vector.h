@@ -24,12 +24,12 @@ namespace mcu {
 
     template<typename T, typename Enable = void>
     struct packed_value_traits {
-        static uint32_t to_bits(const T&) {
+        static size_t to_bits(const T&) {
             static_assert(dependent_false<T>::value, "packed_value_traits specialization required for this type");
             return 0;
         }
 
-        static T from_bits(uint32_t) {
+        static T from_bits(size_t) {
             static_assert(dependent_false<T>::value, "packed_value_traits specialization required for this type");
             return T{};
         }
@@ -37,11 +37,11 @@ namespace mcu {
 
     template<typename T>
     struct packed_value_traits<T, std::enable_if_t<std::is_integral_v<T> || std::is_enum_v<T>>> {
-        static constexpr uint32_t to_bits(T value) noexcept {
-            return static_cast<uint32_t>(value);
+        static constexpr size_t to_bits(T value) noexcept {
+            return static_cast<size_t>(value);
         }
 
-        static constexpr T from_bits(uint32_t bits) noexcept {
+        static constexpr T from_bits(size_t bits) noexcept {
             return static_cast<T>(bits);
         }
     };
@@ -49,14 +49,14 @@ namespace mcu {
     template<typename T>
     struct packed_value_traits<T, std::enable_if_t<!std::is_integral_v<T> && !std::is_enum_v<T> &&
                                                   std::is_trivially_copyable_v<T> &&
-                                                  (sizeof(T) <= sizeof(uint32_t))>> {
-        static uint32_t to_bits(const T& value) noexcept {
-            uint32_t bits = 0;
+                                                  (sizeof(T) <= sizeof(size_t))>> {
+        static size_t to_bits(const T& value) noexcept {
+            size_t bits = 0;
             std::memcpy(&bits, &value, sizeof(T));
             return bits;
         }
 
-        static T from_bits(uint32_t bits) noexcept {
+        static T from_bits(size_t bits) noexcept {
             T value{};
             std::memcpy(&value, &bits, sizeof(T));
             return value;
@@ -206,9 +206,13 @@ namespace mcu {
     
     template<uint8_t BitsPerElement>
     class PackedArray {
-        static_assert(BitsPerElement > 0 && BitsPerElement <= 32, "Invalid bit size");
+        static_assert(BitsPerElement > 0, "Invalid bit size");
 
-        uint32_t* data = nullptr;
+    public:
+        using word_t = size_t;
+        static constexpr size_t WORD_BITS = sizeof(word_t) * 8;
+    private:
+        word_t* data = nullptr;
         uint8_t bpv_ = BitsPerElement;
         size_t capacity_words_ = 0;
 
@@ -218,9 +222,9 @@ namespace mcu {
         explicit PackedArray(size_t capacity_words)
             : bpv_(BitsPerElement), capacity_words_(capacity_words) {
             if (capacity_words_ > 0) {
-                data = mem_alloc::allocate<uint32_t>(capacity_words_);
+                data = mem_alloc::allocate<word_t>(capacity_words_);
                 if (data) {
-                    std::fill_n(data, capacity_words_, static_cast<uint32_t>(0));
+                    std::fill_n(data, capacity_words_, static_cast<word_t>(0));
                 } else {
                     capacity_words_ = 0;
                 }
@@ -236,12 +240,12 @@ namespace mcu {
         PackedArray(const PackedArray& other, size_t words)
             : bpv_(other.bpv_), capacity_words_(words) {
             if (capacity_words_ > 0) {
-                data = mem_alloc::allocate<uint32_t>(capacity_words_);
+                data = mem_alloc::allocate<word_t>(capacity_words_);
                 if (data) {
                     if (other.data) {
                         std::copy(other.data, other.data + capacity_words_, data);
                     } else {
-                        std::fill_n(data, capacity_words_, static_cast<uint32_t>(0));
+                        std::fill_n(data, capacity_words_, static_cast<word_t>(0));
                     }
                 } else {
                     capacity_words_ = 0;
@@ -267,12 +271,12 @@ namespace mcu {
             capacity_words_ = words;
 
             if (capacity_words_ > 0) {
-                data = mem_alloc::allocate<uint32_t>(capacity_words_);
+                data = mem_alloc::allocate<word_t>(capacity_words_);
                 if (data) {
                     if (other.data) {
                         std::copy(other.data, other.data + capacity_words_, data);
                     } else {
-                        std::fill_n(data, capacity_words_, static_cast<uint32_t>(0));
+                        std::fill_n(data, capacity_words_, static_cast<word_t>(0));
                     }
                 } else {
                     capacity_words_ = 0;
@@ -303,84 +307,76 @@ namespace mcu {
         uint8_t get_bpv() const { return bpv_; }
 
         void set_bpv(uint8_t new_bpv) {
-            if (new_bpv > 0 && new_bpv <= 32) {
+            if (new_bpv > 0) {
                 bpv_ = new_bpv;
             }
         }
 
-        __attribute__((always_inline)) inline void set_unsafe(size_t index, uint32_t value) {
+    __attribute__((always_inline)) inline void set_unsafe(size_t index, size_t value) {
             if (!data) {
                 return;
             }
 
             const uint8_t active_bpv = bpv_;
-            const uint32_t mask = (active_bpv >= 32)
-                ? static_cast<uint32_t>(std::numeric_limits<uint32_t>::max())
-                : ((uint32_t{1} << active_bpv) - 1ull);
-            const uint32_t clamped = static_cast<uint32_t>(value) & mask;
+            const size_t mask = (active_bpv >= WORD_BITS)
+                ? static_cast<size_t>(std::numeric_limits<size_t>::max())
+                : ((static_cast<size_t>(1) << active_bpv) - 1ull);
+            const size_t clamped = static_cast<size_t>(value) & mask;
 
-            const size_t bitPos = index * active_bpv;
-            const size_t wordIdx = bitPos >> 5;
+            const size_t bitPos = index * static_cast<size_t>(active_bpv);
+            const size_t wordIdx = bitPos / WORD_BITS;
             if (wordIdx >= capacity_words_) {
                 return;
             }
 
-            const size_t bitOff = bitPos & 31;
-            uint32_t* word = data + wordIdx;
-            const size_t firstBits = std::min<size_t>(32 - bitOff, active_bpv);
-            const uint32_t firstMask = (firstBits == 32)
-                ? std::numeric_limits<uint32_t>::max()
-                : ((uint32_t{1} << firstBits) - 1u);
+            size_t bitOff = bitPos % WORD_BITS;
+            size_t remaining = active_bpv;
+            size_t srcShift = 0;
+            size_t wIndex = wordIdx;
 
-            *word = (*word & ~(firstMask << bitOff)) | ((clamped & firstMask) << bitOff);
-
-            if (firstBits < active_bpv) {
-                const size_t secondBits = active_bpv - firstBits;
-                if ((wordIdx + 1) >= capacity_words_) {
-                    return;
-                }
-                uint32_t* nextWord = data + wordIdx + 1;
-                const uint32_t secondMask = (secondBits == 32)
-                    ? std::numeric_limits<uint32_t>::max()
-                    : ((uint32_t{1} << secondBits) - 1u);
-                const uint32_t secondPart = clamped >> firstBits;
-                *nextWord = (*nextWord & ~secondMask) | (secondPart & secondMask);
+            while (remaining > 0) {
+                if (wIndex >= capacity_words_) return;
+                size_t bitsInWord = std::min<size_t>(WORD_BITS - bitOff, remaining);
+                const size_t maskPart = (bitsInWord == WORD_BITS) ? std::numeric_limits<size_t>::max() : ((static_cast<size_t>(1) << bitsInWord) - 1u);
+                word_t& w = data[wIndex];
+                w = (w & ~(maskPart << bitOff)) | (((clamped >> srcShift) & maskPart) << bitOff);
+                remaining -= bitsInWord;
+                srcShift += bitsInWord;
+                bitOff = 0;
+                ++wIndex;
             }
         }
 
-        __attribute__((always_inline)) inline uint32_t get_unsafe(size_t index) const {
+    __attribute__((always_inline)) inline size_t get_unsafe(size_t index) const {
             if (!data) {
                 return 0;
             }
 
             const uint8_t active_bpv = bpv_;
-            const size_t bitPos = index * active_bpv;
-            const size_t wordIdx = bitPos >> 5;
+            const size_t bitPos = index * static_cast<size_t>(active_bpv);
+            const size_t wordIdx = bitPos / WORD_BITS;
             if (wordIdx >= capacity_words_) {
                 return 0;
             }
 
-            const size_t bitOff = bitPos & 31;
-            const uint32_t firstWord = data[wordIdx];
-            const size_t firstBits = std::min<size_t>(32 - bitOff, active_bpv);
-            const uint32_t firstMask = (firstBits == 32)
-                ? std::numeric_limits<uint32_t>::max()
-                : ((uint32_t{1} << firstBits) - 1u);
-            uint32_t value = (firstWord >> bitOff) & firstMask;
-
-            if (firstBits < active_bpv) {
-                if ((wordIdx + 1) >= capacity_words_) {
-                    return static_cast<uint32_t>(value);
-                }
-                const size_t secondBits = active_bpv - firstBits;
-                const uint32_t secondWord = data[wordIdx + 1];
-                const uint32_t secondMask = (secondBits == 32)
-                    ? std::numeric_limits<uint32_t>::max()
-                    : ((uint32_t{1} << secondBits) - 1u);
-                value |= (secondWord & secondMask) << firstBits;
+            size_t bitOff = bitPos % WORD_BITS;
+            size_t remaining = active_bpv;
+            size_t dstShift = 0;
+            size_t value = 0;
+            size_t wIdx = wordIdx;
+            while (remaining > 0) {
+                if (wIdx >= capacity_words_) return 0;
+                size_t bitsInWord = std::min<size_t>(WORD_BITS - bitOff, remaining);
+                const size_t maskPart = (bitsInWord == WORD_BITS) ? std::numeric_limits<size_t>::max() : ((static_cast<size_t>(1) << bitsInWord) - 1u);
+                const size_t w = data[wIdx];
+                size_t part = (w >> bitOff) & maskPart;
+                value |= (part << dstShift);
+                remaining -= bitsInWord;
+                dstShift += bitsInWord;
+                bitOff = 0;
+                ++wIdx;
             }
-
-            return static_cast<uint32_t>(value);
+            return value;
         }
 
         void copy_elements(const PackedArray& src, size_t element_count) {
@@ -399,23 +395,24 @@ namespace mcu {
             }
         }
 
-        void set(size_t index, uint32_t value) { set_unsafe(index, value); }
-        uint32_t get(size_t index) const { return get_unsafe(index); }
+    void set(size_t index, size_t value) { set_unsafe(index, value); }
+    size_t get(size_t index) const { return get_unsafe(index); }
 
-        uint32_t* raw_data() { return data; }
-        const uint32_t* raw_data() const { return data; }
+    word_t* raw_data() { return data; }
+    const word_t* raw_data() const { return data; }
         size_t words() const { return capacity_words_; }
     };
 
 
-    template<uint8_t BitsPerElement, typename ValueType = uint32_t>
+    template<uint8_t BitsPerElement, typename ValueType = size_t>
     class packed_vector {
-        static_assert(BitsPerElement > 0 && BitsPerElement <= 32, "Invalid bit size");
+    static_assert(BitsPerElement > 0, "Invalid bit size");
 
     public:
         using value_type = ValueType;
         using size_type = size_t;
         using traits_type = packed_value_traits<value_type>;
+        using word_t = typename PackedArray<BitsPerElement>::word_t;
 
     private:
         PackedArray<BitsPerElement> packed_data;
@@ -427,44 +424,45 @@ namespace mcu {
                 ? (std::numeric_limits<size_type>::max() / 2)
                 : static_cast<size_type>(1);
 
-        static constexpr uint32_t COMPILED_MAX_BITS =
-            (BitsPerElement >= 32)
-                ? std::numeric_limits<uint32_t>::max()
-                : ((uint32_t{1} << BitsPerElement) - 1u);
+        static constexpr size_t COMPILED_MAX_BITS =
+            (BitsPerElement >= (int)PackedArray<BitsPerElement>::WORD_BITS)
+                ? std::numeric_limits<size_t>::max()
+                : ((static_cast<size_t>(1) << BitsPerElement) - 1u);
 
         static inline size_t calc_words_for_bpv(size_type capacity, uint8_t bpv) {
             const size_t bits = capacity * static_cast<size_t>(bpv);
-            return (bits + 31u) >> 5;
+            const size_t word_bits = PackedArray<BitsPerElement>::WORD_BITS;
+            return (bits + word_bits - 1u) / word_bits;
         }
 
-        static inline uint32_t runtime_mask(uint8_t bpv) {
-            if (bpv >= 32) {
-                return std::numeric_limits<uint32_t>::max();
+        static inline size_t runtime_mask(uint8_t bpv) {
+            if (bpv >= PackedArray<BitsPerElement>::WORD_BITS) {
+                return std::numeric_limits<size_t>::max();
             }
-            return (uint32_t{1} << bpv) - 1u;
+            return (static_cast<size_t>(1) << bpv) - 1u;
         }
 
-        __attribute__((always_inline)) inline uint32_t mask_bits(uint32_t bits, uint8_t bpv) const {
+        __attribute__((always_inline)) inline size_t mask_bits(size_t bits, uint8_t bpv) const {
             return bits & runtime_mask(bpv);
         }
 
-        __attribute__((always_inline)) inline uint32_t mask_bits(uint32_t bits) const {
+        __attribute__((always_inline)) inline size_t mask_bits(size_t bits) const {
             return mask_bits(bits, packed_data.get_bpv());
         }
 
-        __attribute__((always_inline)) inline uint32_t to_storage_bits(const value_type& value, uint8_t bpv) const {
+        __attribute__((always_inline)) inline size_t to_storage_bits(const value_type& value, uint8_t bpv) const {
             return mask_bits(traits_type::to_bits(value), bpv);
         }
 
-        __attribute__((always_inline)) inline uint32_t to_storage_bits(const value_type& value) const {
+        __attribute__((always_inline)) inline size_t to_storage_bits(const value_type& value) const {
             return to_storage_bits(value, packed_data.get_bpv());
         }
 
-        __attribute__((always_inline)) inline value_type from_storage_bits(uint32_t bits, uint8_t bpv) const {
+        __attribute__((always_inline)) inline value_type from_storage_bits(size_t bits, uint8_t bpv) const {
             return traits_type::from_bits(mask_bits(bits, bpv));
         }
 
-        __attribute__((always_inline)) inline value_type from_storage_bits(uint32_t bits) const {
+        __attribute__((always_inline)) inline value_type from_storage_bits(size_t bits) const {
             return from_storage_bits(bits, packed_data.get_bpv());
         }
 
@@ -483,9 +481,9 @@ namespace mcu {
             }
 
             bool drop_header = false;
-            if (packed_value_traits<T>::to_bits(view.data[0]) == static_cast<uint32_t>(active_bpv) && view.count > 1) {
+            if (packed_value_traits<T>::to_bits(view.data[0]) == static_cast<size_t>(active_bpv) && view.count > 1) {
                 for (size_t i = 1; i < view.count; ++i) {
-                    if (packed_value_traits<T>::to_bits(view.data[i]) > static_cast<uint32_t>(active_bpv)) {
+                    if (packed_value_traits<T>::to_bits(view.data[i]) > static_cast<size_t>(active_bpv)) {
                         drop_header = true;
                         break;
                     }
@@ -531,10 +529,31 @@ namespace mcu {
             packed_data = PackedArray<BitsPerElement>(calc_words_for_bpv(capacity_, active_bpv));
             packed_data.set_bpv(active_bpv);
 
+            // Optimized bulk copy for word-aligned ranges when bpv matches
+            if (active_bpv == source_bpv && (start_index * active_bpv) % PackedArray<BitsPerElement>::WORD_BITS == 0) {
+                // Fast path: word-aligned bulk copy
+                const size_t start_bit = start_index * active_bpv;
+                const size_t end_bit = end_index * active_bpv;
+                const size_t start_word = start_bit / PackedArray<BitsPerElement>::WORD_BITS;
+                const size_t num_bits = size_ * active_bpv;
+                const size_t num_words = (num_bits + PackedArray<BitsPerElement>::WORD_BITS - 1) / PackedArray<BitsPerElement>::WORD_BITS;
+                
+                // Direct word copy from source packed data
+                const word_t* src_words = source.get_packed_data_words();
+                word_t* dst_words = packed_data.raw_data();
+                
+                if (src_words && dst_words && num_words > 0) {
+                    // Use memcpy for bulk transfer
+                    memcpy(dst_words, src_words + start_word, num_words * sizeof(word_t));
+                    return;
+                }
+            }
+            
+            // Fallback: element-by-element copy
             for (size_type i = 0; i < size_; ++i) {
                 using SourceValue = typename SourceVector::value_type;
                 using SourceTraits = packed_value_traits<SourceValue>;
-                const uint32_t source_bits = SourceTraits::to_bits(source[start_index + i]);
+                const size_t source_bits = SourceTraits::to_bits(source[start_index + i]);
                 const value_type converted = traits_type::from_bits(source_bits);
                 packed_data.set_unsafe(i, mask_bits(traits_type::to_bits(converted), active_bpv));
             }
@@ -564,7 +583,7 @@ namespace mcu {
         }
 
         void init(uint8_t bpv) {
-            if (bpv == 0 || bpv > 32) {
+            if (bpv == 0) {
                 return;
             }
 
@@ -590,7 +609,7 @@ namespace mcu {
               size_(initialSize),
               capacity_((initialSize == 0) ? 1 : initialSize) {
             const uint8_t active_bpv = packed_data.get_bpv();
-            const uint32_t clamped = to_storage_bits(value, active_bpv);
+            const size_t clamped = to_storage_bits(value, active_bpv);
             for (size_type i = 0; i < size_; ++i) {
                 packed_data.set_unsafe(i, clamped);
             }
@@ -716,7 +735,7 @@ namespace mcu {
                 return;
             }
             const uint8_t active_bpv = packed_data.get_bpv();
-            const uint32_t clamped = to_storage_bits(value, active_bpv);
+                const size_t clamped = to_storage_bits(value, active_bpv);
             for (size_type i = 0; i < size_; ++i) {
                 packed_data.set_unsafe(i, clamped);
             }
@@ -728,7 +747,7 @@ namespace mcu {
             }
             if (newSize > size_) {
                 const uint8_t active_bpv = packed_data.get_bpv();
-                const uint32_t clamped = to_storage_bits(value, active_bpv);
+                const size_t clamped = to_storage_bits(value, active_bpv);
                 for (size_type i = size_; i < newSize; ++i) {
                     packed_data.set_unsafe(i, clamped);
                 }
@@ -747,7 +766,7 @@ namespace mcu {
             }
             ensure_capacity(count);
             const uint8_t active_bpv = packed_data.get_bpv();
-            const uint32_t clamped = to_storage_bits(value, active_bpv);
+            const size_t clamped = to_storage_bits(value, active_bpv);
             for (size_type i = 0; i < count; ++i) {
                 packed_data.set_unsafe(i, clamped);
             }
@@ -764,7 +783,7 @@ namespace mcu {
             ensure_capacity(view.count);
             const uint8_t active_bpv = packed_data.get_bpv();
             for (size_type i = 0; i < view.count; ++i) {
-                const uint32_t bits = packed_value_traits<T>::to_bits(view.data[i]);
+                const size_t bits = packed_value_traits<T>::to_bits(view.data[i]);
                 const value_type converted = traits_type::from_bits(bits);
                 packed_data.set_unsafe(i, mask_bits(traits_type::to_bits(converted), active_bpv));
             }
@@ -775,7 +794,7 @@ namespace mcu {
 
         static value_type max_value() { return packed_value_traits<value_type>::from_bits(COMPILED_MAX_BITS); }
         static constexpr uint8_t bits_per_element() { return BitsPerElement; }
-        static constexpr uint32_t max_bits_value() { return COMPILED_MAX_BITS; }
+    static constexpr size_t max_bits_value() { return COMPILED_MAX_BITS; }
 
         uint8_t get_bits_per_value() const { return packed_data.get_bpv(); }
 
@@ -800,7 +819,7 @@ namespace mcu {
 
         size_t memory_usage() const {
             const size_t words = calc_words_for_bpv(capacity_, packed_data.get_bpv());
-            return words * sizeof(uint32_t);
+            return words * sizeof(word_t);
         }
 
         bool operator==(const packed_vector& other) const {
@@ -903,8 +922,11 @@ namespace mcu {
         const_iterator cbegin() const { return const_iterator(this, 0); }
         const_iterator cend() const { return const_iterator(this, size_); }
 
-        const uint32_t* data() const { return packed_data.raw_data(); }
-        uint32_t* data() { return packed_data.raw_data(); }
+    const word_t* data() const { return packed_data.raw_data(); }
+    word_t* data() { return packed_data.raw_data(); }
+        
+        // Helper methods for optimized range copying
+    const word_t* get_packed_data_words() const { return packed_data.raw_data(); }
     };
-
+    
 } // namespace mcu

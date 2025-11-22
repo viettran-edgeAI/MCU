@@ -32,14 +32,15 @@
 
 using label_type    = uint8_t;  // type for label related operations
 using sample_type   = uint32_t; // type for sample related operations
+using node_type     = size_t; // type for tree node related operations
 
 static constexpr uint8_t      RF_MAX_LABEL_LENGTH    = 32;     // max label length
 static constexpr uint8_t      RF_PATH_BUFFER         = 64;     // buffer for file_path(limit to 2 level of file)
 static constexpr uint8_t      RF_MAX_TREES           = 100;    // maximum number of trees in a forest
 static constexpr label_type   RF_MAX_LABELS          = 255;    // maximum number of unique labels supported 
-static constexpr uint16_t     RF_MAX_FEATURES        = 1023;   // maximum number of features
-static constexpr sample_type  RF_MAX_SAMPLES         = 65535;  // maximum number of samples in a dataset
-static constexpr uint32_t     RF_MAX_NODES           = 131071; // Maximum nodes per tree 
+static constexpr uint16_t     RF_MAX_FEATURES        = 1023;   // maximum number of features (can exceed this limit)
+static constexpr uint32_t     RF_MAX_NODES           = 262144; // Maximum nodes per tree (18 bits)
+static constexpr sample_type  RF_MAX_SAMPLES         = 1048576;// maximum number of samples in a dataset (20 bits)
 inline size_t rf_max_dataset_size() {
     return rf_storage_max_dataset_bytes();
 }
@@ -3017,10 +3018,11 @@ namespace mcu {
     ------------------------------------------------------------------------------------------------------------------
     */
     struct node_layout{
-        pair<uint8_t, uint8_t> threshold_layout;  // start bit, length in bits
-        pair<uint8_t, uint8_t> featureID_layout; // start bit, length in bits
-        pair<uint8_t, uint8_t> label_layout;     // start bit, length in bits
-        pair<uint8_t, uint8_t> left_child_layout; // start bit, length in bits
+        // <start bit, length in bits>
+        pair<uint8_t, uint8_t> threshold_layout;  
+        pair<uint8_t, uint8_t> featureID_layout; 
+        pair<uint8_t, uint8_t> label_layout;     
+        pair<uint8_t, uint8_t> left_child_layout; 
 
         node_layout() {
             set_layout(10, 8, 10, 3);
@@ -3056,11 +3058,16 @@ namespace mcu {
             return (1 << label_layout.second);
         }
         // return max_nodes, allow exceed RF_MAX_NODES
-        uint16_t max_nodes() const {
-            if (left_child_layout.second >= 32) {
+        node_type max_nodes() const {
+            // If child index bits specify >= 64 bits of index, fallback to RF_MAX_NODES limit
+            if (left_child_layout.second >= 64) {
                 return RF_MAX_NODES;
             }
-            uint16_t mn = 1u << left_child_layout.second;
+            if (left_child_layout.second >= 32) {
+                // Support up to 32+ bits but clamp to RF_MAX_NODES for MCU sanity
+                return RF_MAX_NODES;
+            }
+            uint32_t mn = 1u << left_child_layout.second;
             return mn > RF_MAX_NODES ? mn : RF_MAX_NODES;
         }
         uint8_t bits_per_node() const {
@@ -3082,15 +3089,7 @@ namespace mcu {
     };
 
     struct Tree_node{
-        uint32_t packed_data; 
-        
-        /** Bit layout optimized for breadth-first tree building:
-            * bit   0      : is_leaf
-            * bits  threshold_layout       : threshold slot (dataset-dependent width)
-            * bits  featureID_layout       : feature ID
-            * bits  label_layout           : label ID
-            * bits  left_child_layout      : left child index (right child = left + 1)
-        */
+        size_t packed_data; 
 
         Tree_node() : packed_data(0) {}
 
@@ -3105,51 +3104,54 @@ namespace mcu {
             return static_cast<uint16_t>((packed_data >> layout.first) & mask);
         }
         inline uint16_t getFeatureID(const pair<uint8_t, uint8_t>& layout) const noexcept{
-            return (packed_data >> layout.first) & ((1 << layout.second) - 1);  
+            return (packed_data >> layout.first) & ((1u << layout.second) - 1u);  
         }
         
         inline label_type getLabel(const pair<uint8_t, uint8_t>& layout) const noexcept{
-            return (packed_data >> layout.first) & ((1 << layout.second) - 1);  
+            return (packed_data >> layout.first) & ((1u << layout.second) - 1u);  
         }
-
-        inline uint16_t getLeftChildIndex(const pair<uint8_t, uint8_t>& layout) const noexcept{
-            return (packed_data >> layout.first) & ((1 << layout.second) - 1);  
+        inline node_type getLeftChildIndex(const pair<uint8_t, uint8_t>& layout) const noexcept{
+            return (packed_data >> layout.first) & ((1u << layout.second) - 1u);  
         }
         
-        inline uint16_t getRightChildIndex(const pair<uint8_t, uint8_t>& layout) const noexcept{
+        inline node_type getRightChildIndex(const pair<uint8_t, uint8_t>& layout) const noexcept{
             return getLeftChildIndex(layout) + 1;  // Breadth-first property: right = left + 1
         }
         
         // Setter methods for packed data
         inline void setIsLeaf(bool isLeaf) {
-            packed_data &= ~(0x01); // Clear bit 0
-            packed_data |= (isLeaf ? 1 : 0) << 0; // Set bit 0
+            packed_data &= ~(0x01u); // Clear bit 0
+            packed_data |= (isLeaf ? 1u : 0u) << 0; // Set bit 0
         }
         inline void setThresholdSlot(uint16_t slot, const pair<uint8_t, uint8_t>& layout) noexcept {
             if (layout.second == 0) {
                 return;
             }
-            const uint32_t mask = ((1u << layout.second) - 1u) << layout.first;
+            const uint32_t mask = (((1u << layout.second) - 1u) << layout.first);
             packed_data &= ~mask;
             packed_data |= (static_cast<uint32_t>(slot) & ((1u << layout.second) - 1u)) << layout.first;
         }
         inline void setFeatureID(uint16_t featureID, const pair<uint8_t, uint8_t>& layout) noexcept{
-            packed_data &= ~(((1 << layout.second) - 1) << layout.first); // Clear featureID bits
-            packed_data |= (featureID & ((1 << layout.second) - 1)) << layout.first; // Set featureID bits
+            const uint32_t mask = (((1u << layout.second) - 1u) << layout.first);
+            packed_data &= ~mask; // Clear featureID bits
+            packed_data |= (featureID & ((1u << layout.second) - 1u)) << layout.first; // Set featureID bits
         }
         inline void setLabel(label_type label, const pair<uint8_t, uint8_t>& layout) noexcept{
-            packed_data &= ~(((1 << layout.second) - 1) << layout.first); // Clear label bits
-            packed_data |= (label & ((1 << layout.second) - 1)) << layout.first; // Set label bits
+            const uint32_t mask = (((1u << layout.second) - 1u) << layout.first);
+            packed_data &= ~mask; // Clear label bits
+            packed_data |= (label & ((1u << layout.second) - 1u)) << layout.first; // Set label bits
         }
-        inline void setLeftChildIndex(uint16_t index, const pair<uint8_t, uint8_t>& layout) noexcept{
-            packed_data &= ~(((1 << layout.second) - 1) << layout.first); // Clear left child index bits
-            packed_data |= (index & ((1 << layout.second) - 1)) << layout.first; // Set left child index bits
+        inline void setLeftChildIndex(node_type index, const pair<uint8_t, uint8_t>& layout) noexcept{
+            const uint32_t mask = (((1u << layout.second) - 1u) << layout.first);
+            packed_data &= ~mask; // Clear left child index bits
+            packed_data |= (index & ((1u << layout.second) - 1u)) << layout.first; // Set left child index bits
         }
     };
 
     class Rf_tree {
+        static constexpr uint8_t bits_per_node = sizeof(size_t) * 8;
     public:
-        packed_vector<32, Tree_node> nodes;
+        packed_vector<bits_per_node, Tree_node> nodes;
         node_layout* layout = nullptr;
         uint16_t depth;
         uint8_t index;
@@ -3174,9 +3176,9 @@ namespace mcu {
 
         Rf_tree(Rf_tree&& other) noexcept
             : nodes(std::move(other.nodes)),
-              layout(other.layout),
-              index(other.index),
-              isLoaded(other.isLoaded) {
+            layout(other.layout),
+            index(other.index),
+            isLoaded(other.isLoaded) {
             other.layout = nullptr;
             other.index = 255;
             other.isLoaded = false;
@@ -3214,7 +3216,7 @@ namespace mcu {
             }
         }
 
-        uint32_t countNodes() const {
+        node_type countNodes() const {
             return static_cast<uint32_t>(nodes.size());
         }
 
@@ -3222,8 +3224,8 @@ namespace mcu {
             return nodes.memory_usage() + sizeof(*this);
         }
 
-        uint32_t countLeafNodes() const {
-            uint32_t leafCount = 0;
+        node_type countLeafNodes() const {
+            node_type leafCount = 0;
             for (size_t i = 0; i < nodes.size(); ++i) {
                 if (nodes.get(i).getIsLeaf()) {
                     ++leafCount;
@@ -3261,18 +3263,23 @@ namespace mcu {
                 uint32_t magic = 0x54524545; // "TREE"
                 file.write(reinterpret_cast<uint8_t*>(&magic), sizeof(magic));
 
-                uint32_t nodeCount = static_cast<uint32_t>(nodes.size());
+                // Write bits-per-node (1 byte) so readers know how many bytes follow per node
+                uint8_t bitsPerNode = nodes.get_bits_per_value();
+                if (bitsPerNode == 0) bitsPerNode = 32;
+                uint8_t bytesPerNode = static_cast<uint8_t>((bitsPerNode + 7) / 8);
+                file.write(reinterpret_cast<uint8_t*>(&bitsPerNode), sizeof(bitsPerNode));
+
+                node_type nodeCount = static_cast<node_type>(nodes.size());
                 file.write(reinterpret_cast<uint8_t*>(&nodeCount), sizeof(nodeCount));
 
                 if (nodeCount > 0) {
-                    const size_t totalSize = nodeCount * sizeof(uint32_t);
+                    const size_t totalSize = static_cast<size_t>(nodeCount) * bytesPerNode;
                     uint8_t* buffer = mem_alloc::allocate<uint8_t>(totalSize);
-                    if(buffer) {
-                        for (uint32_t i = 0; i < nodeCount; ++i) {
+                    if (buffer) {
+                        for (node_type i = 0; i < nodeCount; ++i) {
                             const Tree_node node = nodes.get(i);
-                            memcpy(buffer + (i * sizeof(uint32_t)),
-                                   &node.packed_data,
-                                   sizeof(uint32_t));
+                            node_type raw = node.packed_data;
+                            memcpy(buffer + (i * bytesPerNode), &raw, bytesPerNode);
                         }
                         size_t written = file.write(buffer, totalSize);
                         mem_alloc::deallocate(buffer);
@@ -3280,10 +3287,10 @@ namespace mcu {
                             RF_DEBUG(1, "⚠️ Incomplete tree write to file system");
                         }
                     } else {
-                        for (uint32_t i = 0; i < nodeCount; ++i) {
+                        for (node_type i = 0; i < nodeCount; ++i) {
                             const Tree_node node = nodes.get(i);
-                            file.write(reinterpret_cast<const uint8_t*>(&node.packed_data),
-                                       sizeof(node.packed_data));
+                            node_type raw = node.packed_data;
+                            file.write(reinterpret_cast<const uint8_t*>(&raw), bytesPerNode);
                         }
                     }
                 }
@@ -3327,7 +3334,17 @@ namespace mcu {
                 return false;
             }
 
-            uint32_t nodeCount;
+            // New format: bitsPerNode (u8) then nodeCount (u32)
+            uint8_t bitsPerNode = 0;
+            if (file.read(reinterpret_cast<uint8_t*>(&bitsPerNode), sizeof(bitsPerNode)) != sizeof(bitsPerNode)) {
+                RF_DEBUG(0, "❌ Failed to read bits-per-node from tree file: ", path);
+                file.close();
+                return false;
+            }
+            if (bitsPerNode == 0) bitsPerNode = 32;
+            uint8_t bytesPerNode = static_cast<uint8_t>((bitsPerNode + 7) / 8);
+
+            node_type nodeCount;
             if (file.read(reinterpret_cast<uint8_t*>(&nodeCount), sizeof(nodeCount)) != sizeof(nodeCount)) {
                 RF_DEBUG(0, "❌ Failed to read node count: ", path);
                 file.close();
@@ -3341,10 +3358,14 @@ namespace mcu {
             }
 
             reset_node_storage(nodeCount);
-            for (uint32_t i = 0; i < nodeCount; ++i) {
+            for (node_type i = 0; i < nodeCount; ++i) {
                 Tree_node node;
-                if (file.read(reinterpret_cast<uint8_t*>(&node.packed_data), sizeof(node.packed_data))
-                    != sizeof(node.packed_data)) {
+                node_type raw32 = 0ull;
+                // read only bytesPerNode bytes into raw32 (little-endian)
+                size_t readBytes = file.read(reinterpret_cast<uint8_t*>(&raw32), bytesPerNode);
+                if (readBytes == bytesPerNode) {
+                    node.packed_data = raw32 & 0xFFFFFFFFu;
+                } else {
                     RF_DEBUG(0, "❌ Failed to read node data");
                     nodes.clear();
                     file.close();
@@ -3376,8 +3397,8 @@ namespace mcu {
             const auto& childLayout = layout->left_child_layout;
             const auto& thresholdLayout = layout->threshold_layout;
 
-            uint16_t currentIndex = 0;
-            const uint16_t nodeCount = static_cast<uint16_t>(nodes.size());
+            node_type currentIndex = 0;
+            const node_type nodeCount = static_cast<node_type>(nodes.size());
             uint16_t maxDepth = 100; // Safety limit to prevent infinite loops
 
             while (__builtin_expect(currentIndex < nodeCount, 1) && maxDepth-- > 0) {
@@ -3391,7 +3412,7 @@ namespace mcu {
                 const uint16_t threshold = node.getThresholdSlot(thresholdLayout);
 
                 const uint16_t featureValue = static_cast<uint16_t>(packed_features[featureID]);
-                const uint16_t leftChild = node.getLeftChildIndex(childLayout);
+                const node_type leftChild = node.getLeftChildIndex(childLayout);
                 currentIndex = (featureValue <= threshold)
                                    ? leftChild
                                    : node.getRightChildIndex(childLayout);
@@ -5312,11 +5333,11 @@ namespace mcu {
     struct NodeToBuild {
         sample_type begin;   // inclusive
         sample_type end;     // exclusive
-        uint16_t nodeIndex;
+        node_type nodeIndex;
         uint16_t depth;
         
         NodeToBuild() : begin(0), end(0), nodeIndex(0), depth(0) {}
-        NodeToBuild(uint16_t idx, sample_type b, sample_type e, uint16_t d) 
+        NodeToBuild(node_type idx, sample_type b, sample_type e, uint16_t d) 
             : nodeIndex(idx), begin(b), end(e), depth(d) {}
     };
 
@@ -5332,8 +5353,8 @@ namespace mcu {
             vector<Rf_tree> trees;        // b_vector storing root nodes of trees (now manages file system file_paths)
             node_layout layout;
             size_t   total_depths;       // store total depth of all trees
-            size_t   total_nodes;        // store total nodes of all trees
-            size_t   total_leaves;       // store total leaves of all trees
+            node_type   total_nodes;        // store total nodes of all trees
+            node_type   total_leaves;       // store total leaves of all trees
             vector<NodeToBuild> queue_nodes; // Queue for breadth-first tree building
             unordered_map<label_type, sample_type> predictClass; // Map to count predictions per class during inference
             bool is_unified = true;  // Default to unified form (used at the end of training and inference)
@@ -5382,15 +5403,13 @@ namespace mcu {
             }
 
         public:
-            void calculate_layout(label_type num_label, uint16_t num_feature, uint16_t max_node){
-                const uint32_t fallback_node_index = (RF_MAX_NODES > 0)
-                    ? static_cast<uint32_t>(RF_MAX_NODES - 1)
-                    : static_cast<uint32_t>(0);
+            void calculate_layout(label_type num_label, uint16_t num_feature, node_type max_node){
+                const node_type fallback_node_index = 8191;  // safety fallback 13 bits 
 
-                const uint32_t max_label_id   = (num_label  > 0) ? static_cast<uint32_t>(num_label  - 1) : 0;
+                const label_type max_label_id   = (num_label  > 0) ? static_cast<label_type>(num_label  - 1) : 0;
                 const uint32_t max_feature_id = (num_feature > 0) ? static_cast<uint32_t>(num_feature - 1) : 0;
 
-                uint32_t max_node_index = (max_node   > 0) ? static_cast<uint32_t>(max_node   - 1) : 0;
+                node_type max_node_index = (max_node   > 0) ? static_cast<uint32_t>(max_node   - 1) : 0;
                 if (max_node_index > fallback_node_index) {
                     max_node_index = fallback_node_index;
                 }
@@ -5564,20 +5583,15 @@ namespace mcu {
                     uint8_t index = tree.index;
                     ensure_tree_slot(index);
                     uint16_t d = tree.getTreeDepth();
-                    // Serial.println("here 3.3");
                     uint16_t n = tree.countNodes();
-                    // Serial.println("here 3.4");
                     uint16_t l = tree.countLeafNodes();
-                    // Serial.println("here 3.5");
 
                     total_depths += d;
                     total_nodes  += n;
                     total_leaves += l;
 
                     base_ptr->build_tree_file_path(tree_path_buffer, index);
-                    // Serial.println("here 3.6");
                     tree.releaseTree(tree_path_buffer); // Release tree nodes from memory after adding to container
-                    // Serial.println("here 3.7");
                     // slot = std::move(tree);
                     trees[tree.index] = std::move(tree);
                     RF_DEBUG_2(1, "🌲 Added tree index: ", index, "- nodes: ", n);
@@ -5769,6 +5783,16 @@ namespace mcu {
                     return false;
                 }
                 
+                // New unified format: bitsPerNode (u8) then treeCount (u8)
+                uint8_t bitsPerNode = 0;
+                if (file.read(reinterpret_cast<uint8_t*>(&bitsPerNode), sizeof(bitsPerNode)) != sizeof(bitsPerNode)) {
+                    RF_DEBUG(0, "❌ Failed to read bits-per-node from: ", unifiedfile_path);
+                    file.close();
+                    return false;
+                }
+                if (bitsPerNode == 0) bitsPerNode = 32;
+                uint8_t bytesPerNode = static_cast<uint8_t>((bitsPerNode + 7) / 8);
+
                 uint8_t treeCount;
                 if(file.read((uint8_t*)&treeCount, sizeof(treeCount)) != sizeof(treeCount)) {
                     RF_DEBUG(0, "❌ Failed to read tree count from: ", unifiedfile_path);
@@ -5797,19 +5821,24 @@ namespace mcu {
                         RF_DEBUG(1, "❌ Failed to read tree index for tree: ", treeIndex);
                         break;
                     }
-                    
-                    uint32_t nodeCount;
+
+                    node_type nodeCount;
                     if(file.read((uint8_t*)&nodeCount, sizeof(nodeCount)) != sizeof(nodeCount)) {
                         RF_DEBUG(1, "❌ Failed to read node count for tree: ", treeIndex);
                         break;
                     }
                     
                     // Validate node count based on current layout allowance
-                    const uint16_t allowedNodes = layout.max_nodes();
-                    if(nodeCount == 0 || nodeCount > allowedNodes) {
+                        const node_type allowedNodes = layout.max_nodes();
+                        if(nodeCount == 0 || nodeCount > allowedNodes) {
                         RF_DEBUG(1, "❌ Invalid node count for tree: ", treeIndex);
                         // Skip this tree's data
-                        file.seek(file.position() + nodeCount * sizeof(uint32_t));
+                        size_t currentPos = file.position();
+                            size_t skipBytes = static_cast<size_t>(nodeCount) * bytesPerNode;
+                            if (!file.seek(currentPos + skipBytes)) {
+                                // Fallback to 32-bit stride for old files
+                                file.seek(currentPos + static_cast<size_t>(nodeCount) * sizeof(((Tree_node*)nullptr)->packed_data));
+                            }
                         continue;
                     }
                     
@@ -5819,10 +5848,14 @@ namespace mcu {
                     tree.reset_node_storage(nodeCount);
 
                     bool nodeReadSuccess = true;
-                    uint32_t nodesRead = 0;
-                    for(uint32_t j = 0; j < nodeCount; j++) {
+                    node_type nodesRead = 0;
+                    for(node_type j = 0; j < nodeCount; j++) {
                         Tree_node node;
-                        if(file.read(reinterpret_cast<uint8_t*>(&node.packed_data), sizeof(node.packed_data)) != sizeof(node.packed_data)) {
+                        node_type raw32 = 0ull;
+                        size_t readBytes = file.read(reinterpret_cast<uint8_t*>(&raw32), bytesPerNode);
+                        if (readBytes == bytesPerNode) {
+                            node.packed_data = raw32 & 0xFFFFFFFFu;
+                        } else {
                             RF_DEBUG_2(1, "❌ Failed to read node", j, "in tree_", treeIndex);
                             nodeReadSuccess = false;
                             break;
@@ -5841,8 +5874,14 @@ namespace mcu {
                         total_leaves += tree.countLeafNodes();
                     } else {
                         const size_t remaining = (nodesRead < nodeCount)
-                            ? static_cast<size_t>(nodeCount - nodesRead) * sizeof(uint32_t)
+                            ? static_cast<size_t>(nodeCount - nodesRead) * bytesPerNode
                             : 0;
+                        if (remaining > 0) {
+                            if (!file.seek(file.position() + remaining)) {
+                                // fallback to 32-bit size per node
+                                file.seek(file.position() + static_cast<size_t>(nodeCount - nodesRead) * sizeof(((Tree_node*)nullptr)->packed_data));
+                            }
+                        }
                         if(remaining > 0) {
                             file.seek(file.position() + remaining);
                         }
@@ -5890,7 +5929,7 @@ namespace mcu {
                 }    
                 // Count loaded trees
                 uint8_t loadedCount = 0;
-                uint32_t totalNodes = 0;
+                node_type totalNodes = 0;
                 for(auto& tree : trees) {
                     if (tree.isLoaded && !tree.nodes.empty()) {
                         loadedCount++;
@@ -5908,7 +5947,10 @@ namespace mcu {
                 size_t totalFS = RF_TOTAL_BYTES();
                 size_t usedFS = RF_USED_BYTES();
                 size_t freeFS = totalFS - usedFS;
-                size_t estimatedSize = totalNodes * sizeof(uint32_t) + 100; // nodes + headers
+                uint8_t estBits = static_cast<uint8_t>(layout.bits_per_node());
+                if (estBits == 0) estBits = 32;
+                uint8_t estBytesPerNode = static_cast<uint8_t>((estBits + 7) / 8);
+                size_t estimatedSize = static_cast<size_t>(totalNodes) * estBytesPerNode + 100; // nodes + headers
                 
                 if(freeFS < estimatedSize) {
                     RF_DEBUG_2(1, "❌ Insufficient file system space to release forest (need ~", 
@@ -5939,7 +5981,18 @@ namespace mcu {
                     RF_FS_REMOVE(unifiedfile_path);
                     return false;
                 }
-                
+
+                // Write bits-per-node (u8) so reader knows how many bytes per node follow
+                uint8_t bitsPerNode = static_cast<uint8_t>(layout.bits_per_node());
+                if (bitsPerNode == 0) bitsPerNode = sizeof(node_type) * 8; // default to 32 bits in 32-bit systems
+                uint8_t bytesPerNode = static_cast<uint8_t>((bitsPerNode + 7) / 8);
+                if(file.write(reinterpret_cast<uint8_t*>(&bitsPerNode), sizeof(bitsPerNode)) != sizeof(bitsPerNode)) {
+                    RF_DEBUG(0, "❌ Failed to write bits-per-node to: ", unifiedfile_path);
+                    file.close();
+                    RF_FS_REMOVE(unifiedfile_path);
+                    return false;
+                }
+
                 if(file.write((uint8_t*)&loadedCount, sizeof(loadedCount)) != sizeof(loadedCount)) {
                     RF_DEBUG(0, "❌ Failed to write tree count to: ", unifiedfile_path);
                     file.close();
@@ -5960,23 +6013,24 @@ namespace mcu {
                             break;
                         }
                         
-                        uint32_t nodeCount = tree.nodes.size();
+                        node_type nodeCount = tree.nodes.size();
                         if(file.write((uint8_t*)&nodeCount, sizeof(nodeCount)) != sizeof(nodeCount)) {
                             RF_DEBUG(1, "❌ Failed to write node count for tree ", tree.index);
                             break;
                         }
-                        
-                        // Write all nodes with progress tracking
+
+                        // Write all nodes with progress tracking (only bytesPerNode bytes per node)
                         bool writeSuccess = true;
-                        for (uint32_t i = 0; i < tree.nodes.size(); i++) {
+                        for (node_type i = 0; i < tree.nodes.size(); i++) {
                             const Tree_node node = tree.nodes.get(i);
-                            if(file.write(reinterpret_cast<const uint8_t*>(&node.packed_data), sizeof(node.packed_data)) != sizeof(node.packed_data)) {
+                            node_type raw = node.packed_data;
+                            if(file.write(reinterpret_cast<const uint8_t*>(&raw), bytesPerNode) != bytesPerNode) {
                                 RF_DEBUG_2(1, "❌ Failed to write node ", i, "for tree ", tree.index);
                                 writeSuccess = false;
                                 break;
                             }
-                            totalBytes += sizeof(node.packed_data);
-                            
+                            totalBytes += bytesPerNode;
+
                             // Check for memory issues during write
                             if(Rf_memory_status().first < 5000) { // 5KB safety threshold
                                 RF_DEBUG(1, "⚠️ Low memory during write, stopping.");

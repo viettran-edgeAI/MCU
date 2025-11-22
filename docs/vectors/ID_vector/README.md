@@ -8,6 +8,8 @@ ID_vector - member of mcu library space is a vector class specially designed to 
 
 **Latest Enhancement (2025)**: Now includes powerful bulk operations, range manipulation, and vector arithmetic capabilities for advanced data processing workflows.
 
+**Note on underlying storage**: The ID_vector uses `PackedArray` internally for compact storage. `PackedArray` now supports element widths larger than the platform word-size via multi-word reads/writes (`word_t = size_t`). However, `ID_vector` intentionally restricts `BitsPerValue` to <= 32 (compile-time) to keep the per-ID counter compact, predictable, and suitable for embedded environments. If you need >32-bit per-ID counters, use `PackedArray` directly or an alternate container.
+
 ### Core Mechanism
 
 #### Bit-Packing Architecture
@@ -58,7 +60,7 @@ The data structure allocates a contiguous bit array where:
 - **Speed**: O(1) performance across all operations with no hash collisions
 
 #### 💾 **Memory Efficiency**
-- **Bit-Level Precision**: Uses only necessary bits per element (1-8 bits configurable)
+- **Bit-Level Precision**: Uses only necessary bits per element (1-32 bits configurable). Note: `ID_vector` enforces a compile-time limit of `BitsPerValue <= 32` to keep per-ID counts compact and performant; if you need counts wider than 32 bits, consider alternate containers or use `PackedArray` directly.
 - **No Fragmentation**: Single allocation prevents memory fragmentation
 - **Dynamic Growth**: Adjusts memory usage based on actual data requirements
 
@@ -337,12 +339,12 @@ class ID_vector
 | Parameter | Description | Valid Values | Purpose |
 |-----------|-------------|--------------|---------|
 | `typename T` | Base integer type for ID range | `uint8_t`, `uint16_t`, `uint32_t`, `size_t` | Determines maximum ID and internal type mapping |
-| `BitsPerValue` | Bits allocated per ID | 1-8 | Controls max instances per ID (2^n - 1) |
+| `BitsPerValue` | Bits allocated per ID | 1-32 | Controls max instances per ID (2^n - 1) |
 
 ### Type Aliases
 
 ```cpp
-using count_type = uint8_t;     // Type for individual ID counts (0-255)
+using count_type = uint32_t;    // Type for individual ID counts; ID_vector uses a 32-bit count_type by default
 using index_type = /* varies */; // Mapped from template parameter T
 using size_type = /* varies */;  // Large enough to prevent overflow
 ```

@@ -11,7 +11,7 @@ hog_processor
 datasets/mnist/
 
 # Generated output files (keep in result/ folder)
-# result/
+result/emnist.csv
 
 # Dataset (optional - uncomment if you don't want to track datasets)
 # digit_dataset/

@@ -1,6 +1,6 @@
 {
     "data_path": {
-        "value": "../data_processing/data/result/digit_data_nml.csv",
+        "value": "../data_processing/data/result/gesture_nml.csv",
         "description": "Path to the normalized cv dataset."
     },
     "random_seed": {
@@ -62,25 +62,25 @@
         "description": "Number of folds for cross-validation when using k_fold_score."
     },
     "min_split": {
-        "value": 2,
+        "value": 4,
         "status": "disabled",
         "status_options": ["disabled", "enabled"],
         "description": "disabled by default. enable to override min_split_range in training process"
     },
     "min_leaf": {
-        "value": 1,
+        "value": 2,
         "status": "disabled",
         "status_options": ["disabled", "enabled"],
         "description": "disabled by default. enable to override min_leaf_range in training process. Minimum number of samples required to be at a leaf node."
     },
     "max_depth": {
         "value": 50,
-        "status": "enabled",
+        "status": "disabled",
         "status_options": ["disabled", "enabled"],
         "description": "disabled by default. enable to override max_depth in training process."
     },
     "max_samples": {
         "value": 0,
-        "description": "Maximum number of samples to keep in dataset (0 = unlimited). When exceeded, oldest samples are removed (FIFO). "
+        "description": "Max samples in dataset as it grow in esp32 (0 = unlimited). When exceeded, oldest samples are removed (FIFO). "
     }
 }

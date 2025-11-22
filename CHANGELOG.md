@@ -3,13 +3,20 @@
 This changelog documents the sequential, technical evolution of the STL_MCU library and tools.
 Entries are grouped: small and close commits are consolidated into date-based releases; large or breaking upgrades are separated as their own releases. Each release lists the high-level changes, followed by technical details and notable commit references (hash prefixes) so you can trace to the exact commit.
 
-## [unreleased] 2025-11-20 — Repo overwrite (force-push)
+------------------------------------------------------------------------------------
+
+
+## [2025-11-22] — fix hog transform & optimize model storage
+- Fix HOG transform issue - loss of accuracy (at both pc and mcu versions): use artan2() anf sqrt() for angle calculation but slow down the transform (~ x2.5 slower).
+- Optimize model storage: dynamically pack Tree_nodes instead of fixed 4(8) bytes.
+- Upgrade Tree_node: expand to 64-bit node layout to support large datasets.
+- UPgrade packed_vector : support max 32-bit -> unlimited-bit per element.
+
+## [2025-11-20] — Speed up tree building process & handle large datasets
 
 - Speed up tree buliding process: Reworked node statistics and feature selection: replaced per-node unordered_set with compact label-count arrays + a purity flag and added a deterministic vector-based feature sampler to eliminate costly allocations. now treee bulding 40-70% faster.
 - Critical : fix node_layput calculation issue (caused of drop large model accuracy before)
 - Solved : failed problem on  large dataset (~1.000.000 samples)
-
-------------------------------------------------------------
 
 ## [v1.4.0] 2025-11-17 — Feature additions & API surface improvements (grouped)
 

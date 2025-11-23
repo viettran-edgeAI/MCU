@@ -33,3 +33,5 @@ data/result/mnist_copy_nml.csv
 data/result/mnist_copy_dp.csv
 data/result/mnist_copy_ctg.csv
 data/result/emnist_nml.csv
+data/emnist.csv
+data/result/mnist_data_nml.csv

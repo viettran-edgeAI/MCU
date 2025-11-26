@@ -1,0 +1,7 @@
+<20 trees - 2 bit>	scikit learn (total nodes - mode size )	Rf_mcu (total nodes - mode size )	original_data
+iris_data	0.967    -  354        - 0.03 MB	1.00       - 466        - 0.002 MB	1.00   - 346
+cancer_data	0.939    - 1126       - 0.07 MB 	0.954    - 948         - 0.003 MB	0.965 - 736
+digit_data	0.938    - 10816     - 1.42 MB	0.958    - 10828     - 0.036 MB	0.951 - 8284 
+run_walk	0.978    - 41782     - 2.87 MB	0.974    - 7260       - 0.017 MB	0.991 - 36538 
+walker_fall	0.974    - 5280       - 0.45 MB	0.968    - 3348       - 0.016 MB	0.968 - 3498 
+mnist	0.959    - 190118   - 22.86 MB	0.958    - 158198   - 0.563 MB	0.960 - 140182

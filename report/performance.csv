@@ -1,0 +1,7 @@
+<20 trees - 2 bit>,dataset size ,model build time ,num_features,Inference time,ram required
+iris_data ,  0.3 KB ,2.3 s ,4,313 us,6 KB
+cancer_data , 5.1 KB,5.7 s,30,389 us,13 KB
+digit_data ,74 KB,64 s,144,900 us,83 KB
+run_walk,266 KB,460 s,7,393 us,675 KB
+walker_fall , 598 KB,208 s,960,4083 us,528 KB
+Mnist , 2.6 MB,1318 s,72,763 us,2.33 MB

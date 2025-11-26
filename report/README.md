@@ -1,6 +1,6 @@
 # STL_MCU — Quantization & Performance Report
 
-This document summarizes the compression, precision, inference performance, and memory behavior of quantized random-forest models produced by the STL_MCU toolchain. The report is a concise reference for deployment decisions on constrained MCUs (ESP32-family devices and similar).
+This document summarizes the compression, precision, inference performance, and memory behavior of quantized random-forest models produced by the STL_MCU toolchain. The reports and benchmarks are run on 7 datasets provided in the tools/data folder: iris_data, cancer_data, walker_fall, digit_data, run_walk, mnist, emnist with various sizes, number of samples and classes.
 
 **What this file contains:** a brief introduction, compression & precision tables, inference-time benchmark notes and graphs, memory/disk/fragmentation observations, and a short conclusion.
 
@@ -22,13 +22,15 @@ The table below reports dataset and model compression achieved by variable-bit q
 
 Note: Compression ratios are rounded and computed as (original size / quantized size). Sizes use 1 MB = 1024 KB.
 
-Important clarification: the reported **model size** in these tables refers to the model's in-memory footprint after loading and unpacking for runtime inference (what matters for RAM-limited MCUs). The on-disk (filesystem) file created by the exporter typically includes headers, metadata, and a bytes-per-node representation and therefore will often be larger than the runtime RAM usage. Always check the runtime `Rf_tree::get_memory_usage()` or the loader's reported memory usage to estimate RAM requirements, not the file bytes.
+Important clarification: The reported **model_size** mentioned is the model size when loaded into RAM. The model file size can be larger (0 -> 40%) due to the dynamic node layout packing mechanism when the model is loaded into RAM.
 
 Embedded visuals (relative compression and accuracy):
 
-- `imgs/compare_dataset_size.png` — dataset compression (Original = 1)
-- `imgs/compare_model_size.png` — model compression (Original = 1)
-- `imgs/compare_all.png` — combined comparison
+![Dataset size (Original=1)](./imgs/compare_dataset_size.png)
+
+![Model size (Original=1)](./imgs/compare_model_size.png)
+
+![Combined comparison](./imgs/compare_all.png)
 
 ---
 
@@ -36,36 +38,19 @@ Embedded visuals (relative compression and accuracy):
 
 The performance table below summarizes inference time and RAM required across datasets.
 
-| Dataset | # Features | Inference time | RAM required |
-|---|---:|---:|---:|
-| iris_data | 4 | 0.313 ms | 6 KB |
-| cancer_data | 30 | 0.389 ms | 13 KB |
-| digit_data | 144 | 0.900 ms | 83 KB |
-| run_walk | 7 | 0.393 ms | 675 KB |
-| Mnist | 72 | 0.763 ms | 3.1 MB |
+| Dataset | # Features | Inference time | 
+|---|---:|---:|
+| iris_data | 4 | 0.313 ms |
+| cancer_data | 30 | 0.389 ms |
+| digit_data | 144 | 0.900 ms |
+| run_walk | 7 | 0.393 ms |
+| Mnist | 72 | 0.763 ms |
 
 Performance plot:
 
 ![Inference time vs #features](./imgs/inference_report.png)
 
 Benchmark note: these inference-time results were recorded on an `esp32-cam` board using an SD_MMC interface in 1-bit mode with an external SD card and PSRAM enabled. In practice, inference can be faster when running on devices with built-in flash/PSRAM or with SD_MMC in 4-bit mode (or when model assets are stored on internal flash or faster storage). Use these results as a representative baseline: your board, SD interface mode, PSRAM availability, and storage location (SD vs internal flash) will affect measured throughput.
-
-To reproduce the charts locally use the plotting script:
-
-```bash
-python3 report/plot_compare.py --csv report/compare.csv --outdir report
-python3 report/plot_compare.py --perf_csv report/performance.csv --outdir report
-```
-
-Prerequisites:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r report/requirements.txt
-```
-
----
 
 ## Memory Usage, Disk & Fragmentation
 
@@ -84,9 +69,11 @@ Key observations:
 - Fragmentation: the runtime packing strategy prioritizes compact in-memory layouts and minimizes fragmentation. The plotted 'Largest free block' metric shows fragmentation behavior across runs — the implementation is optimized to keep large contiguous blocks available for allocations where possible.
 - PSRAM impact: enabling PSRAM increases total available heap for large models but may change latency characteristics; measure on your target board.
 
-Memory usage plot:
+Memory usage plots:
 
 ![Memory usage over time](./imgs/memory_report.png)
+
+![ESP32 Super Mini memory usage (Digit dataset)](./imgs/esp32_mini_mreport.png)
 
 ---
 

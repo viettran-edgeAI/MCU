@@ -20,7 +20,7 @@ Key points:
 
 - Namespace: `mcu`
 - Primary header: `STL_MCU.h`
-- Purpose-built containers: `mcu::vector`, `mcu::unordered_map`, `mcu::ChainedUnorderedMap`, `mcu::HOGDescriptorMCU`, and others
+- Purpose-built containers: `mcu::vector`, `mcu::b_vector, `mcu::packed_vector`, `mcu::ID_vector`, mcu::unordered_map`, `mcu::unordered_setp`,  and others
 - Designed for low fragmentation, small code size, and optional PSRAM use
 
 For API details, configuration macros, and usage examples see the `docs/` folder in this repository.

@@ -75,9 +75,9 @@ src/*.py
 old_/
 tools/hog_transform/mnist/
 # Ignore large MNIST dumps
-tools/data_processing/data/mnist*.csv
+tools/data_quantization/data/mnist*.csv
 
 # Large datasets kept locally (not tracked)
-tools/data_processing/data/emnist.csv
+tools/data_quantization/data/emnist.csv
 tools/hog_transform/result/emnist.csv
-tools/data_processing/data/result/mnist_data_nml.csv
+tools/data_quantization/data/result/mnist_data_nml.csv

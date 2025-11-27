@@ -6,7 +6,7 @@ This script transfers all necessary model files from PC to ESP32 in a single ses
 Transfers files to /model_name/ directory on ESP32 filesystem.
 
 Files transferred:
-1. From data_processing/data/result/:
+1. From data_quantization/data/result/:
     - {model_name}_ctg.csv (category labels)
     - {model_name}_dp.csv (descriptor payload)
     - {model_name}_nml.bin (normalized dataset for training/testing)
@@ -21,10 +21,11 @@ Files transferred:
    - {model_name}_nlg.csv (training log)
 
 Usage:
-  python3 unifier_transfer.py <model_name> <serial_port>
+  python3 unifier_transfer.py --model_name <model_name> --port <serial_port>
 
 Example:
-  python3 unifier_transfer.py digit_data /dev/ttyUSB0
+  python3 unifier_transfer.py --model_name digit_data --port /dev/ttyUSB0
+  python3 unifier_transfer.py -m digit_data -p /dev/ttyUSB0
 """
 
 import serial
@@ -34,6 +35,7 @@ import sys
 import struct
 import binascii
 from pathlib import Path
+import argparse
 
 # Import configuration parser to sync with ESP32
 try:
@@ -74,9 +76,9 @@ def get_script_root():
 
 
 def find_dataset_files(model_name):
-    """Find dataset files from data_processing/data/result/."""
+    """Find dataset files from data_quantization/data/result/."""
     tools_root = get_script_root()
-    result_dir = tools_root / "data_processing" / "data" / "result"
+    result_dir = tools_root / "data_quantization" / "data" / "result"
 
     suffixes = ["_ctg.csv", "_dp.csv", "_nml.bin"]
     files = []
@@ -424,20 +426,13 @@ def print_file_summary(files_by_category):
 
 
 def main():
-    if len(sys.argv) != 3:
-        print("Usage: python3 unifier_transfer.py <model_name> <serial_port>")
-        print("Example: python3 unifier_transfer.py digit_data /dev/ttyUSB0")
-        print("\nThis script transfers all necessary files to /model_name/ on ESP32:")
-        print("  - Dataset: {model_name}_nml.bin")
-        print("  - HOG Config: {model_name}_hogcfg.json (optional)")
-        print("  - Model Config: {model_name}_config.json")
-        print("  - Unified Forest: {model_name}_forest.bin")
-        print("  - Node Predictor: {model_name}_npd.bin (optional)")
-        print("  - Training Log: {model_name}_nlg.csv (optional)")
-        return 1
+    parser = argparse.ArgumentParser(description="Unified File Transfer Utility for ESP32")
+    parser.add_argument('--model_name', '-m', required=True, help='Name of the model to transfer')
+    parser.add_argument('--port', '-p', required=True, help='Serial port for ESP32')
+    args = parser.parse_args()
 
-    model_name = sys.argv[1]
-    serial_port = sys.argv[2]
+    model_name = args.model_name
+    serial_port = args.port
     
     # Collect all files
     files_by_category = collect_all_files(model_name)

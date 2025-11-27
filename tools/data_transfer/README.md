@@ -8,14 +8,15 @@ This directory now hosts the single unified workflow for moving every model asse
 2. Run the transfer command from `tools/data_transfer/pc_side`:
 
 ```bash
-python3 unifier_transfer.py <model_name> <serial_port>
+python3 unifier_transfer.py --model_name <model_name> --port <serial_port>
 ```
 
 Examples:
 
 ```bash
-python3 unifier_transfer.py digit_data /dev/ttyUSB0
-python3 unifier_transfer.py gesture COM3
+python3 unifier_transfer.py --model_name digit_data --port /dev/ttyUSB0
+python3 unifier_transfer.py -m digit_data -p /dev/ttyUSB0
+python3 unifier_transfer.py --model_name gesture --port COM3
 ```
 
 The script summarizes which files it found, streams each file via chunks with CRC checks, and finishes the session once the ESP32 replies with `OK`.
@@ -24,7 +25,7 @@ The script summarizes which files it found, streams each file via chunks with CR
 
 | Source directory | Pattern | Role |
 |------------------|---------|------|
-| `data_processing/data/result/` | `{model_name}_ctg.csv`, `{model_name}_dp.csv`, `{model_name}_nml.bin` | Category labels, descriptor payload, and normalized dataset for testing/retraining |
+| `data_quantization/data/result/` | `{model_name}_ctg.csv`, `{model_name}_dp.csv`, `{model_name}_nml.bin` | Category labels, descriptor payload, and normalized dataset for testing/retraining |
 | `hog_transform/result/` (or repo root) | `{model_name}_hogcfg.json` | HOG configuration, included when present |
 | `pre_train/trained_model/` | `{model_name}_config.json`, `_forest.bin`, `_npd.bin`, `_nlg.csv` | Model configuration and artifacts (config + forest required, others optional) |
 
@@ -51,7 +52,7 @@ Every transferred file lands under `/model_name/` on the ESP32, enabling multipl
 
 - **No response from ESP32**: Verify the receiver sketch is uploaded and you’re using the correct serial port (`ls /dev/tty*` or Device Manager).
 - **Transfer stalls or CRC errors**: Try a different USB cable, reduce `USER_CHUNK_SIZE` in `Rf_board_config.h`, and allow the script to retry (default 5 attempts per chunk).
-- **Missing files**: Ensure the requested model exists under `data_processing/data/result/`, `hog_transform/result/`, and `pre_train/trained_model/`.
+- **Missing files**: Ensure the requested model exists under `data_quantization/data/result/`, `hog_transform/result/`, and `pre_train/trained_model/`.
 - **Permission denied on Linux**: add your user to the `dialout` group (`sudo usermod -a -G dialout $USER`).
 - **Chunk size warning**: If the script warns it cannot locate `Rf_board_config.h`, it will default to 220 bytes per chunk – make sure your copy of `src/Rf_board_config.h` exists near the top of the repo so the parser can read `USER_CHUNK_SIZE`.
 

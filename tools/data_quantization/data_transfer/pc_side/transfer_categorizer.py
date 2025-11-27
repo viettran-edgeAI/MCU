@@ -3,7 +3,10 @@
 Categorizer CSV Transfer to ESP32 with V2 Protocol
 Transfers CSV files with CRC verification and ACK/NACK
 
-Usage: python3 transfer_categorizer.py <model_name> <serial_port>
+Usage: python3 transfer_categorizer.py --model_name <model_name> --port <serial_port>
+
+Example: python3 transfer_categorizer.py --model_name digit_model --port /dev/ttyACM0
+         python3 transfer_categorizer.py -m digit_model -p /dev/ttyACM0
 
 PERFORMANCE NOTES:
   - CHUNK_SIZE is automatically synchronized with Rf_board_config.h
@@ -20,6 +23,7 @@ import os
 import struct
 import binascii
 from pathlib import Path
+import argparse
 
 # Import configuration parser to sync with ESP32
 try:
@@ -171,13 +175,13 @@ def list_serial_ports():
         print(f"  🔌 {port.device} - {port.description}")
 
 def main():
-    if len(sys.argv) != 3:
-        print("Usage: python3 transfer_categorizer.py <model_name> <serial_port>")
-        print("Example: python3 transfer_categorizer.py digit_model /dev/ttyACM0")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Categorizer CSV Transfer to ESP32")
+    parser.add_argument('--model_name', '-m', required=True, help='Name of the model for categorizer file')
+    parser.add_argument('--port', '-p', required=True, help='Serial port for ESP32')
+    args = parser.parse_args()
 
-    model_name = sys.argv[1]
-    port = sys.argv[2]
+    model_name = args.model_name
+    port = args.port
 
     try:
         file_path = find_file(model_name)

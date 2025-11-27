@@ -6,10 +6,11 @@ This script sends a complete dataset (categorizer, parameters, and binary data)
 to an ESP32 device in a single, coordinated process.
 
 Usage:
-  python3 unified_transfer.py <base_name> <serial_port>
+  python3 unified_transfer.py --model_name <base_name> --port <serial_port>
 
 Example:
-  python3 unified_transfer.py digit_data /dev/ttyUSB0
+  python3 unified_transfer.py --model_name digit_data --port /dev/ttyUSB0
+  python3 unified_transfer.py -m digit_data -p /dev/ttyUSB0
 """
 
 import serial
@@ -19,6 +20,7 @@ import sys
 import struct
 import binascii
 from pathlib import Path
+import argparse
 
 # Import configuration parser to sync with ESP32
 try:
@@ -232,13 +234,13 @@ def check_and_report_files(files_to_check):
 
 def main():
     """Main execution function."""
-    if len(sys.argv) != 3:
-        print(f"Usage: python3 {sys.argv[0]} <base_name> <serial_port>")
-        print("Example: python3 unified_transfer.py digit_data /dev/ttyUSB0")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Unified ESP32 Data Transfer Utility")
+    parser.add_argument('--model_name', '-m', required=True, help='Base name of the dataset files')
+    parser.add_argument('--port', '-p', required=True, help='Serial port for ESP32')
+    args = parser.parse_args()
 
-    base_name = sys.argv[1]
-    port = sys.argv[2]
+    base_name = args.model_name
+    port = args.port
     baudrate = 115200
     
     # Display configuration

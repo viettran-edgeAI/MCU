@@ -6,12 +6,13 @@ This directory contains tools for transferring HOG configuration files from PC t
 
 ```bash
 cd pc_side
-python3 transfer_hog_config.py <model_name> <serial_port>
+python3 transfer_hog_config.py --model_name <model_name> --port <serial_port>
 ```
 
-**Example:**
+**Examples:**
 ```bash
-python3 transfer_hog_config.py dataset_features /dev/ttyUSB0
+python3 transfer_hog_config.py --model_name dataset_features --port /dev/ttyUSB0
+python3 transfer_hog_config.py -m dataset_features -p /dev/ttyUSB0
 ```
 
 ## What Gets Transferred
@@ -52,7 +53,7 @@ tools/hog_transform/
 ## Workflow
 
 1. Generate HOG features: `./hog_processor <config> <input> <output>`
-2. Transfer configuration: `python3 transfer_hog_config.py <model_name> <port>`
+2. Transfer configuration: `python3 transfer_hog_config.py --model_name <model_name> --port <port>`
 3. Use on ESP32 with `hog_transform` library functions
 
 ## Troubleshooting

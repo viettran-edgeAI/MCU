@@ -4,7 +4,9 @@ This document summarizes the compression, precision, inference performance, and 
 
 **What this file contains:** a brief introduction, compression & precision tables, inference-time benchmark notes and graphs, memory/disk/fragmentation observations, and a short conclusion.
 
-**Note:** The entire model used in this report is built with 20 trees by default.
+**Note:** 
+- The entire model used in this report is built with 20 trees and 2-bit quantization by default.
+- The models running on the original dataset were run with the random forest algorithm in scikit-learn with default parameters (20 trees, oob_score) and could be higher if the parameters were tweaked.
 
 ---
 

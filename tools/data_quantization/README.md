@@ -231,7 +231,7 @@ Plots are saved to `plots/` directory with descriptive filenames.
 
 ```bash
 # 1. Navigate to the tool directory
-cd /path/to/STL_MCU/tools/data_processing
+cd /path/to/STL_MCU/tools/data_quantization
 
 # 2. One-time setup (builds C++, creates Python env, makes folders)
 make setup
@@ -361,9 +361,9 @@ Close the Arduino Serial Monitor before automatic transfer.
 Options:
 
 1) Unified transfer (recommended)
-- From `tools/data_processing/data_transfer/pc_side/`:
+- From `tools/data_quantization/data_transfer/pc_side/`:
   - `python3 unified_transfer.py <dataset_base_name> <serial_port>`
-  - Looks for files in `tools/data_processing/data/result/`:
+  - Looks for files in `tools/data_quantization/data/result/`:
     - `<name>_ctg.csv`, `<name>_dp.csv`, `<name>_nml.bin`
 - ESP32 sketch: `data_transfer/esp32_side/unified_receiver.ino`
 
@@ -466,7 +466,7 @@ versicolor,7.0,3.2,4.7,1.4
 ## 🧱 Folder structure
 
 ```
-tools/data_processing/
+tools/data_quantization/
 ├── Makefile
 ├── quantize_dataset.sh             # Main script: CSV → quantized outputs
 ├── processing_data.cpp             # C++ quantizer + binary exporter
@@ -504,7 +504,7 @@ Common issues:
 - Missing compiler: install build-essential on Debian/Ubuntu
 - Python deps: use `make setup-python` or `make clean-python && make setup-python`
 - Permission: `chmod +x quantize_dataset.sh processing_data`
-- Wrong paths: verify files under `tools/data_processing/data/`
+- Wrong paths: verify files under `tools/data_quantization/data/`
 
 ESP32 compatibility checks (done automatically):
 - Features in [0..3]

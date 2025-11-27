@@ -4254,7 +4254,6 @@ namespace mcu {
         }
 
         // if failed to load predictor, manual estimate will be used
-        // if failed to load predictor, manual estimate will be used
         float manual_estimate(const node_data& data) const {
             if (data.min_split == 0) {
                 return 100.0f; 
@@ -6538,8 +6537,8 @@ namespace mcu {
         long unsigned starting_time;
         uint8_t fragmentation;
         uint32_t lowest_ram;
-        uint32_t lowest_rom; 
-        uint32_t freeDisk;
+        uint64_t lowest_rom; 
+        uint64_t freeDisk;
         float log_time;
 
     
@@ -6558,7 +6557,7 @@ namespace mcu {
             drop_anchor(); // initial anchor at index 0
 
             lowest_ram = UINT32_MAX;
-            lowest_rom = UINT32_MAX;
+            lowest_rom = UINT64_MAX;
 
             base->get_time_log_path(this->time_log_path);
             base->get_memory_log_path(this->memory_log_path);
@@ -6600,7 +6599,12 @@ namespace mcu {
             auto heap_status = Rf_memory_status();
             freeHeap = heap_status.first;
             largestBlock = heap_status.second;
-            freeDisk = RF_TOTAL_BYTES() - RF_USED_BYTES();
+            // Calculate free disk properly based on the active storage backend
+            uint64_t totalBytes = RF_TOTAL_BYTES();
+            uint64_t usedBytes = RF_USED_BYTES();
+            uint64_t availableBytes = 0;
+            if (totalBytes >= usedBytes) availableBytes = totalBytes - usedBytes;
+            freeDisk = availableBytes;
 
             if(freeHeap < lowest_ram) lowest_ram = freeHeap;
             if(freeDisk < lowest_rom) lowest_rom = freeDisk;
@@ -6612,8 +6616,8 @@ namespace mcu {
                 log_time = (GET_CURRENT_TIME_IN_MILLISECONDS - starting_time)/1000.0f; 
                 File logFile = RF_FS_OPEN(memory_log_path, FILE_APPEND);
                 if (logFile) {
-                    logFile.printf("%.2f,\t%u,\t%u,\t%u",
-                                    log_time, freeHeap, largestBlock, freeDisk);
+                    logFile.printf("%.2f,\t%u,\t%u,\t%llu",
+                                    log_time, freeHeap, largestBlock, (unsigned long long)freeDisk);
                     if(msg && strlen(msg) > 0){
                         logFile.printf(",\t%s\n", msg);
                     } else {

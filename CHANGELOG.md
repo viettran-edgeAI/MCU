@@ -146,7 +146,7 @@ Entries are grouped: small and close commits are consolidated into date-based re
 
 ## [v0.1.1] 2025-07 — 2025-08 — Tooling, transfer utilities, pre_train & processing pipelines
 
-- Add and refine `data_transfer`, `data_processing`, `pre_train` and `processing_data` workflows and tools for dataset conversion, categorization, and binary dataset generation.
+- Add and refine `data_transfer`, `data_quantization`, `pre_train` and `processing_data` workflows and tools for dataset conversion, categorization, and binary dataset generation.
 - Add many helper tools for ESP32-side transfer and PC-side processing (binary convert tool, categorizer, dataset_params).
 - Add `pre_train` tools and early versions of `processing_data` integration.
 		- notable commits across this period: 4b7705e, c7548c6e, f757004e

@@ -118,7 +118,7 @@
       #define RF_BOARD_USB_RX_BUFFER 512
     #endif
     #ifndef RF_BOARD_DEFAULT_CHUNK
-      #define RF_BOARD_DEFAULT_CHUNK 256
+      #define RF_BOARD_DEFAULT_CHUNK 512
     #endif
     #ifndef RF_BOARD_IS_ESP32S3
       #define RF_BOARD_IS_ESP32S3 1
@@ -162,7 +162,7 @@
       #define RF_BOARD_USB_RX_BUFFER 512
     #endif
     #ifndef RF_BOARD_DEFAULT_CHUNK
-      #define RF_BOARD_DEFAULT_CHUNK 256
+      #define RF_BOARD_DEFAULT_CHUNK 512
     #endif
     #ifndef RF_BOARD_IS_ESP32
       #define RF_BOARD_IS_ESP32 1

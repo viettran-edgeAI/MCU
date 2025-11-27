@@ -6,12 +6,13 @@ This directory contains tools for transferring pre-trained random forest models 
 
 ```bash
 cd pc_side
-python3 transfer_model.py <model_name> <serial_port>
+python3 transfer_model.py --model_name <model_name> --port <serial_port>
 ```
 
-**Example:**
+**Examples:**
 ```bash
-python3 transfer_model.py my_model /dev/ttyUSB0
+python3 transfer_model.py --model_name my_model --port /dev/ttyUSB0
+python3 transfer_model.py -m my_model -p /dev/ttyUSB0
 ```
 
 ## What Gets Transferred
@@ -60,7 +61,7 @@ tools/pre_train/trained_model/
 ## Workflow
 
 1. Train model: Use pre_train tool to generate model files
-2. Transfer model: `python3 transfer_model.py <model_name> <port>`
+2. Transfer model: `python3 transfer_model.py --model_name <model_name> --port <port>`
 3. Load on ESP32: Use `random_forest_mcu.h` to load and run predictions
 
 ## Storage Recommendations

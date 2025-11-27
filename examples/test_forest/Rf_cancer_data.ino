@@ -24,12 +24,13 @@
 
 #define DEV_STAGE    
 #define RF_DEBUG_LEVEL 2
+// #define RF_USE_PSRAM
 
 #include "random_forest_mcu.h"
 
 using namespace mcu;
 
-const RfStorageType STORAGE_MODE = RfStorageType::SD_MMC_4BIT;
+const RfStorageType STORAGE_MODE = RfStorageType::SD_MMC_1BIT;
 
 void setup() {
     Serial.begin(115200);  
@@ -41,43 +42,14 @@ void setup() {
     
     delay(1000);
 
-    // Initialize storage (microSD or LittleFS)
-    auto storageLabel = [](RfStorageType type) {
-        switch (type) {
-            case RfStorageType::FLASH: return "FLASH (LittleFS)";
-            case RfStorageType::SD_MMC_1BIT: return "SD_MMC (1-bit)";
-            case RfStorageType::SD_MMC_4BIT: return "SD_MMC (4-bit)";
-            case RfStorageType::SD_SPI: return "SD over SPI";
-            default: return "AUTO";
-        }
-    };
-
-    Serial.printf("Initializing storage (%s)...\n", storageLabel(STORAGE_MODE));
-    if (!rf_storage_begin(STORAGE_MODE)) {
-        Serial.println("❌ Storage mount failed!");
+    // Initialize filesystem
+    Serial.print("💾 Initializing file system... ");
+    if (!RF_FS_BEGIN(STORAGE_MODE)) {
+        Serial.println("❌ FAILED!");
+        Serial.println("⚠️  File system initialization failed. Cannot continue.");
         return;
     }
-
-    Serial.printf("✅ Storage initialized: %s\n", rf_storage_type());
-
-    switch (STORAGE_MODE) {
-        case RfStorageType::SD_MMC_4BIT:
-            Serial.println("📍 SDIO 4-bit mode");
-            Serial.println("   Pins: CLK→GPIO14, CMD→GPIO15, D0→GPIO2, D1→GPIO4, D2→GPIO12, D3→GPIO13");
-            break;
-        case RfStorageType::SD_MMC_1BIT:
-            Serial.println("📍 SDIO 1-bit mode (shared bus)");
-            Serial.println("   Pins: CLK→GPIO14, CMD→GPIO15, D0→GPIO2");
-            break;
-        case RfStorageType::SD_SPI:
-            Serial.println("📍 SPI mode");
-            Serial.println("   Pins: CS→GPIO5, MOSI→GPIO23, MISO→GPIO19, CLK→GPIO18");
-            break;
-        case RfStorageType::FLASH:
-        default:
-            Serial.println("📍 Using LittleFS (internal flash)");
-            break;
-    }
+    Serial.println("✅ OK");
     
     manage_files();
     delay(500);
@@ -93,7 +65,6 @@ void setup() {
     // forest.set_num_trees(20);
     // forest.set_random_seed(42);
     // forest.set_training_score(Rf_training_score::OOB_SCORE);
-    Serial.println("✅ OK");
 
     // Build and train the model
     Serial.print("Building model... ");
@@ -101,11 +72,14 @@ void setup() {
         Serial.println("❌ FAILED");
         return;
     }
-    Serial.println("✅ OK");
 
-    Serial.print("Training model (3 epochs)... ");
-    forest.training(3);
-    Serial.println("✅ OK");
+    long unsigned build_time = GET_CURRENT_TIME_IN_MILLISECONDS;
+    Serial.printf("Model built in %lu ms\n", build_time - start_forest);
+    
+
+    // Serial.print("Training model (3 epochs)... ");
+    // forest.training(3);
+    // Serial.println("✅ OK");
 
     // Load trained forest from filesystem
     Serial.print("Loading forest... ");
@@ -113,7 +87,6 @@ void setup() {
         Serial.println("❌ FAILED");
         return;
     }
-    Serial.println("✅ OK");
     
     // Optional: Enable dataset extension for online learning
     // forest.enable_extend_base_data();
@@ -143,6 +116,8 @@ void setup() {
     samples.push_back(sample_10);
 
     vector<uint8_t> true_labels = MAKE_UINT8_LIST(1,1,1,1,0,0,0,1,1,0);
+
+    forest.warmup_prediction();
 
     // Perform predictions on all samples
     unsigned long total_time = 0;

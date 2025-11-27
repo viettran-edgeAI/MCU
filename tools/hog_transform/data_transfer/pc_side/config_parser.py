@@ -25,7 +25,7 @@ def find_rf_board_config():
     # Start from this script's location
     script_dir = Path(__file__).resolve().parent
     
-    # Navigate to library root: pc_side -> data_transfer -> data_processing -> tools -> library_root
+    # Navigate to library root: pc_side -> data_transfer -> data_quantization -> tools -> library_root
     lib_root = script_dir.parent.parent.parent.parent
     
     # Expected path: lib_root/src/Rf_board_config.h

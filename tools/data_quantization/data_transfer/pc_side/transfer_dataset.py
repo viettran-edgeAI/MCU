@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # Transfer binary files from PC to ESP32 via serial
-# Usage: python3 transfer_dataset.py <model_name> <serial_port>
-# example: python3 transfer_dataset.py model_name /dev/ttyACM0
+# Usage: python3 transfer_dataset.py --model_name <model_name> --port <serial_port>
+# example: python3 transfer_dataset.py --model_name model_name --port /dev/ttyACM0
+# example: python3 transfer_dataset.py -m model_name -p /dev/ttyACM0
 # Automatically finds files in ../../data/result/ folder
 
 import os
@@ -11,6 +12,7 @@ import serial
 import struct
 import binascii
 from pathlib import Path
+import argparse
 
 # Import configuration parser to sync with ESP32
 try:
@@ -162,13 +164,13 @@ def transfer_file(file_path, port, baudrate=115200):
 
 def main():
     # Accept model name and serial port, then derive <model_name>_nml.bin automatically
-    if len(sys.argv) != 3:
-        print("Usage: python3 transfer_dataset.py <model_name> <serial_port>")
-        print("Example: python3 transfer_dataset.py digit_model /dev/ttyACM0")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Transfer binary dataset files from PC to ESP32")
+    parser.add_argument('--model_name', '-m', required=True, help='Name of the model for dataset file')
+    parser.add_argument('--port', '-p', required=True, help='Serial port for ESP32')
+    args = parser.parse_args()
 
-    model_name = sys.argv[1]
-    port = sys.argv[2]
+    model_name = args.model_name
+    port = args.port
 
     # Interpolate model file name
     filename = f"{model_name}_nml.bin"

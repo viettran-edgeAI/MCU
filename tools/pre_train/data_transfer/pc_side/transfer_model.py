@@ -6,10 +6,11 @@ This script transfers pre-trained random forest model files from PC to ESP32.
 Transfers <model_name>_config.json and all <model_name>_tree_*.bin files while preserving filenames.
 
 Usage:
-  python3 transfer_model.py <model_name> <serial_port>
+  python3 transfer_model.py --model_name <model_name> --port <serial_port>
 
 Example:
-  python3 transfer_model.py my_model /dev/ttyUSB0
+  python3 transfer_model.py --model_name my_model --port /dev/ttyUSB0
+  python3 transfer_model.py -m my_model -p /dev/ttyUSB0
 """
 
 import serial
@@ -20,6 +21,7 @@ import struct
 import glob
 import binascii
 from pathlib import Path
+import argparse
 
 # Import configuration parser to sync with ESP32
 try:
@@ -338,13 +340,13 @@ def check_model_files(model_name):
     return True
 
 def main():
-    if len(sys.argv) != 3:
-        print("Usage: python3 transfer_model.py <model_name> <serial_port>")
-        print("Example: python3 transfer_model.py my_model /dev/ttyUSB0")
-        return 1
+    parser = argparse.ArgumentParser(description="Pre-trained Model Transfer Utility for ESP32")
+    parser.add_argument('--model_name', '-m', required=True, help='Name of the model to transfer')
+    parser.add_argument('--port', '-p', required=True, help='Serial port for ESP32')
+    args = parser.parse_args()
 
-    model_name = sys.argv[1]
-    serial_port = sys.argv[2]
+    model_name = args.model_name
+    serial_port = args.port
     
     # Check for model files
     if not check_model_files(model_name):

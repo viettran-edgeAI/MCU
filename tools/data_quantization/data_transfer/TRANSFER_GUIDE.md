@@ -9,12 +9,13 @@ Transfer all dataset files in one session:
 
 ```bash
 cd pc_side
-python3 unified_transfer.py <base_name> <serial_port>
+python3 unified_transfer.py --model_name <base_name> --port <serial_port>
 ```
 
-**Example:**
+**Examples:**
 ```bash
-python3 unified_transfer.py digit_data /dev/ttyUSB0
+python3 unified_transfer.py --model_name digit_data --port /dev/ttyUSB0
+python3 unified_transfer.py -m digit_data -p /dev/ttyUSB0
 ```
 
 **Transfers:**
@@ -27,13 +28,13 @@ Transfer files separately if needed:
 
 ```bash
 # Transfer categorizer
-python3 transfer_categorizer.py <model_name> <serial_port>
+python3 transfer_categorizer.py --model_name <model_name> --port <serial_port>
 
 # Transfer dataset parameters
-python3 transfer_dp_file.py <model_name> <serial_port>
+python3 transfer_dp_file.py --model_name <model_name> --port <serial_port>
 
 # Transfer binary dataset
-python3 transfer_dataset.py <model_name> <serial_port>
+python3 transfer_dataset.py --model_name <model_name> --port <serial_port>
 ```
 
 ## ESP32 Setup
@@ -47,7 +48,7 @@ Upload the corresponding receiver sketch to your ESP32:
 
 **Generated files** (source):
 ```
-tools/data_processing/data/result/
+tools/data_quantization/data/result/
 ├── <model_name>_ctg.csv
 ├── <model_name>_dp.csv
 └── <model_name>_nml.bin

@@ -6,7 +6,9 @@ This repository provides a compact, memory-conscious C++ toolkit for running qua
 
 ## Quantization — brief introduction
 
-Quantization reduces numeric precision (bits per feature or parameter) to compress datasets and models. When applied carefully, quantization can produce large reductions in storage and memory (often 10–30x) with minimal accuracy loss. STL_MCU's pipeline supports per-feature bit allocation, packed storage formats, and decoder helpers to restore values at inference time.
+- Quantization packs the values ​​in each feature into bins and then normalizes them. This reduces the number of bits required to store each feature value.
+- STL_MCU's pipeline supports per-feature bit allocation, packed storage formats, and decoder helpers to restore values at inference time.
+- There are 8 quantization modes supported: from 1->8 bit. The default mode is 2-bit quantization.
 
 ![Compression & accuracy comparison](/report/imgs/compare_all.png)
 
@@ -20,15 +22,17 @@ Key points:
 
 - Namespace: `mcu`
 - Primary header: `STL_MCU.h`
-- Purpose-built containers: `mcu::vector`, `mcu::b_vector, `mcu::packed_vector`, `mcu::ID_vector`, mcu::unordered_map`, `mcu::unordered_setp`,  and others
-- Designed for low fragmentation, small code size, and optional PSRAM use
+- Purpose-built containers: `mcu::vector`, `mcu::b_vector`, `mcu::packed_vector`, `mcu::ID_vector`, `mcu::unordered_map`, `mcu::unordered_set`... 
+- Designed for low fragmentation, small code size, and optional PSRAM use.
 
-For API details, configuration macros, and usage examples see the `docs/` folder in this repository.
+## Extended support
+
+- Memory : support PSRAM accross all containers and algorithms
+- Storage : support LITTLEFS, FATFS, SD_MMC_1BIT, SD_MMC_4BIT, SD_SPI.
+- Board : tested on ESP32, ESP32-C3, ESP32-S3, ESP32-CAM, dev modules, super mini boards...
+- Cross-platform extension: Macros and declarations support porting to other platforms like Arduino, STM32...
+
+For API details, configuration macros, and usage examples see the [main documentation](./docs/) folder in this repository.
 
 ---
-
-If you'd like, I can also:
-
-- Restore or add a short Quick Start and Installation section to this README, or
-- Move selected images to the repository root so they appear in the project overview on GitHub's landing page.
 

@@ -2,7 +2,7 @@
 
 ![Full pipeline overview](/docs/imgs/full_pipeline_overview.jpg)
 
-This repository provides a compact, memory-conscious C++ toolkit for running quantized random-forest models and on-device training workflows on microcontrollers (ESP32 family). The project focuses on minimizing RAM/flash usage while preserving prediction accuracy through variable-bit quantization and efficient in-memory layouts.
+This repository provides a compact, memory-efficient C++ toolkit for pre-training, embedding, and running quantum random forest models on microcontrollers, and even goes further - retraining models on the microcontroller itself, allowing them to adapt to new data throughout their lifecycle without reloading code or intervention. The entire project is built on a new foundation library, which includes containers with extreme memory optimization and fragmentation.
 
 ## Quantization — brief introduction
 
@@ -26,7 +26,6 @@ Key points:
 - Designed for low fragmentation, small code size, and optional PSRAM use.
 
 ## Extended support
-
 - Memory : support PSRAM accross all containers and algorithms
 - Storage : support LITTLEFS, FATFS, SD_MMC_1BIT, SD_MMC_4BIT, SD_SPI.
 - Board : tested on ESP32, ESP32-C3, ESP32-S3, ESP32-CAM, dev modules, super mini boards...

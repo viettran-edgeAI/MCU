@@ -56,6 +56,7 @@ __pycache__/
 # Ignore report plotting script and requirements exported into report folder
 report/plot_compare.py
 report/requirements.txt
+report/plot_size_vs_build_time.py
 
 # specific files
 src/main_backup.ino

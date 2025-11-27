@@ -50,7 +50,16 @@ Performance plot:
 
 ![Inference time vs #features](./imgs/inference_report.png)
 
-Benchmark note: these inference-time results were recorded on an `esp32-cam` board using an SD_MMC interface in 1-bit mode with an external SD card and PSRAM enabled. In practice, inference can be faster when running on devices with built-in flash/PSRAM or with SD_MMC in 4-bit mode (or when model assets are stored on internal flash or faster storage). Use these results as a representative baseline: your board, SD interface mode, PSRAM availability, and storage location (SD vs internal flash) will affect measured throughput.
+---
+
+## Model building time 
+
+The chart below summarizes the relationship between the quantized dataset size and the time required to build the model on esp32.
+
+![Dataset size vs Model build time](./imgs/plot_size_vs_build_time.png)
+
+
+Benchmark note: these model inference/building-time results were recorded on an `esp32-cam` board using an SD_MMC interface in 1-bit mode with an external SD card and PSRAM enabled. In practice, inference can be faster when running on devices with built-in flash/PSRAM or with SD_MMC in 4-bit mode (or when model assets are stored on internal flash or faster storage). Use these results as a representative baseline: your board, SD interface mode, PSRAM availability, and storage location (SD vs internal flash) will affect measured throughput.
 
 ## Memory Usage, Disk & Fragmentation
 
@@ -58,8 +67,8 @@ The repo includes memory logs and visualizations showing heap usage, largest fre
 
 Files of interest:
 
-- `esp32_cam_mlog.txt` + `imgs/memory_report.png` — Model building log with walker_fall dataset, running on esp32_cam board with 4MB PSRAM + 2.75MB Flash.
-- `esp32c3_mini_mlog.txt` `imgs/esp32_mini_mreport.png` — Model building log with digit_data dataset, running on esp32c3 super mini board with 283 KB RAM + 3 MB Flash.
+- `esp32_cam_mlog.txt` + `imgs/memory_report.png` — Model building + training log with walker_fall dataset, running on esp32_cam board with 4MB PSRAM + 2.75MB Flash.
+- `esp32c3_mini_mlog.txt` `imgs/esp32_mini_mreport.png` — Model building + training log with digit_data dataset, running on esp32c3 super mini board with 283 KB RAM + 3 MB Flash.
 
 Memory usage plots:
 
@@ -81,4 +90,4 @@ Memory usage plots:
 
 References and further reading:
 
-- `docs/` - all documentation related to STL_MCU library
+- [main documentations](./../docs/) - all documentation related to STL_MCU library

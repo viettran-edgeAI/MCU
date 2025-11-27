@@ -1,8 +1,10 @@
 # STL_MCU — Quantization & Performance Report
 
-This document summarizes the compression, precision, inference performance, and memory behavior of quantized random-forest models produced by the STL_MCU toolchain. The reports and benchmarks are run on 7 datasets provided in the tools/data folder: iris_data, cancer_data, walker_fall, digit_data, run_walk, mnist, emnist with various sizes, number of samples and classes.
+This document summarizes the compression, precision, inference performance, and memory behavior of quantized random-forest models produced by the STL_MCU toolchain. The reports and benchmarks are run on 7 datasets provided in the tools/data_quantization/data/ folder: iris_data, cancer_data, walker_fall, digit_data, run_walk, mnist, emnist with various sizes, number of samples and classes.
 
 **What this file contains:** a brief introduction, compression & precision tables, inference-time benchmark notes and graphs, memory/disk/fragmentation observations, and a short conclusion.
+
+**Note:** The entire model used in this report is built with 20 trees by default.
 
 ---
 
@@ -25,10 +27,6 @@ Note: Compression ratios are rounded and computed as (original size / quantized 
 Important clarification: The reported **model_size** mentioned is the model size when loaded into RAM. The model file size can be larger (0 -> 40%) due to the dynamic node layout packing mechanism when the model is loaded into RAM.
 
 Embedded visuals (relative compression and accuracy):
-
-![Dataset size (Original=1)](./imgs/compare_dataset_size.png)
-
-![Model size (Original=1)](./imgs/compare_model_size.png)
 
 ![Combined comparison](./imgs/compare_all.png)
 
@@ -58,39 +56,27 @@ The repo includes memory logs and visualizations showing heap usage, largest fre
 
 Files of interest:
 
-- `esp32_cam_mlog.txt` — example memory log from an ESP32 run (Time(s), FreeHeap, Largest_Block, FreeDisk, Event)
-- `esp32c3_mini_mlog.txt` — example log for an ESP32-C3 mini device
-- `imgs/memory_report.png` — normalized memory usage over time (FreeHeap, Largest free block, FreeDisk)
-- `imgs/esp32_mini_mreport.png` — example memory report (Digit dataset)
-
-Key observations:
-
-- Disk vs RAM: when models or datasets are stored on external SD, available disk space and SD throughput matter primarily during load/unpack operations. Once the model is loaded and packed into RAM, inference uses the in-memory packed layout for speed.
-- Fragmentation: the runtime packing strategy prioritizes compact in-memory layouts and minimizes fragmentation. The plotted 'Largest free block' metric shows fragmentation behavior across runs — the implementation is optimized to keep large contiguous blocks available for allocations where possible.
-- PSRAM impact: enabling PSRAM increases total available heap for large models but may change latency characteristics; measure on your target board.
+- `esp32_cam_mlog.txt` + `imgs/memory_report.png` — Model building log with walker_fall dataset, running on esp32_cam board with 4MB PSRAM + 2.75MB Flash.
+- `esp32c3_mini_mlog.txt` `imgs/esp32_mini_mreport.png` — Model building log with digit_data dataset, running on esp32c3 super mini board with 283 KB RAM + 3 MB Flash.
 
 Memory usage plots:
 
-![Memory usage over time](./imgs/memory_report.png)
+![esp32_cam board - enable PSRAM](./imgs/esp32_cam_mreport.png)
 
-![ESP32 Super Mini memory usage (Digit dataset)](./imgs/esp32_mini_mreport.png)
+![esp32c3 super mini board - minimal resources](./imgs/esp32_mini_mreport.png)
 
+**Notes:**
+- Since processes run single-core, memory and disk usage times are recorded at the peak times of each stage, not measured in parallel.
+- Largest Free Block shows the memory fragmentation, the larger the value the better. The algorithm is optimized to use memory fragments instead of abusing long memories, extremely good against fragmentation.
+- FreeDisk is a filesystem storage level. In this source code, many storage types are supported depending on the user's specifications: FATFS, LITTLEFS, SD_MMC_1BIT, SD_MMC_4BIT, SD_SPI
 ---
 
 ## Conclusion
 
 - Quantization yields significant dataset and model compression (commonly 10-30x depending on dataset and bit choices) while preserving accuracy for many use-cases.
-- Always evaluate the **runtime in-memory model size** (RAM footprint) rather than on-disk file size when planning deployments on RAM-constrained MCUs.
-- Inference latency depends on storage interface, PSRAM presence, and whether the model is loaded from SD or internal flash — benchmark on the actual target hardware and storage configuration.
-
-If you'd like, I can:
-
-- Commit these updated docs and/or embed the images into the README for easier preview.
-- Run the plotting script here and attach the generated images to this file.
+- The model size is already optimally packed when stored, but can be even smaller when loaded into RAM thanks to the dynamic node layout packing mechanism.
+- inference latency depends most strongly on the number of features (mainly through the quantization layer), followed by the depth of the model. RAM type has a slight impact (PSRAM will be a bit slower)
 
 References and further reading:
 
-- `docs/Quantization/Rf_quantizer.md` — quantizer design and PC-to-ESP32 workflow
-- `tools/pre_train/random_forest_pc.cpp` and `tools/pre_train/pc_components.h` — PC-side quantization implementation
-- `report/plot_compare.py` — plotting and report generation script
-
+- `docs/` - all documentation related to STL_MCU library

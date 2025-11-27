@@ -82,3 +82,6 @@ tools/data_quantization/data/mnist*.csv
 tools/data_quantization/data/emnist.csv
 tools/hog_transform/result/emnist.csv
 tools/data_quantization/data/result/mnist_data_nml.csv
+
+# Local python venv
+.venv/

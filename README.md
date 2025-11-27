@@ -1,6 +1,6 @@
 # Quantization - ondevice training - optimized container structure for microcontrollers (STL_MCU)
 
-![Full pipeline overview](/docs/imgs/full_pipeline_overview.png)
+![Full pipeline overview](/docs/imgs/full_pipeline_overview.jpg)
 
 This repository provides a compact, memory-conscious C++ toolkit for running quantized random-forest models and on-device training workflows on microcontrollers (ESP32 family). The project focuses on minimizing RAM/flash usage while preserving prediction accuracy through variable-bit quantization and efficient in-memory layouts.
 

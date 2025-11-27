@@ -1,6 +1,6 @@
 {
     "data_path": {
-        "value": "../data_processing/data/result/gesture_nml.csv",
+        "value": "../data_quantization/data/result/walker_fall_nml.csv",
         "description": "Path to the normalized cv dataset."
     },
     "random_seed": {
@@ -75,7 +75,7 @@
     },
     "max_depth": {
         "value": 50,
-        "status": "disabled",
+        "status": "enabled",
         "status_options": ["disabled", "enabled"],
         "description": "disabled by default. enable to override max_depth in training process."
     },

@@ -235,9 +235,9 @@ def transfer_dataset(ser: serial.Serial, dataset: str) -> Tuple[Path, Optional[P
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Fetch dataset from ESP32 over Serial")
-    parser.add_argument("dataset", nargs='?', default="gesture",
-                        help="Dataset root folder on ESP32 (default: gesture)")
-    parser.add_argument("port",
+    parser.add_argument("--dataset", "-d", required=True,
+                        help="Dataset root folder on ESP32")
+    parser.add_argument("--port", "-p", required=True,
                         help="Serial port (e.g. /dev/ttyUSB0)")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
                         help="Serial read timeout in seconds")

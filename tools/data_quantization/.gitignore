@@ -1,0 +1,37 @@
+# ESP32 Dataset Processing Tool - .gitignore
+
+# Build artifacts
+processing_data
+
+
+# Python environment and cache
+venv_*/
+__pycache__/
+*.pyc
+*.pyo
+
+# Temporary files
+*.tmp
+.DS_Store
+Thumbs.db
+
+# User datasets (uncomment to ignore)
+# data/*.csv
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+processing_data
+
+data/mnist_copy.csv
+data/result/mnist_copy_nml.bin
+data/result/mnist_copy_nml.csv
+data/result/mnist_copy_dp.csv
+data/result/mnist_copy_ctg.csv
+data/result/emnist_nml.csv
+data/emnist.csv
+data/result/mnist_data_nml.csv

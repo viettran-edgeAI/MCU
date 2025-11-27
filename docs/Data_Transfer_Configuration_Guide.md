@@ -136,7 +136,7 @@ If they don't match → transfer hangs or fails.
 
 3. **Run PC transfer**:
    ```bash
-   cd tools/data_processing/data_transfer/pc_side
+   cd tools/data_quantization/data_transfer/pc_side
    python3 unified_transfer.py digit_data /dev/ttyACM0
    ```
 
@@ -186,18 +186,18 @@ Approximate transfer times for a 1 MB file:
 ## Files & Locations
 
 ### ESP32 Sketches
-- `tools/data_processing/data_transfer/esp32_side/unified_receiver.ino` (includes `<Rf_board_config.h>`)
-- `tools/data_processing/data_transfer/esp32_side/dataset_receiver.ino` (includes `<Rf_board_config.h>`)
-- `tools/data_processing/data_transfer/esp32_side/dp_file_receiver.ino` (includes `<Rf_board_config.h>`)
-- `tools/data_processing/data_transfer/esp32_side/quantizer_receiver.ino` (includes `<Rf_board_config.h>`)
+- `tools/data_quantization/data_transfer/esp32_side/unified_receiver.ino` (includes `<Rf_board_config.h>`)
+- `tools/data_quantization/data_transfer/esp32_side/dataset_receiver.ino` (includes `<Rf_board_config.h>`)
+- `tools/data_quantization/data_transfer/esp32_side/dp_file_receiver.ino` (includes `<Rf_board_config.h>`)
+- `tools/data_quantization/data_transfer/esp32_side/quantizer_receiver.ino` (includes `<Rf_board_config.h>`)
 - `tools/pre_train/data_transfer/esp32_side/model_receiver.ino` (includes `<Rf_board_config.h>`)
 - `tools/hog_transform/data_transfer/esp32_side/hog_config_receiver.ino` (includes `<Rf_board_config.h>`)
 
 ### PC Scripts
-- `tools/data_processing/data_transfer/pc_side/unified_transfer.py`
-- `tools/data_processing/data_transfer/pc_side/transfer_dataset.py`
-- `tools/data_processing/data_transfer/pc_side/transfer_dp_file.py`
-- `tools/data_processing/data_transfer/pc_side/transfer_categorizer.py`
+- `tools/data_quantization/data_transfer/pc_side/unified_transfer.py`
+- `tools/data_quantization/data_transfer/pc_side/transfer_dataset.py`
+- `tools/data_quantization/data_transfer/pc_side/transfer_dp_file.py`
+- `tools/data_quantization/data_transfer/pc_side/transfer_categorizer.py`
 - `tools/pre_train/data_transfer/pc_side/transfer_model.py`
 - `tools/hog_transform/data_transfer/pc_side/transfer_hog_config.py`
 

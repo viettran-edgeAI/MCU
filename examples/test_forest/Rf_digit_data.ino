@@ -22,7 +22,7 @@
 
 using namespace mcu;
 
-const RfStorageType STORAGE_MODE = RfStorageType::SD_MMC_1BIT;
+const RfStorageType STORAGE_MODE = RfStorageType::LITTLEFS;
 
 void setup() {
     Serial.begin(115200);  
@@ -64,6 +64,9 @@ void setup() {
         Serial.println("❌ FAILED");
         return;
     }
+
+    long unsigned build_time = GET_CURRENT_TIME_IN_MILLISECONDS;
+    Serial.printf("Model built in %lu ms\n", build_time - start_forest);
 
     // forest.training(2); // limit to 3 epochs
 

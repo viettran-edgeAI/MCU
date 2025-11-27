@@ -53,6 +53,10 @@ __pycache__/
 *.py[cod]
 *.pyo
 
+# Ignore report plotting script and requirements exported into report folder
+report/plot_compare.py
+report/requirements.txt
+report/plot_size_vs_build_time.py
 
 # specific files
 src/main_backup.ino
@@ -72,4 +76,12 @@ src/*.py
 old_/
 tools/hog_transform/mnist/
 # Ignore large MNIST dumps
-tools/data_processing/data/mnist*.csv
+tools/data_quantization/data/mnist*.csv
+
+# Large datasets kept locally (not tracked)
+tools/data_quantization/data/emnist.csv
+tools/hog_transform/result/emnist.csv
+tools/data_quantization/data/result/mnist_data_nml.csv
+
+# Local python venv
+.venv/

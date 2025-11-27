@@ -20,6 +20,9 @@
 
 #include "random_forest_mcu.h"
 
+
+const RfStorageType STORAGE_MODE = RfStorageType::SD_MMC_1BIT;
+
 using namespace mcu;
 
 void setup() {
@@ -33,12 +36,12 @@ void setup() {
     delay(1000);
 
     // Initialize filesystem
-    Serial.print("Initializing LittleFS... ");
-    if (!LittleFS.begin(true)) {
-        Serial.println("❌ FAILED");
+    Serial.print("💾 Initializing file system... ");
+    if (!RF_FS_BEGIN(STORAGE_MODE)) {
+        Serial.println("❌ FAILED!");
+        Serial.println("⚠️  File system initialization failed. Cannot continue.");
         return;
     }
-    Serial.println("✅ OK");
     
     manage_files();
     delay(500);
@@ -52,8 +55,9 @@ void setup() {
     // Optional: Configure forest parameters
     forest.set_num_trees(20);
     // forest.set_random_seed(42);
-    forest.set_training_score(OOB_SCORE);
+    // forest.set_training_score(OOB_SCORE);
     // forest.enable_partial_loading();
+
 
     // Build and train the model
     if (!forest.build_model()) {
@@ -61,7 +65,9 @@ void setup() {
         return;
     }
 
-
+    long unsigned build_time = GET_CURRENT_TIME_IN_MILLISECONDS;
+    Serial.printf("Model built in %lu ms\n", build_time - start_forest);
+    
     // forest.training(2); // limit to 3 epochs
 
     // Load trained forest from filesystem

@@ -304,7 +304,8 @@ namespace mcu{
                 config.enable_partial_loading = true;
                 RF_DEBUG_2(1, "🔄 Auto-enabling partial loading: train_data=", train_size, "bytes, RAM=", available_ram);
             }else{
-                config.enable_partial_loading = false;
+                if (config.enable_auto_config)
+                    config.enable_partial_loading = false;
             }
             #endif
             uint16_t max_nodes = 0;

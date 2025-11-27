@@ -133,7 +133,7 @@ The configuration system is divided into two main categories:
 | `use_bootstrap` | boolean | true | Enable bootstrap sampling (disable to save 38% RAM/SPIFFS) |
 | `criterion` | string | "entropy" | Node splitting criterion: `"gini"` or `"entropy"` |
 | `impurity_threshold` | float | 0.1 | Threshold for node impurity (rarely needs adjustment) |
-| `data_path` | string | "../data_processing/data/result/digit_data_nml.csv" | Path to normalized dataset |
+| `data_path` | string | "../data_quantization/data/result/digit_data_nml.csv" | Path to normalized dataset |
 | `max_samples` | integer | 0 | Maximum number of samples to keep in dataset. When exceeded, oldest samples are removed (FIFO). Set to 0 for unlimited samples. Useful for online learning on memory-constrained devices |
 
 ##### Split Ratio Configuration

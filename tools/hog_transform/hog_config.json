@@ -4,7 +4,7 @@
     "description": "Extract HOG features from image dataset for machine learning"
   },
   "input": {
-    "dataset_name": "datasets/gesture",
+    "dataset_name": "mnist",
     "image_format": "auto",
     "description": "Folder containing class subfolders with images (auto-detects PNG, JPG, JPEG, BMP, TIFF, TXT)"
   },
@@ -32,7 +32,7 @@
     "description": "HOG descriptor parameters"
   },
   "output": {
-    "model_name": "gesture",
+    "model_name": "mnist",
     "shuffle_data": true,
     "description": "Output CSV file with HOG features"
   },

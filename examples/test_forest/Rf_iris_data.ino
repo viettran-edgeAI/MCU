@@ -16,10 +16,13 @@
 
 #define DEV_STAGE    
 #define RF_DEBUG_LEVEL 2
+#define RF_USE_PSRAM
 
 #include "random_forest_mcu.h"
 
 using namespace mcu;
+
+const RfStorageType STORAGE_MODE = RfStorageType::SD_MMC_1BIT;
 
 void setup() {
     Serial.begin(115200);  
@@ -32,12 +35,12 @@ void setup() {
     delay(1000);
 
     // Initialize filesystem
-    Serial.print("Initializing LittleFS... ");
-    if (!LittleFS.begin(true)) {
-        Serial.println("❌ FAILED");
+    Serial.print("💾 Initializing file system... ");
+    if (!RF_FS_BEGIN(STORAGE_MODE)) {
+        Serial.println("❌ FAILED!");
+        Serial.println("⚠️  File system initialization failed. Cannot continue.");
         return;
     }
-    Serial.println("✅ OK");
     
     manage_files();
     delay(500);
@@ -63,17 +66,22 @@ void setup() {
     }
     Serial.println("✅ OK");
 
-    Serial.print("Training model (3 epochs)... ");
-    forest.training(3);
-    Serial.println("✅ OK");
+    long unsigned build_time = GET_CURRENT_TIME_IN_MILLISECONDS;
+    Serial.printf("Model built in %lu ms\n", build_time - start_forest);
+
+    // Serial.print("Training model (3 epochs)... ");
+    // forest.training(3);
+    // Serial.println("✅ OK");
 
     // Load trained forest from filesystem
     Serial.print("Loading forest... ");
+    long unsigned load_start = GET_CURRENT_TIME_IN_MILLISECONDS;
     if (!forest.loadForest()) {
         Serial.println("❌ FAILED");
         return;
     }
-    Serial.println("✅ OK");
+    long unsigned load_end = GET_CURRENT_TIME_IN_MILLISECONDS;
+    Serial.printf("Forest loaded in %lu ms\n", load_end - load_start);
     
     // Optional: Enable dataset extension for online learning
     // forest.enable_extend_base_data();

@@ -5,6 +5,7 @@ static RfStorageType g_active_storage = RfStorageType::AUTO;
 
 namespace {
     constexpr const char* STORAGE_LABEL_FLASH = "LittleFS";
+    constexpr const char* STORAGE_LABEL_FATFS = "FATFS";
     constexpr const char* STORAGE_LABEL_SDMMC_1BIT = "SD_MMC (1-bit)";
     constexpr const char* STORAGE_LABEL_SDMMC_4BIT = "SD_MMC (4-bit)";
     constexpr const char* STORAGE_LABEL_SD_SPI = "SD SPI";
@@ -19,6 +20,8 @@ namespace {
                 return resolve_default_storage();
             case RfStorageType::FLASH:
                 return RfStorageType::FLASH;
+            case RfStorageType::FATFS:
+                return RfStorageType::FATFS;
             case RfStorageType::SD_MMC:
                 return RfStorageType::SD_MMC_1BIT;
             default:
@@ -34,6 +37,8 @@ namespace {
                 return STORAGE_LABEL_SDMMC_4BIT;
             case RfStorageType::SD_MMC_1BIT:
                 return STORAGE_LABEL_SDMMC_1BIT;
+            case RfStorageType::FATFS:
+                return STORAGE_LABEL_FATFS;
             case RfStorageType::FLASH:
             default:
                 return STORAGE_LABEL_FLASH;
@@ -76,6 +81,33 @@ bool rf_storage_begin(RfStorageType type) {
     RfStorageType selected = canonicalize(type);
 
     switch (selected) {
+        case RfStorageType::FATFS:
+        {
+#if RF_HAS_FATFS
+            if (!FFat.begin(RF_FATFS_FORMAT_IF_FAIL)) {
+                RF_DEBUG(0, RF_FATFS_FORMAT_IF_FAIL ? "❌ FATFS mount failed (format attempted)." : "❌ FATFS Mount Failed!");
+                return fallback_to_flash(previous);
+            }
+
+            RF_DEBUG(1, "✅ FATFS initialized successfully");
+
+            if (RF_DEBUG_LEVEL >= 1) {
+                uint64_t totalBytes = FFat.totalBytes();
+                uint64_t usedBytes = FFat.usedBytes();
+                char buffer[128];
+                snprintf(buffer, sizeof(buffer), "📊 FATFS Size: %llu bytes, Used: %llu bytes", 
+                         (unsigned long long)totalBytes, (unsigned long long)usedBytes);
+                RF_DEBUG(0, "", buffer);
+            }
+
+            g_active_storage = RfStorageType::FATFS;
+            return true;
+#else
+            RF_DEBUG(0, "❌ FATFS not available on this platform");
+            return fallback_to_flash(previous);
+#endif
+        }
+
         case RfStorageType::SD_SPI:
         {
             SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
@@ -175,6 +207,12 @@ void rf_storage_end() {
     }
 
     switch (canonicalize(raw)) {
+        case RfStorageType::FATFS:
+#if RF_HAS_FATFS
+            FFat.end();
+            RF_DEBUG(1, "✅ FATFS unmounted");
+#endif
+            break;
         case RfStorageType::SD_SPI:
             SD.end();
             RF_DEBUG(1, "✅ SD Card unmounted");
@@ -199,6 +237,12 @@ void rf_storage_end() {
 // Runtime file system operations
 bool rf_mkdir(const char* path) {
     switch (canonicalize(g_active_storage)) {
+        case RfStorageType::FATFS:
+#if RF_HAS_FATFS
+            return FFat.mkdir(path);
+#else
+            return false;
+#endif
         case RfStorageType::SD_SPI:
             return SD.mkdir(path);
         case RfStorageType::SD_MMC_1BIT:
@@ -216,6 +260,12 @@ bool rf_mkdir(const char* path) {
 
 bool rf_exists(const char* path) {
     switch (canonicalize(g_active_storage)) {
+        case RfStorageType::FATFS:
+#if RF_HAS_FATFS
+            return FFat.exists(path);
+#else
+            return false;
+#endif
         case RfStorageType::SD_SPI:
             return SD.exists(path);
         case RfStorageType::SD_MMC_1BIT:
@@ -233,6 +283,12 @@ bool rf_exists(const char* path) {
 
 bool rf_remove(const char* path) {
     switch (canonicalize(g_active_storage)) {
+        case RfStorageType::FATFS:
+#if RF_HAS_FATFS
+            return FFat.remove(path);
+#else
+            return false;
+#endif
         case RfStorageType::SD_SPI:
             return SD.remove(path);
         case RfStorageType::SD_MMC_1BIT:
@@ -250,6 +306,12 @@ bool rf_remove(const char* path) {
 
 bool rf_rename(const char* oldPath, const char* newPath) {
     switch (canonicalize(g_active_storage)) {
+        case RfStorageType::FATFS:
+#if RF_HAS_FATFS
+            return FFat.rename(oldPath, newPath);
+#else
+            return false;
+#endif
         case RfStorageType::SD_SPI:
             return SD.rename(oldPath, newPath);
         case RfStorageType::SD_MMC_1BIT:
@@ -267,6 +329,12 @@ bool rf_rename(const char* oldPath, const char* newPath) {
 
 bool rf_rmdir(const char* path) {
     switch (canonicalize(g_active_storage)) {
+        case RfStorageType::FATFS:
+#if RF_HAS_FATFS
+            return FFat.rmdir(path);
+#else
+            return false;
+#endif
         case RfStorageType::SD_SPI:
             return SD.rmdir(path);
         case RfStorageType::SD_MMC_1BIT:
@@ -294,6 +362,15 @@ File rf_open(const char* path, const char* mode) {
     }
 
     switch (canonicalize(g_active_storage)) {
+        case RfStorageType::FATFS:
+#if RF_HAS_FATFS
+            if (needsCreate) {
+                return FFat.open(path, mode, true);
+            }
+            return FFat.open(path, mode);
+#else
+            return File();
+#endif
         case RfStorageType::SD_SPI:
             return SD.open(path, mode);
         case RfStorageType::SD_MMC_1BIT:
@@ -314,6 +391,12 @@ File rf_open(const char* path, const char* mode) {
 
 uint64_t rf_total_bytes() {
     switch (canonicalize(g_active_storage)) {
+        case RfStorageType::FATFS:
+#if RF_HAS_FATFS
+            return FFat.totalBytes();
+#else
+            return 0;
+#endif
         case RfStorageType::SD_SPI:
             return SD.totalBytes();
         case RfStorageType::SD_MMC_1BIT:
@@ -331,6 +414,12 @@ uint64_t rf_total_bytes() {
 
 uint64_t rf_used_bytes() {
     switch (canonicalize(g_active_storage)) {
+        case RfStorageType::FATFS:
+#if RF_HAS_FATFS
+            return FFat.usedBytes();
+#else
+            return 0;
+#endif
         case RfStorageType::SD_SPI:
             return SD.usedBytes();
         case RfStorageType::SD_MMC_1BIT:
@@ -362,10 +451,19 @@ bool rf_storage_is_flash() {
     return canonicalize(g_active_storage) == RfStorageType::FLASH;
 }
 
+bool rf_storage_is_fatfs() {
+    return canonicalize(g_active_storage) == RfStorageType::FATFS;
+}
+
 size_t rf_storage_max_dataset_bytes() {
     constexpr size_t FLASH_LIMIT = 150000;          // ~150KB when using internal flash
+    constexpr size_t FATFS_LIMIT = 150000;          // ~150KB for FATFS (internal flash)
     constexpr size_t SD_LIMIT_NO_PSRAM = 5000000;   // 5MB when constrained by DRAM only
     constexpr size_t SD_LIMIT_WITH_PSRAM = 20000000; // 20MB when PSRAM is available
+
+    if (rf_storage_is_fatfs()) {
+        return FATFS_LIMIT;
+    }
 
     if (!rf_storage_is_sd_based()) {
         return FLASH_LIMIT;

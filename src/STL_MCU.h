@@ -241,9 +241,9 @@ namespace mcu {
         return pair<std::decay_t<T1>, std::decay_t<T2>>(std::forward<T1>(a), std::forward<T2>(b));
     }
 
-    // unordered_map class : for speed and flexibility, but limited to small number of elements (max 255)
+    // unordered_map_s class : for speed and flexibility, but limited to small number of elements (max 255)
     template<typename V, typename T>
-    class unordered_map : public hash_kernel, public slot_handler {
+    class unordered_map_s : public hash_kernel, public slot_handler {
     private:
         using Pair = pair<V, T>;
 
@@ -317,8 +317,8 @@ namespace mcu {
         bool inline is_full() const noexcept {
             return size_ >= virtual_cap;
         }
-        template<typename U, typename R> friend class ChainedUnorderedMap;
-        template<typename U> friend class ChainedUnorderedSet;
+        template<typename U, typename R> friend class unordered_map;
+        template<typename U> friend class unordered_set;
     protected:
         int16_t getValue(V key) noexcept {
             if (cap_ == 0 || table == nullptr) {
@@ -376,7 +376,7 @@ namespace mcu {
         
     public:
         // default constructor
-        unordered_map() noexcept {
+        unordered_map_s() noexcept {
             rehash(4);
         }
 
@@ -384,11 +384,11 @@ namespace mcu {
          * @brief Constructor with specified initial capacity.
          * @param cap Initial capacity (number of elements) the map should accommodate.
          */
-        explicit unordered_map(uint8_t cap) noexcept {
+        explicit unordered_map_s(uint8_t cap) noexcept {
             rehash(cap);
         }
         // destructor
-        ~unordered_map() noexcept {
+        ~unordered_map_s() noexcept {
             mem_alloc::deallocate(table);
         }
 
@@ -396,7 +396,7 @@ namespace mcu {
          * @brief Copy constructor, creates a deep copy of another map.
          * @param other The map to copy from.
          */
-        unordered_map(const unordered_map& other) noexcept : hash_kernel(),
+        unordered_map_s(const unordered_map_s& other) noexcept : hash_kernel(),
             slot_handler(other),        
             size_(other.size_),
             dead_size_(other.dead_size_),
@@ -416,7 +416,7 @@ namespace mcu {
          * @brief Move constructor, transfers ownership of resources.
          * @param other The map to move from (will be left in a valid but unspecified state).
          */
-        unordered_map(unordered_map&& other) noexcept : hash_kernel(),
+        unordered_map_s(unordered_map_s&& other) noexcept : hash_kernel(),
         slot_handler(std::move(other)),  // ← steal flags & cap_
         size_(other.size_),
         dead_size_(other.dead_size_),
@@ -438,7 +438,7 @@ namespace mcu {
          * @param other The map to copy from.
          * @return Reference to *this.
          */
-        unordered_map& operator=(const unordered_map& other) noexcept {
+        unordered_map_s& operator=(const unordered_map_s& other) noexcept {
             if (this != &other) {
                 mem_alloc::deallocate(table);
                 slot_handler::operator=(other);  // copy flags & cap_
@@ -461,7 +461,7 @@ namespace mcu {
          * @param other The map to move from (will be left in a valid but unspecified state).
          * @return Reference to *this.
          */
-        unordered_map& operator=(unordered_map&& other) noexcept {
+        unordered_map_s& operator=(unordered_map_s&& other) noexcept {
             if (this != &other) {
                 mem_alloc::deallocate(table);
                 slot_handler::operator=(std::move(other)); // steal flags & cap_
@@ -494,7 +494,7 @@ namespace mcu {
             using reference         = value_type&;
 
         private:
-            typename std::conditional<IsConst, const unordered_map*, unordered_map*>::type map_;
+            typename std::conditional<IsConst, const unordered_map_s*, unordered_map_s*>::type map_;
             uint8_t index_;
 
             void advance() {
@@ -719,7 +719,7 @@ namespace mcu {
          * @param other The map to compare with.
          * @return true if maps are equal, false otherwise.
          */
-        bool operator==(const unordered_map& other) const noexcept {
+        bool operator==(const unordered_map_s& other) const noexcept {
             if (size_ != other.size_) return false;
             for (uint8_t i = 0; i < cap_; ++i) {
                 if (getState(i) == slotState::Used && !other.contains(table[i].first)) {
@@ -734,7 +734,7 @@ namespace mcu {
          * @param other The map to compare with.
          * @return true if maps are not equal, false otherwise.
          */
-        bool operator!=(const unordered_map& other) const noexcept {
+        bool operator!=(const unordered_map_s& other) const noexcept {
             return !(*this == other);
         }
 
@@ -897,7 +897,7 @@ namespace mcu {
          * @brief Swaps the contents of two maps.
          * @param other The map to swap with.
          */
-        void swap(unordered_map& other) noexcept {
+        void swap(unordered_map_s& other) noexcept {
             std::swap(table, other.table);
             std::swap(flags, other.flags);
             std::swap(cap_, other.cap_);
@@ -909,15 +909,15 @@ namespace mcu {
         }
     };
     template<typename V, typename T>
-    T unordered_map<V, T>::MAP_DEFAULT_VALUE = T(); // Default value for MAP_DEFAULT_VALUE
+    T unordered_map_s<V, T>::MAP_DEFAULT_VALUE = T(); // Default value for MAP_DEFAULT_VALUE
     /*
     ------------------------------------------------------------------------------------------------------------------
-    ---------------------------------------------- UNORDERED_SET -----------------------------------------------------
+    ---------------------------------------------- unordered_set_s -----------------------------------------------------
     ------------------------------------------------------------------------------------------------------------------
     */
 
     template<typename T>
-    class unordered_set : public hash_kernel, public slot_handler {
+    class unordered_set_s : public hash_kernel, public slot_handler {
     private:
         T* table = nullptr;
         uint8_t size_ = 0;
@@ -984,9 +984,9 @@ namespace mcu {
         }
     public:
         /**
-         * @brief Default constructor, creates an unordered_set with small initial capacity.
+         * @brief Default constructor, creates an unordered_set_s with small initial capacity.
          */
-        unordered_set() noexcept {
+        unordered_set_s() noexcept {
             rehash(4);
         }
 
@@ -994,14 +994,14 @@ namespace mcu {
          * @brief Constructor with specified initial capacity.
          * @param cap Initial capacity (number of elements) the set should accommodate.
          */
-        explicit unordered_set(uint8_t cap) noexcept {
+        explicit unordered_set_s(uint8_t cap) noexcept {
             rehash(cap);
         }
 
         /**
          * @brief Destructor, frees all allocated memory.
          */
-        ~unordered_set() noexcept {
+        ~unordered_set_s() noexcept {
             mem_alloc::deallocate(table);
         }
 
@@ -1009,7 +1009,7 @@ namespace mcu {
          * @brief Copy constructor, creates a deep copy of another set.
          * @param other The set to copy from.
          */
-        unordered_set(const unordered_set& other) noexcept : hash_kernel(),
+        unordered_set_s(const unordered_set_s& other) noexcept : hash_kernel(),
             slot_handler(other),  // copy flags & cap_
             fullness_(other.fullness_),
             virtual_cap(other.virtual_cap),
@@ -1031,7 +1031,7 @@ namespace mcu {
          * @brief Move constructor, transfers ownership of resources.
          * @param other The set to move from (will be left in a valid but unspecified state).
          */
-        unordered_set(unordered_set&& other) noexcept : hash_kernel(),
+        unordered_set_s(unordered_set_s&& other) noexcept : hash_kernel(),
         slot_handler(std::move(other)),  // ← steal flags & cap_,
         size_(other.size_),
         dead_size_(other.dead_size_),
@@ -1052,7 +1052,7 @@ namespace mcu {
          * @param other The set to copy from.
          * @return Reference to *this.
          */
-        unordered_set& operator=(const unordered_set& other) noexcept {
+        unordered_set_s& operator=(const unordered_set_s& other) noexcept {
             if (this != &other) {
                 mem_alloc::deallocate(table);
                 slot_handler::operator=(other);  // copy flags & cap_
@@ -1076,7 +1076,7 @@ namespace mcu {
          * @param other The set to move from (will be left in a valid but unspecified state).
          * @return Reference to *this.
          */
-        unordered_set& operator=(unordered_set&& other) noexcept {
+        unordered_set_s& operator=(unordered_set_s&& other) noexcept {
             if (this != &other) {
                 mem_alloc::deallocate(table);
                 slot_handler::operator=(std::move(other)); // steal flags & cap_
@@ -1108,7 +1108,7 @@ namespace mcu {
             using reference         = typename std::conditional<IsConst, const T&, T&>::type;
 
         private:
-            typename std::conditional<IsConst, const unordered_set*, unordered_set*>::type set_;
+            typename std::conditional<IsConst, const unordered_set_s*, unordered_set_s*>::type set_;
             uint8_t index_;
 
             void findNextUsed() {
@@ -1128,7 +1128,7 @@ namespace mcu {
             base_iterator() noexcept
                 : set_(nullptr), index_(MAX_CAP)
             {}
-            base_iterator(typename std::conditional<IsConst, const unordered_set*, unordered_set*>::type set,
+            base_iterator(typename std::conditional<IsConst, const unordered_set_s*, unordered_set_s*>::type set,
                         uint8_t start)
             : set_(set), index_(start) {
                 findNextUsed();
@@ -1283,7 +1283,7 @@ namespace mcu {
          * @param other The set to compare with.
          * @return true if sets are equal, false otherwise.
          */
-        bool operator==(const unordered_set& other) const noexcept {
+        bool operator==(const unordered_set_s& other) const noexcept {
             if (size_ != other.size_) return false;
             for (uint8_t i = 0; i < cap_; ++i) {
                 if (getState(i) == slotState::Used && !other.contains(table[i])) {
@@ -1298,7 +1298,7 @@ namespace mcu {
          * @param other The set to compare with.
          * @return true if sets are not equal, false otherwise.
          */
-        bool operator!=(const unordered_set& other) const noexcept {
+        bool operator!=(const unordered_set_s& other) const noexcept {
             return !(*this == other);
         }
 
@@ -1478,7 +1478,7 @@ namespace mcu {
          * @brief Swaps the contents of two sets.
          * @param other The set to swap with.
          */
-        void swap(unordered_set& other) noexcept {
+        void swap(unordered_set_s& other) noexcept {
             std::swap(table, other.table);
             std::swap(flags, other.flags);
             std::swap(cap_, other.cap_);
@@ -3672,8 +3672,8 @@ namespace mcu {
             initialize_from_range(source, start_index, end_index);
         }
 
-    template<uint8_t SourceBitsPerElement, typename SourceValue>
-    packed_vector(const packed_vector<SourceBitsPerElement, SourceValue>& source, size_t start_index, size_t end_index) {
+        template<uint8_t SourceBitsPerElement, typename SourceValue>
+        packed_vector(const packed_vector<SourceBitsPerElement, SourceValue>& source, size_t start_index, size_t end_index) {
             initialize_from_range(source, start_index, end_index);
         }
 
@@ -3805,7 +3805,7 @@ namespace mcu {
 
         static value_type max_value() { return packed_value_traits<value_type>::from_bits(COMPILED_MAX_BITS); }
         static constexpr uint8_t bits_per_element() { return BitsPerElement; }
-    static constexpr size_t max_bits_value() { return COMPILED_MAX_BITS; }
+        static constexpr size_t max_bits_value() { return COMPILED_MAX_BITS; }
 
         uint8_t get_bits_per_value() const { return packed_data.get_bpv(); }
 
@@ -4932,10 +4932,10 @@ namespace mcu {
     */
 
     // Chained Unordered Map : dedicated to machine learning tasks, big data processing: key is always in numeric form, 
-    //                         can contain more elements than unordered_map (~ 60000 elements)
-    // ------------------------------------------- ChainedUnorderedMap ----------------------------------------
+    //                         can contain more elements than unordered_map_s (~ 60000 elements)
+    // ------------------------------------------- unordered_map ----------------------------------------
     /*
-        - chain is made up of consecutive maps (unordered_map)
+        - chain is made up of consecutive maps (unordered_map_s)
         - there are 3 types of maps:
             + Available maps    : maps that have been activated and are being used .
                                 : flags - Used. (contains at least 1 element) or - Empty. (when just initialized)
@@ -4971,19 +4971,19 @@ namespace mcu {
         - cap_ will only change at : remap() and wrapper functions that call remap 
     */
 
-    // note : - in chainedUnorderedMap, slot_handler manages maps instead of pair elements 
+    // note : - in unordered_map, slot_handler manages maps instead of pair elements 
     //        - cap_ : total number of maps in the chain (available + reserve type 1, 2) - size of dynamic array (chain)
 
 
     template <typename R, typename T>
-    class ChainedUnorderedMap : public slot_handler, hash_kernel{
+    class unordered_map : public slot_handler, hash_kernel{
     private:
         using Pair_RT = pair<R, T>;             // for iterator - changed from Pair_16
         using pair_kmi = pair<int16_t, uint8_t>;   // mapID - range, for keyMappingIN 
-        using unordered_map_s = unordered_map<R, T>;
+        using unordered_map_s_s = unordered_map_s<R, T>;
                                                                                                         
-        unordered_map_s** chain = nullptr;  
-        unordered_map<uint8_t, uint8_t> rangeMap;        // Which mapID corresponds to which range?
+        unordered_map_s_s** chain = nullptr;  
+        unordered_map_s<uint8_t, uint8_t> rangeMap;        // Which mapID corresponds to which range?
                                                         // key-range, value-mapID(both unique). only contains used map
         uint8_t fullness_ = 92;                 // maximum map fill level (in %) at each map
         uint8_t cmap_ability = 234;             // Maximum capacity of each map (234 = 92% of 255)
@@ -5003,7 +5003,7 @@ namespace mcu {
             if(chain[mapID] != nullptr) {
                 return;   // mapID already activated
             }else{
-                chain[mapID] = new unordered_map_s();
+                chain[mapID] = new unordered_map_s_s();
                 // rangeMap[mapID] = 0;  // rangeMap change
                 chain_size++;
                 chain[mapID]->set_fullness(fullness_); // set fullness of the map
@@ -5043,7 +5043,7 @@ namespace mcu {
             if (newChainCap > MAX_CAP) newChainCap = MAX_CAP;
 
             // Store old resources if they exist
-            unordered_map_s** oldChain = chain;
+            unordered_map_s_s** oldChain = chain;
             uint8_t* oldFlags = flags;
             uint8_t oldCap = cap_;
 
@@ -5059,12 +5059,12 @@ namespace mcu {
             }
             memset(newFlags, 0, flagBytes);
 
-            unordered_map_s** newChain = mem_alloc::allocate<unordered_map_s*>(newChainCap);
+            unordered_map_s_s** newChain = mem_alloc::allocate<unordered_map_s_s*>(newChainCap);
             if (!newChain) {
                 delete[] newFlags;
                 return; // Keep existing resources if allocation fails
             }
-            memset(newChain, 0, newChainCap * sizeof(unordered_map_s*));
+            memset(newChain, 0, newChainCap * sizeof(unordered_map_s_s*));
 
             if (chain_size >= 234) {
                 rangeMap.set_fullness(1.0);
@@ -5094,7 +5094,7 @@ namespace mcu {
 
     public:
         // default constructor
-        ChainedUnorderedMap() : slot_handler() { 
+        unordered_map() : slot_handler() { 
             // Initialize with INIT_CAP maps
             remap(INIT_CAP);  // Use remap to initialize resources
 
@@ -5105,7 +5105,7 @@ namespace mcu {
         }
         
         // Constructor with capacity
-        explicit ChainedUnorderedMap(uint16_t chainCapicity) : slot_handler() { 
+        explicit unordered_map(uint16_t chainCapicity) : slot_handler() { 
             uint8_t numMapRequired = static_cast<uint8_t>(chainCapicity / cmap_ability + 1);      
             uint8_t numReserve = 3;    // num reserve map 
 
@@ -5121,7 +5121,7 @@ namespace mcu {
             }
         }
                         
-        ~ChainedUnorderedMap() {
+        ~unordered_map() {
             if (chain) {
                 for (uint8_t i = 0; i < cap_; ++i)
                     delete chain[i];
@@ -5132,23 +5132,23 @@ namespace mcu {
             }
         }
         // Copy Constructor
-        ChainedUnorderedMap(const ChainedUnorderedMap& o) noexcept : slot_handler(o),
+        unordered_map(const unordered_map& o) noexcept : slot_handler(o),
             rangeMap(o.rangeMap),
             fullness_(o.fullness_),
             cmap_ability(o.cmap_ability),
             chain_size(o.chain_size)
         {
             this->cap_ = o.cap_; // assign base member if needed
-            chain = mem_alloc::allocate<unordered_map_s*>(this->cap_);
+            chain = mem_alloc::allocate<unordered_map_s_s*>(this->cap_);
             std::memset(chain, 0, this->cap_ * sizeof(chain[0]));
             for (uint8_t i = 0; i < this->cap_; ++i) {
                 if (o.chain[i])
-                    chain[i] = new unordered_map_s(*o.chain[i]);
+                    chain[i] = new unordered_map_s_s(*o.chain[i]);
             }
         }
 
         // Move Constructor
-        ChainedUnorderedMap(ChainedUnorderedMap&& o) noexcept : slot_handler(std::move(o)),   // steal cap_ & flags
+        unordered_map(unordered_map&& o) noexcept : slot_handler(std::move(o)),   // steal cap_ & flags
             rangeMap(std::move(o.rangeMap)),    
             fullness_(std::exchange(o.fullness_,   92)),
             cmap_ability(std::exchange(o.cmap_ability, static_cast<uint8_t>(255*92/100))),
@@ -5156,16 +5156,16 @@ namespace mcu {
                 chain = std::exchange(o.chain, nullptr);
         }
         // Copy‐assignment
-        ChainedUnorderedMap& operator=(const ChainedUnorderedMap& o) noexcept {
+        unordered_map& operator=(const unordered_map& o) noexcept {
             if (this != &o) {
-                ChainedUnorderedMap tmp(o);
+                unordered_map tmp(o);
                 swap(*this, tmp);
             }
             return *this;
         }
 
         // Move‐assignment
-        ChainedUnorderedMap& operator=(ChainedUnorderedMap&& o) noexcept {
+        unordered_map& operator=(unordered_map&& o) noexcept {
             if (this != &o) {
                 swap(*this, o);
             }
@@ -5175,14 +5175,14 @@ namespace mcu {
     // ---------------------------------------------------------------------------------------------------
     // -------------------------------------- iterator class ---------------------------------------------
     // ---------------------------------------------------------------------------------------------------
-    // Iterator class for efficient traversal of ChainedUnorderedMap elements
+    // Iterator class for efficient traversal of unordered_map elements
 
     // combine iterator + const_iterator into one template
     template<bool IsConst>
     class basic_iterator {
     public:
-        using MapType   = std::conditional_t<IsConst, const ChainedUnorderedMap<R, T>, ChainedUnorderedMap<R, T>>;
-        using InnerIter = std::conditional_t<IsConst, typename unordered_map_s::const_iterator, typename unordered_map_s::iterator>;
+        using MapType   = std::conditional_t<IsConst, const unordered_map<R, T>, unordered_map<R, T>>;
+        using InnerIter = std::conditional_t<IsConst, typename unordered_map_s_s::const_iterator, typename unordered_map_s_s::iterator>;
         using value_type = Pair_RT; // This is pair<R, T>
         using reference  = std::conditional_t<IsConst, const Pair_RT&, Pair_RT&>;
         using pointer    = std::conditional_t<IsConst, const Pair_RT*, Pair_RT*>;
@@ -5225,7 +5225,7 @@ namespace mcu {
                     // Check if 'it' is at the end of this particular map.
                     if (current == parent->chain[mapID]->end()) {
                         // Yes, 'it' is at the end of chain[mapID].
-                        // Advance to the next element in the ChainedUnorderedMap or to end().
+                        // Advance to the next element in the unordered_map or to end().
                         ++(*this);
                     }
                     // else: current is a valid iterator within chain[mapID].
@@ -5300,7 +5300,7 @@ namespace mcu {
         }
 
         // Expose mapID for erase operations
-        friend class ChainedUnorderedMap;
+        friend class unordered_map;
     };
 
     // aliases
@@ -5483,7 +5483,7 @@ namespace mcu {
             if (mapID < 0) {
                 return end(); // Key not found
             }
-            typename unordered_map_s::iterator innerIt = chain[mapID]->find(key); // Find in the inner map
+            typename unordered_map_s_s::iterator innerIt = chain[mapID]->find(key); // Find in the inner map
             
             if (innerIt != chain[mapID]->end()) {
                 return iterator(this, mapID, innerIt); // Return iterator to found element
@@ -5497,18 +5497,18 @@ namespace mcu {
             int16_t mapID = keyMap.first;
             if (mapID < 0) {
                 // Key not found - no map contains this range
-                throw std::out_of_range("Key not found in ChainedUnorderedMap");
+                throw std::out_of_range("Key not found in unordered_map");
             }
             
             // Check if map is actually in use
             if (!map_in_use(mapID)) {
-                throw std::out_of_range("Key not found in ChainedUnorderedMap");
+                throw std::out_of_range("Key not found in unordered_map");
             }
             
             // Find the key directly in the map (no inner key conversion needed)
             auto it = chain[mapID]->find(key);
             if (it == chain[mapID]->end()) {
-                throw std::out_of_range("Key not found in ChainedUnorderedMap");
+                throw std::out_of_range("Key not found in unordered_map");
             }
             
             return it->second;
@@ -5519,16 +5519,16 @@ namespace mcu {
             pair_kmi keyMap = keyMappingIN(key);
             int16_t mapID = keyMap.first;
             if (mapID < 0) {
-                throw std::out_of_range("Key not found in ChainedUnorderedMap");
+                throw std::out_of_range("Key not found in unordered_map");
             }
             
             if (!map_in_use(mapID)) {
-                throw std::out_of_range("Key not found in ChainedUnorderedMap");
+                throw std::out_of_range("Key not found in unordered_map");
             }
             
             auto it = chain[mapID]->find(key);
             if (it == chain[mapID]->end()) {
-                throw std::out_of_range("Key not found in ChainedUnorderedMap");
+                throw std::out_of_range("Key not found in unordered_map");
             }
             
             return it->second;
@@ -5720,7 +5720,7 @@ namespace mcu {
         }
 
         // Compare two chains by size and element values
-        bool operator==(const ChainedUnorderedMap& other) const noexcept {
+        bool operator==(const unordered_map& other) const noexcept {
             if (size() != other.size()) return false;
             for (auto it = begin(); it != end(); ++it) {
                 auto oth = other.find(it->first());
@@ -5749,7 +5749,7 @@ namespace mcu {
             return total;
         }
 
-        bool operator!=(const ChainedUnorderedMap& other) const noexcept {
+        bool operator!=(const unordered_map& other) const noexcept {
             return !(*this == other);
         }
         // Optimizes memory usage by removing type 2 reserve maps and calling fit() on remaining maps
@@ -5773,7 +5773,7 @@ namespace mcu {
                         delete chain[i];
                         chain[i] = nullptr;
                         setState(i, slotState::Empty);
-                        bytesFreed += sizeof(unordered_map_s) + 32; // Approximate size
+                        bytesFreed += sizeof(unordered_map_s_s) + 32; // Approximate size
                     }
                 }
             }
@@ -5782,7 +5782,7 @@ namespace mcu {
             if (activeMaps <= 1) return bytesFreed;
         
             // Second pass: compact the chain if there are gaps between maps
-            // Need to handle rangeMap differently since it's now an unordered_map
+            // Need to handle rangeMap differently since it's now an unordered_map_s
             uint8_t destIdx = 0;
             for (uint8_t srcIdx = 0; srcIdx < cap_; srcIdx++) {
                 if (chain[srcIdx] != nullptr && getState(srcIdx) == slotState::Used) {
@@ -5815,8 +5815,8 @@ namespace mcu {
                 uint16_t newCap = std::max(static_cast<uint16_t>(INIT_CAP), static_cast<uint16_t>(activeMaps * 2));
         
                 // Create new smaller chain
-                auto* newChain = mem_alloc::allocate<unordered_map_s*>(newCap);
-                memset(newChain, 0, newCap * sizeof(unordered_map_s*));
+                auto* newChain = mem_alloc::allocate<unordered_map_s_s*>(newCap);
+                memset(newChain, 0, newCap * sizeof(unordered_map_s_s*));
         
                 // Create new flags array
                 uint8_t* newFlags = new uint8_t[(newCap * 2 + 7) / 8];
@@ -5840,11 +5840,11 @@ namespace mcu {
                 uint16_t oldCap = cap_;
                 cap_ = newCap;
         
-                // No need to resize rangeMap since it's now an unordered_map
+                // No need to resize rangeMap since it's now an unordered_map_s
                 // rangeMap's size automatically adjusts as entries are added/removed
         
                 // Bytes freed calculation
-                bytesFreed += (oldCap - newCap) * sizeof(unordered_map_s*);
+                bytesFreed += (oldCap - newCap) * sizeof(unordered_map_s_s*);
                 bytesFreed += ((oldCap * 2 + 7) / 8) - ((newCap * 2 + 7) / 8);
             }
         
@@ -5884,7 +5884,7 @@ namespace mcu {
             return true;
         }
         // swap helper for copy-and-swap
-        friend void swap(ChainedUnorderedMap& a, ChainedUnorderedMap& b) noexcept {
+        friend void swap(unordered_map& a, unordered_map& b) noexcept {
             using std::swap;
             swap(a.fullness_,   b.fullness_);
             swap(a.cmap_ability, b.cmap_ability);
@@ -5899,16 +5899,16 @@ namespace mcu {
 
 
     // -----------------------------------------------------------------------------------------
-    // ---------------------------------- ChainedUnorderedSet class -----------------------------------
+    // ---------------------------------- unordered_set class -----------------------------------
     // -----------------------------------------------------------------------------------------
     template <typename T>
-    class ChainedUnorderedSet : public slot_handler, hash_kernel{
+    class unordered_set : public slot_handler, hash_kernel{
     private:
-        using unordered_set_s = unordered_set<T>;
+        using unordered_set_s_s = unordered_set_s<T>;
         using pair_kmi = pair<int16_t, uint8_t>; // setID , range 
 
-        unordered_set_s** chain = nullptr;
-        unordered_map<uint8_t, uint8_t> rangeMap; // setID -> range
+        unordered_set_s_s** chain = nullptr;
+        unordered_map_s<uint8_t, uint8_t> rangeMap; // setID -> range
 
         uint8_t chain_size = 0; // number of sets in the chain
         uint8_t fullness_ = 92; // maximum map fill level (in %)
@@ -5928,7 +5928,7 @@ namespace mcu {
             if(chain[setID] != nullptr) {
                 return;   // setID already activated
             }else{
-                chain[setID] = new unordered_set_s();
+                chain[setID] = new unordered_set_s_s();
                 chain_size++;
                 chain[setID]->set_fullness(fullness_); // set fullness of the map
                 return;
@@ -5967,7 +5967,7 @@ namespace mcu {
             if (newChainCap > MAX_CAP) newChainCap = MAX_CAP;
 
             // Store old resources if they exist
-            unordered_set_s** oldChain = chain;
+            unordered_set_s_s** oldChain = chain;
             uint8_t* oldFlags = flags;
             uint8_t oldCap = cap_;
 
@@ -5983,12 +5983,12 @@ namespace mcu {
             }
             memset(newFlags, 0, flagBytes);
 
-            unordered_set_s** newChain = mem_alloc::allocate<unordered_set_s*>(newChainCap);
+            unordered_set_s_s** newChain = mem_alloc::allocate<unordered_set_s_s*>(newChainCap);
             if (!newChain) {
                 delete[] newFlags;
                 return;
             }
-            memset(newChain, 0, newChainCap * sizeof(unordered_set_s*));
+            memset(newChain, 0, newChainCap * sizeof(unordered_set_s_s*));
 
             if (chain_size >= 234) {
                 rangeMap.set_fullness(1.0);
@@ -6018,7 +6018,7 @@ namespace mcu {
 
     public:
         // default constructor
-        ChainedUnorderedSet() : slot_handler() { 
+        unordered_set() : slot_handler() { 
             // Initialize with INIT_CAP maps
             remap(INIT_CAP);  // Use remap to initialize resources
 
@@ -6030,7 +6030,7 @@ namespace mcu {
         }
         
         // Constructor with capacity
-        explicit ChainedUnorderedSet(uint16_t chainCapicity) : slot_handler() { 
+        explicit unordered_set(uint16_t chainCapicity) : slot_handler() { 
             uint8_t numSetRequired = static_cast<uint8_t>(chainCapicity / cset_ability + 1);      
             uint8_t numReserve = 3;    // num reserve map 
 
@@ -6046,7 +6046,7 @@ namespace mcu {
             }
         }
                         
-        ~ChainedUnorderedSet() {
+        ~unordered_set() {
             if (chain) {
                 for (uint8_t i = 0; i < cap_; ++i)
                     delete chain[i];
@@ -6057,23 +6057,23 @@ namespace mcu {
             }
         }
         // Copy Constructor
-        ChainedUnorderedSet(const ChainedUnorderedSet& o) noexcept : slot_handler(o),
+        unordered_set(const unordered_set& o) noexcept : slot_handler(o),
             fullness_(o.fullness_),
             cset_ability(o.cset_ability),
             chain_size(o.chain_size),
             rangeMap(o.rangeMap)
         {
             this->cap_ = o.cap_; // assign base member if needed
-            chain = mem_alloc::allocate<unordered_set_s*>(this->cap_);
+            chain = mem_alloc::allocate<unordered_set_s_s*>(this->cap_);
             std::memset(chain, 0, this->cap_ * sizeof(chain[0]));
             for (uint8_t i = 0; i < this->cap_; ++i) {
                 if (o.chain[i])
-                    chain[i] = new unordered_set_s(*o.chain[i]);
+                    chain[i] = new unordered_set_s_s(*o.chain[i]);
             }
         }
 
         // Move Constructor
-        ChainedUnorderedSet(ChainedUnorderedSet&& o) noexcept : slot_handler(std::move(o)),   // steal cap_ & flags
+        unordered_set(unordered_set&& o) noexcept : slot_handler(std::move(o)),   // steal cap_ & flags
             fullness_(std::exchange(o.fullness_,   92)),
             cset_ability(std::exchange(o.cset_ability, static_cast<uint8_t>(255*92/100))),
             chain_size(std::exchange(o.chain_size,  0)),
@@ -6081,16 +6081,16 @@ namespace mcu {
                 chain = std::exchange(o.chain, nullptr);
         }
         // Copy‐assignment
-        ChainedUnorderedSet& operator=(const ChainedUnorderedSet& o) noexcept {
+        unordered_set& operator=(const unordered_set& o) noexcept {
             if (this != &o) {
-                ChainedUnorderedSet tmp(o);
+                unordered_set tmp(o);
                 swap(*this, tmp);
             }
             return *this;
         }
 
         // Move‐assignment
-        ChainedUnorderedSet& operator=(ChainedUnorderedSet&& o) noexcept {
+        unordered_set& operator=(unordered_set&& o) noexcept {
             if (this != &o) {
                 swap(*this, o);
             }
@@ -6100,13 +6100,13 @@ namespace mcu {
     // ---------------------------------------------------------------------------------------------------
     // -------------------------------------- iterator class ---------------------------------------------
     // ---------------------------------------------------------------------------------------------------
-    // Iterator class for efficient traversal of ChainedUnorderedSet elements
+    // Iterator class for efficient traversal of unordered_set elements
 
     template<bool IsConst>
     class base_iterator {
     public:
-        using setType = typename std::conditional<IsConst, const ChainedUnorderedSet, ChainedUnorderedSet>::type;
-        using InnerIter = typename std::conditional<IsConst, typename unordered_set_s::const_iterator, typename unordered_set_s::iterator>::type;
+        using setType = typename std::conditional<IsConst, const unordered_set, unordered_set>::type;
+        using InnerIter = typename std::conditional<IsConst, typename unordered_set_s_s::const_iterator, typename unordered_set_s_s::iterator>::type;
         using iterator_category = std::forward_iterator_tag;
         using difference_type = std::ptrdiff_t;
         using value_type = T;  // Changed from uint16_t to the inner set's value type
@@ -6232,7 +6232,7 @@ namespace mcu {
         */
     public:
         /**
-         * @brief Inserts a key into the ChainedUnorderedSet.
+         * @brief Inserts a key into the unordered_set.
          * @param key The key to insert.
          * @return true if the key was successfully inserted, false otherwise.
          * @note This function handles the insertion logic, including checking for existing keys,
@@ -6294,7 +6294,7 @@ namespace mcu {
         }
 
         /**
-         * @brief Removes a key from the ChainedUnorderedSet.
+         * @brief Removes a key from the unordered_set.
          * @param key The key to remove.
          * @return true if the key was successfully removed, false if not found.
          * @note If removing the key results in an empty set, the set will be marked as deleted
@@ -6321,7 +6321,7 @@ namespace mcu {
         }
 
         /**
-         * @brief Finds a key in the ChainedUnorderedSet.
+         * @brief Finds a key in the unordered_set.
          * @param key The key to find.
          * @return Iterator pointing to the found element, or end() if not found.
          * @note Uses the keyMappingIN function to determine which inner set to search.
@@ -6333,7 +6333,7 @@ namespace mcu {
             if (setID < 0) {
                 return end(); // Key not found
             }
-            typename unordered_set_s::iterator innerIt = chain[setID]->find(key); // Find in the inner map
+            typename unordered_set_s_s::iterator innerIt = chain[setID]->find(key); // Find in the inner map
             
             if (innerIt != chain[setID]->end()) {
                 return iterator(this, setID, innerIt); // Return iterator to found element
@@ -6530,7 +6530,7 @@ namespace mcu {
          * @param other The set to compare with.
          * @return true if both sets have the same elements, false otherwise.
          */
-        bool operator==(const ChainedUnorderedSet& other) const noexcept {
+        bool operator==(const unordered_set& other) const noexcept {
             if (size() != other.size()) return false;
             for (auto it = begin(); it != end(); ++it) {
                 auto oth = other.find(it->first());
@@ -6570,7 +6570,7 @@ namespace mcu {
          * @param other The set to compare with.
          * @return true if sets differ, false if they are equal.
          */
-        bool operator!=(const ChainedUnorderedSet& other) const noexcept {
+        bool operator!=(const unordered_set& other) const noexcept {
             return !(*this == other);
         }
 
@@ -6595,7 +6595,7 @@ namespace mcu {
                         delete chain[i];
                         chain[i] = nullptr;
                         setState(i, slotState::Empty);
-                        bytesFreed += sizeof(unordered_set_s) + 32; // Approximate size
+                        bytesFreed += sizeof(unordered_set_s_s) + 32; // Approximate size
                     }
                 }
             }
@@ -6632,8 +6632,8 @@ namespace mcu {
                 uint16_t newCap = std::max(static_cast<uint16_t>(INIT_CAP), 
                                         static_cast<uint16_t>(activeSets * 2));
         
-                unordered_set_s** newChain = mem_alloc::allocate<unordered_set_s*>(newCap);
-                memset(newChain, 0, newCap * sizeof(unordered_set_s*));
+                unordered_set_s_s** newChain = mem_alloc::allocate<unordered_set_s_s*>(newCap);
+                memset(newChain, 0, newCap * sizeof(unordered_set_s_s*));
         
                 uint8_t* newFlags = new uint8_t[(newCap * 2 + 7) / 8];
                 memset(newFlags, 0, (newCap * 2 + 7) / 8);
@@ -6654,7 +6654,7 @@ namespace mcu {
                 uint16_t oldCap = cap_;
                 cap_ = newCap;
         
-                bytesFreed += (oldCap - newCap) * sizeof(unordered_set_s*);
+                bytesFreed += (oldCap - newCap) * sizeof(unordered_set_s_s*);
                 bytesFreed += ((oldCap * 2 + 7) / 8) - ((newCap * 2 + 7) / 8);
             }
         
@@ -6707,7 +6707,7 @@ namespace mcu {
         }
 
         // swap helper for copy-and-swap
-        friend void swap(ChainedUnorderedSet& a, ChainedUnorderedSet& b) noexcept {
+        friend void swap(unordered_set& a, unordered_set& b) noexcept {
             using std::swap;
             swap(a.fullness_,   b.fullness_);
             swap(a.cset_ability, b.cset_ability);

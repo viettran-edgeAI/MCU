@@ -1,5 +1,5 @@
 #include <iostream>
-#include <unordered_set>
+#include <unordered_set_s>
 #include <vector>
 #include <chrono>
 #include <random>
@@ -17,14 +17,14 @@ private:
     struct BenchmarkResult {
         std::string test_name;
         double id_vector_time_ns;
-        double unordered_set_time_ns;
+        double unordered_set_s_time_ns;
         double vector_time_ns;
         size_t id_vector_memory_bytes;
-        size_t unordered_set_memory_bytes;
+        size_t unordered_set_s_memory_bytes;
         size_t vector_memory_bytes;
-        double speedup_vs_unordered_set;
+        double speedup_vs_unordered_set_s;
         double speedup_vs_vector;
-        double memory_ratio_vs_unordered_set;
+        double memory_ratio_vs_unordered_set_s;
         double memory_ratio_vs_vector;
     };
     
@@ -36,9 +36,9 @@ private:
         return vec.capacity() * sizeof(T) + sizeof(std::vector<T>);
     }
     
-    // Estimate memory usage for unordered_set
+    // Estimate memory usage for unordered_set_s
     template<typename T>
-    size_t estimate_unordered_set_memory(const std::unordered_set<T>& set) {
+    size_t estimate_unordered_set_s_memory(const std::unordered_set<T>& set) {
         // Conservative estimate: 
         // - Each element: sizeof(T) + pointer overhead
         // - Hash table overhead: load factor ~0.75, so extra buckets
@@ -84,7 +84,7 @@ public:
                   << " elements in " << result.id_vector_time_ns << " ns\n";
         std::cout << "ID_vector memory usage: " << result.id_vector_memory_bytes << " bytes\n";
         
-        // Benchmark unordered_set insertion
+        // Benchmark unordered_set_s insertion
         start = high_resolution_clock::now();
         
         std::unordered_set<T> uset;
@@ -95,12 +95,12 @@ public:
         }
         
         end = high_resolution_clock::now();
-        result.unordered_set_time_ns = duration_cast<nanoseconds>(end - start).count();
-        result.unordered_set_memory_bytes = estimate_unordered_set_memory(uset);
+        result.unordered_set_s_time_ns = duration_cast<nanoseconds>(end - start).count();
+        result.unordered_set_s_memory_bytes = estimate_unordered_set_s_memory(uset);
         
-        std::cout << "unordered_set inserted " << uset.size() 
-                  << " elements in " << result.unordered_set_time_ns << " ns\n";
-        std::cout << "unordered_set memory usage: " << result.unordered_set_memory_bytes << " bytes\n";
+        std::cout << "unordered_set_s inserted " << uset.size() 
+                  << " elements in " << result.unordered_set_s_time_ns << " ns\n";
+        std::cout << "unordered_set_s memory usage: " << result.unordered_set_s_memory_bytes << " bytes\n";
         
         // Benchmark std::vector insertion (sorted)
         start = high_resolution_clock::now();
@@ -124,14 +124,14 @@ public:
         std::cout << "std::vector memory usage: " << result.vector_memory_bytes << " bytes\n";
         
         // Calculate ratios
-        result.speedup_vs_unordered_set = result.unordered_set_time_ns / std::max(1.0, result.id_vector_time_ns);
+        result.speedup_vs_unordered_set_s = result.unordered_set_s_time_ns / std::max(1.0, result.id_vector_time_ns);
         result.speedup_vs_vector = result.vector_time_ns / std::max(1.0, result.id_vector_time_ns);
-        result.memory_ratio_vs_unordered_set = (double)result.id_vector_memory_bytes / result.unordered_set_memory_bytes;
+        result.memory_ratio_vs_unordered_set_s = (double)result.id_vector_memory_bytes / result.unordered_set_s_memory_bytes;
         result.memory_ratio_vs_vector = (double)result.id_vector_memory_bytes / result.vector_memory_bytes;
         
-        std::cout << "Speedup vs unordered_set: " << std::fixed << std::setprecision(2) << result.speedup_vs_unordered_set << "x\n";
+        std::cout << "Speedup vs unordered_set_s: " << std::fixed << std::setprecision(2) << result.speedup_vs_unordered_set_s << "x\n";
         std::cout << "Speedup vs vector: " << std::setprecision(2) << result.speedup_vs_vector << "x\n";
-        std::cout << "Memory ratio vs unordered_set: " << std::setprecision(3) << result.memory_ratio_vs_unordered_set << "\n";
+        std::cout << "Memory ratio vs unordered_set_s: " << std::setprecision(3) << result.memory_ratio_vs_unordered_set_s << "\n";
         std::cout << "Memory ratio vs vector: " << std::setprecision(3) << result.memory_ratio_vs_vector << "\n";
         
         results.push_back(result);
@@ -162,7 +162,7 @@ public:
         BenchmarkResult result;
         result.test_name = test_name;
         result.id_vector_memory_bytes = estimate_id_vector_memory(id_vec);
-        result.unordered_set_memory_bytes = estimate_unordered_set_memory(uset);
+        result.unordered_set_s_memory_bytes = estimate_unordered_set_s_memory(uset);
         result.vector_memory_bytes = estimate_vector_memory(vec);
         
         // Benchmark ID_vector lookup
@@ -178,7 +178,7 @@ public:
         auto end = high_resolution_clock::now();
         result.id_vector_time_ns = duration_cast<nanoseconds>(end - start).count();
         
-        // Benchmark unordered_set lookup
+        // Benchmark unordered_set_s lookup
         start = high_resolution_clock::now();
         
         size_t found_count_uset = 0;
@@ -189,7 +189,7 @@ public:
         }
         
         end = high_resolution_clock::now();
-        result.unordered_set_time_ns = duration_cast<nanoseconds>(end - start).count();
+        result.unordered_set_s_time_ns = duration_cast<nanoseconds>(end - start).count();
         
         // Benchmark std::vector lookup
         start = high_resolution_clock::now();
@@ -206,20 +206,20 @@ public:
         
         std::cout << "ID_vector found " << found_count_id_vec << "/" << lookup_data.size() 
                   << " elements in " << result.id_vector_time_ns << " ns\n";
-        std::cout << "unordered_set found " << found_count_uset << "/" << lookup_data.size() 
-                  << " elements in " << result.unordered_set_time_ns << " ns\n";
+        std::cout << "unordered_set_s found " << found_count_uset << "/" << lookup_data.size() 
+                  << " elements in " << result.unordered_set_s_time_ns << " ns\n";
         std::cout << "std::vector found " << found_count_vec << "/" << lookup_data.size() 
                   << " elements in " << result.vector_time_ns << " ns\n";
         
         // Calculate ratios
-        result.speedup_vs_unordered_set = result.unordered_set_time_ns / std::max(1.0, result.id_vector_time_ns);
+        result.speedup_vs_unordered_set_s = result.unordered_set_s_time_ns / std::max(1.0, result.id_vector_time_ns);
         result.speedup_vs_vector = result.vector_time_ns / std::max(1.0, result.id_vector_time_ns);
-        result.memory_ratio_vs_unordered_set = (double)result.id_vector_memory_bytes / result.unordered_set_memory_bytes;
+        result.memory_ratio_vs_unordered_set_s = (double)result.id_vector_memory_bytes / result.unordered_set_s_memory_bytes;
         result.memory_ratio_vs_vector = (double)result.id_vector_memory_bytes / result.vector_memory_bytes;
         
-        std::cout << "Speedup vs unordered_set: " << std::fixed << std::setprecision(2) << result.speedup_vs_unordered_set << "x\n";
+        std::cout << "Speedup vs unordered_set_s: " << std::fixed << std::setprecision(2) << result.speedup_vs_unordered_set_s << "x\n";
         std::cout << "Speedup vs vector: " << std::setprecision(2) << result.speedup_vs_vector << "x\n";
-        std::cout << "Memory ratio vs unordered_set: " << std::setprecision(3) << result.memory_ratio_vs_unordered_set << "\n";
+        std::cout << "Memory ratio vs unordered_set_s: " << std::setprecision(3) << result.memory_ratio_vs_unordered_set_s << "\n";
         std::cout << "Memory ratio vs vector: " << std::setprecision(3) << result.memory_ratio_vs_vector << "\n";
         
         results.push_back(result);
@@ -235,7 +235,7 @@ public:
                   << std::setw(12) << "Elements"
                   << std::setw(15) << "ID_vec(1bit)"
                   << std::setw(15) << "ID_vec(2bit)"
-                  << std::setw(15) << "unordered_set"
+                  << std::setw(15) << "unordered_set_s"
                   << std::setw(12) << "std::vector"
                   << std::setw(10) << "R1_vs_US"
                   << std::setw(10) << "R1_vs_V"
@@ -278,7 +278,7 @@ public:
                 
                 size_t mem1 = estimate_id_vector_memory(vec1);
                 size_t mem2 = estimate_id_vector_memory(vec2);
-                size_t mem_uset = estimate_unordered_set_memory(uset);
+                size_t mem_uset = estimate_unordered_set_s_memory(uset);
                 size_t mem_vec = estimate_vector_memory(vec);
                 
                 std::cout << std::setw(10) << max_id
@@ -322,16 +322,16 @@ public:
         
         for (const auto& result : results) {
             std::cout << std::setw(25) << result.test_name
-                      << std::setw(12) << std::fixed << std::setprecision(1) << result.speedup_vs_unordered_set
+                      << std::setw(12) << std::fixed << std::setprecision(1) << result.speedup_vs_unordered_set_s
                       << std::setw(12) << std::setprecision(1) << result.speedup_vs_vector
-                      << std::setw(12) << std::setprecision(3) << result.memory_ratio_vs_unordered_set
+                      << std::setw(12) << std::setprecision(3) << result.memory_ratio_vs_unordered_set_s
                       << std::setw(12) << std::setprecision(3) << result.memory_ratio_vs_vector
                       << std::setw(15) << std::setprecision(0) << result.id_vector_time_ns
                       << "\n";
             
-            avg_speedup_us += result.speedup_vs_unordered_set;
+            avg_speedup_us += result.speedup_vs_unordered_set_s;
             avg_speedup_v += result.speedup_vs_vector;
-            avg_memory_us += result.memory_ratio_vs_unordered_set;
+            avg_memory_us += result.memory_ratio_vs_unordered_set_s;
             avg_memory_v += result.memory_ratio_vs_vector;
         }
         
@@ -350,7 +350,7 @@ public:
                   << "\n";
         
         std::cout << "\nKey Findings:\n";
-        std::cout << "• ID_vector vs unordered_set: " << std::setprecision(1) << avg_speedup_us << "x faster, " 
+        std::cout << "• ID_vector vs unordered_set_s: " << std::setprecision(1) << avg_speedup_us << "x faster, " 
                   << std::setprecision(1) << (avg_memory_us * 100) << "% memory\n";
         std::cout << "• ID_vector vs std::vector: " << std::setprecision(1) << avg_speedup_v << "x faster, " 
                   << std::setprecision(1) << (avg_memory_v * 100) << "% memory\n";
@@ -367,23 +367,23 @@ public:
         }
         
         // Write header
-        file << "Test_Name,ID_vector_Time_ns,unordered_set_Time_ns,vector_Time_ns,"
-             << "ID_vector_Memory_bytes,unordered_set_Memory_bytes,vector_Memory_bytes,"
-             << "Speedup_vs_unordered_set,Speedup_vs_vector,"
-             << "Memory_Ratio_vs_unordered_set,Memory_Ratio_vs_vector\n";
+        file << "Test_Name,ID_vector_Time_ns,unordered_set_s_Time_ns,vector_Time_ns,"
+             << "ID_vector_Memory_bytes,unordered_set_s_Memory_bytes,vector_Memory_bytes,"
+             << "Speedup_vs_unordered_set_s,Speedup_vs_vector,"
+             << "Memory_Ratio_vs_unordered_set_s,Memory_Ratio_vs_vector\n";
         
         // Write data
         for (const auto& result : results) {
             file << result.test_name << ","
                  << result.id_vector_time_ns << ","
-                 << result.unordered_set_time_ns << ","
+                 << result.unordered_set_s_time_ns << ","
                  << result.vector_time_ns << ","
                  << result.id_vector_memory_bytes << ","
-                 << result.unordered_set_memory_bytes << ","
+                 << result.unordered_set_s_memory_bytes << ","
                  << result.vector_memory_bytes << ","
-                 << result.speedup_vs_unordered_set << ","
+                 << result.speedup_vs_unordered_set_s << ","
                  << result.speedup_vs_vector << ","
-                 << result.memory_ratio_vs_unordered_set << ","
+                 << result.memory_ratio_vs_unordered_set_s << ","
                  << result.memory_ratio_vs_vector << "\n";
         }
         
@@ -392,7 +392,7 @@ public:
     }
     
     void run_comprehensive_benchmark() {
-        std::cout << "🚀 Starting Comprehensive ID_vector vs unordered_set Benchmark\n";
+        std::cout << "🚀 Starting Comprehensive ID_vector vs unordered_set_s Benchmark\n";
         std::cout << std::string(80, '=') << "\n";
         
         // Test data generation

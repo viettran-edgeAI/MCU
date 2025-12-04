@@ -957,8 +957,8 @@ public:
             return;
         }
 
-        unordered_map<uint16_t, uint32_t> labelCounts;
-        unordered_set<uint16_t> featureValues;
+        unordered_map_s<uint16_t, uint32_t> labelCounts;
+        unordered_set_s<uint16_t> featureValues;
 
         uint32_t numSamples = 0;
         uint16_t maxFeatures = 0;

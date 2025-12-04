@@ -30,45 +30,48 @@
     #define RF_ENABLE_TRAINING 0
 #endif
 
-using label_type    = uint8_t;  // type for label related operations
-using sample_type   = uint32_t; // type for sample related operations
-using node_type     = size_t; // type for tree node related operations
-
-static constexpr uint8_t      RF_MAX_LABEL_LENGTH    = 32;     // max label length
-static constexpr uint8_t      RF_PATH_BUFFER         = 64;     // buffer for file_path(limit to 2 level of file)
-static constexpr uint8_t      RF_MAX_TREES           = 100;    // maximum number of trees in a forest
-static constexpr label_type   RF_MAX_LABELS          = 255;    // maximum number of unique labels supported 
-static constexpr uint16_t     RF_MAX_FEATURES        = 1023;   // maximum number of features (can exceed this limit)
-static constexpr uint32_t     RF_MAX_NODES           = 262144; // Maximum nodes per tree (18 bits)
-static constexpr sample_type  RF_MAX_SAMPLES         = 1048576;// maximum number of samples in a dataset (20 bits)
-inline size_t rf_max_dataset_size() {
-    return rf_storage_max_dataset_bytes();
-}
-
-// define error label base on label_type
-template<typename T>
-struct Rf_err_label {
-    static constexpr T value = static_cast<T>(~static_cast<T>(0));
-};
-
-static constexpr label_type RF_ERROR_LABEL = Rf_err_label<label_type>::value; 
-
-/*
- NOTE : Forest file components (with each model)
-    1.  model_name_nml.bin       : base data (dataset)
-    2.  model_name_config.json   : model configuration file 
-    3.  model_name_ctg.csv       : quantizer (feature quantizer and label mapping)
-    4.  model_name_dp.csv        : information about dataset (num_features, num_labels...)
-    5.  model_name_forest.bin    : model file (all trees) in unified format
-    6.  model_name_hogcfg.json   : HOG & Camera configuration file (for hog_transform - model preprocessing)
-    7.  model_name_npd.bin       : node predictor file 
-    8.  model_name_nlg.csv       : node splitting log file during training (for retraining node predictor)
-    9.  model_name_ifl.bin       : inference log file (predictions, actual labels, metrics over time)
-    10. model_name_tlog.csv      : time log file (detailed timing of forest events)
-    11. model_name_mlog.csv      : memory log file (detailed memory usage of forest events)
-*/
-
 namespace mcu {
+
+    using label_type    = uint8_t;  // type for label related operations
+    using sample_type   = uint32_t; // type for sample related operations
+    using node_type     = size_t; // type for tree node related operations
+    using sampleID_set  = ID_vector<sample_type>;       // set of unique sample IDs
+
+    static constexpr uint8_t      RF_MAX_LABEL_LENGTH    = 32;     // max label length
+    static constexpr uint8_t      RF_PATH_BUFFER         = 64;     // buffer for file_path(limit to 2 level of file)
+    static constexpr uint8_t      RF_MAX_TREES           = 100;    // maximum number of trees in a forest
+    static constexpr label_type   RF_MAX_LABELS          = 255;    // maximum number of unique labels supported 
+    static constexpr uint16_t     RF_MAX_FEATURES        = 1023;   // maximum number of features (can exceed this limit)
+    static constexpr uint32_t     RF_MAX_NODES           = 262144; // Maximum nodes per tree (18 bits)
+    static constexpr sample_type  RF_MAX_SAMPLES         = 1048576;// maximum number of samples in a dataset (20 bits)
+    inline size_t rf_max_dataset_size() {
+        return rf_storage_max_dataset_bytes();
+    }
+
+    // define error label base on label_type
+    template<typename T>
+    struct Rf_err_label {
+        static constexpr T value = static_cast<T>(~static_cast<T>(0));
+    };
+
+    static constexpr label_type RF_ERROR_LABEL = Rf_err_label<label_type>::value; 
+
+    /*
+    NOTE : Forest file components (with each model)
+        1.  model_name_nml.bin       : base data (dataset)
+        2.  model_name_config.json   : model configuration file 
+        3.  model_name_ctg.csv       : quantizer (feature quantizer and label mapping)
+        4.  model_name_dp.csv        : information about dataset (num_features, num_labels...)
+        5.  model_name_forest.bin    : model file (all trees) in unified format
+        6.  model_name_hogcfg.json   : HOG & Camera configuration file (for hog_transform - model preprocessing)
+        7.  model_name_npd.bin       : node predictor file 
+        8.  model_name_nlg.csv       : node splitting log file during training (for retraining node predictor)
+        9.  model_name_ifl.bin       : inference log file (predictions, actual labels, metrics over time)
+        10. model_name_tlog.csv      : time log file (detailed timing of forest events)
+        11. model_name_mlog.csv      : memory log file (detailed memory usage of forest events)
+    */
+
+
     /*
     ------------------------------------------------------------------------------------------------------------------
     ------------------------------------------------ RF_COMPONENTS ---------------------------------------------------
@@ -583,7 +586,7 @@ namespace mcu {
             const uint16_t packedFeatureBytes = (totalBits + 7) / 8; // Round up to nearest byte
 
             // Track unique labels and their counts
-            unordered_map<label_type, sample_type> label_counts;
+            unordered_map_s<label_type, sample_type> label_counts;
             label_type max_label = 0;
 
             // Scan through all samples to collect label statistics
@@ -818,7 +821,7 @@ namespace mcu {
             uint16_t numFeatures = 0;
             label_type numLabels = 0;
             uint8_t quantCoeff = 2;  // Default 2 bits
-            unordered_map<label_type, sample_type> labelCounts; // label -> count
+            unordered_map_s<label_type, sample_type> labelCounts; // label -> count
             uint8_t maxFeatureValue = 3;    // Default for 2-bit quantized data
 
             // Parse parameters from CSV
@@ -1330,7 +1333,6 @@ namespace mcu {
     -------------------------------------------------- RF_DATA ------------------------------------------------------
     ------------------------------------------------------------------------------------------------------------------
     */
-    using sampleID_set = ID_vector<sample_type>;       // set of unique sample IDs
 
     // single data sample structure
     struct Rf_sample{
@@ -1787,26 +1789,38 @@ namespace mcu {
                 file.write((uint8_t*)&numSamples, sizeof(numSamples));
                 file.write((uint8_t*)&numFeatures, sizeof(numFeatures));
 
-                // Calculate packed bytes needed for features
+                // Calculate packed bytes needed for features per sample
                 uint32_t totalBits = static_cast<uint32_t>(numFeatures) * quantization_coefficient;
                 uint16_t packedFeatureBytes = (totalBits + 7) / 8; // Round up to nearest byte
-
-                // Write samples WITHOUT sample IDs (using vector indices)
+                
+                // Record size = label (1 byte) + packed features
+                uint16_t recordSize = sizeof(label_type) + packedFeatureBytes;
+                
+                // Use a heap-allocated write buffer to batch multiple samples (512 bytes to save heap)
+                static constexpr size_t WRITE_BUFFER_SIZE = 512;
+                uint8_t* writeBuffer = (uint8_t*)malloc(WRITE_BUFFER_SIZE);
+                if (!writeBuffer) {
+                    RF_DEBUG(0, "❌ Failed to allocate write buffer");
+                    file.close();
+                    return false;
+                }
+                size_t bufferPos = 0;
+                
+                // Calculate how many complete samples fit in buffer
+                sample_type samplesPerBuffer = WRITE_BUFFER_SIZE / recordSize;
+                if (samplesPerBuffer == 0) samplesPerBuffer = 1; // At least one sample per write
+                
                 for (sample_type i = 0; i < size_; i++) {
                     // Reconstruct sample from chunked packed storage
                     Rf_sample s = getSample(i);
                     
-                    // Write label only (no sample ID needed)
-                    file.write(&s.label, sizeof(s.label));
+                    // Write label to buffer
+                    writeBuffer[bufferPos++] = s.label;
                     
-                    // Pack and write features
-                    uint8_t packedBuffer[packedFeatureBytes];
-                    // Initialize buffer to 0
-                    for(uint16_t j = 0; j < packedFeatureBytes; j++) {
-                        packedBuffer[j] = 0;
-                    }
+                    // Initialize packed feature area to 0
+                    memset(&writeBuffer[bufferPos], 0, packedFeatureBytes);
                     
-                    // Pack features into bytes according to quantization_coefficient
+                    // Pack features into buffer according to quantization_coefficient
                     for (size_t j = 0; j < s.features.size(); ++j) {
                         uint32_t bitPosition = static_cast<uint32_t>(j) * quantization_coefficient;
                         uint16_t byteIndex = bitPosition / 8;
@@ -1815,17 +1829,23 @@ namespace mcu {
                         
                         if (bitOffset + quantization_coefficient <= 8) {
                             // Feature fits in single byte
-                            packedBuffer[byteIndex] |= (feature_value << bitOffset);
+                            writeBuffer[bufferPos + byteIndex] |= (feature_value << bitOffset);
                         } else {
                             // Feature spans two bytes
                             uint8_t bitsInFirstByte = 8 - bitOffset;
-                            packedBuffer[byteIndex] |= (feature_value << bitOffset);
-                            packedBuffer[byteIndex + 1] |= (feature_value >> bitsInFirstByte);
+                            writeBuffer[bufferPos + byteIndex] |= (feature_value << bitOffset);
+                            writeBuffer[bufferPos + byteIndex + 1] |= (feature_value >> bitsInFirstByte);
                         }
                     }
+                    bufferPos += packedFeatureBytes;
                     
-                    file.write(packedBuffer, packedFeatureBytes);
+                    // Flush buffer when full or last sample
+                    if (bufferPos + recordSize > WRITE_BUFFER_SIZE || i == size_ - 1) {
+                        file.write(writeBuffer, bufferPos);
+                        bufferPos = 0;
+                    }
                 }
+                free(writeBuffer);
                 file.close();
             }
             
@@ -5355,7 +5375,7 @@ namespace mcu {
             node_type   total_nodes;        // store total nodes of all trees
             node_type   total_leaves;       // store total leaves of all trees
             vector<NodeToBuild> queue_nodes; // Queue for breadth-first tree building
-            unordered_map<label_type, sample_type> predictClass; // Map to count predictions per class during inference
+            unordered_map_s<label_type, sample_type> predictClass; // Map to count predictions per class during inference
             bool is_unified = true;  // Default to unified form (used at the end of training and inference)
 
             inline bool has_base() const { 

@@ -1,8 +1,8 @@
-# Quantization - ondevice training - optimized container structure for microcontrollers (STL_MCU)
+# Quantization - ondevice training for microcontrollers 
 
 ![Full pipeline overview](/docs/imgs/full_pipeline_overview.jpg)
 
-This repository provides a compact, memory-efficient C++ toolkit for pre-training, embedding, and running quantum random forest models on microcontrollers, and even goes further - retraining models on the microcontroller itself, allowing them to adapt to new data throughout their lifecycle without reloading code or intervention. The entire project is built on a new foundation library, which includes containers with extreme memory optimization and fragmentation.
+This repository provides a compact, memory-efficient C++ toolkit for pre-training, embedding, and running quantum random forest models on microcontrollers, and even goes further - retraining models on the microcontroller itself, allowing them to adapt to new data throughout their lifecycle without reloading code or intervention. The entire project is built on a new foundation library, which includes containers with extreme memory optimization and defragmentation.
 
 ## Quantization — brief introduction
 
@@ -12,18 +12,22 @@ This repository provides a compact, memory-efficient C++ toolkit for pre-trainin
 
 ![Compression & accuracy comparison](/report/imgs/compare_all.png)
 
-Learn more about the quantization pipeline, benchmarks and recommendations in the full report: `report/README.md`.
+Learn more about the quantization pipeline, benchmarks and recommendations in the full report: [project report](report/README.md).
 
-## Library foundation — optimized containers
+## Library Foundation — Optimized Containers
 
-The entire library is built on a foundation of special container classes optimized for microcontrollers. These classes are implemented in `STL_MCU.h` and live in the `mcu` namespace. They provide memory-efficient variants of common STL containers (vectors, maps, sets) and additional primitives that prefer contiguous allocations and PSRAM when available.
+The entire library is built on a foundation of special container classes optimized for microcontrollers. These classes are implemented in `STL_MCU.h` and reside in the `mcu` namespace. They provide super memory-efficient variants of common STL containers (vector, map, set) and additional primitives that prioritize contiguous allocation and PSRAM when possible.
 
-Key points:
+Key Points:
 
 - Namespace: `mcu`
-- Primary header: `STL_MCU.h`
-- Purpose-built containers: `mcu::vector`, `mcu::b_vector`, `mcu::packed_vector`, `mcu::ID_vector`, `mcu::unordered_map`, `mcu::unordered_set`... 
+- new hash + vector architectures
+- new hash functions: mcu::unordered_set_s(_s)/map(_s).
+- new vector architectures: mcu::vector & b_vector , packed_vector & ID_vector.
 - Designed for low fragmentation, small code size, and optional PSRAM use.
+
+## Demonstration examples
+- Demo of complete workflow: collect data, pre-train (on pc), run model, re-train and update model in real time entirely on esp32 - [ondevice training](examples/retrain_ondevice_demo/)
 
 ## Extended support
 - Memory : support PSRAM accross all containers and algorithms

@@ -122,7 +122,7 @@ class Rf_quantizer{
     
     mcu::vector<FeatureInfo> features;
     mcu::vector<SharedPattern> sharedPatterns;
-    mcu::unordered_map<std::string, uint16_t> patternMap; // key -> patternId
+    mcu::unordered_map_s<std::string, uint16_t> patternMap; // key -> patternId
     mcu::vector<mcu::pair<std::string, uint8_t>> labelMapping;
 
     static int64_t scaleFloatToInt64(double value, uint64_t scale) {

@@ -479,7 +479,7 @@ public:
         
         
         // Track hashes of each tree dataset to avoid duplicates across trees
-        unordered_set<uint64_t> seen_hashes;
+        unordered_set_s<uint64_t> seen_hashes;
         seen_hashes.reserve(config.num_trees * 2);
 
         for (uint16_t i = 0; i < config.num_trees; i++) {
@@ -1747,7 +1747,7 @@ public:
     // combined prediction metrics function
     b_vector<b_vector<pair<uint16_t, float>>> predict(Rf_data& data) {
         // Counters for each label
-        unordered_map<uint16_t, uint32_t> tp, fp, fn, totalPred, correctPred;
+        unordered_map_s<uint16_t, uint32_t> tp, fp, fn, totalPred, correctPred;
         
         // Initialize counters for all actual labels
         for (uint16_t label=0; label < config.num_labels; label++) {

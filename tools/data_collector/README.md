@@ -1,6 +1,6 @@
 # Data Collector Tools
 
-This directory contains tools for collecting and transferring datasets from ESP32 devices to your PC.
+This directory contains tools for collecting and transferring image datasets from ESP32 devices to your PC.
 
 ## Components
 

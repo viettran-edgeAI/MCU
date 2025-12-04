@@ -154,7 +154,7 @@ uint8_t predict_features(const packed_vector<2>& features) const {
 ```cpp
 // BEFORE: Hash table with dynamic allocation
 uint8_t predict_features(const packed_vector<2>& features) {
-    unordered_map<uint8_t, uint8_t> predictClass;  // Dynamic allocation
+    unordered_map_s<uint8_t, uint8_t> predictClass;  // Dynamic allocation
     for(auto& tree : trees) {
         uint8_t predict = tree.predict_features(features);
         predictClass[predict]++;  // Hash computation per vote

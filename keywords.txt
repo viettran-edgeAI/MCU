@@ -11,10 +11,10 @@ mcu	KEYWORD1
 
 # Container Classes
 vector	KEYWORD1
+unordered_map_s	KEYWORD1
+unordered_set_s	KEYWORD1
 unordered_map	KEYWORD1
 unordered_set	KEYWORD1
-ChainedUnorderedMap	KEYWORD1
-ChainedUnorderedSet	KEYWORD1
 Stack	KEYWORD1
 pair	KEYWORD1
 

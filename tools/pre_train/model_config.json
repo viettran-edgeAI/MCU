@@ -9,7 +9,7 @@
     },
     "num_trees": {
         "value": 20,
-        "description": "Number of trees in the random forest. should be < 50"
+        "description": "Number of trees in the random forest. default - 20, max - 100."
     },
     "split_ratio":{
         "train_ratio" : 0.8,
@@ -26,40 +26,6 @@
         "value": "entropy",
         "options": ["gini", "entropy"],
         "description": "Splitting criteria for decision trees."
-    },
-    "training_score": {
-        "value": "oob_score",
-        "options": ["oob_score", "valid_score", "k_fold_score"],
-        "description": "Method for evaluating model performance during training. oob_score: Out-of-bag validation, valid_score: Validation set, k_fold_score: K-fold cross validation"
-    },
-    "metric_score": {
-        "value": "PRECISION",
-        "options": ["ACCURACY", "PRECISION", "RECALL", "F1_SCORE"],
-        "status": "disabled",
-        "status_options": ["disabled", "overwrite", "stacked"],
-        "description": "Training evaluation metrics to optimize during model training",
-        "description_disabled": "Automatic flag selection based on dataset characteristics (imbalance analysis)",
-        "description_overwrite": "User flags completely replace automatic detection",
-        "description_stacked": "User flags are combined with auto-detected flags using bitwise OR"
-    },
-    "extend_base_data": {
-        "value": true,
-        "options": [true, false],
-        "description": "Whether to extend the base dataset with new data."
-    },
-    "enable_retrain": {
-        "value": true,
-        "options": [true, false],
-        "description": "Whether to enable retraining of the model with new data."
-    },
-    "enable_auto_config": {
-        "value": false,
-        "options": [true, false],
-        "description": "Whether to automatically configure model parameters based on dataset characteristics."      
-    },
-    "k_folds":{
-        "value": 4,
-        "description": "Number of folds for cross-validation when using k_fold_score."
     },
     "min_split": {
         "value": 4,
@@ -78,6 +44,40 @@
         "status": "enabled",
         "status_options": ["disabled", "enabled"],
         "description": "disabled by default. enable to override max_depth in training process."
+    },
+    "training_score": {
+        "value": "oob_score",
+        "options": ["oob_score", "valid_score", "k_fold_score"],
+        "description": "Method for evaluating model performance during training. oob_score: Out-of-bag validation, valid_score: Validation set, k_fold_score: K-fold cross validation"
+    },
+    "metric_score": {
+        "value": "PRECISION",
+        "options": ["ACCURACY", "PRECISION", "RECALL", "F1_SCORE"],
+        "status": "disabled",
+        "status_options": ["disabled", "overwrite", "stacked"],
+        "description": "Training evaluation metrics to optimize during model training",
+        "description_disabled": "Automatic flag selection based on dataset characteristics (imbalance analysis)",
+        "description_overwrite": "User flags completely replace automatic detection",
+        "description_stacked": "User flags are combined with auto-detected flags using bitwise OR"
+    },
+    "k_folds":{
+        "value": 4,
+        "description": "Number of folds for cross-validation when using k_fold_score."
+    },
+    "extend_base_data": {
+        "value": true,
+        "options": [true, false],
+        "description": "Whether to extend the base dataset with new data."
+    },
+    "enable_retrain": {
+        "value": true,
+        "options": [true, false],
+        "description": "Whether to enable retraining of the model with new data."
+    },
+    "enable_auto_config": {
+        "value": false,
+        "options": [true, false],
+        "description": "Whether to automatically configure model parameters based on dataset characteristics."      
     },
     "max_samples": {
         "value": 0,

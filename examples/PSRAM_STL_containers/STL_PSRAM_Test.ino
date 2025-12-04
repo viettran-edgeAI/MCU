@@ -2,7 +2,7 @@
  * STL_MCU PSRAM Test for ESP32-S3
  * 
  * This example demonstrates:
- * - PSRAM allocation and deallocation in unordered_map and unordered_set
+ * - PSRAM allocation and deallocation in unordered_map_s and unordered_set_s
  * - Synchronization and correctness of memory operations
  * - Performance comparison between regular DRAM and PSRAM storage
  * - Memory fragmentation and recovery testing
@@ -47,9 +47,9 @@ void print_memory_stats() {
     Serial.println(" bytes");
 }
 
-// Helper for unordered_map
+// Helper for unordered_map_s
 template<typename V, typename T>
-void print_map_allocation_info(const char* name, const unordered_map<V, T>& map) {
+void print_map_allocation_info(const char* name, const unordered_map_s<V, T>& map) {
     if (map.get_table_ptr() == nullptr) {
         Serial.println("  ❌ Map allocation FAILED (nullptr)");
         return;
@@ -62,9 +62,9 @@ void print_map_allocation_info(const char* name, const unordered_map<V, T>& map)
     Serial.println(is_psram ? "PSRAM ✓" : "DRAM ✓");
 }
 
-// Helper for unordered_set
+// Helper for unordered_set_s
 template<typename T>
-void print_set_allocation_info(const char* name, const unordered_set<T>& set) {
+void print_set_allocation_info(const char* name, const unordered_set_s<T>& set) {
     if (set.get_table_ptr() == nullptr) {
         Serial.println("  ❌ Set allocation FAILED (nullptr)");
         return;
@@ -78,19 +78,19 @@ void print_set_allocation_info(const char* name, const unordered_set<T>& set) {
 }
 
 // ============================================================================
-// TEST 1: Basic unordered_map PSRAM allocation
+// TEST 1: Basic unordered_map_s PSRAM allocation
 // ============================================================================
 
-void test_unordered_map_basic() {
+void test_unordered_map_s_basic() {
     Serial.println("\n┌─────────────────────────────────────────────┐");
-    Serial.println("│ TEST 1: unordered_map Basic PSRAM Allocation│");
+    Serial.println("│ TEST 1: unordered_map_s Basic PSRAM Allocation│");
     Serial.println("└─────────────────────────────────────────────┘");
 
     print_memory_stats();
     Serial.println();
 
     // Create a small map
-    unordered_map<uint8_t, int16_t> map1(10);
+    unordered_map_s<uint8_t, int16_t> map1(10);
     Serial.println("Created map1 with capacity 10");
     print_map_allocation_info("map1.table", map1);
 
@@ -112,18 +112,18 @@ void test_unordered_map_basic() {
 }
 
 // ============================================================================
-// TEST 2: unordered_map rehash with PSRAM
+// TEST 2: unordered_map_s rehash with PSRAM
 // ============================================================================
 
-void test_unordered_map_rehash() {
+void test_unordered_map_s_rehash() {
     Serial.println("\n┌──────────────────────────────────────────┐");
-    Serial.println("│ TEST 2: unordered_map Rehash with PSRAM  │");
+    Serial.println("│ TEST 2: unordered_map_s Rehash with PSRAM  │");
     Serial.println("└──────────────────────────────────────────┘");
 
     print_memory_stats();
     Serial.println();
 
-    unordered_map<uint8_t, uint16_t> map2(4);
+    unordered_map_s<uint8_t, uint16_t> map2(4);
     Serial.println("Created map2 with initial capacity 4");
     print_map_allocation_info("map2.table", map2);
 
@@ -156,18 +156,18 @@ void test_unordered_map_rehash() {
 }
 
 // ============================================================================
-// TEST 3: unordered_set PSRAM allocation
+// TEST 3: unordered_set_s PSRAM allocation
 // ============================================================================
 
-void test_unordered_set_basic() {
+void test_unordered_set_s_basic() {
     Serial.println("\n┌────────────────────────────────────────┐");
-    Serial.println("│ TEST 3: unordered_set Basic PSRAM       │");
+    Serial.println("│ TEST 3: unordered_set_s Basic PSRAM       │");
     Serial.println("└────────────────────────────────────────┘");
 
     print_memory_stats();
     Serial.println();
 
-    unordered_set<uint8_t> set1(10);
+    unordered_set_s<uint8_t> set1(10);
     Serial.println("Created set1 with capacity 10");
     print_set_allocation_info("set1.table", set1);
 
@@ -191,18 +191,18 @@ void test_unordered_set_basic() {
 }
 
 // ============================================================================
-// TEST 4: unordered_set rehash and erase
+// TEST 4: unordered_set_s rehash and erase
 // ============================================================================
 
-void test_unordered_set_rehash_erase() {
+void test_unordered_set_s_rehash_erase() {
     Serial.println("\n┌──────────────────────────────────────────┐");
-    Serial.println("│ TEST 4: unordered_set Rehash & Erase     │");
+    Serial.println("│ TEST 4: unordered_set_s Rehash & Erase     │");
     Serial.println("└──────────────────────────────────────────┘");
 
     print_memory_stats();
     Serial.println();
 
-    unordered_set<uint16_t> set2(4);
+    unordered_set_s<uint16_t> set2(4);
     Serial.println("Created set2 with initial capacity 4");
 
     // Insert elements to trigger rehash
@@ -253,7 +253,7 @@ void test_copy_move_operations() {
     Serial.println();
 
     // Original map
-    unordered_map<uint8_t, int16_t> original(8);
+    unordered_map_s<uint8_t, int16_t> original(8);
     original.insert(1, 10);
     original.insert(2, 20);
     original.insert(3, 30);
@@ -261,7 +261,7 @@ void test_copy_move_operations() {
     print_map_allocation_info("original.table", original);
 
     Serial.println("\n--- Copy Constructor ---");
-    unordered_map<uint8_t, int16_t> copied(original);
+    unordered_map_s<uint8_t, int16_t> copied(original);
     Serial.println("Created copy via copy constructor");
     print_map_allocation_info("copied.table", copied);
     if (copied.getValue(2) == 20) {
@@ -271,7 +271,7 @@ void test_copy_move_operations() {
     }
 
     Serial.println("\n--- Move Constructor ---");
-    unordered_map<uint8_t, int16_t> moved(std::move(original));
+    unordered_map_s<uint8_t, int16_t> moved(std::move(original));
     Serial.println("Created moved map via move constructor");
     print_map_allocation_info("moved.table", moved);
     if (moved.getValue(3) == 30 && original.size() == 0) {
@@ -296,7 +296,7 @@ void test_allocation_failure_handling() {
     print_memory_stats();
     Serial.println();
 
-    unordered_map<uint8_t, uint32_t> stress_map(8);
+    unordered_map_s<uint8_t, uint32_t> stress_map(8);
     Serial.println("Created stress_map with capacity 8");
 
     // Try to insert many elements - should succeed or fail gracefully
@@ -339,7 +339,7 @@ void test_fit_and_clear() {
     print_memory_stats();
     Serial.println();
 
-    unordered_set<uint16_t> set_fit(20);
+    unordered_set_s<uint16_t> set_fit(20);
     Serial.println("Created set_fit with capacity 20");
 
     // Insert a few elements
@@ -393,7 +393,7 @@ void test_reserve() {
     print_memory_stats();
     Serial.println();
 
-    unordered_map<uint8_t, int32_t> reserve_map(4);
+    unordered_map_s<uint8_t, int32_t> reserve_map(4);
     Serial.println("Created reserve_map with initial capacity 4");
     Serial.print("Initial capacity: ");
     Serial.println(reserve_map.capacity());
@@ -438,7 +438,7 @@ void setup() {
 
     Serial.println("\n╔══════════════════════════════════════════════════╗");
     Serial.println("║  STL_MCU PSRAM Test Suite - ESP32-S3             ║");
-    Serial.println("║  Testing unordered_map & unordered_set with PSRAM║");
+    Serial.println("║  Testing unordered_map_s & unordered_set_s with PSRAM║");
     Serial.println("╚══════════════════════════════════════════════════╝\n");
 
     delay(500);
@@ -457,16 +457,16 @@ void setup() {
     delay(1000);
 
     // Run all tests
-    test_unordered_map_basic();
+    test_unordered_map_s_basic();
     delay(500);
 
-    test_unordered_map_rehash();
+    test_unordered_map_s_rehash();
     delay(500);
 
-    test_unordered_set_basic();
+    test_unordered_set_s_basic();
     delay(500);
 
-    test_unordered_set_rehash_erase();
+    test_unordered_set_s_rehash_erase();
     delay(500);
 
     test_copy_move_operations();

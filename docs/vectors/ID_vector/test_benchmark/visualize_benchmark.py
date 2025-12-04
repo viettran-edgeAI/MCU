@@ -33,7 +33,7 @@ def create_performance_comparison(df):
     width = 0.25
     
     ax1.bar(x - width, df['ID_vector_Time_ns'], width, label='ID_vector', alpha=0.8)
-    ax1.bar(x, df['unordered_set_Time_ns'], width, label='unordered_set', alpha=0.8)
+    ax1.bar(x, df['unordered_set_s_Time_ns'], width, label='unordered_set_s', alpha=0.8)
     ax1.bar(x + width, df['vector_Time_ns'], width, label='std::vector', alpha=0.8)
     
     ax1.set_yscale('log')
@@ -47,7 +47,7 @@ def create_performance_comparison(df):
     
     # 2. Memory Usage Comparison (log scale)
     ax2.bar(x - width, df['ID_vector_Memory_bytes'], width, label='ID_vector', alpha=0.8)
-    ax2.bar(x, df['unordered_set_Memory_bytes'], width, label='unordered_set', alpha=0.8)
+    ax2.bar(x, df['unordered_set_s_Memory_bytes'], width, label='unordered_set_s', alpha=0.8)
     ax2.bar(x + width, df['vector_Memory_bytes'], width, label='std::vector', alpha=0.8)
     
     ax2.set_yscale('log')
@@ -60,7 +60,7 @@ def create_performance_comparison(df):
     ax2.grid(True, alpha=0.3)
     
     # 3. Speedup Factors
-    ax3.bar(x - width/2, df['Speedup_vs_unordered_set'], width, label='vs unordered_set', alpha=0.8)
+    ax3.bar(x - width/2, df['Speedup_vs_unordered_set_s'], width, label='vs unordered_set_s', alpha=0.8)
     ax3.bar(x + width/2, df['Speedup_vs_vector'], width, label='vs std::vector', alpha=0.8)
     
     ax3.set_xlabel('Test Cases')
@@ -72,12 +72,12 @@ def create_performance_comparison(df):
     ax3.grid(True, alpha=0.3)
     
     # Add value labels on bars
-    for i, (v1, v2) in enumerate(zip(df['Speedup_vs_unordered_set'], df['Speedup_vs_vector'])):
+    for i, (v1, v2) in enumerate(zip(df['Speedup_vs_unordered_set_s'], df['Speedup_vs_vector'])):
         ax3.text(i - width/2, v1 + 1, f'{v1:.1f}x', ha='center', va='bottom', fontsize=8)
         ax3.text(i + width/2, v2 + 1, f'{v2:.1f}x', ha='center', va='bottom', fontsize=8)
     
     # 4. Memory Efficiency Ratios
-    ax4.bar(x - width/2, df['Memory_Ratio_vs_unordered_set'], width, label='vs unordered_set', alpha=0.8)
+    ax4.bar(x - width/2, df['Memory_Ratio_vs_unordered_set_s'], width, label='vs unordered_set_s', alpha=0.8)
     ax4.bar(x + width/2, df['Memory_Ratio_vs_vector'], width, label='vs std::vector', alpha=0.8)
     
     ax4.set_xlabel('Test Cases')
@@ -89,7 +89,7 @@ def create_performance_comparison(df):
     ax4.grid(True, alpha=0.3)
     
     # Add percentage labels
-    for i, (v1, v2) in enumerate(zip(df['Memory_Ratio_vs_unordered_set'], df['Memory_Ratio_vs_vector'])):
+    for i, (v1, v2) in enumerate(zip(df['Memory_Ratio_vs_unordered_set_s'], df['Memory_Ratio_vs_vector'])):
         ax4.text(i - width/2, v1 + 0.05, f'{v1*100:.1f}%', ha='center', va='bottom', fontsize=8)
         ax4.text(i + width/2, v2 + 0.05, f'{v2*100:.1f}%', ha='center', va='bottom', fontsize=8)
     
@@ -103,12 +103,12 @@ def create_summary_statistics(df):
     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 10))
     
     # 1. Average Performance Metrics
-    metrics = ['Speed vs unordered_set', 'Speed vs std::vector', 
-               'Memory vs unordered_set', 'Memory vs std::vector']
+    metrics = ['Speed vs unordered_set_s', 'Speed vs std::vector', 
+               'Memory vs unordered_set_s', 'Memory vs std::vector']
     
-    speed_us_avg = df['Speedup_vs_unordered_set'].mean()
+    speed_us_avg = df['Speedup_vs_unordered_set_s'].mean()
     speed_v_avg = df['Speedup_vs_vector'].mean()
-    mem_us_avg = df['Memory_Ratio_vs_unordered_set'].mean()
+    mem_us_avg = df['Memory_Ratio_vs_unordered_set_s'].mean()
     mem_v_avg = df['Memory_Ratio_vs_vector'].mean()
     
     values = [speed_us_avg, speed_v_avg, mem_us_avg, mem_v_avg]
@@ -134,11 +134,11 @@ def create_summary_statistics(df):
     labels = []
     
     for _, row in df.iterrows():
-        performance_data.extend([row['Speedup_vs_unordered_set'], row['Speedup_vs_vector']])
-        labels.extend(['vs unordered_set', 'vs std::vector'])
+        performance_data.extend([row['Speedup_vs_unordered_set_s'], row['Speedup_vs_vector']])
+        labels.extend(['vs unordered_set_s', 'vs std::vector'])
     
-    ax2.boxplot([df['Speedup_vs_unordered_set'], df['Speedup_vs_vector']], 
-                labels=['vs unordered_set', 'vs std::vector'])
+    ax2.boxplot([df['Speedup_vs_unordered_set_s'], df['Speedup_vs_vector']], 
+                labels=['vs unordered_set_s', 'vs std::vector'])
     ax2.set_title('Speedup Distribution')
     ax2.set_ylabel('Speedup Factor')
     ax2.grid(True, alpha=0.3)
@@ -147,11 +147,11 @@ def create_summary_statistics(df):
     mem_savings_us = (1 - mem_us_avg) * 100
     mem_savings_v = (1 - mem_v_avg) * 100
     
-    # vs unordered_set
+    # vs unordered_set_s
     ax3.pie([mem_savings_us, 100 - mem_savings_us], 
             labels=[f'Memory Saved\n{mem_savings_us:.1f}%', f'Memory Used\n{100-mem_savings_us:.1f}%'],
             autopct='%1.1f%%', startangle=90, colors=['lightcoral', 'lightblue'])
-    ax3.set_title('Memory Savings vs unordered_set')
+    ax3.set_title('Memory Savings vs unordered_set_s')
     
     # vs std::vector
     if mem_savings_v > 0:
@@ -178,8 +178,8 @@ def create_detailed_analysis(df):
     # 1. Time vs Memory Trade-off
     ax1.scatter(df['ID_vector_Memory_bytes'], df['ID_vector_Time_ns'], 
                s=100, alpha=0.7, label='ID_vector', color='blue')
-    ax1.scatter(df['unordered_set_Memory_bytes'], df['unordered_set_Time_ns'], 
-               s=100, alpha=0.7, label='unordered_set', color='red')
+    ax1.scatter(df['unordered_set_s_Memory_bytes'], df['unordered_set_s_Time_ns'], 
+               s=100, alpha=0.7, label='unordered_set_s', color='red')
     ax1.scatter(df['vector_Memory_bytes'], df['vector_Time_ns'], 
                s=100, alpha=0.7, label='std::vector', color='green')
     
@@ -192,14 +192,14 @@ def create_detailed_analysis(df):
     ax1.grid(True, alpha=0.3)
     
     # 2. Efficiency Score (Speed improvement / Memory ratio)
-    efficiency_us = df['Speedup_vs_unordered_set'] / df['Memory_Ratio_vs_unordered_set']
+    efficiency_us = df['Speedup_vs_unordered_set_s'] / df['Memory_Ratio_vs_unordered_set_s']
     efficiency_v = df['Speedup_vs_vector'] / df['Memory_Ratio_vs_vector']
     
     test_names = [name.replace(' (BPV=1)', '').replace(' (BPV=2)', '') for name in df['Test_Name']]
     x = np.arange(len(test_names))
     width = 0.35
     
-    ax2.bar(x - width/2, efficiency_us, width, label='vs unordered_set', alpha=0.8)
+    ax2.bar(x - width/2, efficiency_us, width, label='vs unordered_set_s', alpha=0.8)
     ax2.bar(x + width/2, efficiency_v, width, label='vs std::vector', alpha=0.8)
     
     ax2.set_xlabel('Test Cases')
@@ -212,9 +212,9 @@ def create_detailed_analysis(df):
     
     # 3. Performance Heatmap
     # Normalize values for better visualization
-    norm_speed_us = df['Speedup_vs_unordered_set'] / df['Speedup_vs_unordered_set'].max()
+    norm_speed_us = df['Speedup_vs_unordered_set_s'] / df['Speedup_vs_unordered_set_s'].max()
     norm_speed_v = df['Speedup_vs_vector'] / df['Speedup_vs_vector'].max()
-    norm_mem_us = (1 - df['Memory_Ratio_vs_unordered_set']) / (1 - df['Memory_Ratio_vs_unordered_set']).max()
+    norm_mem_us = (1 - df['Memory_Ratio_vs_unordered_set_s']) / (1 - df['Memory_Ratio_vs_unordered_set_s']).max()
     norm_mem_v = (1 - df['Memory_Ratio_vs_vector']) / abs(1 - df['Memory_Ratio_vs_vector']).max()
     
     heatmap_data = np.array([norm_speed_us, norm_speed_v, norm_mem_us, norm_mem_v]).T
@@ -231,11 +231,11 @@ def create_detailed_analysis(df):
     cbar.set_label('Normalized Performance (0=worst, 1=best)')
     
     # 4. Cumulative advantages
-    cumulative_speed_us = df['Speedup_vs_unordered_set'].cumsum()
+    cumulative_speed_us = df['Speedup_vs_unordered_set_s'].cumsum()
     cumulative_speed_v = df['Speedup_vs_vector'].cumsum()
     
     x_range = range(len(df))
-    ax4.plot(x_range, cumulative_speed_us, marker='o', label='Cumulative speedup vs unordered_set', linewidth=2)
+    ax4.plot(x_range, cumulative_speed_us, marker='o', label='Cumulative speedup vs unordered_set_s', linewidth=2)
     ax4.plot(x_range, cumulative_speed_v, marker='s', label='Cumulative speedup vs std::vector', linewidth=2)
     
     ax4.set_xlabel('Test Case Index')
@@ -257,37 +257,37 @@ def generate_report(df):
     report.append("=" * 80)
     
     # Overall statistics
-    avg_speed_us = df['Speedup_vs_unordered_set'].mean()
+    avg_speed_us = df['Speedup_vs_unordered_set_s'].mean()
     avg_speed_v = df['Speedup_vs_vector'].mean()
-    avg_mem_us = df['Memory_Ratio_vs_unordered_set'].mean()
+    avg_mem_us = df['Memory_Ratio_vs_unordered_set_s'].mean()
     avg_mem_v = df['Memory_Ratio_vs_vector'].mean()
     
     report.append(f"\nOVERALL PERFORMANCE SUMMARY:")
-    report.append(f"  Average speedup vs unordered_set: {avg_speed_us:.1f}x")
+    report.append(f"  Average speedup vs unordered_set_s: {avg_speed_us:.1f}x")
     report.append(f"  Average speedup vs std::vector:   {avg_speed_v:.1f}x")
-    report.append(f"  Average memory ratio vs unordered_set: {avg_mem_us:.3f} ({avg_mem_us*100:.1f}%)")
+    report.append(f"  Average memory ratio vs unordered_set_s: {avg_mem_us:.3f} ({avg_mem_us*100:.1f}%)")
     report.append(f"  Average memory ratio vs std::vector:   {avg_mem_v:.3f} ({avg_mem_v*100:.1f}%)")
     
     # Best performing scenarios
-    best_speed_us_idx = df['Speedup_vs_unordered_set'].idxmax()
+    best_speed_us_idx = df['Speedup_vs_unordered_set_s'].idxmax()
     best_speed_v_idx = df['Speedup_vs_vector'].idxmax()
-    best_mem_us_idx = df['Memory_Ratio_vs_unordered_set'].idxmin()
+    best_mem_us_idx = df['Memory_Ratio_vs_unordered_set_s'].idxmin()
     best_mem_v_idx = df['Memory_Ratio_vs_vector'].idxmin()
     
     report.append(f"\nBEST PERFORMANCE SCENARIOS:")
-    report.append(f"  Best speedup vs unordered_set: {df.iloc[best_speed_us_idx]['Test_Name']} "
-                 f"({df.iloc[best_speed_us_idx]['Speedup_vs_unordered_set']:.1f}x)")
+    report.append(f"  Best speedup vs unordered_set_s: {df.iloc[best_speed_us_idx]['Test_Name']} "
+                 f"({df.iloc[best_speed_us_idx]['Speedup_vs_unordered_set_s']:.1f}x)")
     report.append(f"  Best speedup vs std::vector:   {df.iloc[best_speed_v_idx]['Test_Name']} "
                  f"({df.iloc[best_speed_v_idx]['Speedup_vs_vector']:.1f}x)")
-    report.append(f"  Best memory efficiency vs unordered_set: {df.iloc[best_mem_us_idx]['Test_Name']} "
-                 f"({df.iloc[best_mem_us_idx]['Memory_Ratio_vs_unordered_set']*100:.1f}%)")
+    report.append(f"  Best memory efficiency vs unordered_set_s: {df.iloc[best_mem_us_idx]['Test_Name']} "
+                 f"({df.iloc[best_mem_us_idx]['Memory_Ratio_vs_unordered_set_s']*100:.1f}%)")
     report.append(f"  Best memory efficiency vs std::vector:   {df.iloc[best_mem_v_idx]['Test_Name']} "
                  f"({df.iloc[best_mem_v_idx]['Memory_Ratio_vs_vector']*100:.1f}%)")
     
     # Key insights
     report.append(f"\nKEY INSIGHTS:")
     report.append(f"  • ID_vector consistently outperforms both alternatives in speed")
-    report.append(f"  • Memory efficiency is exceptional vs unordered_set (avg {(1-avg_mem_us)*100:.1f}% savings)")
+    report.append(f"  • Memory efficiency is exceptional vs unordered_set_s (avg {(1-avg_mem_us)*100:.1f}% savings)")
     
     if avg_mem_v < 1.0:
         report.append(f"  • Also memory efficient vs std::vector (avg {(1-avg_mem_v)*100:.1f}% savings)")

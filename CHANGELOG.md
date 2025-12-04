@@ -5,6 +5,38 @@ Entries are grouped: small and close commits are consolidated into date-based re
 
 ------------------------------------------------------------------------------------
 
+## [2025-12-04] — Update 4_12_25: Documentation overhaul & container renaming
+
+### Major Changes
+- **Complete documentation rewrite**: Created comprehensive guides for all vector containers (packed_vector, vector/b_vector, ID_vector) with 600-1400 lines each covering architecture, API reference, performance benchmarks, and usage patterns.
+- **Container renaming**: Renamed `unordered_map(set)` → `unordered_map(set)_s` and `ChainedUnorderedMap(Set)` → `unordered_map(set)` for consistency.
+- **New STL_MCU.md**: Added 733-line main documentation with container comparison tables, hash mechanism details, memory efficiency analysis, and performance benchmarks.
+- **FATFS support**: Added FAT filesystem support for RF file system storage with improved `releaseData()` method using buffer.
+
+### Documentation Additions
+- **Vector guides** (3 comprehensive READMEs):
+  - `packed_vector`: 772 lines covering bit-packing, ValueType templates, traits system, multi-word storage, runtime BPV configuration
+  - `vector & b_vector`: 688 lines covering heap-only vs SBO comparison, auto-calculated buffer sizes, implicit conversions, built-in sorting
+  - `ID_vector`: 1403 lines covering O(1) integer ID operations, frequency tracking, set operations, range operations, vector arithmetic
+  
+- **Performance documentation**: Added benchmark scripts and visualization for hash containers, packed_vector, ID_vector with detailed memory/speed comparisons vs std::
+
+- **Visual aids**: Added 20+ diagrams and performance charts (hash_kernel components, container comparisons, memory usage graphs)
+
+### Technical Details
+- **File Manager**: Upgraded `releaseData()` to use buffered approach for better memory efficiency
+- **Container API**: Standardized naming across all hash-based containers
+- **Image organization**: Renamed documentation images for clarity (e.g., `552df095cf9345cd1c823.jpg` → `hash_kernel_collision.jpg`)
+- **Benchmark infrastructure**: Added Python scripts for automated benchmarking of all container types
+
+### Repository Cleanup
+- Added comprehensive .gitignore rules for test binaries, benchmark outputs, and build artifacts
+- Organized documentation structure with proper cross-linking between guides
+
+		- notable commits: 388d80a, fb2acbe, 07854fa
+
+------------------------------------------------------------------------------------
+
 
 ## [2025-11-22] — fix hog transform & optimize model storage
 - Fix HOG transform issue - loss of accuracy (at both pc and mcu versions): use artan2() anf sqrt() for angle calculation but slow down the transform (~ x2.5 slower).
@@ -14,7 +46,7 @@ Entries are grouped: small and close commits are consolidated into date-based re
 
 ## [2025-11-20] — Speed up tree building process & handle large datasets
 
-- Speed up tree buliding process: Reworked node statistics and feature selection: replaced per-node unordered_set with compact label-count arrays + a purity flag and added a deterministic vector-based feature sampler to eliminate costly allocations. now treee bulding 40-70% faster.
+- Speed up tree buliding process: Reworked node statistics and feature selection: replaced per-node unordered_set_s with compact label-count arrays + a purity flag and added a deterministic vector-based feature sampler to eliminate costly allocations. now treee bulding 40-70% faster.
 - Critical : fix node_layput calculation issue (caused of drop large model accuracy before)
 - Solved : failed problem on  large dataset (~1.000.000 samples)
 
@@ -93,7 +125,7 @@ Entries are grouped: small and close commits are consolidated into date-based re
 
 ## [v0.7.0] 2025-10-18 — BIG_UPGRADE: PSRAM support across containers
 
-- Enable PSRAM allocation support for: Stack, Queue, DeQueue, vector, b_vector, unordered_map, unordered_set, ChainedUnorderedMap, ChainedUnorderedSet, PackedArray, packed_vector, and ID_vector.
+- Enable PSRAM allocation support for: Stack, Queue, DeQueue, vector, b_vector, unordered_map_s, unordered_set_s, unordered_map, unordered_set, PackedArray, packed_vector, and ID_vector.
 	- Automatic PSRAM detection and graceful fallback to DRAM.
 	- `uses_psram()` helper to introspect containers.
 	- Backwards compatible behind `RF_USE_PSRAM` macro.
@@ -117,11 +149,11 @@ Entries are grouped: small and close commits are consolidated into date-based re
 - Enhance `Rf_file_manager` to be robust with different storage backends and error conditions.
 		- notable commit: 04f64bf4
 
-## [v0.4.1] 2025-09-04 — Quantization & container updates; ChainedUnorderedMap addition
+## [v0.4.1] 2025-09-04 — Quantization & container updates; unordered_map addition
 
 - Add `loadChunk()` method and upgrade forest ability to handle datasets with large feature counts (e.g., up to 1023 features).
 - Add quantization visualizer and rename Categorizer -> Quantizer to reflect new workflow.
-- Add `ChainedUnorderedMap` and fix constructors for correctness.
+- Add `unordered_map` and fix constructors for correctness.
 		- notable commits: ebceb7ad, c55571ea, be266ffa
 
 ## [v0.4.0] 2025-09-03 — Memory & diagnostics improvements
@@ -153,7 +185,7 @@ Entries are grouped: small and close commits are consolidated into date-based re
 
 ## [v0.1.0] 2025-06-23 — Core container and baseline features (initial release)
 
-- Add core containers and components: `vector`, `b_vector`, `ID_vector`, `packed_vector`, `packedArray`, `pair`, `hash_kernel`, `unordered_map` and `unordered_set` variants.
+- Add core containers and components: `vector`, `b_vector`, `ID_vector`, `packed_vector`, `packedArray`, `pair`, `hash_kernel`, `unordered_map_s` and `unordered_set_s` variants.
 - Add `Rf_components`, `Rf_file_manager`, `random_forest_mcu` initial integration and `hog_transform` toolkit.
 - Add initial examples and early ESP32 transfer tools.
 - Initial commit and repository scaffolding.

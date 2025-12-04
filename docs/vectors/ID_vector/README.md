@@ -1,496 +1,533 @@
-# ID_vector: A High-Performance, Memory-Efficient Integer Set Data Structure
-
-## Part 1: Overview and Core Concepts
-
-### Overview 
-
-ID_vector - member of mcu library space is a vector class specially designed to store IDs (positive integers) with optimization in both aspects: memory and speed surpassing conventional containers (vector, unordered_set..). 
-
-**Latest Enhancement (2025)**: Now includes powerful bulk operations, range manipulation, and vector arithmetic capabilities for advanced data processing workflows.
-
-**Note on underlying storage**: The ID_vector uses `PackedArray` internally for compact storage. `PackedArray` now supports element widths larger than the platform word-size via multi-word reads/writes (`word_t = size_t`). However, `ID_vector` intentionally restricts `BitsPerValue` to <= 32 (compile-time) to keep the per-ID counter compact, predictable, and suitable for embedded environments. If you need >32-bit per-ID counters, use `PackedArray` directly or an alternate container.
-
-### Core Mechanism
-
-#### Bit-Packing Architecture
-
-Suppose you need to store a list of IDs (positive integers). With a normal `vector<size_t>`, you spend 4 bytes for each element. So with 1000 elements, it costs 4 KB of memory. 
-
-However, if you know the largest ID in advance (say 2000), you can store those IDs as indexes of bits: initialize a 2000-bit contiguous array with all elements set to 0. When you need to store ID 300, the 299th bit is set to 1. To store 1000 IDs, you only spend 2000/8 ≈ 250 bytes - an 94.75% memory reduction!
-
-#### Visual Representation
-
-**BPV (Bits_per_value) = 1 (Contains unique IDs only)**
-```
-index:     0  1  2  3  4  5  6  7  8  9  10 11 12 13 14 15
-Bit:      [0][1][0][1][0][0][1][0][1][0][0][1][0][0][0][1]
-Value:     -  ✓  -  ✓  -  -  ✓  -  ✓  -  -  ✓  -  -  -  ✓
-```
-**=> IDs stored**: 1, 3, 6, 8, 11, 15...
-
-#### BPV = 2 (Up to 3 instances per ID)
-```
-index:     0    1    2    3    4    5    6    7    8
-Bits:    [00] [01] [00] [11] [00] [00] [10] [00] [11]
-Count:     0    1    0    3    0    0    2    0    3
-```
-**=> Ids stored**: 1, 3, 3, 3, 6, 6, 8, 8, 8...
-
-#### Advance : enable min_id (eg: min_id = 1000, bpv = 1)
-```
-index:     0    1    2    3    4    5    6    7    8
-Bit:      [0]  [1]  [0]  [1]  [0]  [0]  [1]  [0]  [1]
-```
-**=> IDs stored**: 1001, 1003, 1006, 1008...
-
-#### Memory Layout Strategy
-
-The data structure allocates a contiguous bit array where:
-- **ID mapping**: Each ID maps to bit position `(id - min_id)`, enabling O(1) access
-- **Count storage**: Multiple bits per position allow counting duplicate IDs (when BPV > 1)
-- **Dynamic sizing**: The vector automatically expands during `push_back()` operations
-- **Range optimization**: Memory allocation adjusts based on the actual ID range needed
-
-### Key Benefits
-
-#### 🚀 **Performance Advantages**
-- **O(1) Operations**: Constant-time insertion, lookup, and deletion
-- **Self-Sorting**: Elements maintained in natural sorted order without overhead
-- **Flexible Counting**: Efficient storage for unique integer sets (BPV=1) or multiple instances (BPV > 1)
-- **Speed**: O(1) performance across all operations with no hash collisions
-
-#### 💾 **Memory Efficiency**
-- **Bit-Level Precision**: Uses only necessary bits per element (1-32 bits configurable). Note: `ID_vector` enforces a compile-time limit of `BitsPerValue <= 32` to keep per-ID counts compact and performant; if you need counts wider than 32 bits, consider alternate containers or use `PackedArray` directly.
-- **No Fragmentation**: Single allocation prevents memory fragmentation
-- **Dynamic Growth**: Adjusts memory usage based on actual data requirements
-
-
-#### **Trade-offs**
-- **Limited to Integers**: Only supports positive integer IDs
-- **Sparse Data**: Memory optimization can degrade with extremely sparse sets
-- **⚠️ Silent Overflow**: If you add more instances than the capacity (e.g., 4 instances with BPV=2 that only allows max 3), nothing happens. This silent failure can lead to infinite loops or incorrect program behavior in some cases.
-
-### Comprehensive Performance Comparison
-
-We conducted extensive benchmarks comparing `ID_vector` against `std::unordered_set` and `std::vector` using nanosecond-precision timing across multiple scenarios.
-
-### Benchmark Configuration
-- **Timing Precision**: Nanoseconds (ns) for accurate measurement of fast operations
-- **Compiler**: g++ with -O2 optimization
-- **Test Scenarios**: Sparse datasets, dense datasets, large datasets with duplicates, and very large sparse datasets
-
-### Overall Performance Results
-
-| Metric | vs std::unordered_set | vs std::vector |
-|--------|----------------------|----------------|
-| **Average Speedup** | **12.3x faster** | **36.4x faster** |
-| **Memory Usage** | **19.4%** (80.6% savings) | **52.6%** (47.4% savings) |
-| **Best Speedup** | **35.1x faster** | **61.2x faster** |
-| **Best Memory Efficiency** | **0.5% usage** | **1.9% usage** |
-
-### Detailed Benchmark Results
-
-#### Small Sparse Dataset (1000 elements, max_id=10000)
-
-| Operation | ID_vector | unordered_set | std::vector | Speedup vs US | Speedup vs Vector |
-|-----------|-------------|---------------|-------------|---------------|-------------------|
-| **Insertion** | 1,553 ns | 54,433 ns | 68,770 ns | 35.1x | 44.3x |
-| **Lookup** | 751 ns | 8,596 ns | 45,927 ns | 11.4x | 61.2x |
-| **Memory** | 1,283 bytes | 33,264 bytes | 8,216 bytes | 3.9% | 15.6% |
-
-**Key Insight**: Excellent performance across all metrics, with dramatic speedups and memory savings.
-
-#### Dense Dataset (1000 consecutive elements)
-
-| Operation | ID_vector | unordered_set | std::vector | Speedup vs US | Speedup vs Vector |
-|-----------|-------------|---------------|-------------|---------------|-------------------|
-| **Insertion** | 1,193 ns | 25,709 ns | 8,476 ns | 21.5x | 7.1x |
-| **Lookup** | 731 ns | 3,286 ns | 30,618 ns | 4.5x | 41.9x |
-| **Memory** | 158 bytes | 34,720 bytes | 8,216 bytes | 0.5% | 1.9% |
-
-**Key Insight**: Best memory efficiency scenario with exceptional memory savings and consistent speed advantages.
-
-#### Large Dataset with Duplicates (BPV=2)
-
-| Operation | ID_vector | unordered_set | std::vector | Speedup vs US | Speedup vs Vector |
-|-----------|-------------|---------------|-------------|---------------|-------------------|
-| **Insertion** | 22,663 ns | 195,650 ns | 849,441 ns | 8.6x | 37.5x |
-| **Lookup** | 10,029 ns | 45,837 ns | 510,779 ns | 4.6x | 50.9x |
-| **Memory** | 1,283 bytes | 150,056 bytes | 65,560 bytes | 0.9% | 2.0% |
-
-**Key Insight**: Demonstrates BPV=2 capabilities for handling duplicates while maintaining superior performance.
-
-#### Very Large Sparse (5000 elements, max_id=1,000,000)
-
-| Operation | ID_vector | unordered_set | std::vector | Speedup vs US | Speedup vs Vector |
-|-----------|-------------|---------------|-------------|---------------|-------------------|
-| **Insertion** | 32,261 ns | 228,984 ns | 730,946 ns | 7.1x | 22.7x |
-| **Lookup** | 10,179 ns | 55,074 ns | 263,380 ns | 5.4x | 25.9x |
-| **Memory** | 125,033 bytes | 173,008 bytes | 65,560 bytes | 72.3% | 190.7% |
-
-**Key Insight**: Even in very sparse scenarios (max_id=1,000,000), ID_vector maintains significant speed advantages, though memory efficiency decreases due to the large bit array allocation.
-
-### Memory Scaling Analysis
-
-| Max ID | Elements | ID_vector(1bit) | unordered_set | std::vector | Efficiency Ratio |
-|--------|----------|-----------------|---------------|-------------|------------------|
-| 1,000 | 100 | 158 bytes | 3,344 bytes | 1,048 bytes | 21.2x / 6.6x |
-| 5,000 | 500 | 658 bytes | 16,656 bytes | 4,120 bytes | 25.3x / 6.3x |
-| 10,000 | 1,000 | 1,283 bytes | 32,776 bytes | 8,216 bytes | 25.5x / 6.4x |
-| 50,000 | 5,000 | 6,283 bytes | 165,520 bytes | 65,560 bytes | 26.3x / 10.4x |
-| 100,000 | 10,000 | 12,533 bytes | 329,944 bytes | 131,096 bytes | 26.3x / 10.5x |
-
-## Performance Visualizations
-
-The benchmark results have been comprehensively visualized in multiple formats to clearly demonstrate ID_vector's advantages:
-
-### 1. Performance Comparison Charts
-This comprehensive visualization includes execution time comparison, memory usage analysis, speedup factors, and memory efficiency ratios across all test scenarios.
-
-![Performance Comparison Charts](images/performance_comparison.png)
-
-**Key Features:**
-- **Execution Time Comparison** (log scale): Shows dramatic speed differences across all test scenarios
-- **Memory Usage Comparison** (log scale): Illustrates memory efficiency advantages
-- **Speedup Factor Analysis**: Quantifies performance improvements with labeled bars
-- **Memory Efficiency Ratios**: Displays percentage memory usage compared to alternatives
-
-### 2. Summary Statistics
-Statistical analysis featuring average performance metrics, distribution analysis, and clear percentage breakdowns for quick comprehension.
-
-![Summary Statistics](images/summary_statistics.png)
-
-**Analysis Components:**
-- **Average Performance Metrics**: Bar chart showing overall speedup and memory ratios
-- **Performance Distribution**: Box plots revealing consistency of advantages
-- **Memory Savings Visualization**: Pie charts showing percentage savings vs each alternative
-- **Efficiency Breakdown**: Clear percentage breakdowns for quick comprehension
-
-### 3. Detailed Analysis
-Advanced analytical visualizations showing time vs memory trade-offs, efficiency scores, performance heatmaps, and cumulative advantages.
-
-![Detailed Analysis](images/detailed_analysis.png)
-
-**Advanced Metrics:**
-- **Time vs Memory Trade-off**: Scatter plot showing optimal positioning in performance space
-- **Overall Efficiency Score**: Combined metric considering both speed and memory benefits
-- **Performance Heatmap**: Normalized comparison across all metrics and test cases
-- **Cumulative Advantages**: Shows progressive benefits across test scenarios
-
-These visualizations clearly demonstrate that `ID_vector` consistently operates in the optimal region of both speed and memory efficiency compared to traditional alternatives.
-
-### Quick Start Examples
-
-```cpp
-// Basic usage with automatic sizing
-ID_vector<uint16_t> unique_ids;                 // Using default BPV=1 (unique IDs)
-ID_vector<uint16_t, 2> counted_ids;             // Up to 3 instances per ID
-
-// Essential operations - all O(1)
-unique_ids.push_back(500);                      // Add ID (auto-expands if needed)
-bool exists = unique_ids.contains(100);         // Check presence  
-uint8_t count = counted_ids.count(50);          // Get count
-unique_ids.erase(200);                          // Remove one instance
-auto total = unique_ids.size();                 // Get total instances
-
-// Range-based iteration (automatically sorted)
-for (auto id : unique_ids) {
-    std::cout << id << " ";
-}
-```
-
-### Advanced Configuration
-
-#### Setting max_id (Recommended)
-For optimal memory efficiency, set the maximum expected ID before extensive use:
-
-```cpp
-ID_vector<uint16_t> sensor_ids;
-sensor_ids.set_maxID(2000);                     // Prevents memory fragmentation
-sensor_ids.push_back(1500);                     // Efficient allocation
-```
-
-#### min_id for High-Value Ranges (Advanced)
-For IDs that don't start from 0, setting min_id optimizes memory usage:
-
-```cpp
-ID_vector<uint16_t> high_value_ids;
-high_value_ids.set_minID(45000);                // Set minimum ID
-high_value_ids.set_maxID(50000);                // Set maximum ID
-// Alternative: high_value_ids.set_ID_range(45000, 50000);
-
-// Memory savings: stores only range 45000-50000 instead of 0-50000
-high_value_ids.push_back(47500);                // Maps to bit position (47500-45000)
-```
-
-#### Type Selection Guide
-```cpp
-// Choose template parameter T based on your maximum ID:
-ID_vector<uint8_t> small_range;              // Max ID ≤ 255
-ID_vector<uint16_t> medium_range;            // Max ID ≤ 65,535  
-ID_vector<uint32_t> large_range;             // Max ID ≤ 4.3 billion
-ID_vector<size_t> unlimited_range;           // No practical limit
-```
-
-### Use Case Guidelines
-
-#### ✅ **Optimal Use Cases**
-1. **Embedded Systems**: RAM-constrained environments requiring efficient integer sets
-2. **Real-time Applications**: Guaranteed O(1) performance for time-critical operations  
-3. **Sensor Networks**: Managing device IDs with known ranges
-4. **High-frequency Lookups**: Applications with many `contains()` operations
-5. **Cache-sensitive Code**: Benefits from linear memory layout and spatial locality
-6. **ID Range Management**: Applications dealing with allocated ID blocks or ranges
-7. **Database Record Tracking**: Efficient storage for record IDs and status tracking
-
-#### ⚠️ **Consider Alternatives When**
-1. **Extremely Sparse Data**: When memory usage exceeds `std::vector` due to very large, sparse ID ranges
-2. **Completely Unknown Ranges**: Applications where ID bounds cannot be estimated
-3. **Non-integer Keys**: Only supports positive integer identifiers
-4. **Frequent Range Changes**: Applications requiring constant capacity modifications
-5. **Thread-heavy Applications**: No built-in thread safety (external synchronization required)
-
-### Integration with MCU Ecosystem
-
-`ID_vector` is designed to be fully compatible with other container classes in the `mcu` namespace, particularly for embedded systems development:
-
-#### Compatibility with mcu::vector and mcu::b_vector
-
-```cpp
-#include "STL_MCU.h"  // Includes all mcu container classes
-
-// Convert from mcu::vector
-mcu::vector<uint16_t> regular_vec = {100, 200, 300, 400};
-ID_vector<uint16_t> id_vec(regular_vec);      // Direct conversion
-
-// Convert from mcu::b_vector  
-mcu::b_vector<uint16_t> bounded_vec = MAKE_UINT16_LIST(100, 200, 300);
-ID_vector<uint16_t> from_bvec(bounded_vec);   // Direct conversion
-
-// Use together in embedded applications
-class EmbeddedSensorManager {
-    mcu::vector<uint16_t> sensor_data;             // Raw sensor readings
-    ID_vector<uint16_t> active_sensors;           // Active sensor IDs (memory efficient)
-    ID_vector<uint16_t, 2> error_counts;         // Error count per sensor
-    
-public:
-    void process_sensor_reading(uint16_t sensor_id, uint16_t value) {
-        active_sensors.push_back(sensor_id);      // Track active sensor
-        sensor_data.push_back(value);            // Store reading
-        
-        if (value > ERROR_THRESHOLD) {
-            error_counts.push_back(sensor_id);   // Increment error count
-        }
-    }
-    
-    bool is_sensor_active(uint16_t id) const {
-        return active_sensors.contains(id);      // O(1) lookup
-    }
-    
-    uint8_t get_error_count(uint16_t id) const {
-        return error_counts.count(id);           // Get error frequency
-    }
-};
-```
-
-#### Embedded Systems Design Benefits
-
-1. **Memory Predictability**: Unlike dynamic containers, ID_vector provides predictable memory usage patterns essential for embedded systems
-2. **No Dynamic Allocation Fragmentation**: Single allocation strategy prevents memory fragmentation issues
-3. **Deterministic Performance**: O(1) operations with no worst-case scenarios for real-time requirements
-4. **Low Overhead**: Minimal metadata storage compared to traditional containers
-5. **Arduino/MCU Friendly**: Designed specifically for resource-constrained environments
-
-### Conclusion
-
-`ID_vector` represents a specialized solution optimized for embedded systems and resource-constrained environments. With its dynamic sizing capabilities, O(1) performance guarantees, and seamless integration with the `mcu` namespace ecosystem, it provides an excellent choice for integer set operations where memory efficiency and predictable performance are critical.
-
-The data structure is particularly valuable when combined with other `mcu` container classes, offering embedded developers a comprehensive toolkit for efficient data management in RAM-limited environments.
+# ID_vector: Memory-Efficient Integer Set with Frequency Tracking
+
+## Table of Contents
+1. [Core Concept](#core-concept)
+2. [Key Features](#key-features)
+3. [Template Parameters](#template-parameters)
+4. [Constructors](#constructors)
+5. [Range Configuration](#range-configuration)
+6. [Primary Operations](#primary-operations)
+7. [Element Access](#element-access)
+8. [Iteration](#iteration)
+9. [Set Operations](#set-operations)
+10. [Range Operations](#range-operations)
+11. [Vector Arithmetic](#vector-arithmetic)
+12. [Comparison Operations](#comparison-operations)
+13. [Memory Management](#memory-management)
+14. [Performance Analysis](#performance-analysis)
+15. [Usage Patterns](#usage-patterns)
+16. [API Quick Reference](#api-quick-reference)
 
 ---
 
-*`ID_vector` is part of the STL_MCU library, designed specifically for embedded systems and microcontroller applications.*
+## Core Concept
 
-### Performance Insights & Recommendations
+`ID_vector` is a specialized container optimized for storing integer IDs with optional frequency counting, using bit-packing to achieve dramatic memory savings while maintaining O(1) operation complexity.
 
-#### Key Findings
-- **Consistent Superiority**: ID_vector outperforms alternatives in 100% of tested scenarios for speed
-- **Memory Efficiency**: Achieves 80.6% average memory savings vs unordered_set, 47.4% vs vector
-- **Scalability**: Performance advantages increase with dataset size and sparsity
-- **Predictability**: No worst-case scenarios due to O(1) guarantees
+### Architecture Overview
 
-#### Best Practices
-1. **Set Realistic Maximums**: Use appropriate max_id values for your domain
-2. **Choose Appropriate BPV**: Match bits-per-value to actual counting requirements
-3. **Validate Input**: Add bounds checking for external data sources
-4. **Consider Sparsity**: Most effective when ID range is reasonable for actual element count
+![ID_vector architecture](../../imgs/ID_vector.jpg)
 
-## Part 3: API Reference and Usage Guide
+**Bit-Packing Mechanism:**
+```
+BPV = 1 (Unique IDs only):
+Index:    0  1  2  3  4  5  6  7  8  9  10
+Bits:    [0][1][0][1][0][0][1][0][1][0][0]
+Result:   -  ✓  -  ✓  -  -  ✓  -  ✓  -  -
+IDs:         1     3           6     8
 
-## Template Declaration
+BPV = 2 (Up to 3 instances per ID):
+Index:     0    1    2    3    4    5    6
+Bits:    [00] [01] [00] [11] [00] [00] [10]
+Count:     0    1    0    3    0    0    2
+IDs:          1         3₃              6₂
+
+With min_id = 1000, BPV = 1:
+Index:     0    1    2    3    4    5    6
+Bits:    [0]  [1]  [0]  [1]  [0]  [0]  [1]
+IDs:         1001    1003              1006
+```
+
+**Memory Layout:**
+- **ID Mapping:** Each ID maps to position `(id - min_id)` for O(1) access
+- **Count Storage:** Multiple bits per position enable frequency tracking
+- **Dynamic Sizing:** Automatic expansion during insertions
+- **Range Optimization:** Only allocates memory for actual ID range needed
+
+### Internal Storage
+
+Uses `PackedArray<BitsPerValue>` for bit-level storage:
+- **Word Size:** `sizeof(size_t) * 8` bits (32 or 64 bits depending on platform)
+- **Multi-word Support:** Handles bit widths spanning multiple words
+- **Zero Initialization:** All bits start at 0 (no ID present)
+- **Efficient Access:** Inlined get/set operations with minimal overhead
+
+---
+
+## Key Features
+
+### Performance Characteristics
+
+| Feature | Complexity | Details |
+|---------|-----------|---------|
+| **Insertion** | O(1) | Direct bit manipulation |
+| **Lookup** | O(1) | Single array index access |
+| **Deletion** | O(1) | Decrement count in place |
+| **Contains Check** | O(1) | Single bit/count read |
+| **Iteration** | O(N) | N = total instances with repetitions |
+| **Memory Usage** | O(range × BPV) | `(max_id - min_id + 1) × BitsPerValue` bits |
+
+### Advantages
+
+✅ **Memory Efficiency**
+- Uses only `(range × BitsPerValue)` bits vs. `range × sizeof(T)` bytes
+- Example: 1000 IDs in range 0-2000 → 250 bytes vs. 4KB (94% savings)
+
+✅ **Predictable Performance**
+- O(1) operations with no hash collisions
+- No worst-case scenarios
+- Deterministic memory allocation
+
+✅ **Embedded-Friendly**
+- No dynamic allocation fragmentation
+- Predictable stack/PSRAM usage
+- Compatible with resource-constrained environments
+
+✅ **Built-in Sorting**
+- Elements always maintained in ascending order
+- No explicit sort() call needed
+- Iteration yields sorted sequence
+
+### Trade-offs
+
+⚠️ **Integer-Only**
+- Only supports positive integer types (`uint8_t`, `uint16_t`, `uint32_t`, `size_t`)
+- Cannot store floating-point or complex types
+
+⚠️ **Sparse Data Inefficiency**
+- Memory proportional to ID range, not count
+- Very sparse data (e.g., 10 IDs in range 0-1,000,000) wastes memory
+
+⚠️ **Silent Overflow**
+- Adding beyond `MAX_COUNT = (2^BitsPerValue - 1)` silently fails
+- No exception thrown when count limit reached
+
+⚠️ **Fixed Bit Width**
+- `BitsPerValue` is compile-time constant (template parameter)
+- Runtime modification possible via `set_bits_per_value()` but triggers reallocation
+
+---
+
+## Template Parameters
 
 ```cpp
 template <typename T, uint8_t BitsPerValue = 1>
 class ID_vector
 ```
 
-### Template Parameters
+### Type Parameter: `T`
 
-| Parameter | Description | Valid Values | Purpose |
-|-----------|-------------|--------------|---------|
-| `typename T` | Base integer type for ID range | `uint8_t`, `uint16_t`, `uint32_t`, `size_t` | Determines maximum ID and internal type mapping |
-| `BitsPerValue` | Bits allocated per ID | 1-32 | Controls max instances per ID (2^n - 1) |
+Determines the maximum ID range and internal index type:
 
-### Type Aliases
-
-```cpp
-using count_type = uint32_t;    // Type for individual ID counts; ID_vector uses a 32-bit count_type by default
-using index_type = /* varies */; // Mapped from template parameter T
-using size_type = /* varies */;  // Large enough to prevent overflow
-```
-
-**Type Mapping Table:**
-
-| Template T | index_type | size_type | Max ID Range | Max Total Instances |
-|------------|------------|-----------|--------------|-------------------|
+| Type | Index Type | Size Type | Max ID Range | Max Total Instances |
+|------|-----------|-----------|--------------|---------------------|
 | `uint8_t` | `uint8_t` | `uint32_t` | 0-255 | 4.3 billion |
 | `uint16_t` | `uint16_t` | `uint64_t` | 0-65,535 | 18.4 quintillion |
-| `uint32_t` | `size_t` | `size_t` | 0-4.3B | System maximum |
-| `size_t` | `size_t` | `size_t` | System max | System maximum |
+| `uint32_t` | `size_t` | `size_t` | 0-4.3B | Platform max |
+| `size_t` | `size_t` | `size_t` | Platform max | Platform max |
+
+**Type Selection Guidelines:**
+```cpp
+ID_vector<uint8_t> small_range;      // For sensor IDs 0-255
+ID_vector<uint16_t> medium_range;    // For device IDs 0-65K
+ID_vector<uint32_t> large_range;     // For database record IDs
+ID_vector<size_t> unlimited_range;   // For maximum flexibility
+```
+
+### Value Parameter: `BitsPerValue`
+
+Controls maximum count per ID:
+
+| BitsPerValue | MAX_COUNT | Use Case | Memory per 1000 IDs |
+|--------------|-----------|----------|---------------------|
+| 1 | 1 | Unique IDs (set behavior) | 125 bytes |
+| 2 | 3 | Low-frequency counting | 250 bytes |
+| 4 | 15 | Medium-frequency counting | 500 bytes |
+| 8 | 255 | High-frequency counting | 1000 bytes |
+| 16 | 65,535 | Very high-frequency | 2000 bytes |
+| 32 | 4.3B | Maximum count capacity | 4000 bytes |
+
+**Important:** `BitsPerValue` is clamped to 32 to prevent excessive memory usage and maintain performance on embedded systems.
+
+---
 
 ## Constructors
 
+### Default Constructor
+
 ```cpp
-// Default constructor (empty, dynamic sizing)
 ID_vector();
+```
 
-// Copy constructor
+Creates empty vector with default range based on template parameter `T`:
+
+```cpp
+ID_vector<uint8_t> vec1;    // Range: [0, 63]
+ID_vector<uint16_t> vec2;   // Range: [0, 255]
+ID_vector<uint32_t> vec3;   // Range: [0, 127]
+```
+
+### Constructor with Max ID
+
+```cpp
+explicit ID_vector(index_type max_id);
+```
+
+Specifies maximum ID (min_id defaults to 0):
+
+```cpp
+ID_vector<uint16_t> sensor_ids(2000);  // Range: [0, 2000]
+ID_vector<uint8_t, 2> counters(100);   // Range: [0, 100], BPV=2
+```
+
+### Constructor with Min and Max ID
+
+```cpp
+ID_vector(index_type min_id, index_type max_id);
+```
+
+Specifies both range bounds for optimal memory usage:
+
+```cpp
+ID_vector<uint16_t> high_value_ids(45000, 50000);  // Only allocates for range [45000, 50000]
+ID_vector<uint32_t> database_ids(1000000, 2000000); // 1M-2M range
+```
+
+### Copy Constructor
+
+```cpp
 ID_vector(const ID_vector& other);
+```
 
-// Copy from mcu containers
-ID_vector(const mcu::vector<T>& other);         // Copy from mcu::vector
-ID_vector(const mcu::b_vector<T>& other);       // Copy from mcu::b_vector
+Performs deep copy of all elements and range:
 
-// Move constructor
+```cpp
+ID_vector<uint16_t> original(0, 1000);
+original.push_back(500);
+ID_vector<uint16_t> copy = original;  // Independent copy
+```
+
+### Constructor from mcu::vector/b_vector
+
+```cpp
+template<typename Y>
+ID_vector(const vector<Y>& ids);  // Requires Y = uint8_t/uint16_t/uint32_t/size_t
+
+template<typename Y>
+ID_vector(const b_vector<Y>& ids);
+```
+
+Converts from MCU vector types, automatically determining range:
+
+```cpp
+mcu::vector<uint16_t> raw_ids = {100, 200, 300, 200, 100};
+ID_vector<uint16_t> id_vec(raw_ids);  // Range: [100, 300], contains counts
+
+mcu::b_vector<uint8_t> small_ids = MAKE_UINT8_LIST(10, 20, 30);
+ID_vector<uint8_t> from_bvec(small_ids);  // Range: [10, 30]
+```
+
+### Move Constructor
+
+```cpp
 ID_vector(ID_vector&& other) noexcept;
 ```
 
-### Constructor Examples
-
->**🚀 Note**: default BPV=1 , so no need to specified it (meaning IDs contain in vector is unique)
+Transfers ownership without copying:
 
 ```cpp
-ID_vector<uint16_t> vec1;                       // default bpv - unique IDs only 
-ID_vector<uint16_t, 2> vec2;                    // turn off unique feature, allow up to 3 instances per ID
+ID_vector<uint16_t> create_temp() {
+    ID_vector<uint16_t> temp(0, 1000);
+    temp.push_back(500);
+    return temp;  // Move constructor called
+}
 
-// Copy from existing containers
-mcu::vector<uint16_t> regular_vec = {1, 2, 3, 4};
-ID_vector<uint16_t> vec3(regular_vec);          // Copy from mcu::vector
-
-mcu::b_vector<uint16_t> bounded_vec = MAKE_UINT16_LIST(1, 2, 3, 4);
-ID_vector<uint16_t> vec4(bounded_vec);          // Copy from mcu::b_vector
-
-auto vec5 = vec3;                               // Copy constructor
-auto vec6 = std::move(vec4);                    // Move constructor
+auto result = create_temp();  // Efficient transfer
 ```
 
-## Range Configuration (Optional)
+---
 
-For optimal memory efficiency, you can configure the expected ID range:
+## Range Configuration
+
+### Setting Maximum ID
 
 ```cpp
-// Set maximum ID (recommended for memory efficiency)
-void set_maxID(index_type max_id);
+void set_maxID(index_type new_max_id);
+```
 
-// Set minimum ID (advanced: for high-value ID ranges)
-void set_minID(index_type min_id);
+Expands or preserves maximum ID boundary:
 
-// Set both min and max ID range
-void set_ID_range(index_type min_id, index_type max_id);
+```cpp
+ID_vector<uint16_t> vec(0, 100);
+vec.push_back(50);
+vec.push_back(80);
 
-// Get current range bounds
+vec.set_maxID(200);  // ✅ Expands range, preserves data
+
+// vec.set_maxID(70);  // ❌ Throws: would lose element 80
+```
+
+**Behavior:**
+- If `new_max_id >= maxID()` (largest element): Expands range, preserves all data
+- If `new_max_id < maxID()`: Throws `std::out_of_range` to prevent data loss
+- Reallocates memory if expanding
+
+### Setting Minimum ID
+
+```cpp
+void set_minID(index_type new_min_id);
+```
+
+Adjusts minimum ID boundary for high-value ranges:
+
+```cpp
+ID_vector<uint16_t> vec(0, 10000);
+vec.push_back(9000);
+vec.push_back(9500);
+
+vec.set_minID(8000);  // ✅ Optimizes memory, preserves data (9000-10000)
+
+// vec.set_minID(9200);  // ❌ Throws: would lose element 9000
+```
+
+**Memory Savings Example:**
+```cpp
+// Before: Range [0, 10000] → 10,001 bits → 1,251 bytes
+// After:  Range [8000, 10000] → 2,001 bits → 251 bytes
+// Savings: 80% memory reduction
+```
+
+### Setting ID Range
+
+```cpp
+void set_ID_range(index_type new_min_id, index_type new_max_id);
+```
+
+Sets both bounds simultaneously:
+
+```cpp
+ID_vector<uint32_t> vec;
+vec.set_ID_range(1000000, 2000000);  // Allocates for 1M-2M range
+
+vec.push_back(1500000);
+vec.set_ID_range(1000000, 3000000);  // ✅ Expands max, preserves data
+```
+
+**Exception Safety:**
+- Throws `std::out_of_range` if `new_min_id > new_max_id`
+- Throws if new range excludes existing elements
+- Provides strong exception guarantee (no changes if fails)
+
+### Getting Range Bounds
+
+```cpp
 index_type get_minID() const;
 index_type get_maxID() const;
 ```
 
-### Range Configuration Examples
+Retrieves current allocated range:
 
 ```cpp
-ID_vector<uint16_t> vec;
+ID_vector<uint16_t> vec(100, 500);
+assert(vec.get_minID() == 100);
+assert(vec.get_maxID() == 500);
 
-// Basic setup (recommended)
-vec.set_maxID(2000);                    // Prevents memory fragmentation
-
-// Advanced: optimize for high-value ranges
-vec.set_minID(45000);                   // For IDs starting from 45000
-vec.set_maxID(50000);                   // Memory only allocated for 45000-50000
-// Alternative: vec.set_ID_range(45000, 50000);
-
-auto min_id = vec.get_minID();          // Returns: 45000
-auto max_id = vec.get_maxID();          // Returns: 50000
+vec.push_back(600);  // Auto-expands max
+assert(vec.get_maxID() >= 600);
 ```
 
-> **💡 Tip**: Setting `max_id` before extensive use prevents memory fragmentation. Setting `min_id` for high-value ID ranges can provide significant memory savings.
+---
 
-## Primary Operations (All O(1))
+## Primary Operations
+
+All primary operations have O(1) time complexity.
+
+### Insertion
 
 ```cpp
-// Insert ID (increment count, respects max count limit)
 void push_back(index_type id);
+```
 
-// Check if ID exists (count > 0)
+Adds one instance of ID, auto-expanding range if needed:
+
+```cpp
+ID_vector<uint16_t, 2> vec(100, 200);  // BPV=2, max count = 3
+
+vec.push_back(150);  // Count: 1
+vec.push_back(150);  // Count: 2
+vec.push_back(150);  // Count: 3
+vec.push_back(150);  // Silent ignore (already at MAX_COUNT)
+
+vec.push_back(250);  // Auto-expands max_id to >= 250
+vec.push_back(50);   // Auto-expands min_id to <= 50
+```
+
+**Behavior:**
+- Increments count at position `(id - min_id)`
+- Silently ignores if count already at `MAX_COUNT = (2^BitsPerValue - 1)`
+- Automatically expands range if `id < min_id` or `id > max_id`
+- Throws `std::out_of_range` if `id > MAX_RF_ID` (platform limit)
+
+### Presence Check
+
+```cpp
 bool contains(index_type id) const;
+```
 
-// Get count of specific ID
+Checks if ID exists (count > 0):
+
+```cpp
+ID_vector<uint16_t> vec(0, 100);
+vec.push_back(50);
+
+assert(vec.contains(50) == true);
+assert(vec.contains(30) == false);
+assert(vec.contains(200) == false);  // Out of range
+```
+
+### Count Retrieval
+
+```cpp
 count_type count(index_type id) const;
+```
 
-// Remove one instance of ID (decrement count)
+Returns number of instances of specific ID:
+
+```cpp
+ID_vector<uint16_t, 2> vec(0, 100);
+vec.push_back(50);
+vec.push_back(50);
+vec.push_back(50);
+
+assert(vec.count(50) == 3);
+assert(vec.count(30) == 0);
+assert(vec.count(200) == 0);  // Out of range
+```
+
+**Return Type:** `count_type = uint32_t` (supports up to 4.3 billion instances)
+
+### Single Deletion
+
+```cpp
 bool erase(index_type id);
+```
 
-// Get total number of stored instances
-size_type size() const;
+Removes one instance of ID:
 
-// Check if container is empty
-bool empty() const;
+```cpp
+ID_vector<uint16_t, 2> vec(0, 100);
+vec.push_back(50);
+vec.push_back(50);
+vec.push_back(50);
 
-// Remove all elements
+assert(vec.erase(50) == true);   // Count: 3 → 2
+assert(vec.count(50) == 2);
+assert(vec.erase(50) == true);   // Count: 2 → 1
+assert(vec.erase(50) == true);   // Count: 1 → 0
+assert(vec.erase(50) == false);  // Already 0
+```
+
+**Returns:** `true` if ID existed and was decremented, `false` otherwise
+
+### Complete Deletion
+
+```cpp
+bool erase_all(index_type id);
+```
+
+Removes all instances of ID:
+
+```cpp
+ID_vector<uint16_t, 2> vec(0, 100);
+vec.push_back(50);
+vec.push_back(50);
+vec.push_back(50);
+
+assert(vec.erase_all(50) == true);  // Count: 3 → 0
+assert(vec.count(50) == 0);
+assert(vec.size() == 0);
+```
+
+### Size Queries
+
+```cpp
+size_type size() const;          // Total instances
+size_type unique_size() const;   // Unique IDs
+bool empty() const;              // Check if empty
+```
+
+```cpp
+ID_vector<uint16_t, 2> vec(0, 100);
+vec.push_back(10);
+vec.push_back(10);
+vec.push_back(20);
+
+assert(vec.size() == 3);         // 3 total instances
+assert(vec.unique_size() == 2);  // 2 unique IDs (10, 20)
+assert(vec.empty() == false);
+```
+
+**Note:** For `BitsPerValue = 1`, `size()` == `unique_size()` (set behavior)
+
+### Clear
+
+```cpp
 void clear();
 ```
 
+Removes all elements, preserves allocated range:
+
 ```cpp
-ID_vector<uint16_t, 2> vec(1000, 5000);  // Range: 1000-5000, max 3 per ID
+ID_vector<uint16_t> vec(0, 1000);
+vec.push_back(500);
+vec.push_back(600);
 
-vec.push_back(1500);                     // Add ID 1500 (count: 1)
-vec.push_back(1500);                     // Add ID 1500 (count: 2)  
-vec.push_back(1500);                     // Add ID 1500 (count: 3)
-vec.push_back(1500);                     // Silent ignore (already at max count)
-
-bool exists = vec.contains(1500);        // Returns: true
-auto count = vec.count(1500);            // Returns: 3
-auto total = vec.size();                 // Returns: 3 (total instances)
-
-bool removed = vec.erase(1500);          // Returns: true, count now 2
-bool removed_all = vec.erase_all(1500);  // Returns: true, count now 0
-
-vec.clear();                             // Remove all elements
-bool is_empty = vec.empty();             // Returns: true
+vec.clear();
+assert(vec.empty() == true);
+assert(vec.get_maxID() == 1000);  // Range unchanged
 ```
 
-## Access operations (all O(N) - return value , not reference)
+### Reserve
+
 ```cpp
-// get smallest ID stored in the vector
-index_type minID() const;       // ✅ safe: no exception - return 0 if empty
-index_type front() const;       // ⚠️ throws exception if empty
-
-// get largest ID stored in the vector
-index_type maxID() const;       // ✅ safe: no exception - return 0 if empty
-index_type back() const;        // ⚠️ :throws exception if empty
-
-// access nth element (0-based, sorted order with repetitions) 
-index_type operator[](size_type index) const;  // throws exception if index >= size()
+void reserve(index_type new_max_id);
 ```
 
-### Access Examples
+Pre-allocates memory for expected ID range:
+
+```cpp
+ID_vector<uint16_t> vec;
+vec.reserve(10000);  // Pre-allocate for IDs up to 10000
+
+// Subsequent insertions won't trigger reallocation
+for (int i = 0; i < 10000; ++i) {
+    vec.push_back(i);
+}
+```
+
+---
+
+## Element Access
+
+All access methods return values (not references) since elements are bit-packed.
+
+### Access by Index
+
+```cpp
+index_type operator[](size_type index) const;
+```
+
+Returns nth element in sorted order with repetitions:
 
 ```cpp
 ID_vector<uint16_t, 2> vec(0, 100);
@@ -498,37 +535,116 @@ vec.push_back(10);
 vec.push_back(10);
 vec.push_back(50);
 
-auto elem0 = vec[0];        // Returns: 10 (first instance)
-auto elem1 = vec[1];        // Returns: 10 (second instance)  
-auto elem2 = vec[2];        // Returns: 50
-auto last = vec.back();     // Returns: 50 (largest ID)
-auto first = vec.front();   // Returns: 10 (smallest ID)
-auto min_id = vec.minID();  // Returns: 10 (smallest ID)
-auto max_id = vec.maxID();  // Returns: 50 (largest ID)
+assert(vec[0] == 10);  // First instance of 10
+assert(vec[1] == 10);  // Second instance of 10
+assert(vec[2] == 50);  // First instance of 50
+
+// vec[3];  // ❌ Throws std::out_of_range
 ```
 
-## Iteration Support
+**Throws:** `std::out_of_range` if `index >= size()`
+
+### Front Element
 
 ```cpp
-// Iterator class for range-based loops
-class iterator;
+index_type front() const;
+T minID() const;  // Equivalent, returns smallest ID present
+```
 
-// Get begin/end iterators
+Returns smallest ID present:
+
+```cpp
+ID_vector<uint16_t> vec(0, 1000);
+vec.push_back(500);
+vec.push_back(200);
+vec.push_back(800);
+
+assert(vec.front() == 200);
+assert(vec.minID() == 200);
+
+// ID_vector<uint16_t> empty_vec;
+// empty_vec.front();  // ❌ Throws std::out_of_range
+```
+
+**Throws:** `std::out_of_range` if empty
+
+**Complexity:** O(N) where N = range size (scans until first non-zero count found)
+
+### Back Element
+
+```cpp
+index_type back() const;
+index_type maxID() const;  // Equivalent, returns largest ID present
+```
+
+Returns largest ID present:
+
+```cpp
+ID_vector<uint16_t> vec(0, 1000);
+vec.push_back(500);
+vec.push_back(200);
+vec.push_back(800);
+
+assert(vec.back() == 800);
+assert(vec.maxID() == 800);
+```
+
+**Throws:** `std::out_of_range` if empty
+
+**Complexity:** O(N) where N = range size
+
+### Pop Operations
+
+```cpp
+void pop_back();   // Remove one instance of largest ID
+void pop_front();  // Remove one instance of smallest ID
+```
+
+```cpp
+ID_vector<uint16_t, 2> vec(0, 100);
+vec.push_back(10);
+vec.push_back(10);
+vec.push_back(50);
+vec.push_back(50);
+
+vec.pop_back();   // Removes one instance of 50
+assert(vec.count(50) == 1);
+
+vec.pop_front();  // Removes one instance of 10
+assert(vec.count(10) == 1);
+```
+
+**Complexity:** O(N) where N = range size
+
+---
+
+## Iteration
+
+### Iterator Class
+
+```cpp
+class iterator {
+    using value_type = index_type;
+    using iterator_category = std::forward_iterator_tag;
+    // ...
+};
+
 iterator begin() const;
 iterator end() const;
 ```
 
-### Iteration Examples
+Iterates over all ID instances in ascending order with repetitions:
 
 ```cpp
 ID_vector<uint16_t, 2> vec(0, 100);
 vec.push_back(10);
 vec.push_back(10);
 vec.push_back(50);
+vec.push_back(80);
 
-// Range-based loop (automatically sorted, includes repetitions)
+// Range-based for loop
 for (auto id : vec) {
-    std::cout << id << " ";  // Output: 10 10 50
+    std::cout << id << " ";  // Output: 10 10 50 80
 }
 
 // Iterator-based loop
@@ -537,79 +653,649 @@ for (auto it = vec.begin(); it != vec.end(); ++it) {
 }
 ```
 
-## Comparison Operators
+### Iterator Properties
+
+- **Category:** Forward iterator
+- **Sorting:** Always yields IDs in ascending order
+- **Repetitions:** Yields each ID multiple times according to its count
+- **Complexity:** O(1) per increment (amortized)
+- **Const-only:** Iterators are const (no modification through iterators)
+
+### Unique ID Iteration Pattern
 
 ```cpp
-// Equality comparison
-bool operator==(const ID_vector& other) const;
-bool operator!=(const ID_vector& other) const;
+ID_vector<uint16_t, 2> vec(0, 100);
+vec.push_back(10);
+vec.push_back(10);
+vec.push_back(50);
 
-// Subset relationship
-bool is_subset_of(const ID_vector& other) const;
+// Iterate over unique IDs only
+for (index_type id = vec.get_minID(); id <= vec.get_maxID(); ++id) {
+    if (vec.count(id) > 0) {
+        std::cout << "ID " << id << " appears " << vec.count(id) << " times\n";
+    }
+}
 ```
 
-### Comparison Examples
-
-```cpp
-ID_vector<uint16_t> vec1(0, 100);       //  unique IDs set (use default BPV=1)
-ID_vector<uint16_t> vec2(0, 100);
-
-vec1.push_back(10);
-vec1.push_back(20);
-vec2.push_back(10);
-vec2.push_back(20);
-
-bool equal = (vec1 == vec2);        // Returns: true
-bool not_equal = (vec1 != vec2);    // Returns: false
-
-vec2.push_back(30);
-bool is_subset = vec1.is_subset_of(vec2);  // Returns: true
-```
+---
 
 ## Set Operations
 
+### Union (|, |=)
+
 ```cpp
-// Union: Combine two vectors (returns new vector)
 ID_vector operator|(const ID_vector& other) const;
-
-// Intersection: Common elements (returns new vector)  
-ID_vector operator&(const ID_vector& other) const;
-
-// Difference: Elements in this but not other (returns new vector)
-ID_vector operator-(const ID_vector& other) const;
-
-// Union assignment: Add elements from other vector
 ID_vector& operator|=(const ID_vector& other);
+```
 
-// Intersection assignment: Keep only common elements
+Combines two vectors, taking maximum count per ID:
+
+```cpp
+ID_vector<uint16_t, 2> vec1(0, 100);
+vec1.push_back(10);
+vec1.push_back(10);  // 10: count=2
+vec1.push_back(30);  // 30: count=1
+
+ID_vector<uint16_t, 2> vec2(0, 100);
+vec2.push_back(10);  // 10: count=1
+vec2.push_back(20);  // 20: count=1
+
+auto result = vec1 | vec2;
+// Result: 10 appears 2 times (max of 2 and 1)
+//         20 appears 1 time
+//         30 appears 1 time
+
+vec1 |= vec2;  // In-place union
+```
+
+### Intersection (&, &=)
+
+```cpp
+ID_vector operator&(const ID_vector& other) const;
 ID_vector& operator&=(const ID_vector& other);
+```
 
-// Difference assignment: Remove elements in other vector
+Keeps only common IDs, taking minimum count:
+
+```cpp
+ID_vector<uint16_t, 2> vec1(0, 100);
+vec1.push_back(10);
+vec1.push_back(10);  // 10: count=2
+vec1.push_back(30);  // 30: count=1
+
+ID_vector<uint16_t, 2> vec2(0, 100);
+vec2.push_back(10);  // 10: count=1
+vec2.push_back(20);  // 20: count=1
+
+auto result = vec1 & vec2;
+// Result: Only 10 appears 1 time (min of 2 and 1)
+```
+
+### Difference (-)
+
+```cpp
+ID_vector operator-(const ID_vector& other) const;
 ID_vector& operator-=(const ID_vector& other);
 ```
 
-### Set Operations Examples
+Removes all instances of IDs present in other vector (implemented for vector arithmetic, see next section):
 
 ```cpp
-ID_vector<uint16_t> vec1(0, 100);       
-ID_vector<uint16_t> vec2(0, 100);
-
+ID_vector<uint16_t, 2> vec1(0, 100);
 vec1.push_back(10);
-vec1.push_back(20);
+vec1.push_back(10);
 vec1.push_back(30);
 
+ID_vector<uint16_t, 2> vec2(0, 100);
+vec2.push_back(10);
+
+auto result = vec1 - vec2;
+// Result: Only 30 (all instances of 10 removed)
+
+vec1 -= vec2;  // In-place difference
+```
+
+---
+
+## Range Operations
+
+### Fill Range
+
+```cpp
+void fill();
+```
+
+Fills vector with all IDs in current range at maximum count:
+
+```cpp
+ID_vector<uint8_t, 2> vec(10, 15);  // Range [10, 15], BPV=2 (max count=3)
+vec.fill();
+
+// Result: IDs 10,10,10, 11,11,11, 12,12,12, 13,13,13, 14,14,14, 15,15,15
+assert(vec.size() == 6 * 3);  // 6 IDs × 3 instances
+assert(vec.count(12) == 3);
+```
+
+### Erase Range
+
+```cpp
+void erase_range(index_type start, index_type end);
+```
+
+Removes all instances of IDs in range [start, end] without changing allocated range:
+
+```cpp
+ID_vector<uint8_t> vec(1, 20);
+vec.insert_range(5, 15);  // Add IDs 5-15
+
+vec.erase_range(8, 12);   // Remove IDs 8-12
+// Now contains: 5,6,7,13,14,15
+
+assert(vec.get_minID() == 1);   // Range unchanged
+assert(vec.get_maxID() == 20);  // Range unchanged
+```
+
+### Insert Range
+
+```cpp
+void insert_range(index_type start, index_type end);
+```
+
+Adds all IDs in range [start, end] with auto-expansion:
+
+```cpp
+ID_vector<uint8_t> vec(10, 15);
+vec.insert_range(5, 8);    // Expands min_id to accommodate 5-8
+vec.insert_range(18, 20);  // Expands max_id to accommodate 18-20
+
+// Now contains: 5,6,7,8,10,11,12,13,14,15,18,19,20
+assert(vec.get_minID() <= 5);
+assert(vec.get_maxID() >= 20);
+```
+
+---
+
+## Vector Arithmetic
+
+### Addition (+, +=)
+
+```cpp
+template<uint8_t OtherBitsPerValue>
+ID_vector operator+(const ID_vector<T, OtherBitsPerValue>& other) const;
+
+template<uint8_t OtherBitsPerValue>
+ID_vector& operator+=(const ID_vector<T, OtherBitsPerValue>& other);
+```
+
+Adds **one instance** of each unique ID from other vector:
+
+```cpp
+ID_vector<uint8_t, 2> vec1(1, 5);
+vec1.push_back(2);
+vec1.push_back(2);  // 2: count=2
+vec1.push_back(4);  // 4: count=1
+
+ID_vector<uint8_t, 2> vec2(3, 7);
+vec2.push_back(2);  // 2: count=1
+vec2.push_back(6);  // 6: count=1
+
+auto result = vec1 + vec2;
+// Result: 2 appears 3 times (2+1)
+//         4 appears 1 time
+//         6 appears 1 time
+
+vec1 += vec2;  // In-place addition
+```
+
+**Compile-time Safety:**
+```cpp
+ID_vector<uint8_t> vec_1bit;
+ID_vector<uint8_t, 2> vec_2bit;
+
+// auto result = vec_1bit + vec_2bit;  // ❌ Compilation error
+// Static assertion: "Cannot perform arithmetic operations on ID_vectors with different BitsPerValue"
+```
+
+### Subtraction (-, -=)
+
+```cpp
+template<uint8_t OtherBitsPerValue>
+ID_vector operator-(const ID_vector<T, OtherBitsPerValue>& other) const;
+
+template<uint8_t OtherBitsPerValue>
+ID_vector& operator-=(const ID_vector<T, OtherBitsPerValue>& other);
+```
+
+Removes **all instances** of IDs present in other vector:
+
+```cpp
+ID_vector<uint8_t, 2> vec1(1, 8);
+vec1.push_back(2);
+vec1.push_back(2);
+vec1.push_back(3);
+vec1.push_back(5);
+
+ID_vector<uint8_t, 2> vec2(2, 6);
+vec2.push_back(2);
+vec2.push_back(5);
+
+auto result = vec1 - vec2;
+// Result: Only 3 remains (all instances of 2 and 5 removed)
+
+vec1 -= vec2;  // In-place subtraction
+```
+
+---
+
+## Comparison Operations
+
+### Equality
+
+```cpp
+bool operator==(const ID_vector& other) const;
+bool operator!=(const ID_vector& other) const;
+```
+
+Compares both ranges and element counts:
+
+```cpp
+ID_vector<uint16_t> vec1(0, 100);
+vec1.push_back(10);
+vec1.push_back(20);
+
+ID_vector<uint16_t> vec2(0, 100);
+vec2.push_back(10);
+vec2.push_back(20);
+
+assert(vec1 == vec2);
+assert(!(vec1 != vec2));
+
+vec2.push_back(30);
+assert(vec1 != vec2);
+```
+
+**Complexity:** O(range_size) - compares count at each position
+
+### Subset Check
+
+```cpp
+bool is_subset_of(const ID_vector& other) const;
+```
+
+Checks if this vector is a subset of another (this ⊆ other):
+
+```cpp
+ID_vector<uint16_t> vec1(0, 100);
+vec1.push_back(10);
+vec1.push_back(20);
+
+ID_vector<uint16_t> vec2(0, 100);
+vec2.push_back(10);
 vec2.push_back(20);
 vec2.push_back(30);
-vec2.push_back(40);
 
-auto union_result = vec1 | vec2;        // Contains: 10, 20, 30, 40
-auto intersection = vec1 & vec2;        // Contains: 20, 30
-auto difference = vec1 - vec2;          // Contains: 10
-
-vec1 |= vec2;                           // vec1 now contains: 10, 20, 30, 40
-vec1 &= vec2;                           // vec1 now contains: 20, 30, 40
-vec1 -= vec2;                           // vec1 now contains: (empty)
+assert(vec1.is_subset_of(vec2) == true);
+assert(vec2.is_subset_of(vec1) == false);
 ```
+
+**Requirements:**
+- Every ID in `this` must exist in `other`
+- Count of each ID in `this` ≤ count in `other`
+- Range of `this` must be contained in range of `other`
+
+---
+
+## Memory Management
+
+### Memory Usage Query
+
+```cpp
+size_t memory_usage() const;
+```
+
+Returns total memory used including overhead:
+
+```cpp
+ID_vector<uint16_t> vec(0, 1000);  // Range: 1001 IDs, BPV=1
+// Memory = sizeof(ID_vector) + (1001 bits / 8) = ~36 + 126 = ~162 bytes
+
+size_t mem = vec.memory_usage();
+```
+
+**Calculation:**
+```
+Memory = sizeof(ID_vector) + ceiling((max_id - min_id + 1) × BitsPerValue / 8)
+```
+
+### Capacity Query
+
+```cpp
+size_t capacity() const;
+```
+
+Returns number of unique IDs that can be stored:
+
+```cpp
+ID_vector<uint16_t> vec(100, 200);
+assert(vec.capacity() == 101);  // 200 - 100 + 1
+```
+
+### Memory Optimization
+
+```cpp
+void fit();
+```
+
+Shrinks allocated range to actual data range:
+
+```cpp
+ID_vector<uint16_t> vec(0, 10000);  // Large allocation
+vec.push_back(5000);
+vec.push_back(5001);
+vec.push_back(5002);
+
+vec.fit();  // Shrinks to range [5000, 5002]
+// Memory reduced from ~1.25KB to ~1 byte (+ overhead)
+```
+
+### Runtime Bit Width Configuration
+
+```cpp
+uint8_t get_bits_per_value() const;
+bool set_bits_per_value(uint8_t new_bpv);
+```
+
+Dynamically changes bits per value (advanced use):
+
+```cpp
+ID_vector<uint16_t> vec(0, 100);  // BPV=1 (compile-time)
+vec.push_back(50);
+
+bool success = vec.set_bits_per_value(2);  // Change to BPV=2
+// ✅ Success: reallocates and preserves data
+
+vec.push_back(50);
+vec.push_back(50);  // Now can store up to 3 instances
+
+// vec.set_bits_per_value(1);  // ❌ Fails: would lose count data (50 appears twice)
+```
+
+**Limitations:**
+- Must be in range [1, 32]
+- Fails if reducing would cause data loss (existing counts exceed new maximum)
+- Triggers reallocation and data copy
+
+---
+
+## Performance Analysis
+
+### Benchmark Results
+
+Comprehensive benchmarks comparing `ID_vector` against `std::unordered_set` and `std::vector`:
+
+![Performance Comparison](images/performance_comparison.png)
+![Summary Statistics](images/summary_statistics.png)
+![Detailed Analysis](images/detailed_analysis.png)
+
+**Overall Results:**
+
+| Metric | vs std::unordered_set | vs std::vector |
+|--------|----------------------|----------------|
+| **Average Speedup** | **12.3× faster** | **36.4× faster** |
+| **Memory Usage** | **19.4%** (80.6% savings) | **52.6%** (47.4% savings) |
+| **Best Speedup** | **35.1× faster** | **61.2× faster** |
+| **Best Memory** | **0.5% usage** | **1.9% usage** |
+
+### Detailed Scenarios
+
+#### Small Sparse (1000 elements, max_id=10000)
+
+| Operation | ID_vector | unordered_set_s | std::vector | Speedup US | Speedup Vec |
+|-----------|-----------|-----------------|-------------|------------|-------------|
+| Insertion | 1,553 ns | 54,433 ns | 68,770 ns | **35.1×** | **44.3×** |
+| Lookup | 751 ns | 8,596 ns | 45,927 ns | **11.4×** | **61.2×** |
+| Memory | 1,283 B | 33,264 B | 8,216 B | **3.9%** | **15.6%** |
+
+#### Dense Dataset (1000 consecutive elements)
+
+| Operation | ID_vector | unordered_set_s | std::vector | Speedup US | Speedup Vec |
+|-----------|-----------|-----------------|-------------|------------|-------------|
+| Insertion | 1,193 ns | 25,709 ns | 8,476 ns | **21.5×** | **7.1×** |
+| Lookup | 731 ns | 3,286 ns | 30,618 ns | **4.5×** | **41.9×** |
+| Memory | 158 B | 34,720 B | 8,216 B | **0.5%** | **1.9%** |
+
+**Key Insight:** Best memory efficiency scenario with 99.5% savings vs unordered_set.
+
+### Memory Scaling
+
+| Max ID | Elements | ID_vector | unordered_set | std::vector | Efficiency |
+|--------|----------|-----------|---------------|-------------|------------|
+| 1,000 | 100 | 158 B | 3,344 B | 1,048 B | **21.2×** / 6.6× |
+| 10,000 | 1,000 | 1,283 B | 32,776 B | 8,216 B | **25.5×** / 6.4× |
+| 100,000 | 10,000 | 12,533 B | 329,944 B | 131,096 B | **26.3×** / 10.5× |
+
+---
+
+## Usage Patterns
+
+### Pattern 1: Sensor Network ID Tracking
+
+```cpp
+class SensorManager {
+    ID_vector<uint16_t> active_sensors;
+    ID_vector<uint16_t, 2> error_counts;
+    
+public:
+    SensorManager() : active_sensors(1000, 2000), error_counts(1000, 2000) {}
+    
+    void process_reading(uint16_t sensor_id, float value) {
+        active_sensors.push_back(sensor_id);  // Track active
+        
+        if (value > ERROR_THRESHOLD) {
+            error_counts.push_back(sensor_id);  // Count errors
+        }
+    }
+    
+    bool is_active(uint16_t id) const {
+        return active_sensors.contains(id);  // O(1) lookup
+    }
+    
+    uint8_t get_error_count(uint16_t id) const {
+        return error_counts.count(id);
+    }
+};
+```
+
+### Pattern 2: Database Record Status Tracking
+
+```cpp
+class DatabaseCache {
+    ID_vector<uint32_t> valid_records;
+    ID_vector<uint32_t> pending_records;
+    
+public:
+    DatabaseCache() : valid_records(1000000, 2000000), 
+                     pending_records(1000000, 2000000) {}
+    
+    void mark_valid(uint32_t record_id) {
+        pending_records.erase(record_id);
+        valid_records.push_back(record_id);
+    }
+    
+    bool is_valid(uint32_t record_id) const {
+        return valid_records.contains(record_id);
+    }
+    
+    void invalidate_range(uint32_t start, uint32_t end) {
+        valid_records.erase_range(start, end);
+    }
+};
+```
+
+### Pattern 3: Data Processing Pipeline
+
+```cpp
+// Step 1: Initialize with expected range
+ID_vector<uint16_t> active_ids(1000, 2000);
+active_ids.fill();  // Start with all IDs
+
+// Step 2: Remove failed ranges
+active_ids.erase_range(1200, 1250);
+active_ids.erase_range(1800, 1820);
+
+// Step 3: Add newly discovered IDs
+active_ids.insert_range(500, 600);    // Expands range
+active_ids.insert_range(2100, 2150);
+
+// Step 4: Combine with backup set
+ID_vector<uint16_t> backup_ids(2200, 2300);
+backup_ids.fill();
+active_ids += backup_ids;  // Add backup IDs
+```
+
+### Pattern 4: Set Operations Workflow
+
+```cpp
+ID_vector<uint16_t> set_a(0, 1000);
+ID_vector<uint16_t> set_b(0, 1000);
+ID_vector<uint16_t> set_c(0, 1000);
+
+// Populate sets
+set_a.insert_range(100, 200);
+set_b.insert_range(150, 250);
+set_c.insert_range(200, 300);
+
+// Complex set algebra
+auto union_ab = set_a | set_b;              // Union
+auto intersection_ab = set_a & set_b;       // Intersection
+auto difference = set_a - set_b;            // Difference
+
+// Three-way operations
+auto result = (set_a | set_b) & set_c;      // (A ∪ B) ∩ C
+```
+
+### Pattern 5: Frequency Counting
+
+```cpp
+ID_vector<uint8_t, 4> frequency_counter(0, 255);  // Max count = 15
+
+// Process data stream
+for (uint8_t byte : data_stream) {
+    frequency_counter.push_back(byte);
+}
+
+// Analyze frequencies
+for (uint16_t i = 0; i <= 255; ++i) {
+    uint8_t count = frequency_counter.count(i);
+    if (count > 0) {
+        std::cout << "Byte " << i << " appeared " 
+                  << (int)count << " times\n";
+    }
+}
+```
+
+---
+
+## API Quick Reference
+
+### Construction & Assignment
+```cpp
+ID_vector()                                    // Default constructor
+ID_vector(index_type max_id)                  // With max ID
+ID_vector(index_type min, index_type max)     // With range
+ID_vector(const ID_vector& other)             // Copy constructor
+ID_vector(ID_vector&& other)                  // Move constructor
+ID_vector(const vector<Y>& ids)               // From mcu::vector
+ID_vector(const b_vector<Y>& ids)             // From mcu::b_vector
+operator=(const ID_vector&)                   // Copy assignment
+operator=(ID_vector&&)                        // Move assignment
+```
+
+### Range Configuration
+```cpp
+void set_maxID(index_type new_max)            // Set/expand max ID
+void set_minID(index_type new_min)            // Set/adjust min ID
+void set_ID_range(index_type min, max)        // Set both bounds
+index_type get_minID() const                  // Get min bound
+index_type get_maxID() const                  // Get max bound
+void reserve(index_type new_max)              // Pre-allocate
+```
+
+### Primary Operations (O(1))
+```cpp
+void push_back(index_type id)                 // Add one instance
+bool contains(index_type id) const            // Check presence
+count_type count(index_type id) const         // Get count
+bool erase(index_type id)                     // Remove one instance
+bool erase_all(index_type id)                 // Remove all instances
+size_type size() const                        // Total instances
+size_type unique_size() const                 // Unique IDs
+bool empty() const                            // Check if empty
+void clear()                                  // Remove all
+```
+
+### Element Access (O(N))
+```cpp
+index_type operator[](size_type idx) const    // Nth element (throws)
+index_type front() const                      // Smallest ID (throws)
+index_type back() const                       // Largest ID (throws)
+T minID() const                               // Smallest present (throws)
+index_type maxID() const                      // Largest present (throws)
+void pop_front()                              // Remove one from front
+void pop_back()                               // Remove one from back
+```
+
+### Iteration
+```cpp
+iterator begin() const                        // Begin iterator
+iterator end() const                          // End iterator
+// Range-based for loop supported
+```
+
+### Set Operations
+```cpp
+ID_vector operator|(const ID_vector&) const   // Union
+ID_vector operator&(const ID_vector&) const   // Intersection
+ID_vector& operator|=(const ID_vector&)       // Union assignment
+ID_vector& operator&=(const ID_vector&)       // Intersection assignment
+```
+
+### Range Operations
+```cpp
+void fill()                                   // Fill entire range
+void erase_range(index_type start, end)       // Remove range
+void insert_range(index_type start, end)      // Add range
+```
+
+### Vector Arithmetic
+```cpp
+template<uint8_t OBP>
+ID_vector operator+(const ID_vector<T,OBP>&)  // Add one of each
+template<uint8_t OBP>
+ID_vector operator-(const ID_vector<T,OBP>&)  // Remove all matching
+template<uint8_t OBP>
+ID_vector& operator+=(const ID_vector<T,OBP>&) // Add in-place
+template<uint8_t OBP>
+ID_vector& operator-=(const ID_vector<T,OBP>&) // Remove in-place
+```
+
+### Comparison
+```cpp
+bool operator==(const ID_vector&) const       // Equality
+bool operator!=(const ID_vector&) const       // Inequality
+bool is_subset_of(const ID_vector&) const     // Subset check
+```
+
+### Memory Management
+```cpp
+size_t memory_usage() const                   // Total bytes used
+size_t capacity() const                       // Unique IDs storable
+void fit()                                    // Shrink to actual range
+uint8_t get_bits_per_value() const            // Get runtime BPV
+bool set_bits_per_value(uint8_t new_bpv)      // Change BPV dynamically
+```
+
+---
 
 ## Exception Safety
 
@@ -617,261 +1303,100 @@ vec1 -= vec2;                           // vec1 now contains: (empty)
 
 | Method | Exception | Condition |
 |--------|-----------|-----------|
-| `push_back(id)` | `std::out_of_range` | `id < min_id` or `id > max_id` |
-| `operator[](index)` | `std::out_of_range` | `index >= size()` |
-| `back()` | `std::out_of_range` | Container is empty |
-| Constructor | `std::out_of_range` | `min_id > max_id` |
-| `set_ID_range()` | `std::out_of_range` | `min_id > max_id` |
+| `push_back(id)` | `std::out_of_range` | `id > MAX_RF_ID` |
+| `set_maxID(max)` | `std::out_of_range` | `max < min_id` or `max < maxID()` |
+| `set_minID(min)` | `std::out_of_range` | `min > max_id` or `min > minID()` |
+| `set_ID_range(min, max)` | `std::out_of_range` | `min > max` or range excludes elements |
+| `operator[](idx)` | `std::out_of_range` | `idx >= size()` |
+| `front()` | `std::out_of_range` | Container empty |
+| `back()` | `std::out_of_range` | Container empty |
+| `minID()` | `std::out_of_range` | Container empty |
+| `maxID()` | `std::out_of_range` | Container empty |
 
-### Exception Handling Example
+### Strong Exception Guarantee
+
+Range modification methods provide strong exception guarantee - if an exception is thrown, the container remains unchanged:
 
 ```cpp
-ID_vector<uint16_t> vec(1000, 2000);
-
 try {
-    vec.push_back(500);      // Throws: below min_id
-    vec.push_back(3000);     // Throws: above max_id
-    auto elem = vec[100];    // Throws: index out of range (if size < 101)
-    auto last = vec.back();  // Throws: if empty
+    vec.set_ID_range(100, 50);  // Throws: min > max
 } catch (const std::out_of_range& e) {
-    std::cerr << "Range error: " << e.what() << std::endl;
+    // vec is unchanged
 }
 ```
 
-## Memory Management
+---
 
-```cpp
-// Estimate memory usage (implementation-specific)
-// Returns approximate bytes used by internal storage
-size_t estimated_memory_bytes() const {
-    return bits_to_bytes((max_id_ - min_id_ + 1) * BitsPerValue) + 
-           sizeof(*this);
-}
-```
+## Best Practices
 
-## Part 4: Enhanced Features (New)
+### ✅ DO
 
-The ID_vector has been significantly enhanced with powerful new features that provide advanced bulk operations, range manipulation, and vector arithmetic capabilities.
-
-### Range Operations
-
-#### Fill Operation
-Fills the vector with all possible values in the current range. For `BitsPerValue > 1`, each ID is filled with the maximum possible count.
-
-```cpp
-ID_vector<uint8_t> vec(10, 15);  // Range 10-15
-vec.fill();                         // Contains: 10, 11, 12, 13, 14, 15
-
-ID_vector<uint8_t, 2> vec2(5, 7);   // BPV=2 (max count = 3)
-vec2.fill();                        // Contains: 5,5,5, 6,6,6, 7,7,7
-```
-
-**Key Properties:**
-- Fills with all IDs in current `[min_id, max_id]` range
-- For `BitsPerValue > 1`: fills with `MAX_COUNT = (2^BitsPerValue - 1)` instances
-- Clears existing data before filling
-- Safe for any valid range
-
-#### Range Erasure
-Removes all instances of IDs within a specified range **without changing the vector's allocated range**.
-
-```cpp
-ID_vector<uint8_t> vec(1, 20);   // Allocated range: 1-20
-vec.insert_range(5, 15);            // Contains: 5,6,7,8,9,10,11,12,13,14,15
-vec.erase_range(8, 12);             // Contains: 5,6,7,13,14,15
-
-// Vector still has range 1-20, but only contains: 5,6,7,13,14,15
-assert(vec.get_minID() == 1);       // Range unchanged
-assert(vec.get_maxID() == 20);      // Range unchanged
-```
-
-**Key Properties:**
-- **Range Preservation**: Never changes `min_id` or `max_id` of the vector
-- **Safe Overlap**: Only affects IDs within both the specified range AND current vector range
-- **Invalid Range Handling**: Silently ignores invalid ranges (start > end)
-- **Performance**: O(range_size) operation
-
-#### Range Insertion  
-Adds all IDs within a specified range **with automatic range expansion**.
-
-```cpp
-ID_vector<uint8_t> vec(10, 15);  // Initial range: 10-15
-vec.insert_range(5, 8);             // Expands range to accommodate 5-8
-vec.insert_range(18, 20);           // Further expands range to include 18-20
-
-// Vector now contains: 5,6,7,8,10,11,12,13,14,15,18,19,20
-assert(vec.get_minID() <= 5);       // Range expanded downward
-assert(vec.get_maxID() >= 20);      // Range expanded upward
-```
-
-**Key Properties:**
-- **Automatic Expansion**: Extends `min_id`/`max_id` as needed to accommodate new range
-- **One Instance Per ID**: Adds exactly one instance of each ID in the range
-- **Invalid Range Handling**: Silently ignores invalid ranges (start > end)
-- **Memory Reallocation**: May trigger memory reallocation for range expansion
-
-### Vector Arithmetic Operations
-
-#### Vector Addition (`+`, `+=`)
-Adds **one instance** of each unique ID from the second vector to the first vector.
-
-```cpp
-ID_vector<uint8_t, 2> vec1(1, 5);
-vec1.push_back(2); vec1.push_back(2); vec1.push_back(4);  // vec1: [2,2,4]
-
-ID_vector<uint8_t, 2> vec2(3, 7);  
-vec2.push_back(2); vec2.push_back(6);                     // vec2: [2,6]
-
-// Addition creates new vector
-auto result = vec1 + vec2;  // result: [2,2,2,4,6]  (one more instance of 2, plus 6)
-
-// In-place addition
-vec1 += vec2;               // vec1 now: [2,2,2,4,6]
-```
-
-**Key Properties:**
-- **Range Expansion**: Result encompasses the union of both vector ranges
-- **Instance Addition**: Adds exactly **one** instance of each unique ID from second vector
-- **Type Safety**: Static assertion ensures both vectors have same `BitsPerValue`
-- **Empty Vector Handling**: Gracefully handles empty vectors
-
-#### Vector Subtraction (`-`, `-=`)
-Removes **all instances** of IDs that exist in the second vector.
-
-```cpp
-ID_vector<uint8_t, 2> vec1(1, 8);
-vec1.push_back(2); vec1.push_back(2); vec1.push_back(3); 
-vec1.push_back(5); vec1.push_back(7);                     // vec1: [2,2,3,5,7]
-
-ID_vector<uint8_t, 2> vec2(2, 6);
-vec2.push_back(2); vec2.push_back(5);                     // vec2: [2,5]
-
-// Subtraction creates new vector  
-auto result = vec1 - vec2;  // result: [3,7]  (all instances of 2 and 5 removed)
-
-// In-place subtraction
-vec1 -= vec2;               // vec1 now: [3,7]
-```
-
-**Key Properties:**
-- **Complete Removal**: Removes **all instances** of matching IDs (not just one)
-- **Range Preservation**: Result maintains the original vector's range
-- **Non-matching IDs**: Preserves all instances of IDs not present in second vector
-- **Type Safety**: Static assertion ensures both vectors have same `BitsPerValue`
-
-### Compile-Time Safety
-
-Enhanced operations include compile-time type checking to prevent mixing incompatible vectors:
-
-```cpp
-ID_vector<uint8_t> vec_1bit;
-ID_vector<uint8_t, 2> vec_2bit;
-
-// ✅ This compiles fine
-auto result1 = vec_1bit + vec_1bit;   // Same BitsPerValue
-
-// ❌ This causes COMPILATION ERROR
-// auto result2 = vec_1bit + vec_2bit;   // Different BitsPerValue
-// Static assertion failure: "Cannot perform arithmetic operations on ID_vectors with different BitsPerValue"
-```
-
-### Usage Examples
-
-#### Pattern: Data Processing Pipeline
-```cpp
-// Step 1: Initialize with expected range
-ID_vector<uint16_t> active_sensors(1000, 2000);
-active_sensors.fill();                           // Start with all sensors
-
-// Step 2: Remove failed sensor ranges  
-active_sensors.erase_range(1200, 1250);        // Remove known failure range
-active_sensors.erase_range(1800, 1820);        // Remove another failure range
-
-// Step 3: Add newly discovered sensors
-active_sensors.insert_range(500, 600);         // Expands range to include 500-600
-active_sensors.insert_range(2100, 2150);       // Expands range to include 2100-2150
-
-// Step 4: Combine with another sensor network
-ID_vector<uint16_t> backup_sensors(2200, 2300);
-backup_sensors.fill();
-active_sensors += backup_sensors;               // Add backup sensors
-```
-
-#### Pattern: Set Operations with Counting
-```cpp
-ID_vector<uint8_t, 3> frequency_count(1, 100);  // Track frequency (up to 7 instances)
-
-// Multiple data sources
-ID_vector<uint8_t, 3> source1(10, 50);
-source1.insert_range(15, 25);
-source1 += source1;  // Double the frequency
-
-ID_vector<uint8_t, 3> source2(20, 60); 
-source2.insert_range(30, 40);
-
-// Combine frequencies
-frequency_count = source1 + source2;  // Each unique ID appears once more
-```
-
-#### Pattern: Memory-Efficient Filtering
-```cpp
-// Large dataset with sparse active elements
-ID_vector<uint32_t> large_dataset(1, 1000000);
-large_dataset.insert_range(50000, 51000);     // 1K active elements
-large_dataset.insert_range(100000, 101000);   // Another 1K active
-
-// Filter out problematic ranges
-large_dataset.erase_range(50200, 50300);      // Remove problematic range
-large_dataset.erase_range(100500, 100600);    // Range preserved, elements removed
-
-// Memory usage: ~125KB instead of ~4MB for traditional vector
-```
-
-### Performance Characteristics
-
-| Operation | Time Complexity | Space Complexity | Notes |
-|-----------|----------------|------------------|-------|
-| `fill()` | O(range × BitsPerValue) | O(1) | Fills all positions |
-| `erase_range(start, end)` | O(end - start) | O(1) | Range preservation |
-| `insert_range(start, end)` | O(end - start + realloc) | O(new_range) | May expand |
-| `vec1 + vec2` | O(range1 + range2) | O(union_range) | Creates new vector |
-| `vec1 += vec2` | O(range2) | O(expanded_range) | In-place, may expand |
-| `vec1 - vec2` | O(range1) | O(range1) | Preserves original range |
-| `vec1 -= vec2` | O(range2) | O(1) | In-place subtraction |
-
-### Best Practices Summary
-
-1. **Configure for Efficiency**:
+1. **Set Range Early:**
    ```cpp
    ID_vector<uint16_t> vec;
-   vec.set_maxID(expected_max);                 // Prevents fragmentation
-   vec.set_minID(expected_min);                 // Optimizes high-value ranges
+   vec.set_ID_range(1000, 2000);  // Before insertions
    ```
 
-2. **Choose Appropriate Template Parameters**:
+2. **Choose Appropriate Type:**
    ```cpp
-   ID_vector<uint8_t> small_range;          // For unique IDs 0-255
-   ID_vector<uint16_t> medium_range;        // For unique IDs 0-65K
-   ID_vector<uint32_t> large_range;         // For unique IDs 0-4B+
+   ID_vector<uint8_t> small;      // For IDs 0-255
+   ID_vector<uint16_t> medium;    // For IDs 0-65K
    ```
 
-3. **Handle Exceptions**:
+3. **Use min_id for High Values:**
    ```cpp
-   try {
-       vec.push_back(id);
-   } catch (const std::out_of_range& e) {
-       // Handle range violations
+   ID_vector<uint32_t> db_ids(1000000, 2000000);  // Memory efficient
+   ```
+
+4. **Check Bounds:**
+   ```cpp
+   if (vec.contains(id)) {
+       vec.erase(id);
    }
    ```
 
-4. **Choose Appropriate BitsPerValue**:
+### ❌ DON'T
+
+1. **Don't Rely on Silent Overflow:**
    ```cpp
-   ID_vector<uint16_t> unique_only;             // Set behavior
-   ID_vector<uint16_t, 4> frequency;           // Up to 15 instances per ID
+   // BAD: No indication when max count reached
+   for (int i = 0; i < 10; ++i) {
+       vec.push_back(50);  // Silently stops at MAX_COUNT
+   }
+   
+   // GOOD: Check count explicitly
+   if (vec.count(50) < MAX_COUNT) {
+       vec.push_back(50);
+   }
    ```
 
-5. **Leverage MCU Ecosystem**:
+2. **Don't Use for Sparse Data:**
    ```cpp
-   mcu::vector<uint16_t> input_data = get_sensor_ids();
-   ID_vector<uint16_t> efficient_storage(input_data);  // Convert for efficiency
+   // BAD: Wastes memory
+   ID_vector<uint32_t> sparse(0, 1000000);  // 125KB allocation
+   sparse.push_back(10);                    // Only 1 element!
+   
+   // GOOD: Use min_id
+   ID_vector<uint32_t> optimized(10, 100);  // 12 bytes
    ```
+
+3. **Don't Modify During Iteration:**
+   ```cpp
+   // BAD: Undefined behavior
+   for (auto id : vec) {
+       vec.push_back(id + 1);  // Modifies during iteration!
+   }
+   
+   // GOOD: Collect first, then modify
+   std::vector<uint16_t> ids_to_add;
+   for (auto id : vec) {
+       ids_to_add.push_back(id + 1);
+   }
+   for (auto id : ids_to_add) {
+       vec.push_back(id);
+   }
+   ```
+
+---
+
+**For more information, see the [main STL_MCU documentation](../../STL_MCU.md).**

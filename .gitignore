@@ -85,3 +85,27 @@ tools/data_quantization/data/result/mnist_data_nml.csv
 
 # Local python venv
 .venv/
+
+# Benchmark folder
+docs/benchmark/
+
+# Test and binary files in vector documentation folders
+docs/vectors/*/test*
+docs/vectors/*/*.out
+docs/vectors/*/*.o
+docs/vectors/*/Makefile
+docs/vectors/packed_vector/packed_vector
+docs/vectors/packed_vector/packed_vector.h
+docs/vectors/packed_vector/test_packed_b_vector_parity
+docs/vectors/packed_vector/test_single
+docs/vectors/b_vector_and_vector/b_vector_comprehensive_test
+docs/vectors/b_vector_and_vector/full_api_example
+docs/vectors/b_vector_and_vector/old_tests/
+docs/vectors/ID_vector/test_benchmark/
+
+# Test and binary files in unordered_map_set subfolders
+docs/unordered_map_set/*/unordered_map_test
+docs/unordered_map_set/*/unordered_map_s_test
+docs/unordered_map_set/*/unordered_set_test
+docs/unordered_map_set/*/unordered_set_s_test
+docs/unordered_map_set/hash_kernel/Hash_kernel_optimizer

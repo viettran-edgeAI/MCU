@@ -324,6 +324,21 @@
 #endif
 #define RF_HAS_SDMMC (RF_BOARD_SUPPORTS_SDMMC)
 
+// FATFS support detection - available on all ESP32 variants with enough flash
+// FATFS uses the FFat library which works with internal flash partitioned as FAT
+#ifndef RF_HAS_FATFS
+  #if defined(ESP32) || defined(CONFIG_IDF_TARGET_ESP32) || \
+      defined(ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S2) || \
+      defined(ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32S3) || \
+      defined(ESP32C3) || defined(CONFIG_IDF_TARGET_ESP32C3) || \
+      defined(ESP32C6) || defined(CONFIG_IDF_TARGET_ESP32C6) || \
+      defined(ESP32H2) || defined(CONFIG_IDF_TARGET_ESP32H2)
+    #define RF_HAS_FATFS 1
+  #else
+    #define RF_HAS_FATFS 0
+  #endif
+#endif
+
 // -----------------------------------------------------------------------------
 // USB transfer tuning defaults
 // -----------------------------------------------------------------------------
@@ -351,7 +366,9 @@ inline void print_board_info() {
     Serial.println(RF_PSRAM_AVAILABLE ? "yes" : "no");
     Serial.print("SD_MMC available: ");
     Serial.println(RF_HAS_SDMMC ? "yes" : "no");
-  Serial.println("Storage options: FLASH, SD_MMC_1BIT, SD_MMC_4BIT, SD_SPI");
+    Serial.print("FATFS available: ");
+    Serial.println(RF_HAS_FATFS ? "yes" : "no");
+  Serial.println("Storage options: FLASH, FATFS, SD_MMC_1BIT, SD_MMC_4BIT, SD_SPI");
   Serial.println("Select runtime backend via RfStorageType in your sketch.");
     if (RF_BOARD_CDC_WARNING) {
         Serial.println("Note: board has a compact USB CDC buffer. Keep chunks conservative or define USER_CHUNK_SIZE manually.");

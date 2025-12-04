@@ -520,7 +520,7 @@ namespace mcu{
             }
 
             // Track hashes of each tree dataset to avoid duplicates across trees
-            unordered_set<uint64_t> seen_hashes;
+            unordered_set_s<uint64_t> seen_hashes;
             RF_DEBUG(1, "Creating dataset for trees..."); 
             seen_hashes.reserve(config.num_trees * 2);
             for (uint8_t i = 0; i < config.num_trees; i++) {
@@ -1610,7 +1610,7 @@ namespace mcu{
             // Pre-allocate evaluation resources
             Rf_data train_samples_buffer;
             b_vector<uint8_t, 20> activeTrees;
-            unordered_map<label_type, uint8_t> oobPredictClass;
+            unordered_map_s<label_type, uint8_t> oobPredictClass;
 
             activeTrees.reserve(config.num_trees);
             oobPredictClass.reserve(config.num_labels);
@@ -1719,7 +1719,7 @@ namespace mcu{
                 const Rf_sample& sample = ctx->validation_data[i];
                 label_type actualLabel = sample.label;
 
-                unordered_map<label_type, uint8_t> validPredictClass;
+                unordered_map_s<label_type, uint8_t> validPredictClass;
                 sample_type validTotalPredict = 0;
 
                 // Use all trees for validation prediction

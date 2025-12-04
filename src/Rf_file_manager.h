@@ -8,6 +8,10 @@
 // Always include all storage libraries for runtime flexibility
 #include <LittleFS.h>
 
+#if RF_HAS_FATFS
+#include <FFat.h>
+#endif
+
 #if RF_HAS_SDMMC
 #include <SD_MMC.h>
 #endif
@@ -35,6 +39,12 @@
 #endif
 #ifndef RF_SDMMC_FORMAT_IF_FAIL
     #define RF_SDMMC_FORMAT_IF_FAIL false
+#endif
+
+// Default FATFS configuration values
+// FATFS uses internal flash with FAT partition - useful for compatibility with PC tools
+#ifndef RF_FATFS_FORMAT_IF_FAIL
+    #define RF_FATFS_FORMAT_IF_FAIL true
 #endif
 
 #ifndef RF_FILE_READ
@@ -69,30 +79,37 @@
 enum class RfStorageType {
     AUTO,          // Use board-default selection
     FLASH,         // Internal flash (LittleFS)
+    FATFS,         // Internal flash (FAT file system via FFat),
     SD_MMC_1BIT,   // SD_MMC in 1-bit mode
     SD_MMC_4BIT,   // SD_MMC in 4-bit mode
     SD_SPI,        // SD over SPI bus
-    LITTLEFS = FLASH,       // Legacy alias for backward compatibility
-    SD_MMC = SD_MMC_1BIT    // Legacy alias for backward compatibility
+    LITTLEFS = FLASH,       
+    SD_MMC = SD_MMC_1BIT,   
+    SD     = SD_SPI,         
+    FAT = FATFS           
 };
 
 /**
- * @brief Initialize the selected storage backend (LittleFS or SD variants)
+ * @brief Initialize the selected storage backend (LittleFS, FATFS, or SD variants)
  * 
  * Automatically initializes the storage system based on the requested
  * RfStorageType. When AUTO is provided (or no argument), the library falls
  * back to the board default — currently LittleFS/flash. For SD_MMC targets,
  * you can explicitly choose between 1-bit and 4-bit bus modes. For SPI-based
- * readers, select SD_SPI.
+ * readers, select SD_SPI. For FAT filesystem compatibility, use FATFS.
  *
  * For LittleFS: Uses begin(true) to format if mount fails.
+ * For FATFS: Uses FFat library with FAT partition on internal flash.
+ *            Supports formatting on mount failure if RF_FATFS_FORMAT_IF_FAIL is true.
+ *            FATFS is useful when you need PC-compatible file system or
+ *            when interfacing with tools that expect FAT format.
  * For SD_MMC: Mounts the bus in the requested width and logs card metadata.
  * For SD SPI: Initializes SPI with the default pinout before mounting.
  * If an SD backend cannot be mounted, the function automatically falls back
  * to LittleFS to keep file access available.
  * 
- * IMPORTANT: File Creation in LittleFS
- * - LittleFS requires the create flag to be set when opening files for writing.
+ * IMPORTANT: File Creation in LittleFS/FATFS
+ * - Both LittleFS and FATFS require the create flag for writing new files.
  * - rf_open() automatically detects write/append modes and applies the create flag.
  * - This ensures files are created even if they don't exist, matching standard file
  *   system behavior on other platforms.
@@ -134,6 +151,11 @@ bool rf_storage_is_sd_based();
  * @brief Returns true when LittleFS/flash is the active backend.
  */
 bool rf_storage_is_flash();
+
+/**
+ * @brief Returns true when FATFS is the active backend.
+ */
+bool rf_storage_is_fatfs();
 
 /**
  * @brief Maximum dataset size (in bytes) supported by the active storage backend.

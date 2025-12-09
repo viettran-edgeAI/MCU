@@ -284,7 +284,7 @@ public:
                     break;
                 }
             }
-            index = linearProbe(cap_, index, step_);
+            index = linearShifting(cap_, index, step_);
         }
         slotState oldState = getState(index);
         if(oldState == slotState::Empty){
@@ -318,7 +318,7 @@ public:
                     return false;
                 }
             }
-            index = linearProbe(cap_, index, step_);
+            index = linearShifting(cap_, index, step_);
         }
         return false;
     }
@@ -343,7 +343,7 @@ public:
                     return end();
                 }
             }
-            index = linearProbe(cap_, index, step_);
+            index = linearShifting(cap_, index, step_);
         }
         return end();
     }

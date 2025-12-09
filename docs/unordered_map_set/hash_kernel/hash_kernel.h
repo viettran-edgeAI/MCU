@@ -130,7 +130,7 @@ protected:
         return static_cast<uint8_t>((hash + tranform_key) % TABLE_SIZE);              // minimal 
         // return (key * 157) % TABLE_SIZE;           // golden ration 
     }   
-    [[nodiscard]] inline uint8_t linearProbe(uint8_t TABLE_SIZE,uint8_t index, uint8_t step) noexcept{
+    [[nodiscard]] inline uint8_t linearShifting(uint8_t TABLE_SIZE,uint8_t index, uint8_t step) noexcept{
         uint16_t sum = index + step;
         if ((TABLE_SIZE & (TABLE_SIZE - 1)) == 0) {
             return sum & (TABLE_SIZE - 1);
@@ -138,7 +138,7 @@ protected:
         return sum % TABLE_SIZE;
         // return (index + step) % TABLE_SIZE;
     }
-    [[nodiscard]] inline uint8_t linearProbe(uint8_t TABLE_SIZE,uint8_t index, uint8_t step) const noexcept{
+    [[nodiscard]] inline uint8_t linearShifting(uint8_t TABLE_SIZE,uint8_t index, uint8_t step) const noexcept{
         uint16_t sum = index + step;
         if ((TABLE_SIZE & (TABLE_SIZE - 1)) == 0) {
             return sum & (TABLE_SIZE - 1);

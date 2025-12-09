@@ -147,8 +147,6 @@ namespace mcu {
         char model_name[RF_PATH_BUFFER] ={0};
         
     public:
-        // Helper to build file paths: buffer must be at least RF_PATH_BUFFER size
-        // update: add parent folder : /model_name/model_name_suffix
         inline void build_file_path(char* buffer, const char* suffix, int buffer_size = RF_PATH_BUFFER) const {
             if (!buffer || buffer_size <= 0) return;
             if (buffer_size > RF_PATH_BUFFER) buffer_size = RF_PATH_BUFFER;
@@ -166,7 +164,6 @@ namespace mcu {
             // check : base data exists (binary or csv)
             build_file_path(filepath, "_nml.bin");
             if (!RF_FS_EXISTS(filepath)) {
-                // try to find csv file
                 build_file_path(filepath, "_nml.csv");
                 if (RF_FS_EXISTS(filepath)) {
                     RF_DEBUG(1, "🔄 Found csv dataset, need to be converted to binary format before use.");

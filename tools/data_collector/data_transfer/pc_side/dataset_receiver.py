@@ -80,7 +80,8 @@ def wait_for_response(ser: serial.Serial, timeout: float = 5.0) -> str:
             return RESP_ERROR
         if text.startswith(RESP_DONE):
             return RESP_DONE
-        print(f"[ESP32] {text}")
+        if not text.startswith("✅ Got response"):
+            print(f"[ESP32] {text}")
     raise TimeoutError("Timeout waiting for ESP32 response")
 
 

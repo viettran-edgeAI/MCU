@@ -130,7 +130,7 @@ public:
                     break;
                 }
             }
-            index = linearProbe(cap_, index, step_);
+            index = linearShifting(cap_, index, step_);
         }
         return -1;
     }
@@ -153,7 +153,7 @@ public:
                     break;
                 }
             }
-            index = linearProbe(cap_, index, step_);
+            index = linearShifting(cap_, index, step_);
         }
         return -1;
     }
@@ -360,7 +360,7 @@ private:
                     break;
                 }
             }
-            index = linearProbe(cap_, index, step_);
+            index = linearShifting(cap_, index, step_);
         }
 
         slotState old_state = getState(index);
@@ -423,7 +423,7 @@ public:
                     return false;
                 }
             }
-            index = linearProbe(cap_, index, step_);
+            index = linearShifting(cap_, index, step_);
         }
         return false;
     }
@@ -451,7 +451,7 @@ public:
                     return end();
                 }
             }
-            index = linearProbe(cap_, index, step_);
+            index = linearShifting(cap_, index, step_);
         }
         return end();
     }

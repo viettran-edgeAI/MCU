@@ -2,15 +2,17 @@
 
 ## Overview
 
-This tool enables pre-training of optimized Random Forest models using normalized datasets (`<data_name>_nml.csv`) from the data processing pipeline. The pre-training process automatically determines optimal hyperparameters and generates highly efficient models specifically designed for ESP32 microcontrollers with memory constraints.
+This tool allows pre-training Random Forest models from quantized datasets and from user-specified configuration files.
 
 **Key Benefits:**
-- Reduces computational workload on ESP32 devices
+- Allows users to customize all settings and configurations for the model through the model_config.json file.
+- generate ready-to-deploy model files for ESP32.
+- Reduces computational workload on ESP32 devices: user can specify best configuration at model_config.json file until reaching satisfactory performance.
 - Automatically optimizes hyperparameters for best performance
-- Generates memory-efficient binary tree files
 - Supports multiple evaluation strategies (OOB, validation, cross-validation)
-- Provides comprehensive configuration override system
 - **Two execution modes**: Fast build-only mode for prototyping, full training mode for optimization
+
+![Pre-training workflow](../../docs/imgs/pre_train_tool.jpg)
 
 > **Note:** While pre-training is recommended for optimal performance, you can still deploy raw data and run inference directly on ESP32 without this step. Use build-only mode for quick prototyping and training mode for final optimization.
 
@@ -108,16 +110,6 @@ The tool supports two execution modes to accommodate different workflow needs:
 ./pre_train -training
 ```
 
-## Output Files
-
-The training process generates the following files in the `trained_model/` directory:
-
-| File | Description |
-|------|-------------|
-| `esp32_config.json` | Complete model configuration and metadata |
-| `esp32_config.csv` | CSV version of configuration for analysis |
-| `tree_0.bin`, `tree_1.bin`, ... | Binary tree files optimized for ESP32 SPIFFS |
-
 ## Configuration Guide
 
 ### Model Configuration File: `model_config.json`
@@ -130,7 +122,7 @@ The configuration system is divided into two main categories:
 |-----------|------|---------|-------------|
 | `num_trees` | integer | 20 | Number of trees in the forest (recommended: 10-50) |
 | `split_ratio` | object | see below | Dataset splitting ratios for train/test/validation |
-| `use_bootstrap` | boolean | true | Enable bootstrap sampling (disable to save 38% RAM/SPIFFS) |
+| `use_bootstrap` | boolean | true | Enable bootstrap sampling |
 | `criterion` | string | "entropy" | Node splitting criterion: `"gini"` or `"entropy"` |
 | `impurity_threshold` | float | 0.1 | Threshold for node impurity (rarely needs adjustment) |
 | `data_path` | string | "../data_quantization/data/result/digit_data_nml.csv" | Path to normalized dataset |
@@ -139,7 +131,6 @@ The configuration system is divided into two main categories:
 ##### Split Ratio Configuration
 
 The `split_ratio` parameter controls how the dataset is divided:
-
 ```json
 "split_ratio": {
     "train_ratio": 0.7,
@@ -153,7 +144,9 @@ The `split_ratio` parameter controls how the dataset is divided:
 - **`test_ratio`**: Proportion of data for testing (default: 0.15)
 - **`valid_ratio`**: Proportion of data for validation (default: 0.15)
 
-> **Note:** When `use_validation` is false, only `train_ratio` and `test_ratio` are used. The ratios should sum to 1.0 for optimal data utilization.
+> **Note:** Normally the program will automatically generate the appropriate ratio based on the dataset, u don't need to edit it unless you want to specify custom ratios.
+
+> **Note:** When `use_validation` is false, only `train_ratio` and `test_ratio` are used. The ratios should sum to 1.0 for optimal data utilization. Anyway the program will automatically adjust the ratio to make sure they sum to 1.
 
 ##### Max Samples Configuration
 
@@ -172,7 +165,6 @@ The `max_samples` parameter controls memory usage for online learning scenarios:
 **Use Cases:**
 - **ESP32 Online Learning**: Set to prevent memory overflow as dataset grows from user feedback
 - **Adaptive Models**: Maintain recent data while discarding outdated patterns
-- **Memory-Constrained Devices**: Essential for devices with limited RAM/storage
 
 **Behavior:**
 - When `addNewData()` is called and dataset size exceeds `max_samples`:
@@ -181,16 +173,10 @@ The `max_samples` parameter controls memory usage for online learning scenarios:
   - Node layout is recalculated based on current dataset size
   - Training continues with the updated dataset
 
-> **Recommendation:** For ESP32 with 4MB PSRAM, typical values range from 3000-10000 samples depending on feature count and model complexity.
 
 #### B. Evaluation Strategy
 
-| Parameter | Type | Default | Options | Description |
-|-----------|------|---------|---------|-------------|
-| `training_score` | string | "oob_score" | ["oob_score", "valid_score", "k-fold_score"] | Method for evaluating model performance during training |
-| `k_folds` | integer | 4 | | Number of folds for k-fold cross-validation |
-
-##### Training Score Methods:
+Training Score Methods:
 
 1. **`"oob_score"`** (default):
    - Uses Out-of-Bag validation with bootstrap sampling
@@ -231,9 +217,11 @@ The override system allows you to control automatic parameter optimization with 
 | `max_depth` | disabled, enabled | Maximum tree depth |
 | `metric_score` | disabled, overwrite, stacked | Training optimization flags |
 
-##### Training Flags System
+##### Metric Score Configuration
 
-Training flags specify which metrics to optimize during model training:
+The `metric_score` parameter allows you to specify which performance metrics to optimize during training. It supports multiple flags and three status modes.
+
+>**Note:** Normally, the system automatically selects the best metric based on dataset characteristics and u no need to edit this unless u have specific requirements.
 
 **Available Flags:**
 - `ACCURACY` - Overall classification accuracy
@@ -274,6 +262,186 @@ Training flags specify which metrics to optimize during model training:
    ```
    - Combines user flags with automatically detected flags using bitwise OR
    - Example: User specifies `ACCURACY`, system detects imbalance → Result: `ACCURACY | RECALL`
+
+##### Min Split Configuration
+
+The `min_split` parameter controls the minimum number of samples required to split a node during tree building. This affects tree complexity and model generalization.
+
+```json
+"min_split": {
+    "value": 4,
+    "status": "disabled"
+}
+```
+
+**Status Modes:**
+
+1. **Disabled Mode** (`"status": "disabled"`):
+   - System automatically determines optimal `min_split` values through grid search (training mode)
+   - Default behavior - recommended for most use cases
+   - During build-only mode, uses first value from automatic range
+
+2. **Enabled Mode** (`"status": "enabled"`):
+   ```json
+   "min_split": {
+       "value": 4,
+       "status": "enabled"
+   }
+   ```
+   - Overrides automatic optimization with fixed user value
+   - Useful when you want to enforce memory or performance constraints
+   - In build-only mode: uses specified value without grid search
+   - In training mode: skips grid search for `min_split`, uses this value directly
+
+**Recommendations:**
+- **Small datasets (< 1000 samples)**: Use `2-4` for better generalization
+- **Large datasets (> 10000 samples)**: Use `4-8` to reduce overfitting
+- **Memory-constrained devices**: Increase value to reduce tree complexity
+- **High accuracy needed**: Decrease value to allow more complex trees (if memory allows)
+
+##### Min Leaf Configuration
+
+The `min_leaf` parameter controls the minimum number of samples required at a leaf node. This is a regularization technique to prevent overfitting.
+
+```json
+"min_leaf": {
+    "value": 2,
+    "status": "disabled"
+}
+```
+
+**Status Modes:**
+
+1. **Disabled Mode** (`"status": "disabled"`):
+   - System automatically determines optimal `min_leaf` values through grid search (training mode)
+   - Default behavior - recommended for most use cases
+   - During build-only mode, uses first value from automatic range
+
+2. **Enabled Mode** (`"status": "enabled"`):
+   ```json
+   "min_leaf": {
+       "value": 2,
+       "status": "enabled"
+   }
+   ```
+   - Overrides automatic optimization with fixed user value
+   - Useful for controlling overfitting or enforcing minimum leaf sizes
+   - In build-only mode: uses specified value without grid search
+   - In training mode: skips grid search for `min_leaf`, uses this value directly
+
+**Recommendations:**
+- **Small datasets**: Use `2-4` to avoid too many leaves
+- **Large datasets**: Use `1-2` for better model complexity
+- **Imbalanced datasets**: Increase value to ensure sufficient minority class samples in leaves
+- **High variance models**: Increase value to regularize
+- **Underfitting**: Decrease value to allow more complex leaves
+
+##### Max Depth Configuration
+
+The `max_depth` parameter controls the maximum depth of trees in the forest. This is critical for embedded systems with memory constraints.
+
+```json
+"max_depth": {
+    "value": 50,
+    "status": "enabled"
+}
+```
+
+**Status Modes:**
+
+1. **Disabled Mode** (`"status": "disabled"`):
+   - System automatically determines optimal `max_depth` values through grid search (training mode)
+   - Default behavior - recommended when memory is not a constraint
+   - During build-only mode, uses first value from automatic range
+
+2. **Enabled Mode** (`"status": "enabled"`):
+   ```json
+   "max_depth": {
+       "value": 20,
+       "status": "enabled"
+   }
+   ```
+   - Overrides automatic optimization with fixed user value
+   - Essential for memory-constrained embedded systems
+   - In build-only mode: uses specified value without grid search
+   - In training mode: skips grid search for `max_depth`, uses this value directly
+   - Controls maximum number of levels in decision trees
+
+**Recommendations:**
+- **small, medium datasets:** set to `disabled` for best accuracy
+- **Large datasets (> 10000 samples)**: set to `enabled` with 50 , allow trees to grow to their maximum depth. shorten training time
+
+
+##### Extend Base Data Configuration
+
+The `extend_base_data` parameter controls whether the training dataset can be extended with new data during online learning on ESP32.
+
+```json
+"extend_base_data": {
+    "value": true,
+    "options": [true, false]
+}
+```
+
+**Modes:**
+
+1. **Enabled** (`true`):
+   - Allows the model to accept and incorporate new data samples collected during inference and expand the dataset size
+   - Necessary for adaptive models that improve over time
+   - Works in conjunction with `max_samples` to control the dataset size
+
+2. **Disabled** (`false`):
+   - allows new data to be accepted, but the dataset size remains constant.
+   - Old samples are replaced by new ones when the limit is reached (FIFO behavior)
+   - usually combined with `enable_auto_config` = false.
+
+##### Enable Retrain Configuration
+
+The `enable_retrain` parameter controls whether the model can be retrained on-device with newly collected data on ESP32.
+
+```json
+"enable_retrain": {
+    "value": true,
+    "options": [true, false]
+}
+```
+
+**Modes:**
+
+1. **Enabled** (`true`):
+   - Allows the model to be retrained on the ESP32 using newly collected data
+   - Should be combined with `extend_base_data: true` to accumulate data for retraining
+
+2. **Disabled** (`false`):
+   - Model remains static after embedding on ESP32
+   - No retraining occurs, even if new data is collected
+   - infer faster on ESP32.
+   - flags `extend_base_data` and `enable_auto_config` have no effect when retraining is disabled.
+
+##### Enable Auto Config Configuration
+
+The `enable_auto_config` parameter controls whether the model automatically reconfigures itself based on newly observed data during online learning on ESP32.
+
+```json
+"enable_auto_config": {
+    "value": false,
+    "options": [true, false]
+}
+```
+
+**Modes:**
+
+1. **Disabled** (`false` - default):
+   - Uses configuration from pre-trained `model_config.json` without modification
+   - Model parameters (`num_trees`, `max_depth`, etc.) remain fixed
+   - Retraining uses original hyperparameters
+   - `extend_base_data` should be `false` or `max_samples` should not be too large compared to the current dataset size.
+
+2. **Enabled** (`true`):
+   - On ESP32, each session of building a model based on a new dataset will compute optimal parameters automatically.
+   - Recommended if you feel your current dataset is not big enough and can grow much bigger in the future on esp32.
+   - `enable_retrain` must be `true` for this to have effect.
+   - `extend_base_data` should be `true` to accumulate new data for reconfiguration.
 
 ## Example Configurations
 
@@ -440,68 +608,6 @@ This directory includes specialized transfer tools for uploading pre-trained mod
 - **Grid Search**: Systematic exploration of parameter combinations
 - **Automatic Range Detection**: Dataset-driven parameter range selection
 - **Override System**: Manual control when needed
-
-## Recent Improvements
-
-### v2024.09.2 Updates (Current)
-
-#### Major Configuration Overhaul
-- **Unified Training Score System**: Replaced `use_validation`, `cross_validation`, and `combine_ratio` with single `training_score` parameter
-- **Simplified Evaluation**: Three clear options: `"oob_score"`, `"valid_score"`, `"k-fold_score"`
-- **Cleaner Configuration**: Removed complex ratio combining logic for better user experience
-- **Automatic Fallback**: `valid_score` automatically switches to `oob_score` when validation set too small
-
-#### New Build Model Only Mode
-- **Fast Model Building**: New default mode that builds models quickly without grid search
-- **Command Line Control**: Use `-training` flag to enable full grid search optimization
-- **Smart Parameter Selection**: Uses first values from ranges or config overrides for rapid prototyping
-- **Complete Output**: Still generates all MCU deployment files and evaluates on test set
-- **Workflow Optimization**: Essential for large datasets and iterative development
-
-### Migration Guide from v2024.09.1
-
-If you're upgrading from the previous version, update your `model_config.json`:
-
-**Old Configuration (v2024.09.1):**
-```json
-{
-    "use_validation": {"value": true},
-    "cross_validation": {"value": false},
-    "combine_ratio": {"value": 0.7, "status": "disabled"}
-}
-```
-
-**New Configuration (v2024.09.2):**
-```json
-{
-    "training_score": {"value": "valid_score"}
-}
-```
-
-**Migration Rules:**
-- `cross_validation: true` → `training_score: "k-fold_score"`
-- `use_validation: true, cross_validation: false` → `training_score: "valid_score"`
-- `use_validation: false, cross_validation: false` → `training_score: "oob_score"`
-- Remove `combine_ratio` parameter (no longer needed)
-
-### v2024.09.1 Updates
-
-#### Bug Fixes
-- **Critical Tree Building Fix**: Fixed feature indexing bug in `build_tree()` partitioning logic that was causing poor model accuracy
-- **Cross-Validation Memory Management**: Resolved segmentation faults in `get_cross_validation_score()` due to improper object lifecycle management
-- **Configuration Parsing**: Enhanced JSON parsing robustness for nested configuration objects
-
-#### New Features
-- **Flexible Split Ratios**: Added `split_ratio` configuration with independent `train_ratio`, `test_ratio`, and `valid_ratio` controls
-- **Enhanced Debug Output**: Added configuration display showing parsed split ratios during initialization
-- **Improved Memory Safety**: Better handling of MCU container objects and reduced memory corruption risks
-
-#### Performance Improvements
-- **Cross-Validation Implementation**: Complete implementation of k-fold cross-validation with proper index-based data management
-- **Optimized Data Splitting**: Direct ratio-based splitting instead of remainder calculations
-- **Better Tree Statistics**: Enhanced forest analysis with comprehensive node and depth statistics
-
-> **Important:** These updates require C++17 compiler. Models trained with this version show significantly improved accuracy compared to previous versions due to the tree building bug fix.
 
 ## Troubleshooting
 

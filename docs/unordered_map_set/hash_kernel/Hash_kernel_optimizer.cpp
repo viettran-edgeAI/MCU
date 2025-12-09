@@ -20,7 +20,7 @@ uint8_t hashFunction(uint16_t TABLE_SIZE, size_t key, int hash) {
     return (hash + key) % TABLE_SIZE;              // minimal 
     // return (key * 157) % TABLE_SIZE;         // use golden ration 
 }
-uint8_t linearProbe(uint16_t TABLE_SIZE,uint8_t index, uint8_t step) {
+uint8_t linearShifting(uint16_t TABLE_SIZE,uint8_t index, uint8_t step) {
     return (index + step) % TABLE_SIZE;
 }
 
@@ -109,7 +109,7 @@ vector<uint16_t> final_testing(unordered_map_s<int,vector<uint16_t>> hashers_con
                         int attempt = 0;
                         size_t index = hashFunction(TABLE_SIZE, value, hasher);
                         while(check[index] != -1){
-                            index = linearProbe(TABLE_SIZE, index, step);
+                            index = linearShifting(TABLE_SIZE, index, step);
                             if(attempt++ >= TABLE_SIZE){
                                 total_errors++;
                                 break;
@@ -200,7 +200,7 @@ int main(){
                         uint8_t index = hashFunction(TABLE_SIZE, value, hash);
                         while(check[index] != -1){
                             total_collision++;
-                            index = linearProbe(TABLE_SIZE, index, step);
+                            index = linearShifting(TABLE_SIZE, index, step);
                             if(attempt++ > TABLE_SIZE){
                                 hash_complete = false;
                                 // cout << " failed";

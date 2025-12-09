@@ -3,11 +3,6 @@
  * 
  * Tests PSRAM allocation/deallocation synchronization and safe API sequencing
  * for unordered_map and unordered_set after capacity operations.
- * 
- * Build & Upload:
- * - Select ESP32 board in Arduino IDE
- * - Optional: Define RF_USE_PSRAM before including STL_MCU.h to enable PSRAM
- * - Upload and open Serial Monitor at 115200 baud
  */
 
 #define RF_USE_PSRAM  // Enable PSRAM allocation for this test

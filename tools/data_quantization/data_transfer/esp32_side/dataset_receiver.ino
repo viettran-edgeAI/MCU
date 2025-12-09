@@ -2,13 +2,6 @@
  * ESP32 Binary File Receiver
  * Upload this sketch to ESP32, then use transfer_dataset.py to send files.
  * Saves files to file system with model_name/filename structure.
- * 
- * PERFORMANCE NOTES:
- * - Transfer speed depends on BUFFER_CHUNK size; larger chunks are faster
- *   but may cause USB CDC buffer overruns on ESP32-C3-like boards.
- * - This sketch auto-detects the board and sets BUFFER_CHUNK conservatively
- *   for C3, but allows user override via USER_CHUNK_SIZE define.
- * - See board_config.h for board-specific recommendations.
  */
 
 #include "Rf_file_manager.h"  // Includes Rf_board_config.h internally
@@ -19,22 +12,10 @@
 //   RfStorageType::SD_MMC_1BIT - Built-in SD slot (1-bit mode)
 //   RfStorageType::SD_MMC_4BIT - Built-in SD slot (4-bit mode)
 //   RfStorageType::SD_SPI     - External SD card module (SPI interface, compatible with all ESP32 variants)
+
 const RfStorageType STORAGE_MODE = RfStorageType::FLASH;
 
-/*
- * Transfer timing and size configuration.
- * IMPORTANT: Keep these in sync with the PC sender script (transfer_dataset.py)
- * 
- * BUFFER_CHUNK:
- *   - Must match CHUNK_SIZE in transfer_dataset.py
- *   - ESP32-C3 recommended: 220 bytes (USB CDC buffer constraint)
- *   - ESP32/ESP32-S3: Can use 256+ bytes for higher speed
- * 
- * BUFFER_DELAY_MS:
- *   - Delay between chunks (matches CHUNK_DELAY * 1000 on PC)
- *   - Allows ESP32 time to process and write to storage
- *   - ACK/NACK protocol means this can be quite small (20ms)
- */
+
 const int BUFFER_CHUNK = USER_CHUNK_SIZE;
 const int BUFFER_DELAY_MS = 20;  // ms to match CHUNK_DELAY (0.02s) on PC
 uint8_t buffer[BUFFER_CHUNK];
@@ -58,10 +39,8 @@ void loop() {
     command.trim();
 
     if (command == "TRANSFER_START") {
-      // Legacy mode (no CRC/ACK) remains available for compatibility
       receiveFile();
     } else if (command == "TRANSFER_V2") {
-      // V2 protocol with CRC validation and ACK/NACK handshaking
       receiveFileV2();
     }
   }
@@ -83,13 +62,10 @@ void receiveFile() {
   }
   filename[filename_length] = '\0';
   
-  // Extract model name from filename (everything before last underscore)
-  // e.g., "digit_data_nml.bin" -> model_name = "digit_data"
   String filenameStr = String(filename);
   int lastUnderscore = filenameStr.lastIndexOf('_');
   String modelName = (lastUnderscore > 0) ? filenameStr.substring(0, lastUnderscore) : "default_model";
-  
-  // Create model directory if it doesn't exist
+
   String modelDir = "/" + modelName;
   if (!RF_FS_EXISTS(modelDir.c_str())) {
     RF_FS_MKDIR(modelDir.c_str());
@@ -101,10 +77,7 @@ void receiveFile() {
     return;
   }
   
-  // Prepare file path with model name
   String filepath = modelDir + "/" + String(filename);
-  
-  // Open file for writing
   File file = RF_FS_OPEN(filepath, RF_FILE_WRITE);
   if (!file) {
     return;
@@ -139,8 +112,7 @@ void receiveFile() {
         delay(1);
       }
     }
-    
-    // Write to file
+  
     size_t written = file.write(buffer, actual_read);
     if (written != actual_read) {
       file.close();
@@ -167,7 +139,6 @@ void receiveFile() {
   }
 }
 
-// V2: Robust receiver with per-chunk CRC and ACK/NACK
 void receiveFileV2() {
   // Receive filename length
   uint32_t filename_length = 0;
@@ -220,8 +191,6 @@ void receiveFileV2() {
   Serial.println("READY_V2");
 
   uint32_t bytes_received = 0;
-  // Simple CRC32 calculation using ESP32's ROM function isn't directly available here.
-  // We'll accumulate CRC manually via a software implementation.
   uint32_t crc = 0xFFFFFFFF;
 
   while (bytes_received < file_size) {
@@ -283,7 +252,6 @@ void receiveFileV2() {
     }
 
     // CRC matched; write to file at the correct position if needed
-    // For simplicity since we receive in order, append write is okay.
     size_t written = file.write(buffer, clen);
     if (written != clen) { file.close(); RF_FS_REMOVE(filepath.c_str()); return; }
 

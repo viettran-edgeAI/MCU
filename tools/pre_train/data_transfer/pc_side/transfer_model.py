@@ -113,7 +113,7 @@ def wait_for_response(ser, expected_response, timeout=ACK_TIMEOUT, verbose=True)
     """Wait for a specific response from the ESP32."""
     start_time = time.time()
     buffer = b""
-    all_received = []  # Track all received data for debugging
+    all_received = []
     
     while time.time() - start_time < timeout:
         if ser.in_waiting > 0:
@@ -140,7 +140,6 @@ def wait_for_response(ser, expected_response, timeout=ACK_TIMEOUT, verbose=True)
         time.sleep(0.005)
         
     if verbose:
-        # Show what we actually received for debugging
         all_data = b"".join(all_received).decode(errors='ignore')
         if all_data:
             print(f"❌ Timeout waiting for '{expected_response.decode()}'.")

@@ -224,6 +224,10 @@ namespace mcu{
 
         bool build_model(){
 #if RF_ENABLE_TRAINING
+            if(!config.enable_retrain){
+                RF_DEBUG(0, "❌ Retraining mode not enabled");
+                return false;
+            }
             RF_DEBUG(0, "🌲 Building model... ");
             if(!base.able_to_training()){
                 RF_DEBUG(0, "❌ Model not set for training");
@@ -233,6 +237,13 @@ namespace mcu{
             if(!begin_training_session()){
                 RF_DEBUG(0, "❌ Unable to allocate training context");
                 return false;
+            }
+
+            // Clear inference log file at the beginning of model building session
+            base.get_infer_log_path(path_buffer);
+            if(RF_FS_EXISTS(path_buffer)) {
+                RF_FS_REMOVE(path_buffer);
+                RF_DEBUG(1, "🧹 Cleared inference log file");
             }
 
             bool success = true;
@@ -546,8 +557,6 @@ namespace mcu{
                         // Bootstrap sampling: allow duplicates, track occurrence count
                         for (sample_type j = 0; j < numSubSample; ++j) {
                             sample_type idx = static_cast<sample_type>(tree_rng.bounded(numSample));
-                            // For ID_vector with 2 bits per value, we can store up to count 3
-                            // Add the sample ID, which will increment its count in the bit array
                             sub_data.push_back(idx);
                         }
                     } else {
@@ -560,7 +569,6 @@ namespace mcu{
                             sample_type tmp = arr[t];
                             arr[t] = arr[j];
                             arr[j] = tmp;
-                            // For unique sampling, just set bit once (count = 1)
                             sub_data.push_back(arr[t]);
                         }
                     }
@@ -999,7 +1007,6 @@ namespace mcu{
                 }
             }
 
-            // Pre-allocate count arrays
             const uint16_t numPossibleValues = maxFeatureValue + 1;
             b_vector<sample_type> counts;
             counts.resize(numPossibleValues * numLabels, 0);
@@ -2098,7 +2105,13 @@ namespace mcu{
             add_actual_label(label.c_str());
         }
 #endif
-
+        /**
+         * @brief: Add actual label into stack of pending data.
+         * The most recent feedback time will be subtracted and compared to feedback_timeout, and the added label will jump over the pending_samples
+         * if the time difference exceeds the timeout.
+         * @param label: Actual label as a C-style string.
+         * @return : void
+         */
         void add_actual_label(const char* label){
             if (!label) {
                 return;
@@ -2182,13 +2195,20 @@ namespace mcu{
         }
  
     // ----------------------------------------setters---------------------------------------
-
+        /**
+        * @brief: Enable retraining mode.
+        * enable model retraining. inference will be slower and use more memory (pending_data will be initialized)
+        */
         void enable_retrain(){
             config.enable_retrain = true;
             ensure_pending_data();
             ensure_base_data_stub();
         }
 
+        /**
+         * @brief: Disable retraining mode and release associated resources.
+         * disable model retraining. inference will be faster and save memory (pending_data will not be initialized)
+         */
         void disable_retrain(){
             config.enable_retrain = false;
             release_pending_data();
@@ -2218,19 +2238,38 @@ namespace mcu{
             config.extend_base_data = false;
         }
 
+        /**
+         * @brief: Enable automatic configuration adjustment.
+         * when enabled, interpolate the best configuration for the model based on the current dataset at each training session.
+         * Should only be used when the dataset grows much larger than the last time the model was rebuilt
+         */
         void enable_auto_config(){
             config.enable_auto_config = true;
         }
+
+        /**
+         * @brief: Disable automatic configuration adjustment.
+         * when disabled, use the optimal config calculated and transferred from the pc side.
+         * This is the default behavior.
+         */
         void disable_auto_config(){
             config.enable_auto_config = false;
         }
 
-        // set impurity_threshold
+        /**
+         * @brief: set impurity_threshold for tree building.
+         * @note: for Gini criterion, typical values are in the range of [0.0, 0.25]; for Entropy criterion, typical values are in the range of [0.0, 0.1]
+         * ussually not need to use this. 
+         */
         void set_impurity_threshold(float threshold) {
             config.impurity_threshold = threshold;
         }
 
-        // set criterion
+        /**
+         * @brief: set criterion for tree splitting.
+         * @param criterion: "gini" or "entropy"
+         * @note: changing criterion will also adjust impurity_threshold accordingly
+         */
         void set_criterion(const char* criterion) {
             if (strcmp(criterion, "gini") == 0) {
                 if(!config.use_gini){
@@ -2250,33 +2289,52 @@ namespace mcu{
             }
         }
 
-        // overwrite metric_score
+        /**
+         * @brief: set metric_score for training evaluation.
+         * @param flag: Rf_metric_scores flag (ACCURACY, PRECISSION, F1_SCORE, RECALL)
+         * This action will overwrite previous metric_score setting.
+         */
         void set_metric_score(Rf_metric_scores flag) {
             config.metric_score = flag;
         }
 
-        //  combined metric_score with user input
+        /**
+         * @brief: add metric_score for training evaluation.
+         * @param flag: Rf_metric_scores flag (ACCURACY, PRECISSION, F1_SCORE, RECALL)
+         * This action will combine with previous metric_score setting.
+         */
         void add_metric_score(Rf_metric_scores flag) {
             config.metric_score |= flag;
         }
 
-        // set training_score
+        /**
+         * @brief: set training_score method for training evaluation.
+         * @param score: Rf_training_score flag (OOB_SCORE, VALID_SCORE, K_FOLD_SCORE)
+         */
         void set_training_score(Rf_training_score score) {
             config.training_score = score;
             config.validate_ratios();
         }
 
+        /**
+         * @brief: set train ratio for dataset splitting.
+         * @param ratio: float value in range (0.0, 1.0)
+         */
         void set_train_ratio(float ratio) {
             config.train_ratio = ratio;
             config.validate_ratios();
         }
 
+        /**
+         * @brief: set valid ratio for dataset splitting.
+         * @param ratio: float value in range (0.0, 1.0)
+         */
         void set_valid_ratio(float ratio) {
             config.valid_ratio = ratio;
             config.validate_ratios();
         }
 
-        // set random seed , default is 37
+        // set random seed, default is 37
         void set_random_seed(uint32_t seed) {
             config.random_seed = seed;
 #if RF_ENABLE_TRAINING
@@ -2286,21 +2344,37 @@ namespace mcu{
 #endif
         }
 
+        // use default random seed (0ULL)
         void use_default_seed() {
             set_random_seed(0ULL);
         }
+
         //  rename model.  This action will rename all forest file components.
         void set_model_name(const char* name) {
             base.set_model_name(name);
         }
+
+        // set number of trees in the forest
         void set_num_trees(uint8_t n_trees) {
             config.num_trees = n_trees;
         }
+        
+        // set max pending samples in the pending data stack
+        // should not be too large to avoid memory issues
+        void set_max_pending_samples(size_t max_samples) {
+            Rf_pending_data* pd = config.enable_retrain ? ensure_pending_data() : pending_data;
+            if(pd){
+                pd->set_max_pending_samples(max_samples);
+            }
+        }
+
     // ----------------------------------------getters---------------------------------------
+        // check if model is able to inference
         bool able_to_inference() const {
             return base.able_to_inference();
         }
 
+        // get best training score achieved during last training session
         float best_training_score() const {
             return config.result_score;
         }
@@ -2407,10 +2481,12 @@ namespace mcu{
             return get_practical_inference_score(static_cast<uint8_t>(config.metric_score));
         }
 
+        // get quantization coefficient
         uint8_t get_quantization_coefficient() const {
             return config.quantization_coefficient;
         }
 
+        // get model name
         void get_model_name(char* name, size_t length) const {
             base.get_model_name(name, length);
         }
@@ -2452,14 +2528,19 @@ namespace mcu{
         }
     #endif
     
+    #ifdef DEV_STAGE
+        // get lowest RAM usage recorded during model buliding / training 
         size_t lowest_ram() const {
             return logger.lowest_ram;
         }
+        
+        // get lowest storage (ROM) usage recorded during model building / training
         size_t lowest_storage() const {
             return logger.lowest_rom;
         }
+    #endif
 
-        // get total nodes in model (forest). Each node is 4 bytes
+        // get total nodes in model (forest).
         size_t total_nodes() const {
             return forest_container.get_total_nodes();
         }
@@ -2473,10 +2554,12 @@ namespace mcu{
         float avg_nodes_per_tree() const {
             return forest_container.avg_nodes();
         }
+        
         // get average leaves per tree
         float avg_leaves_per_tree() const {
             return forest_container.avg_leaves();
         }
+        
         // get average depth per tree
         float avg_depth_per_tree() const {
             return forest_container.avg_depth();
@@ -2487,6 +2570,7 @@ namespace mcu{
             return forest_container.max_depth_tree();
         }
 
+        // get bits used per node in the model
         uint8_t bits_per_node() const {
             return forest_container.bits_per_node();
         }
@@ -2713,8 +2797,7 @@ namespace mcu{
             return scorer.calculate_score();
         }
 
-        float recall(Rf_data& data) {
-            // Create a temporary scorer to calculate recall
+        float recall(Rf_data& data) {                                       
             Rf_matrix_score scorer(config.num_labels, 0x04); // RECALL flag only
             
             if(!data.isLoaded) data.loadData();
@@ -2738,7 +2821,6 @@ namespace mcu{
         }
 
         float f1_score(Rf_data& data) {
-            // Create a temporary scorer to calculate F1-score
             Rf_matrix_score scorer(config.num_labels, 0x08); // F1_SCORE flag only
             
             if(!data.isLoaded) data.loadData();
@@ -2762,7 +2844,6 @@ namespace mcu{
         }
 
         float accuracy(Rf_data& data) {
-            // Create a temporary scorer to calculate accuracy
             Rf_matrix_score scorer(config.num_labels, 0x01); // ACCURACY flag only
             
             if(!data.isLoaded) data.loadData();
@@ -2793,8 +2874,8 @@ namespace mcu{
                 RF_DEBUG(0, "❌ No training context available for visual_result!", "");
                 return;
             }
-            forest_container.loadForest(); // Ensure all trees are loaded before prediction
-            ctx->test_data.loadData(); // Load test set data if not already loaded
+            forest_container.loadForest();
+            ctx->test_data.loadData(); 
 
             RF_DEBUG(0, "Predicted, Actual");
             for (sample_type i = 0; i < ctx->test_data.size(); i++) {
@@ -2802,8 +2883,8 @@ namespace mcu{
                 label_type pred = forest_container.predict_features(sample.features);
                 RF_DEBUG_2(0, String(pred).c_str(), ", ", String(sample.label).c_str(), "");
             }
-            ctx->test_data.releaseData(true); // Release test set data after use
-            forest_container.releaseForest(); // Release all trees after prediction
+            ctx->test_data.releaseData(true); 
+            forest_container.releaseForest(); 
 #else
             RF_DEBUG(0, "❌ Training disabled (RF_ENABLE_TRAINING = 0)");
 #endif

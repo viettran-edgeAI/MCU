@@ -4,39 +4,6 @@
 #include "STL_MCU.h"
 #include "image_processing.h"
 
-/**
- * HOG_MCU - Histogram of Oriented Gradients for Microcontrollers
- * ==============================================================
- * 
- * A memory-efficient implementation of HOG feature extraction optimized for
- * microcontrollers like ESP32. Includes integrated image processing for
- * format conversion and resizing.
- * 
- * Key Features:
- * - Automatic image format conversion (RGB565, RGB888, YUV422 → Grayscale)
- * - Intelligent resizing with multiple algorithms
- * - Fixed-size feature vectors using mcu::b_vector
- * - Optimized for embedded systems
- * - Easy configuration with sensible defaults
- * 
- * Quick Start:
- * ```cpp
- * HOG_MCU hog;
- * hog.setupForESP32CAM();              // Use defaults
- * hog.transform(camera_buffer);        // Extract features
- * const auto& features = hog.getFeatures();  // Use features
- * ```
- * 
- * Advanced Usage:
- * ```cpp
- * HOG_MCU::Config config;
- * config.input_format = ImageProcessing::PixelFormat::RGB565;
- * config.input_width = 640;
- * config.input_height = 480;
- * config.hog_img_width = 48;
- * hog.setConfig(config);
- * ```
- */
 
 class HOG_MCU {
 public:

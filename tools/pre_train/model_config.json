@@ -1,6 +1,6 @@
 {
     "data_path": {
-        "value": "../data_quantization/data/result/walker_fall_nml.csv",
+        "value": "../data_quantization/data/result/hand_nml.csv",
         "description": "Path to the normalized cv dataset."
     },
     "random_seed": {
@@ -8,7 +8,7 @@
         "description": "Random seed for Rf_random."
     },
     "num_trees": {
-        "value": 20,
+        "value": 30,
         "description": "Number of trees in the random forest. default - 20, max - 100."
     },
     "split_ratio":{
@@ -41,7 +41,7 @@
     },
     "max_depth": {
         "value": 50,
-        "status": "enabled",
+        "status": "disabled",
         "status_options": ["disabled", "enabled"],
         "description": "disabled by default. enable to override max_depth in training process."
     },

@@ -191,8 +191,7 @@ Open Arduino Serial Monitor after transfer:
 ## Related Tools
 
 - **hog_processor**: Generates the HOG config file (in parent directory)
-- **HOG_Quickstart**: Example sketch showing config file loading
-- **HOG_Advanced**: Advanced example with multiple config options
+- **HOG_ESP32CAM**: Complete example with quick start, config file loading, and custom parameters
 
 ## Support
 

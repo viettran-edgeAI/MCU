@@ -2,13 +2,6 @@
  * ESP32 Quantizer CSV Receiver with V2 Protocol
  * Upload this sketch to ESP32, then use transfer_categorizer.py to send files.
  * Saves files to file system with model_name/filename structure and CRC verification.
- * 
- * PERFORMANCE NOTES:
- * - Transfer speed depends on BUFFER_CHUNK size; larger chunks are faster
- *   but may cause USB CDC buffer overruns on ESP32-C3-like boards.
- * - This sketch auto-detects the board and sets BUFFER_CHUNK conservatively
- *   for C3, but allows user override via USER_CHUNK_SIZE define.
- * - See board_config.h for board-specific recommendations.
  */
 
 #include "Rf_file_manager.h"  // Includes Rf_board_config.h internally

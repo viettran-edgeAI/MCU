@@ -53,6 +53,7 @@ static uint16_t getPackedFeatureBytes(uint16_t featureCount) {
 }
 
 static int num_features = 1023;
+static int label_column_index = 0; // Column index containing the label (0 = first column)
 
 // Split a line on commas (naïve; assumes no embedded commas/quotes)
 static mcu::vector<std::string> split(const std::string &line) {
@@ -647,13 +648,6 @@ bool detectCSVHeader(const char* inputFilePath) {
                      (firstRowNumericRatio < 0.5f) && 
                      (secondRowNumericRatio - firstRowNumericRatio >= 0.3f);
     
-    std::cout << "🔍 Header Detection Analysis:\n";
-    std::cout << "   First row numeric ratio: " << std::fixed << std::setprecision(2) 
-              << (firstRowNumericRatio * 100) << "%\n";
-    std::cout << "   Second row numeric ratio: " << std::fixed << std::setprecision(2) 
-              << (secondRowNumericRatio * 100) << "%\n";
-    std::cout << "   📊 Result: " << (hasHeader ? "Header detected" : "No header detected") << "\n";
-    
     return hasHeader;
 }
 
@@ -680,6 +674,13 @@ Rf_quantizer quantizeCSVFeatures(const char* inputFilePath, const char* outputFi
         throw std::runtime_error("Input CSV needs at least one label + one feature");
     }
     
+    // Validate label_column_index
+    if (label_column_index < 0 || label_column_index >= n_cols) {
+        fin.close();
+        throw std::runtime_error("Label column index " + std::to_string(label_column_index) + 
+                               " is out of range (0-" + std::to_string(n_cols-1) + ")");
+    }
+    
     int n_feats = n_cols - 1;
     
     // First pass: collect data and calculate statistics for Z-score
@@ -694,16 +695,17 @@ Rf_quantizer quantizeCSVFeatures(const char* inputFilePath, const char* outputFi
     if (processFirstLine) {
         // Process the first line as data
         if ((int)cols.size() == n_cols) {
-            labels.push_back(cols[0]);
+            labels.push_back(cols[label_column_index]);
             mcu::vector<float> feats;
             feats.reserve(n_feats);
             
-            for (int j = 1; j < n_cols; ++j) {
+            for (int j = 0; j < n_cols; ++j) {
+                if (j == label_column_index) continue; // Skip label column
                 try {
                     float val = std::stof(cols[j]);
                     feats.push_back(val);
                     
-                    int idx = j - 1;
+                    int idx = (j < label_column_index) ? j : (j - 1);
                     featureStats[idx].min = std::min(featureStats[idx].min, val);
                     featureStats[idx].max = std::max(featureStats[idx].max, val);
                     featureStats[idx].mean += val;
@@ -726,16 +728,17 @@ Rf_quantizer quantizeCSVFeatures(const char* inputFilePath, const char* outputFi
             continue; 
         }
         
-        labels.push_back(cells[0]);
+        labels.push_back(cells[label_column_index]);
         mcu::vector<float> feats;
         feats.reserve(n_feats);
         
-        for (int j = 1; j < n_cols; ++j) {
+        for (int j = 0; j < n_cols; ++j) {
+            if (j == label_column_index) continue; // Skip label column
             try {
                 float val = std::stof(cells[j]);
                 feats.push_back(val);
                 
-                int idx = j - 1;
+                int idx = (j < label_column_index) ? j : (j - 1);
                 featureStats[idx].min = std::min(featureStats[idx].min, val);
                 featureStats[idx].max = std::max(featureStats[idx].max, val);
                 featureStats[idx].mean += val;
@@ -912,6 +915,13 @@ DatasetInfo scanDataset(const char* inputFilePath) {
         throw std::runtime_error("Input CSV needs at least one label + one feature");
     }
     
+    // Validate label_column_index
+    if (label_column_index < 0 || label_column_index >= n_cols) {
+        fin.close();
+        throw std::runtime_error("Label column index " + std::to_string(label_column_index) + 
+                               " is out of range (0-" + std::to_string(n_cols-1) + ")");
+    }
+    
     info.numFeatures = n_cols - 1; // Exclude label column
     info.needsHorizontalTruncation = (info.numFeatures > num_features);
     
@@ -925,7 +935,7 @@ DatasetInfo scanDataset(const char* inputFilePath) {
         auto cells = split(firstLine);
         if ((int)cells.size() == n_cols) {
             lineCount++;
-            std::string label = cells[0].c_str();
+            std::string label = cells[label_column_index].c_str();
             uniqueLabels.push_back(label);
         }
     }
@@ -936,7 +946,7 @@ DatasetInfo scanDataset(const char* inputFilePath) {
         if ((int)cells.size() != n_cols) continue; // Skip malformed rows
         
         lineCount++;
-        std::string label = cells[0].c_str();
+        std::string label = cells[label_column_index].c_str();
         
         // Check if label already exists in uniqueLabels
         bool found = false;
@@ -962,19 +972,10 @@ DatasetInfo scanDataset(const char* inputFilePath) {
         info.labelMapping.push_back({uniqueLabels[i], static_cast<uint8_t>(i)});
     }
     
-    std::cout << "Dataset scan results:\n";
-    std::cout << "  📄 Header: " << (hasHeader ? "Detected and skipped" : "Not detected") << "\n";
-    std::cout << "  📊 Samples: " << info.numSamples << "\n";
-    std::cout << "  🔢 Features: " << info.numFeatures << "\n";
-    std::cout << "  🏷️  Labels: " << uniqueLabels.size() << " unique\n";
-    std::cout << "  📝 Label mapping:\n";
-    for (const auto& mapping : info.labelMapping) {
-        std::cout << "     \"" << mapping.first << "\" -> " << static_cast<int>(mapping.second) << "\n";
-    }
-    
+    // Silent operation - only report if there are issues
     if (info.needsHorizontalTruncation) {
-        std::cout << "  ⚠️  Feature count (" << info.numFeatures << ") exceeds num_features (" 
-                  << num_features << "). Horizontal truncation needed.\n";
+        std::cout << "⚠️  Feature count (" << info.numFeatures << ") exceeds num_features (" 
+                  << num_features << "). Truncating to " << num_features << " features.\n";
     }
     
     return info;
@@ -1043,20 +1044,6 @@ void generateDatasetParamsCSV(std::string path, const DatasetInfo& datasetInfo, 
     }
     
     fout.close();
-    uint16_t packedFeatureBytes = getPackedFeatureBytes(actualFeatures);
-
-    float compressionRatio = 0.0f;
-    if (packedFeatureBytes > 0) {
-        compressionRatio = static_cast<float>(actualFeatures) / packedFeatureBytes;
-    }
-    
-    std::cout << "✅ Dataset parameters saved to: " << outputFile << "\n";
-    std::cout << "   📊 Parameters summary:\n";
-    std::cout << "     Quantization: " << static_cast<int>(quantization_coefficient) << " bits per feature\n";
-    std::cout << "     Features: " << actualFeatures << "\n";
-    std::cout << "     Samples: " << actualTotalSamples << "\n";
-    std::cout << "     Labels: " << datasetInfo.labelMapping.size() << "\n";
-    std::cout << "     Compression: " << compressionRatio << ":1\n";
 }
 
 // Add binary conversion structures and functions before main()
@@ -1079,8 +1066,6 @@ struct ESP32_Sample {
 
 // Load CSV data for binary conversion
 mcu::vector<ESP32_Sample> loadCSVForBinary(const std::string& csvFilename, uint16_t expectedFeatures) {
-    std::cout << "🔄 Loading CSV data for binary conversion: " << csvFilename << std::endl;
-    
     std::ifstream file(csvFilename);
     if (!file) {
         throw std::runtime_error("Cannot open CSV file: " + csvFilename);
@@ -1156,10 +1141,9 @@ mcu::vector<ESP32_Sample> loadCSVForBinary(const std::string& csvFilename, uint1
     
     file.close();
     
-    std::cout << "✅ CSV loading completed:" << std::endl;
-    std::cout << "   📊 Valid samples loaded: " << validSamples << std::endl;
-    std::cout << "   📋 Lines processed: " << lineCount << std::endl;
-    std::cout << "   ❌ Errors encountered: " << errorCount << std::endl;
+    if (errorCount > 0) {
+        std::cout << "⚠️  Warning: " << errorCount << " invalid rows skipped during loading\n";
+    }
     
     return samples;
 }
@@ -1168,8 +1152,6 @@ mcu::vector<ESP32_Sample> loadCSVForBinary(const std::string& csvFilename, uint1
 void saveBinaryDataset(const mcu::vector<ESP32_Sample>& samples, 
                       const std::string& binaryFilename, 
                       uint16_t numFeatures) {
-    std::cout << "🔄 Converting to ESP32 binary format: " << binaryFilename << std::endl;
-    
     std::ofstream file(binaryFilename, std::ios::binary);
     if (!file) {
         throw std::runtime_error("Cannot create binary file: " + binaryFilename);
@@ -1179,24 +1161,12 @@ void saveBinaryDataset(const mcu::vector<ESP32_Sample>& samples,
     uint32_t numSamples = static_cast<uint32_t>(samples.size());
     uint16_t numFeatures_header = numFeatures;
     
-    std::cout << "📊 Binary header:" << std::endl;
-    std::cout << "   Samples: " << numSamples << " (4 bytes, little-endian)" << std::endl;
-    std::cout << "   Features: " << numFeatures_header << " (2 bytes, little-endian)" << std::endl;
-    
     // Write header (exactly like ESP32 Rf_data)
     file.write(reinterpret_cast<const char*>(&numSamples), sizeof(uint32_t));
     file.write(reinterpret_cast<const char*>(&numFeatures_header), sizeof(uint16_t));
     
     // Calculate packed bytes needed for features
     uint16_t packedFeatureBytes = getPackedFeatureBytes(numFeatures);
-    
-    std::cout << "🗜️  Packing configuration:" << std::endl;
-    std::cout << "   Bits per feature: " << static_cast<int>(quantization_coefficient) << std::endl;
-    if (packedFeatureBytes > 0) {
-        float effectiveFeaturesPerByte = static_cast<float>(numFeatures) / packedFeatureBytes;
-        std::cout << "   Effective features per byte: " << effectiveFeaturesPerByte << std::endl;
-    }
-    std::cout << "   Packed bytes per sample: " << packedFeatureBytes << std::endl;
     
     // Write samples (exactly like ESP32 Rf_data)
     for (size_t i = 0; i < samples.size(); ++i) {
@@ -1242,30 +1212,14 @@ void saveBinaryDataset(const mcu::vector<ESP32_Sample>& samples,
         
         size_t expectedSize = 6 + samples.size() * (1 + packedFeatureBytes);
         
-        std::cout << "✅ Binary conversion completed:" << std::endl;
-        std::cout << "   📁 File: " << binaryFilename << std::endl;
-        std::cout << "   📊 Samples written: " << samples.size() << std::endl;
-        std::cout << "   💾 File size: " << fileSize << " bytes" << std::endl;
-        std::cout << "   🎯 Expected size: " << expectedSize << " bytes" << std::endl;
-        
-        if (fileSize == expectedSize) {
-            std::cout << "   ✅ File size matches ESP32 expectation" << std::endl;
-        } else {
-            std::cout << "   ❌ File size mismatch!" << std::endl;
+        if (fileSize != expectedSize) {
+            std::cout << "❌ Binary file size mismatch: " << fileSize << " bytes (expected " << expectedSize << " bytes)\n";
         }
     }
 }
 
 // Integrated CSV to binary conversion function
 void convertCSVToBinary(const std::string& inputCSV, const std::string& outputBinary, uint16_t numFeatures) {
-    std::cout << "\n=== CSV to Binary Conversion ===\n";
-    std::cout << "🔧 Configuration:" << std::endl;
-    std::cout << "   Input CSV: " << inputCSV << std::endl;
-    std::cout << "   Output binary: " << outputBinary << std::endl;
-    std::cout << "   Features per sample: " << numFeatures << std::endl;
-    std::cout << "   Quantization: " << static_cast<int>(quantization_coefficient) << " bits per feature" << std::endl;
-    std::cout << "   Valid range: 0-" << static_cast<int>(getMaxFeatureValue()) << std::endl;
-    
     // Load CSV data
     auto samples = loadCSVForBinary(inputCSV, numFeatures);
     
@@ -1275,15 +1229,13 @@ void convertCSVToBinary(const std::string& inputCSV, const std::string& outputBi
     
     // Convert to binary format
     saveBinaryDataset(samples, outputBinary, numFeatures);
-    
-    std::cout << "✅ CSV to binary conversion completed successfully!" << std::endl;
 }
 
 int main(int argc, char* argv[]) {
     try {
         bool skipHeader = false; // Default to not skipping header (process all lines)
         bool headerSpecified = false; // Track if user explicitly specified header option
-        bool runVisualization = true; // Default to running visualization
+        bool runVisualization = false; // Visualization handled by wrapper script
         std::string inputFile;
         std::string modelName; // Model name for output filenames
         
@@ -1348,13 +1300,31 @@ int main(int argc, char* argv[]) {
                     return 1;
                 }
             } else if (arg == "-v" || arg == "-visualize") {
-                runVisualization = true;
+                runVisualization = true; // Accepted for backward compatibility
+            } else if (arg == "-lc" || arg == "--label_column") {
+                if (i + 1 < argc) {
+                    try {
+                        int column = std::stoi(argv[++i]);
+                        if (column < 0) {
+                            std::cerr << "Error: label column index must be non-negative\n";
+                            return 1;
+                        }
+                        label_column_index = column;
+                    } catch (const std::exception& e) {
+                        std::cerr << "Error: Invalid number for -lc/--label_column option\n";
+                        return 1;
+                    }
+                } else {
+                    std::cerr << "Error: -lc/--label_column requires a numeric value\n";
+                    return 1;
+                }
             } else if (arg == "-h" || arg == "--help") {
                 std::cout << "Usage: " << argv[0] << " [options]\n";
                 std::cout << "Options:\n";
                 std::cout << "  -p, -path <file>        Path to input CSV file (required)\n";
                 std::cout << "  -m, -model <name>       Model name for output filenames (optional; if not provided, extracted from input filename)\n";
                 std::cout << "  -he, -header <yes/no>   Skip header if 'yes', process all lines if 'no' (auto-detect if not specified)\n";
+                std::cout << "  -lc, --label_column <n> Column index containing the label (default: 0 for first column)\n";
                 std::cout << "  -f, -features <number>  Maximum number of features (default: 1023, range: 1-1023)\n";
                 std::cout << "  -q, -bits <1-8>         Quantization coefficient in bits per feature (default: 2)\n";
                 std::cout << "  -v, -visualize          Run quantization visualization after processing (default: enabled)\n";
@@ -1362,6 +1332,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "\nExamples:\n";
                 std::cout << "  " << argv[0] << " -p data/mydata.csv -header yes -features 512 -q 3\n";
                 std::cout << "  " << argv[0] << " -p data/mydata.csv -model my_rf_model -q 3\n";
+                std::cout << "  " << argv[0] << " -p data/mydata.csv --label_column 2 -q 3\n";
                 return 0;
             } else if (inputFile.empty() && arg.find('-') != 0) {
                 // If no flags and inputFile not set, treat as positional argument (backward compatibility)
@@ -1415,75 +1386,56 @@ int main(int argc, char* argv[]) {
         std::string binaryFile = resultDir + "/" + baseName + "_nml.bin";
 
         // Step 1: Scan dataset to get info and create label mapping
-                std::cout << "=== Dataset Analysis ===\n";
-                std::cout << "   Quantization: " << static_cast<int>(quantization_coefficient)
-                                    << " bits (" << getGroupsPerFeature() << " groups, max value "
-                                    << static_cast<int>(getMaxFeatureValue()) << ")\n";
         DatasetInfo datasetInfo = scanDataset(inputFile.c_str());
 
         // Auto-detect header if not explicitly specified by user
         if (!headerSpecified) {
-            std::cout << "\n=== Automatic Header Detection ===\n";
             bool hasHeader = detectCSVHeader(inputFile.c_str());
             skipHeader = hasHeader; // Skip header if detected
-            std::cout << "   🤖 Auto-detected header mode: " 
-                      << (skipHeader ? "yes (header will be skipped)" : "no (all lines will be processed)") << "\n";
-        } else {
-            std::cout << "\n=== User-specified Header Mode ===\n";
-            std::cout << "   👤 User specified header mode: " 
-                      << (skipHeader ? "yes (header will be skipped)" : "no (all lines will be processed)") << "\n";
+            (void)hasHeader; // Header detection is silent for clean CLI output
         }
 
         // Step 2: Quantize features with the dataset
-        std::cout << "\n=== Feature Categorization ===\n";
         Rf_quantizer test_ctg = quantizeCSVFeatures(inputFile.c_str(), normalizedFile.c_str(), getGroupsPerFeature(), datasetInfo.labelMapping, skipHeader);
-        std::cout << "Categorization completed successfully.\n";
 
         // Save quantizer for ESP32 transfer
         test_ctg.saveQuantizer(quantizerFile.c_str());
-        std::cout << "Quantizer saved to " << quantizerFile << " for ESP32 transfer.\n";
 
         // Step 3: Generate dataset parameters CSV for ESP32 transfer
-        std::cout << "\n=== Dataset Parameters Generation ===\n";
         generateDatasetParamsCSV(normalizedFile, datasetInfo, dataParamsFile.c_str());
 
         // Step 4: Convert CSV to binary format
         convertCSVToBinary(normalizedFile, binaryFile, test_ctg.getNumFeatures());
 
-        std::cout << "\n=== Processing Complete ===\n";
-        std::cout << "✅ Dataset processing completed successfully:\n";
-        std::cout << "   📊 Normalized CSV: " << normalizedFile << "\n";
-        std::cout << "   💾 Binary dataset: " << binaryFile << "\n";
-        std::cout << "   📊 Features per sample: " << test_ctg.getNumFeatures() << " (" << static_cast<int>(quantization_coefficient)
-                  << "-bit values: 0-" << static_cast<int>(getMaxFeatureValue()) << ")\n";
-        std::cout << "   🏷️  Labels: " << datasetInfo.labelMapping.size() << " classes (normalized 0-"
-                  << (datasetInfo.labelMapping.size() - 1) << ")\n";
-        std::cout << "   📋 Quantizer: " << quantizerFile << "\n";
-        std::cout << "   ⚙️  Parameters: " << dataParamsFile << "\n";
-        std::cout << "\n🚀 Ready for ESP32 transfer!\n";
-        
-        // Step 7: Run quantization visualization if requested
-        if (runVisualization) {
-            std::cout << "\n=== Quantization Visualization ===\n";
-            std::cout << "🔄 Running quantization visualization...\n";
-            
-            // Prepare command to run visualization
-            std::string visualizeCommand = "python3 quantization_visualizer.py " + baseName;
-            std::cout << "🚀 Running: " << visualizeCommand << std::endl;
-            
-            int result = system(visualizeCommand.c_str());
-            if (result == 0) {
-                std::cout << "✅ Visualization completed successfully!" << std::endl;
-                std::cout << "📊 Check the plots/ directory for generated visualizations." << std::endl;
-            } else {
-                std::cout << "❌ Visualization failed. You can run it manually:" << std::endl;
-                std::cout << "   " << visualizeCommand << std::endl;
-                std::cout << "💡 Make sure Python dependencies are installed:" << std::endl;
-                std::cout << "   pip install -r requirements.txt" << std::endl;
-            }
+        // Calculate file size compression ratio
+        size_t inputFileSize = 0;
+        size_t outputFileSize = 0;
+        std::ifstream inputFileCheck(inputFile, std::ios::binary | std::ios::ate);
+        if (inputFileCheck) {
+            inputFileSize = inputFileCheck.tellg();
+            inputFileCheck.close();
         }
-
-        std::cout << "\n";
+        std::ifstream outputFileCheck(binaryFile, std::ios::binary | std::ios::ate);
+        if (outputFileCheck) {
+            outputFileSize = outputFileCheck.tellg();
+            outputFileCheck.close();
+        }
+        
+        std::cout << "\n=== Processing Complete ===\n";
+        std::cout << "✅ Dataset quantized and compressed:\n";
+        std::cout << "   📊 Samples: " << datasetInfo.numSamples << " | Features: " << test_ctg.getNumFeatures() 
+                  << " | Labels: " << datasetInfo.labelMapping.size() << "\n";
+        std::cout << "   🗜️  Quantization: " << static_cast<int>(quantization_coefficient) << std::endl;
+        
+        if (inputFileSize > 0 && outputFileSize > 0) {
+            float compressionRatio = static_cast<float>(inputFileSize) / static_cast<float>(outputFileSize);
+            float compressionPercent = (1.0f - static_cast<float>(outputFileSize) / static_cast<float>(inputFileSize)) * 100.0f;
+            std::cout << "   📉 Compression: " << std::fixed << std::setprecision(2) 
+                      << compressionRatio << "x (" << compressionPercent << "% size reduction)\n";
+            std::cout << "      Input: " << inputFileSize << " bytes → Output: " << outputFileSize << " bytes\n";
+        }
+        
+        (void)runVisualization; // Silence unused warning; visualization runs in shell script
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
         return 1;

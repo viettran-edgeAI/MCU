@@ -142,9 +142,50 @@ For details on how variable quantization (1-8 bits) and quantizer work, please r
 
 # With custom feature limit and quantization, no visualization
 ./quantize_dataset.sh -p data/iris_data.csv -q 2 -f 512 -nv
+
+# If label is in a different column (e.g., column 3)
+./quantize_dataset.sh -p data/mydata.csv --label_column 2 -q 3
 ```
 
 Generated files will be in `data/result/` directory, ready for ESP32 transfer.
+
+### 📁 Flexible CSV Format Support
+
+**NEW:** You can now specify which column contains your labels!
+
+By default, the tool expects labels in the **first column** (index 0), but many datasets have different formats:
+
+```bash
+# Standard format: label in first column (default)
+./quantize_dataset.sh -p data/standard.csv
+
+# Label in second column (index 1)
+./quantize_dataset.sh -p data/custom.csv --label_column 1
+
+# Label in third column (index 2)
+./quantize_dataset.sh -p data/custom.csv --label_column 2
+
+# Label in last column
+./quantize_dataset.sh -p data/custom.csv --label_column 5  # if you have 6 columns total
+```
+
+**Example CSV formats:**
+
+```csv
+# Default: Label first (--label_column 0 or omit)
+Species,SepalLength,SepalWidth,PetalLength,PetalWidth
+setosa,5.1,3.5,1.4,0.2
+
+# Label in middle (--label_column 2)
+SepalLength,SepalWidth,Species,PetalLength,PetalWidth
+5.1,3.5,setosa,1.4,0.2
+
+# Label last (--label_column 4)
+SepalLength,SepalWidth,PetalLength,PetalWidth,Species
+5.1,3.5,1.4,0.2,setosa
+```
+
+All other columns are automatically treated as features. The tool validates column indices to prevent errors.
 
 ## 🔧 Commands and interfaces
 
@@ -156,6 +197,7 @@ Generated files will be in `data/result/` directory, ready for ESP32 transfer.
 - `-p, --path <file>`: input CSV (required)
 - `-m, --model <name>`: Model name for output filenames (optional; if not provided, extracted from input filename)
 - `-he, --header <yes/no>`: Skip header if 'yes', process all lines if 'no' (auto-detect if not specified)
+- `-lc, --label_column <n>`: Column index containing the label (default: 0 for first column)
 - `-f, --features <number>`: Maximum number of features (default: 1023, range: 1-65535)
 - `-q, --bits <1-8>`: Quantization coefficient in bits per feature (default: 2, range: 1-8)
 - `-v, --visualize`: run visualization after processing (default: enabled)
@@ -165,16 +207,24 @@ Generated files will be in `data/result/` directory, ready for ESP32 transfer.
 ## 📊 Input format
 
 Your CSV should have:
-- Column 1: label (string or numeric)
-- Columns 2..N: features (any numeric data)
+- One column for label (string or numeric) - by default the first column, configurable with `--label_column`
+- Remaining columns: features (any numeric data)
 - Headers: optional (automatically handled)
 
-Example:
+**Default format (label in first column):**
 ```
 Species,SepalLength,SepalWidth,PetalLength,PetalWidth
 setosa,5.1,3.5,1.4,0.2
 versicolor,7.0,3.2,4.7,1.4
 ```
+
+**Alternative format (label in different column):**
+```
+SepalLength,SepalWidth,Species,PetalLength,PetalWidth
+5.1,3.5,setosa,1.4,0.2
+7.0,3.2,versicolor,4.7,1.4
+```
+Use `--label_column 2` to specify the Species column as the label.
 
 ## 🔌 Transfer to ESP32
 
@@ -259,6 +309,7 @@ python3 unified_transfer.py iris_data /dev/ttyUSB0
   - `-p, --path <file>`: input CSV (required)
   - `-m, --model <name>`: Model name for output filenames (optional; if not provided, extracted from input filename)
   - `-he, --header <yes/no>`: Skip header if 'yes', process all lines if 'no' (auto-detect if not specified)
+  - `-lc, --label_column <n>`: Column index containing the label (default: 0 for first column)
   - `-f, --features <number>`: Maximum number of features (default: 1023, range: 1-65535)
   - `-q, --bits <1-8>`: Quantization coefficient in bits per feature (default: 2, range: 1-8)
   - `-v, --visualize`: run visualization after processing (default: enabled)
@@ -270,12 +321,14 @@ Examples:
 - Custom model name: `./quantize_dataset.sh -p data/iris_data.csv -m iris_classifier`
 - Force skip header: `./quantize_dataset.sh -p data/iris_data.csv --header yes`
 - Force process all lines: `./quantize_dataset.sh -p data/iris_data.csv --header no`
+- Label in 3rd column: `./quantize_dataset.sh -p data/iris_data.csv --label_column 2`
 - Limit to 512 features: `./quantize_dataset.sh -p data/iris_data.csv -f 512`
 - Use 3-bit quantization: `./quantize_dataset.sh -p data/iris_data.csv -q 3`
 - Binary features (1-bit): `./quantize_dataset.sh -p data/iris_data.csv -q 1 -nv`
 - High precision (4-bit) with custom model name: `./quantize_dataset.sh -p data/iris_data.csv -m iris_precise -q 4 -f 256`
 - Skip visualization: `./quantize_dataset.sh -p data/iris_data.csv -nv`
 - Combined options: `./quantize_dataset.sh -p data/iris_data.csv -m iris_v2 -q 2 -f 256 --header yes -nv`
+- Label in last column: `./quantize_dataset.sh -p data/mydata.csv --label_column 10 -q 3`
 
 **Header Detection Logic:**
 - Analyzes first two rows to detect header presence
@@ -283,6 +336,12 @@ Examples:
 - `--header yes`: Skip first line (treat as header)
 - `--header no`: Process all lines (no header present)
 - (no --header): Automatically detect and handle appropriately
+
+**Label Column:**
+- Default: Column 0 (first column)
+- Use `--label_column N` to specify a different column (0-indexed)
+- All other columns are treated as features
+- Column validation ensures the specified index is within the CSV column range
 
 **Feature Limit:**
 - Default: 1023 features (optimized for ESP32 memory constraints)
@@ -321,6 +380,7 @@ Examples:
   - `-p, -path <file>`: input CSV
   - `-m, -model <name>`: Model name for output filenames (optional; if not provided, extracted from input filename)
   - `-he, -header <yes/no>`: Skip header if 'yes', process all lines if 'no' (auto-detect if not specified)
+  - `-lc, --label_column <n>`: Column index containing the label (default: 0 for first column)
   - `-f, -features <number>`: Maximum number of features (default: 1023, range: 1-65535)
   - `-q, -bits <1-8>`: Quantization coefficient in bits per feature (default: 2, range: 1-8)
   - `-v, -visualize`

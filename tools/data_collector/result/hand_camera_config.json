@@ -1,0 +1,8 @@
+{
+  "dataset": "hand",
+  "resolution": "QQVGA",
+  "width": 160,
+  "height": 120,
+  "pixel_format": "GRAYSCALE",
+  "capture_interval_ms": 750
+}

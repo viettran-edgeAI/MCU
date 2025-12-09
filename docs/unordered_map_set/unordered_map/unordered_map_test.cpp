@@ -11,6 +11,7 @@
 // for memory usage measurement
 #include <memory>
 #include <atomic>
+#include <fstream>
 
 using namespace mcu;
 
@@ -635,7 +636,7 @@ void memory_usage_comparison(unordered_map<uint16_t, uint16_t>& myMap,std::unord
     uint16_t,uint16_t,
     std::hash<uint16_t>,
     std::equal_to<uint16_t>,
-    CountingAllocator<std::pair<const uint8_t,uint8_t>>>;
+    CountingAllocator<std::pair<const uint16_t,uint16_t>>>;
     SM cmap;
 
     // bump both maps equally
@@ -1134,6 +1135,189 @@ void constructors_test(unordered_map<uint16_t, uint16_t>& myMap, std::unordered_
     std::cout << "total errors: " << total_err << std::endl;
 }
 
+// Comprehensive benchmark function to measure all key metrics
+void comprehensive_benchmark(unordered_map<uint16_t, uint16_t>& myMap, std::unordered_map<uint16_t, uint16_t>& stdMap, const std::string& log_filename) {
+    std::cout << "\n========== COMPREHENSIVE BENCHMARK ==========" << std::endl;
+    
+    const int TEST_SIZE = 50000; // Number of elements to test
+    const int INSERT_ITERATIONS = 10;
+    const int FIND_ITERATIONS = 100;
+    const int ITERATION_RUNS = 50;
+    
+    // Reset global counter for memory tracking
+    g_bytes_allocated = 0;
+    
+    // Prepare std::unordered_map with counting allocator
+    using SM = std::unordered_map<
+        uint16_t, uint16_t,
+        std::hash<uint16_t>,
+        std::equal_to<uint16_t>,
+        CountingAllocator<std::pair<const uint16_t, uint16_t>>
+    >;
+    SM cmap;
+    
+    myMap.clear();
+    cmap.clear();
+    stdMap.clear();
+    
+    // Generate random keys for testing
+    uint16_t test_keys[TEST_SIZE];
+    for(int i = 0; i < TEST_SIZE; i++) {
+        test_keys[i] = (i * 13 + 7) % 65535;
+    }
+    
+    // ===== MEMORY USAGE MEASUREMENT =====
+    std::cout << "\n[1/4] Measuring memory usage..." << std::endl;
+    
+    // Fill both maps
+    for(int i = 0; i < TEST_SIZE; i++) {
+        uint16_t key = test_keys[i];
+        uint16_t value = key ^ 0xAAAA;
+        myMap.insert(key, value);
+        cmap.insert({key, value});
+    }
+    
+    size_t my_memory = myMap.memory_usage();
+    size_t std_memory = g_bytes_allocated.load();
+    
+    std::cout << "  mcu::unordered_map: " << my_memory << " bytes" << std::endl;
+    std::cout << "  std::unordered_map: " << std_memory << " bytes" << std::endl;
+    std::cout << "  Ratio: " << static_cast<double>(my_memory) / std_memory << "x" << std::endl;
+    
+    // ===== INSERT PERFORMANCE =====
+    std::cout << "\n[2/4] Benchmarking insert operations..." << std::endl;
+    
+    double my_insert_time = 0;
+    double std_insert_time = 0;
+    
+    for(int iter = 0; iter < INSERT_ITERATIONS; iter++) {
+        myMap.clear();
+        stdMap.clear();
+        
+        auto start = std::chrono::high_resolution_clock::now();
+        for(int i = 0; i < TEST_SIZE; i++) {
+            myMap.insert(test_keys[i], test_keys[i] ^ 0xAAAA);
+        }
+        auto end = std::chrono::high_resolution_clock::now();
+        my_insert_time += std::chrono::duration<double>(end - start).count();
+        
+        start = std::chrono::high_resolution_clock::now();
+        for(int i = 0; i < TEST_SIZE; i++) {
+            stdMap.insert({test_keys[i], test_keys[i] ^ 0xAAAA});
+        }
+        end = std::chrono::high_resolution_clock::now();
+        std_insert_time += std::chrono::duration<double>(end - start).count();
+    }
+    
+    my_insert_time /= INSERT_ITERATIONS;
+    std_insert_time /= INSERT_ITERATIONS;
+    
+    std::cout << "  mcu::unordered_map: " << my_insert_time * 1000 << " ms" << std::endl;
+    std::cout << "  std::unordered_map: " << std_insert_time * 1000 << " ms" << std::endl;
+    std::cout << "  Ratio: " << my_insert_time / std_insert_time << "x" << std::endl;
+    
+    // ===== FIND PERFORMANCE =====
+    std::cout << "\n[3/4] Benchmarking find operations..." << std::endl;
+    
+    // Ensure both maps have same data
+    myMap.clear();
+    stdMap.clear();
+    for(int i = 0; i < TEST_SIZE; i++) {
+        myMap.insert(test_keys[i], test_keys[i] ^ 0xAAAA);
+        stdMap.insert({test_keys[i], test_keys[i] ^ 0xAAAA});
+    }
+    
+    double my_find_time = 0;
+    double std_find_time = 0;
+    uint16_t checksum = 0;
+    
+    for(int iter = 0; iter < FIND_ITERATIONS; iter++) {
+        auto start = std::chrono::high_resolution_clock::now();
+        for(int i = 0; i < TEST_SIZE; i++) {
+            auto it = myMap.find(test_keys[i]);
+            if(it != myMap.end()) {
+                checksum += it->second;
+            }
+        }
+        auto end = std::chrono::high_resolution_clock::now();
+        my_find_time += std::chrono::duration<double>(end - start).count();
+        
+        start = std::chrono::high_resolution_clock::now();
+        for(int i = 0; i < TEST_SIZE; i++) {
+            auto it = stdMap.find(test_keys[i]);
+            if(it != stdMap.end()) {
+                checksum += it->second;
+            }
+        }
+        end = std::chrono::high_resolution_clock::now();
+        std_find_time += std::chrono::duration<double>(end - start).count();
+    }
+    
+    my_find_time /= FIND_ITERATIONS;
+    std_find_time /= FIND_ITERATIONS;
+    
+    std::cout << "  mcu::unordered_map: " << my_find_time * 1000 << " ms" << std::endl;
+    std::cout << "  std::unordered_map: " << std_find_time * 1000 << " ms" << std::endl;
+    std::cout << "  Ratio: " << my_find_time / std_find_time << "x" << std::endl;
+    std::cout << "  (checksum: " << checksum << ")" << std::endl;
+    
+    // ===== ITERATION PERFORMANCE =====
+    std::cout << "\n[4/4] Benchmarking iteration..." << std::endl;
+    
+    double my_iter_time = 0;
+    double std_iter_time = 0;
+    checksum = 0;
+    
+    for(int iter = 0; iter < ITERATION_RUNS; iter++) {
+        auto start = std::chrono::high_resolution_clock::now();
+        for(auto it = myMap.begin(); it != myMap.end(); ++it) {
+            checksum += it->first + it->second;
+        }
+        auto end = std::chrono::high_resolution_clock::now();
+        my_iter_time += std::chrono::duration<double>(end - start).count();
+        
+        start = std::chrono::high_resolution_clock::now();
+        for(auto it = stdMap.begin(); it != stdMap.end(); ++it) {
+            checksum += it->first + it->second;
+        }
+        end = std::chrono::high_resolution_clock::now();
+        std_iter_time += std::chrono::duration<double>(end - start).count();
+    }
+    
+    my_iter_time /= ITERATION_RUNS;
+    std_iter_time /= ITERATION_RUNS;
+    
+    std::cout << "  mcu::unordered_map: " << my_iter_time * 1000 << " ms" << std::endl;
+    std::cout << "  std::unordered_map: " << std_iter_time * 1000 << " ms" << std::endl;
+    std::cout << "  Ratio: " << my_iter_time / std_iter_time << "x" << std::endl;
+    std::cout << "  (checksum: " << checksum << ")" << std::endl;
+    
+    // ===== SAVE RESULTS TO LOG FILE =====
+    std::cout << "\nSaving results to " << log_filename << "..." << std::endl;
+    
+    std::ofstream log_file(log_filename);
+    if(!log_file.is_open()) {
+        std::cerr << "Error: Could not open log file for writing!" << std::endl;
+        return;
+    }
+    
+    log_file << "# Comprehensive Benchmark Results\n";
+    log_file << "# Test size: " << TEST_SIZE << " elements\n";
+    log_file << "# mcu::unordered_map fullness: " << myMap.get_fullness() << "\n";
+    log_file << "# Date: " << __DATE__ << " " << __TIME__ << "\n\n";
+    
+    log_file << "metric,mcu_value,std_value,unit\n";
+    log_file << "Memory," << my_memory << "," << std_memory << ",bytes\n";
+    log_file << "Insert," << std::fixed << std::setprecision(6) << my_insert_time * 1000 << "," << std_insert_time * 1000 << ",ms\n";
+    log_file << "Find," << my_find_time * 1000 << "," << std_find_time * 1000 << ",ms\n";
+    log_file << "Iteration," << my_iter_time * 1000 << "," << std_iter_time * 1000 << ",ms\n";
+    
+    log_file.close();
+    
+    std::cout << "\n========== BENCHMARK COMPLETE ==========" << std::endl;
+    std::cout << "Results saved to: " << log_filename << std::endl;
+}
+
 
 int main(){
     srand(time(0));
@@ -1155,6 +1339,9 @@ int main(){
     fullness_test();
     memory_usage_comparison(myMap, stdMap);
     fullness_test2();
+    
+    // Run comprehensive benchmark and save to log
+    comprehensive_benchmark(myMap, stdMap, "benchmark_results.log");
 
     // unordered_map<int, std::string> myMap2;
     // for(int i= 0; i < 10000; i++){

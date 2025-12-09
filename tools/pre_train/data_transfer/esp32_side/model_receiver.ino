@@ -19,13 +19,6 @@
  * The tree log provides training history for analysis and debugging.
  * 
  * Designed to work with 'transfer_model.py' script.
- * 
- * PERFORMANCE NOTES:
- * - Transfer speed depends on CHUNK_SIZE; larger chunks are faster
- *   but may cause USB CDC buffer overruns on ESP32-C3-like boards.
- * - This sketch auto-detects the board and sets CHUNK_SIZE conservatively
- *   for C3, but allows user override via USER_CHUNK_SIZE define.
- * - See board_config.h for board-specific recommendations.
  */
 
 #include "Rf_file_manager.h"  // Includes Rf_board_config.h internally
@@ -46,27 +39,8 @@ const char* RESP_READY = "READY";
 const char* RESP_OK = "OK";
 const char* RESP_ERROR = "ERROR";
 
-/*
- * CHUNK_SIZE Configuration:
- * 
- * This is the maximum bytes per transfer chunk. The PC script must match this value.
- * 
- * Trade-off:
- *   - Larger chunks = faster transfers
- *   - Smaller chunks = more reliable (less USB CDC buffer saturation)
- * 
- * Board-specific guidance:
- *   - ESP32-C3/C6: 220 bytes (USB CDC buffer ~384 bytes; conservative margin)
- *   - ESP32-S3:    256 bytes (larger CDC buffer)
- *   - ESP32:       256 bytes (standard board)
- * 
- * If you need higher speed on larger boards, define USER_CHUNK_SIZE before
- * including this file, or edit board_config.h to adjust DEFAULT_CHUNK_SIZE.
- * 
- * Default is set via board_config.h based on detected board variant.
- */
 const uint16_t CHUNK_SIZE = USER_CHUNK_SIZE;
-const uint32_t CHUNK_DELAY = 20;  // Delay between chunk processing
+const uint32_t CHUNK_DELAY = 20;
 const uint32_t SERIAL_TIMEOUT_MS = 30000;  // Extended timeout for large files
 const uint32_t HEADER_WAIT_MS = 100;  // Wait time for header assembly
 
@@ -522,7 +496,6 @@ void handleFileChunk() {
     }
     uint8_t command = Serial.read();
     if (command != CMD_FILE_CHUNK) {
-        // If not a chunk, go back to command processing
         currentState = State::WAITING_FOR_COMMAND;
         return;
     }

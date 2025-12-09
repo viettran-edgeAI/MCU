@@ -37,12 +37,8 @@ const char* RESP_READY = "READY";
 const char* RESP_OK = "OK";
 const char* RESP_ERROR = "ERROR";
 
-/*
- * CHUNK_SIZE Configuration:
- * Auto-synced with Rf_board_config.h via USER_CHUNK_SIZE
- */
 const uint16_t CHUNK_SIZE = USER_CHUNK_SIZE;
-const uint32_t CHUNK_DELAY = 20;  // Delay between chunk processing
+const uint32_t CHUNK_DELAY = 20;
 const uint32_t SERIAL_TIMEOUT_MS = 30000;
 const uint32_t HEADER_WAIT_MS = 100;
 

@@ -83,7 +83,7 @@ The slot state management uses 2 bits per slot:
 Since elements may have to be linearly shifted multiple times, reordered or deleted overlapping with other elements in the container's lifetime, when we lookup to it (search, delete..) and the hash function hashes it to an address, how can we know its linear shift or deletion history? slot_handler combined with key can solve this problem, by using key matching, state and tombstone cleanup.
 
 Fullness mechanism :
-linear translation allows the design of containers to avoid creating pointers (binary trees, linked lists..) at each slot in main_table , but its disadvantage is that collisions slow down performance, O(N) in the worst case. The fullness mechanism overcomes this.
+`Linear shifting` allows the design of containers to avoid creating pointers (binary trees, linked lists..) at each slot in main_table , but its disadvantage is that collisions slow down performance, O(N) in the worst case. The fullness mechanism overcomes this.
 ![Hash Kernel Fullness](imgs/hash_kernel_fullness.jpg)
 
 The `fullness` parameter (default 92%) controls the trade-off between memory and performance:
@@ -136,11 +136,11 @@ We benchmarked four vector implementations with **SBO_SIZE=256** to evaluate the
 
 **Performance Results (relative to std::vector = 100%):**
 
-![Vector Speed Comparison](benchmark/vector_speed_comparison.png)
+![Vector Speed Comparison](imgs/vector_speed_comparison.png)
 
 **Summary Table:**
 
-![Vector Performance Summary](benchmark/vector_speed_summary.png)
+![Vector Performance Summary](imgs/vector_speed_summary.png)
 
 **Key Findings:**
 
@@ -234,8 +234,7 @@ Below is comparison of `ID_vector` with `std::unordered_set` and `std::vector`:
 
 ![ID_vector performance comparison](imgs/id_vector_time_comparison.png)
 
----
-## Part 4 
+Read more details : [ID_vector documentation](vectors/ID_vector/README.md)
 
 ---
 

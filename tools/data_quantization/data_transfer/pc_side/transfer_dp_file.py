@@ -7,13 +7,6 @@ Usage: python3 transfer_dp_file.py --model_name <model_name> --port <serial_port
 
 Example: python3 transfer_dp_file.py --model_name digit_model --port /dev/ttyACM0
          python3 transfer_dp_file.py -m digit_model -p /dev/ttyACM0
-
-PERFORMANCE NOTES:
-  - CHUNK_SIZE is automatically synchronized with Rf_board_config.h
-  - Board-specific defaults:
-    * ESP32-C3/C6: 220 bytes (USB CDC buffer constraint)
-    * ESP32-S3: 256 bytes (larger buffer)
-    * ESP32: 256 bytes (standard board)
 """
 
 import serial

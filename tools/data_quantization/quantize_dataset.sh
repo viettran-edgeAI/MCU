@@ -162,21 +162,15 @@ fi
 echo -e "  📊 Run visualization: ${GREEN}$RUN_VISUALIZATION${NC}"
 echo ""
 
-# Step 1: Compile processing program if needed
-echo -e "${PURPLE}Step 1: Checking processing program...${NC}"
+# Compile processing program if needed (quiet unless failure)
 if [[ ! -f "processing_data" || "processing_data.cpp" -nt "processing_data" ]]; then
-    echo -e "${YELLOW}🔧 Compiling processing program...${NC}"
     if ! g++ -std=c++17 -I../../src -o processing_data processing_data.cpp; then
         echo -e "${RED}❌ Failed to compile processing program${NC}"
         exit 1
     fi
-    echo -e "${GREEN}✅ Processing program compiled successfully${NC}"
-else
-    echo -e "${GREEN}✅ Processing program is up to date${NC}"
 fi
 
-# Step 2: Run dataset processing
-echo -e "\n${PURPLE}Step 2: Processing dataset...${NC}"
+# Run dataset processing
 PROCESS_ARGS="-p $CSV_PATH"
 
 # Add model name argument if user specified it
@@ -199,17 +193,10 @@ if [[ -n "$QUANT_BITS" ]]; then
     PROCESS_ARGS="$PROCESS_ARGS -q $QUANT_BITS"
 fi
 
-if [[ "$RUN_VISUALIZATION" == "yes" ]]; then
-    PROCESS_ARGS="$PROCESS_ARGS -v"
-fi
-
-echo -e "${YELLOW}🚀 Running: ./processing_data $PROCESS_ARGS${NC}"
 if ! ./processing_data $PROCESS_ARGS; then
     echo -e "${RED}❌ Dataset processing failed${NC}"
     exit 1
 fi
-
-echo -e "\n${GREEN}✅ ESP32 Dataset Processing and Visualization completed successfully!${NC}"
 
 # Extract base name for further operations
 if [[ -n "$MODEL_NAME" ]]; then
@@ -219,6 +206,15 @@ else
 fi
 DIRNAME=$(dirname "$CSV_PATH")
 RESULT_DIR="$DIRNAME/result"
+
+if [[ "$RUN_VISUALIZATION" == "yes" ]]; then
+    echo -e "\n📊 Running visualization..."
+    if python3 quantization_visualizer.py "$BASENAME" >/dev/null 2>&1; then
+        :
+    else
+        echo -e "${YELLOW}⚠️  Visualization failed (run manually: python3 quantization_visualizer.py $BASENAME)${NC}"
+    fi
+fi
 
 echo -e "\n${CYAN}Generated Files:${NC}"
 if [[ -f "$RESULT_DIR/${BASENAME}_nml.csv" ]]; then
@@ -238,10 +234,4 @@ if [[ "$RUN_VISUALIZATION" == "yes" && -d "plots" ]]; then
     echo -e "  📊 Visualizations: ${GREEN}plots/${NC}"
 fi
 
-echo -e "\n${YELLOW}💡 Next steps:${NC}"
-echo -e "   • Review generated files in the result/ directory"
-if [[ "$RUN_VISUALIZATION" == "yes" ]]; then
-    echo -e "   • Check visualization plots in the plots/ directory"
-fi
-echo -e "   • Transfer files to ESP32 using unified_transfer.py"
 echo ""

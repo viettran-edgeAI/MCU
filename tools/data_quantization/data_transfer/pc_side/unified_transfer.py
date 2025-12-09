@@ -159,7 +159,7 @@ def transfer_file(ser, file_path, esp32_filename):
                struct.pack('<III', file_size, file_crc, CHUNK_SIZE))
     send_command(ser, CMD_FILE_INFO, payload)
 
-    if not wait_for_response(ser, RESP_ACK):
+    if not wait_for_response(ser, RESP_ACK, verbose=False):
         print("❌ ESP32 did not acknowledge file info.")
         return False
 

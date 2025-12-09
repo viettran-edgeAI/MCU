@@ -165,8 +165,6 @@ def wait_for_response(ser, expected_response, timeout=ACK_TIMEOUT, verbose=True)
             all_received.append(new_data)
             
             if expected_response in buffer:
-                if verbose:
-                    print(f"✅ Got response: {expected_response.decode()}")
                 return True
                 
             if b"ERROR" in buffer:

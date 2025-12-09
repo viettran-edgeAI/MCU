@@ -342,7 +342,7 @@ namespace mcu {
                         break;
                     }
                 }
-                index = linearProbe(cap_, index, step_);
+                index = linearShifting(cap_, index, step_);
             }
             return -1;
         }
@@ -368,7 +368,7 @@ namespace mcu {
                         break;
                     }
                 }
-                index = linearProbe(cap_, index, step_);
+                index = linearShifting(cap_, index, step_);
             }
             return -1;
         }
@@ -581,7 +581,7 @@ namespace mcu {
                         break;
                     }
                 }
-                index = linearProbe(cap_, index, step_);
+                index = linearShifting(cap_, index, step_);
             }
 
             slotState old_state = getState(index);
@@ -647,7 +647,7 @@ namespace mcu {
                         return false;
                     }
                 }
-                index = linearProbe(cap_, index, step_);
+                index = linearShifting(cap_, index, step_);
             }
             return false;
         }
@@ -678,7 +678,7 @@ namespace mcu {
                         return end();
                     }
                 }
-                index = linearProbe(cap_, index, step_);
+                index = linearShifting(cap_, index, step_);
             }
             return end();
         }
@@ -1208,7 +1208,7 @@ namespace mcu {
                         break;
                     }
                 }
-                index = linearProbe(cap_, index, step_);
+                index = linearShifting(cap_, index, step_);
             }
             slotState oldState = getState(index);
             if(oldState == slotState::Empty){
@@ -1245,7 +1245,7 @@ namespace mcu {
                         return false;
                     }
                 }
-                index = linearProbe(cap_, index, step_);
+                index = linearShifting(cap_, index, step_);
             }
             return false;
         }
@@ -1273,7 +1273,7 @@ namespace mcu {
                         return end();
                     }
                 }
-                index = linearProbe(cap_, index, step_);
+                index = linearShifting(cap_, index, step_);
             }
             return end();
         }

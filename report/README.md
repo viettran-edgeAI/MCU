@@ -1,6 +1,6 @@
 # STL_MCU — Quantization & Performance Report
 
-This document summarizes the compression, precision, inference performance, and memory behavior of quantized random-forest models produced by the STL_MCU toolchain. The reports and benchmarks are run on 7 datasets provided in the tools/data_quantization/data/ folder: iris_data, cancer_data, walker_fall, digit_data, run_walk, mnist, emnist with various sizes, number of samples and classes.
+This document summarizes the compression, precision, inference performance, and memory behavior of quantized random-forest models produced by the STL_MCU toolchain. The reports and benchmarks are run on 7 datasets provided in the [data folder](./tools/data_quantization/data/) folder: iris_data, cancer_data, walker_fall, digit_data, run_walk, mnist, emnist with various sizes, number of samples and classes.
 
 **What this file contains:** a brief introduction, compression & precision tables, inference-time benchmark notes and graphs, memory/disk/fragmentation observations, and a short conclusion.
 
@@ -24,13 +24,14 @@ The table below reports dataset and model compression achieved by variable-bit q
 | Mnist (70000) | 73.4 MB → 2.6 MB | x28.2 | 17.2 MB → 0.563 MB | x30.6 | 0.960 → 0.958 |
 | Emnist (274000) | 151 MB → 5.2 MB | x29.0 | 3424 MB → 4.75 MB | x721.3 | 0.823 → 0.795 |
 
-Note: Compression ratios are rounded and computed as (original size / quantized size). Sizes use 1 MB = 1024 KB.
-
-Important clarification: The reported **model_size** mentioned is the model size when loaded into RAM. The model file size can be larger (0 -> 40%) due to the dynamic node layout packing mechanism when the model is loaded into RAM.
-
 Embedded visuals (relative compression and accuracy):
 
 ![Combined comparison](./imgs/compare_all.png)
+
+Note: 
+ - Compression ratios are rounded and computed as (original size / quantized size). Sizes use 1 MB = 1024 KB.
+
+ - The reported **model_size** mentioned is the model size when loaded into RAM. The model file size can be larger (0 -> 40%) due to the dynamic node layout packing mechanism when the model is loaded into RAM.
 
 ---
 
@@ -65,14 +66,14 @@ Benchmark note: these model inference/building-time results were recorded on an 
 
 The repo includes memory logs and visualizations showing heap usage, largest free block (fragmentation), and free disk over time for representative runs.
 
-Files of interest:
-
-- `esp32_cam_mlog.txt` + `imgs/memory_report.png` — Model building + training log with walker_fall dataset, running on esp32_cam board with 4MB PSRAM + 2.75MB Flash.
-- `esp32c3_mini_mlog.txt` `imgs/esp32_mini_mreport.png` — Model building + training log with digit_data dataset, running on esp32c3 super mini board with 283 KB RAM + 3 MB Flash.
 
 Memory usage plots:
 
+- Files : `esp32_cam_mlog.txt` + `imgs/memory_report.png` — Model building + training log with walker_fall dataset, running on esp32_cam board with 4MB PSRAM + 2.75MB Flash.
+
 ![esp32_cam board - enable PSRAM](./imgs/esp32_cam_mreport.png)
+
+- Files : `esp32c3_mini_mlog.txt` `imgs/esp32_mini_mreport.png` — Model building + training log with digit_data dataset, running on esp32c3 super mini board with 283 KB RAM + 3 MB Flash.
 
 ![esp32c3 super mini board - minimal resources](./imgs/esp32_mini_mreport.png)
 

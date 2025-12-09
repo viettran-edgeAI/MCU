@@ -5,37 +5,20 @@ Entries are grouped: small and close commits are consolidated into date-based re
 
 ------------------------------------------------------------------------------------
 
-## [2025-12-04] — Update 4_12_25: Documentation overhaul & container renaming
-
-### Major Changes
-- **Complete documentation rewrite**: Created comprehensive guides for all vector containers (packed_vector, vector/b_vector, ID_vector) with 600-1400 lines each covering architecture, API reference, performance benchmarks, and usage patterns.
-- **Container renaming**: Renamed `unordered_map(set)` → `unordered_map(set)_s` and `ChainedUnorderedMap(Set)` → `unordered_map(set)` for consistency.
-- **New STL_MCU.md**: Added 733-line main documentation with container comparison tables, hash mechanism details, memory efficiency analysis, and performance benchmarks.
-- **FATFS support**: Added FAT filesystem support for RF file system storage with improved `releaseData()` method using buffer.
-
-### Documentation Additions
-- **Vector guides** (3 comprehensive READMEs):
-  - `packed_vector`: 772 lines covering bit-packing, ValueType templates, traits system, multi-word storage, runtime BPV configuration
-  - `vector & b_vector`: 688 lines covering heap-only vs SBO comparison, auto-calculated buffer sizes, implicit conversions, built-in sorting
-  - `ID_vector`: 1403 lines covering O(1) integer ID operations, frequency tracking, set operations, range operations, vector arithmetic
-  
-- **Performance documentation**: Added benchmark scripts and visualization for hash containers, packed_vector, ID_vector with detailed memory/speed comparisons vs std::
-
-- **Visual aids**: Added 20+ diagrams and performance charts (hash_kernel components, container comparisons, memory usage graphs)
-
-### Technical Details
-- **File Manager**: Upgraded `releaseData()` to use buffered approach for better memory efficiency
-- **Container API**: Standardized naming across all hash-based containers
-- **Image organization**: Renamed documentation images for clarity (e.g., `552df095cf9345cd1c823.jpg` → `hash_kernel_collision.jpg`)
-- **Benchmark infrastructure**: Added Python scripts for automated benchmarking of all container types
-
-### Repository Cleanup
-- Added comprehensive .gitignore rules for test binaries, benchmark outputs, and build artifacts
-- Organized documentation structure with proper cross-linking between guides
-
-		- notable commits: 388d80a, fb2acbe, 07854fa
+## [2025-12-10] - Final update & clean 
+- Final update : 
+	- rename data_processing -> data_quantization across all docs and code.
+	- rename STL_MCU containers name 
+	- add buffer in releaseData() process
+- Write all documentations , examples and imgs.
+- Final cleanup and repo organization.
 
 ------------------------------------------------------------------------------------
+
+## [2025-11-27] - finalize transfer tools & rename data_processing tool
+- added new tool data_transfer : transfer all needed files to ESP32
+- add and normalize command line arguments for all data_transfer tools
+- Rename : data_processing  -> data_quantization.
 
 
 ## [2025-11-22] — fix hog transform & optimize model storage

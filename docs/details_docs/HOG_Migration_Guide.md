@@ -316,7 +316,7 @@ If you encounter issues during migration:
 1. Review `docs/HOG_Performance_Optimization.md` for technical details
 2. Check `docs/HOG_Optimization_QuickStart.md` for quick fixes
 3. Verify your config matches camera settings
-4. Test with `examples/HOG_ConfigQuickstart/` baseline
+4. Test with `examples/HOG_ESP32CAM/` baseline
 
 ## Summary
 

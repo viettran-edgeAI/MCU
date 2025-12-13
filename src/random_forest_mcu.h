@@ -14,7 +14,9 @@ namespace mcu{
     } rf_predict_result_t;
 
     class RandomForest{
-        using TreeSampleIDs = ID_vector<sample_type,3>;
+        uint8_t boostrap_bits = 3;
+        template<uint8_t bits>
+        using TreeSampleIDs = ID_vector<sample_type,bits>;
 #if RF_ENABLE_TRAINING
         struct TrainingContext {
             Rf_data base_data;
@@ -22,7 +24,46 @@ namespace mcu{
             Rf_data test_data;
             Rf_data validation_data;
             Rf_random random_generator;
-            vector<TreeSampleIDs> dataList;
+            template<uint8_t bits>
+            using sub_data_list_t = vector<TreeSampleIDs<bits>>;
+
+            // ID_vector's bits-per-value is a compile-time template parameter.
+            // We choose 1/2/3 at runtime by keeping three typed lists.
+            sub_data_list_t<1> dataList_1;
+            sub_data_list_t<2> dataList_2;
+            sub_data_list_t<3> dataList_3;
+
+            void clear_all_dataLists(){
+                dataList_1.clear();
+                dataList_2.clear();
+                dataList_3.clear();
+            }
+
+            size_t active_dataList_size(uint8_t bits) const {
+                switch(bits){
+                    case 1: return dataList_1.size();
+                    case 2: return dataList_2.size();
+                    default: return dataList_3.size();
+                }
+            }
+
+            bool active_dataList_empty(uint8_t bits) const {
+                return active_dataList_size(bits) == 0;
+            }
+
+            template<uint8_t bits>
+            sub_data_list_t<bits>& dataList(){
+                if constexpr (bits == 1) return dataList_1;
+                else if constexpr (bits == 2) return dataList_2;
+                else return dataList_3;
+            }
+
+            template<uint8_t bits>
+            const sub_data_list_t<bits>& dataList() const {
+                if constexpr (bits == 1) return dataList_1;
+                else if constexpr (bits == 2) return dataList_2;
+                else return dataList_3;
+            }
             TrainChunkAccessor* chunk_accessor; // For partial loading mode
             bool build_model;
             bool data_prepared;
@@ -211,7 +252,7 @@ namespace mcu{
             training_ctx->test_data.purgeData();
             if(config.use_validation() || config.training_score != OOB_SCORE)
             training_ctx->validation_data.purgeData();
-            training_ctx->dataList.clear();
+            training_ctx->clear_all_dataLists();
 
             // re_train node predictor after training session
             if(!training_ctx->build_model){
@@ -352,7 +393,11 @@ namespace mcu{
                     tree.set_layout(forest_container.layout_ptr(), true);
                     tree.reset_node_storage(estimated_nodes);
                     queue_nodes.clear();
-                    buildTree(tree, ctx->dataList[i], queue_nodes, ctx->chunk_accessor);
+                    switch (boostrap_bits) {
+                        case 1: buildTree<1>(tree, ctx->dataList<1>()[i], queue_nodes, ctx->chunk_accessor); break;
+                        case 2: buildTree<2>(tree, ctx->dataList<2>()[i], queue_nodes, ctx->chunk_accessor); break;
+                        default: buildTree<3>(tree, ctx->dataList<3>()[i], queue_nodes, ctx->chunk_accessor); break;
+                    }
                     tree.isLoaded = true;
                     if(tree.countNodes() > max_nodes){
                         max_nodes = tree.countNodes();
@@ -379,7 +424,11 @@ namespace mcu{
                     tree.set_layout(forest_container.layout_ptr(), true);
                     tree.reset_node_storage(estimated_nodes);
                     queue_nodes.clear();
-                    buildTree(tree, ctx->dataList[i], queue_nodes);
+                    switch (boostrap_bits) {
+                        case 1: buildTree<1>(tree, ctx->dataList<1>()[i], queue_nodes); break;
+                        case 2: buildTree<2>(tree, ctx->dataList<2>()[i], queue_nodes); break;
+                        default: buildTree<3>(tree, ctx->dataList<3>()[i], queue_nodes); break;
+                    }
                     tree.isLoaded = true;
                     if(tree.countNodes() > max_nodes){
                         max_nodes = tree.countNodes();
@@ -420,8 +469,7 @@ namespace mcu{
             }
 
             // initialize data components
-            ctx->dataList.clear();
-            ctx->dataList.reserve(config.num_trees);
+            ctx->clear_all_dataLists();
 
             base.build_file_path(path_buffer, "_train.bin");
             ctx->train_data.init(path_buffer, config);
@@ -519,95 +567,103 @@ namespace mcu{
                 RF_DEBUG(2, "No bootstrap, unique sample IDs only");
             }
 
-            uint8_t bits = 3;       // bits per sample ID (for bootstrap sampling)
-            if(!config.use_boostrap){
-                bits = 1;
-            }else{
+            if(config.use_boostrap){
                 if(config.num_samples < 2048){
-                    bits = 2;
-                }else{
-                    bits = 3;
+                    boostrap_bits = 2;
                 }
+            }else{
+                boostrap_bits = 1;
             }
 
             // Track hashes of each tree dataset to avoid duplicates across trees
             unordered_set_s<uint64_t> seen_hashes;
             RF_DEBUG(1, "Creating dataset for trees..."); 
             seen_hashes.reserve(config.num_trees * 2);
-            for (uint8_t i = 0; i < config.num_trees; i++) {
-                // Create a new ID_vector for this tree with proper range [0, numSample-1]
-                TreeSampleIDs sub_data;
-                sub_data.set_bits_per_value(bits);
-                
-                // CRITICAL: Set the ID range to match the sample IDs (0 to numSample-1)
-                if(numSample > 1){
-                    sub_data.set_ID_range(0, numSample - 1);
-                } else {
-                    sub_data.set_maxID(0);
-                }
-                sub_data.reserve(numSample);
 
-                // Derive a deterministic per-tree RNG; retry with nonce if duplicate detected
-                uint64_t nonce = 0;
-                while (true) {
-                    sub_data.clear();
-                    auto tree_rng = ctx->random_generator.deriveRNG(i, nonce);
+            auto clone_impl = [&](auto& list, auto& sub_data){
+                list.clear();
+                list.reserve(config.num_trees);
 
-                    if (config.use_boostrap) {
-                        // Bootstrap sampling: allow duplicates, track occurrence count
-                        for (sample_type j = 0; j < numSubSample; ++j) {
-                            sample_type idx = static_cast<sample_type>(tree_rng.bounded(numSample));
-                            sub_data.push_back(idx);
-                        }
-                    } else {
-                        // Sample without replacement using partial Fisher-Yates
-                        // Build an index array 0..numSample-1 (small sample_type)
-                        vector<sample_type> arr(numSample);
-                        for (sample_type t = 0; t < numSample; ++t) arr[t] = t; // keep indices valid; avoid clearing as custom vector shrinks size
-                        for (sample_type t = 0; t < numSubSample; ++t) {
-                            sample_type j = static_cast<sample_type>(t + tree_rng.bounded(numSample - t));
-                            sample_type tmp = arr[t];
-                            arr[t] = arr[j];
-                            arr[j] = tmp;
-                            sub_data.push_back(arr[t]);
-                        }
-                    }
-                    uint64_t h = ctx->random_generator.hashIDVector(sub_data);
-                    if (seen_hashes.find(h) == seen_hashes.end()) {
-                        seen_hashes.insert(h);
-                        break; // unique, accept
-                    }
-                    nonce++;
-                    if (nonce > 8) {
-                        auto temp_vec = sub_data;  // Copy current state
+                for (uint8_t i = 0; i < config.num_trees; i++) {
+                    // Derive a deterministic per-tree RNG; retry with nonce if duplicate detected
+                    uint64_t nonce = 0;
+                    while (true) {
                         sub_data.clear();
-                        
-                        // Re-add samples with slight modifications
-                        for (sample_type k = 0; k < min(5, (int)temp_vec.size()); ++k) {
-                            sample_type original_id = k < temp_vec.size() ? k : 0; // Simplified access
-                            sample_type modified_id = static_cast<sample_type>((original_id + k + i) % numSample);
-                            sub_data.push_back(modified_id);
+                        auto tree_rng = ctx->random_generator.deriveRNG(i, nonce);
+
+                        if (config.use_boostrap) {
+                            // Bootstrap sampling: allow duplicates
+                            for (sample_type j = 0; j < numSubSample; ++j) {
+                                sample_type idx = static_cast<sample_type>(tree_rng.bounded(numSample));
+                                sub_data.push_back(idx);
+                            }
+                        } else {
+                            // Sample without replacement using partial Fisher-Yates
+                            vector<sample_type> arr(numSample);
+                            for (sample_type t = 0; t < numSample; ++t) arr[t] = t;
+                            for (sample_type t = 0; t < numSubSample; ++t) {
+                                sample_type j = static_cast<sample_type>(t + tree_rng.bounded(numSample - t));
+                                sample_type tmp = arr[t];
+                                arr[t] = arr[j];
+                                arr[j] = tmp;
+                                sub_data.push_back(arr[t]);
+                            }
                         }
-                        
-                        // Add remaining samples from original
-                        for (sample_type k = 5; k < min(numSubSample, (sample_type)temp_vec.size()); ++k) {
-                            sample_type id = k % numSample; // Simplified access
-                            sub_data.push_back(id);
+
+                        uint64_t h = ctx->random_generator.hashIDVector(sub_data);
+                        if (seen_hashes.find(h) == seen_hashes.end()) {
+                            seen_hashes.insert(h);
+                            break; // unique, accept
                         }
-                        
-                        // accept after tweak
-                        seen_hashes.insert(ctx->random_generator.hashIDVector(sub_data));
-                        break;
+                        nonce++;
+                        if (nonce > 8) {
+                            auto temp_vec = sub_data;  // Copy current state
+                            sub_data.clear();
+
+                            // Re-add samples with slight modifications
+                            for (sample_type k = 0; k < min(5, (int)temp_vec.size()); ++k) {
+                                sample_type original_id = k < temp_vec.size() ? k : 0;
+                                sample_type modified_id = static_cast<sample_type>((original_id + k + i) % numSample);
+                                sub_data.push_back(modified_id);
+                            }
+
+                            // Add remaining samples from original
+                            for (sample_type k = 5; k < min(numSubSample, (sample_type)temp_vec.size()); ++k) {
+                                sample_type id = k % numSample;
+                                sub_data.push_back(id);
+                            }
+
+                            // accept after tweak
+                            seen_hashes.insert(ctx->random_generator.hashIDVector(sub_data));
+                            break;
+                        }
                     }
+
+                    list.push_back(std::move(sub_data));
+                    sub_data.clear();
+                    logger.m_log("clone sub_data");
                 }
-                ctx->dataList.push_back(std::move(sub_data));
-                logger.m_log("clone sub_data");
+            };
+
+            switch (boostrap_bits) {
+                case 1: {
+                    TreeSampleIDs<1> sub_data;
+                    clone_impl(ctx->dataList_1, sub_data);
+                } break;
+                case 2: {
+                    TreeSampleIDs<2> sub_data;
+                    clone_impl(ctx->dataList_2, sub_data);
+                } break;
+                default: {
+                    TreeSampleIDs<3> sub_data;
+                    clone_impl(ctx->dataList_3, sub_data);
+                } break;
             }
 
             logger.m_log("clones data");  
             size_t end = logger.drop_anchor();
             long unsigned dur = logger.t_log("clones data time", start, end, "ms");
-            RF_DEBUG_2(1, "🎉 Created ", ctx->dataList.size(), "datasets for trees","");
+            RF_DEBUG_2(1, "🎉 Created ", ctx->active_dataList_size(boostrap_bits), "datasets for trees","");
             RF_DEBUG_2(1, "⏱️  Created datasets time: ", dur, "ms","");
         }  
         
@@ -1207,7 +1263,8 @@ namespace mcu{
         }
 
         // Breadth-first tree building for optimal node layout - MEMORY OPTIMIZED
-        void buildTree(Rf_tree& tree, TreeSampleIDs& sampleIDs, vector<NodeToBuild>& queue_nodes) {
+        template<uint8_t bits>
+        void buildTree(Rf_tree& tree, TreeSampleIDs<bits>& sampleIDs, vector<NodeToBuild>& queue_nodes) {
             auto* ctx = training_ctx;
             if(!ctx){
                 return;
@@ -1285,7 +1342,12 @@ namespace mcu{
                     continue;
                 }
 
-                uint8_t num_selected_features = static_cast<uint8_t>(sqrt(config.num_features));
+                uint8_t num_selected_features;
+                if(config.num_trees > 1) {
+                    num_selected_features = static_cast<uint8_t>(sqrt(config.num_features));
+                } else {
+                    num_selected_features = config.num_features; // Decision tree mode: use all features
+                }
                 if (num_selected_features == 0) num_selected_features = 1;
                 vector<uint16_t> selectedFeatures = selectFeatureSubset(num_selected_features, ctx->random_generator);
 
@@ -1395,7 +1457,8 @@ namespace mcu{
         }
 
         // Overloaded buildTree using chunk accessor for partial loading
-        void buildTree(Rf_tree& tree, TreeSampleIDs& sampleIDs, vector<NodeToBuild>& queue_nodes, TrainChunkAccessor* accessor) {
+        template<uint8_t bits>
+        void buildTree(Rf_tree& tree, TreeSampleIDs<bits>& sampleIDs, vector<NodeToBuild>& queue_nodes, TrainChunkAccessor* accessor) {
             auto* ctx = training_ctx;
             if(!ctx || !accessor){
                 return;
@@ -1475,7 +1538,12 @@ namespace mcu{
                     continue;
                 }
 
-                uint8_t num_selected_features = static_cast<uint8_t>(sqrt(config.num_features));
+                uint8_t num_selected_features;
+                if(config.num_trees > 1) {
+                    num_selected_features = static_cast<uint8_t>(sqrt(config.num_features));
+                } else {
+                    num_selected_features = config.num_features; // Decision tree mode: use all features
+                }
                 if (num_selected_features == 0) num_selected_features = 1;
                 vector<uint16_t> selectedFeatures = selectFeatureSubset(num_selected_features, ctx->random_generator);
 
@@ -1606,7 +1674,7 @@ namespace mcu{
             }
 
             // Check if we have trained trees and data
-            if(ctx->dataList.empty()){
+            if(ctx->active_dataList_empty(boostrap_bits)){
                 RF_DEBUG(0, "❌ No sub_data for validation");
                 return 0.0f;
             }
@@ -1648,9 +1716,18 @@ namespace mcu{
 
                     // Find trees that didn't use this sample (OOB trees)
                     activeTrees.clear();
-                    for(uint8_t treeIdx = 0; treeIdx < config.num_trees && treeIdx < ctx->dataList.size(); treeIdx++){
+                    auto contains_in_tree = [&](uint8_t treeIdx, sample_type sid) -> bool {
+                        switch (boostrap_bits) {
+                            case 1: return ctx->dataList<1>()[treeIdx].contains(sid);
+                            case 2: return ctx->dataList<2>()[treeIdx].contains(sid);
+                            default: return ctx->dataList<3>()[treeIdx].contains(sid);
+                        }
+                    };
+
+                    size_t list_size = ctx->active_dataList_size(boostrap_bits);
+                    for(uint8_t treeIdx = 0; treeIdx < config.num_trees && treeIdx < list_size; treeIdx++){
                         // Check if this sample ID is NOT in the tree's training data
-                        if(!ctx->dataList[treeIdx].contains(sampleID)){
+                        if(!contains_in_tree(treeIdx, sampleID)){
                             activeTrees.push_back(treeIdx);
                         }
                     }
@@ -2357,6 +2434,16 @@ namespace mcu{
         // set number of trees in the forest
         void set_num_trees(uint8_t n_trees) {
             config.num_trees = n_trees;
+        }
+
+        // enable decision tree mode
+        void enable_decision_tree_mode() {
+            config.num_trees = 1;
+            config.use_boostrap = false;
+            config.boostrap_ratio = 1.0f;
+            if(config.training_score == Rf_training_score::OOB_SCORE){
+                config.training_score = Rf_training_score::VALID_SCORE;
+            }
         }
         
         // set max pending samples in the pending data stack

@@ -27,7 +27,7 @@ Key Points:
 Read more about these containers in the [STL_MCU documentation](./docs/STL_MCU.md).
 
 ## Demonstration examples
-- Demo of complete workflow: collect data, pre-train (on pc), run model, re-train and update model in real time entirely on esp32 - [ondevice training](./examples/retrain_ondevice_demo/)
+- Demo of complete workflow: collect data, pre-train (on pc), run model, re-train and update model in real time entirely on esp32 - [demo: ondevice training](./examples/retrain_ondevice_demo/)
 
 ## Extended support
 - Memory : support PSRAM accross all containers and algorithms
@@ -37,5 +37,23 @@ Read more about these containers in the [STL_MCU documentation](./docs/STL_MCU.m
 
 For API details, configuration macros, and usage examples see the [main documentation](./docs/) folder in this repository.
 
+## Use cases
+
+**Wearables & Health**
+
+- Gesture-recognizing rings or bracelets (IMU-based) that learn individual gesture styles.
+- Fall detection, gait analysis, and rehabilitation support – models that adapt to the patient.
+- Personal medical support devices where biological data cannot be sent to a server.
+
+**Industrial / IoT / Agriculture**
+
+- Vibration sensors predict machine failure; models update automatically for each specific machine.
+- Agricultural sensor nodes that self-calibrate to the environment of each region.
+- Environmental monitoring systems (water, low-quality air), operating completely offline.
+
+**Audio & Simple Vision**
+
+- Audio analysis (anomaly detection, keyword spotting) that can learn based on real-world acoustic conditions.
+- Simple vision tasks based on compressed features; forest models determine optimal processing.
 ---
 

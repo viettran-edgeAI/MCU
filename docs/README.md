@@ -30,7 +30,8 @@ This is the technical documentation for the MCU random forest library, analyzing
   - See more details : [Model pre-training tools](../tools/pre_train/README.md) 
 
 ## Data transfer tools:
-- used to transfer files from pc to microcontroller: dataset (after quantization), model, quantizer, node_predictor, ...
+- After quantization and pre-training, the generated files need to be transferred to the microcontroller's filesystem (SD card, SPIFFS, LittleFS, ...). This step is done using the data transfer tools.
+- used to transfer files from pc to microcontroller:hog config file(for vision tasks), dataset (after quantization), model, quantizer, node_predictor, ...
 - See more details : [Data transfer tools](./Data_Transfer.md)
 
 ## Data structure & storage 
@@ -115,11 +116,38 @@ Add new data into the main dataset:
 
 >**Note:** Inside the algorithm, the component classes and algorithm processes are built much more complexly to ensure the following factors: avoiding peak ram usage, avoiding heap fragmentation and stack overflow (Microcontrollers are extremely sensitive to this), adapting to new data (dataset grows, causing classes like config, node_predictor.. (resource preparation and node_layout packaging) to adapt accordingly), classes, resources are released and loaded into RAM in a rhythmic rotation.. This document only provides a preliminary introduction.
 
+## Model Training: PC vs MCU Equivalence
+
+The Random Forest models trained on PC and deployed on MCU will produce **equivalent results**, with only negligible accuracy differences (typically less than 0.03%). The minor variations are due to the MCU's `Rf_random` random number generator being slightly less random than the PC version.
+
+**Why is there a difference?**
+- **PC version** uses `std::mt19937` (Mersenne Twister), providing high-quality pseudo-random number generation
+- **MCU version** uses `Rf_random`, a lighter-weight RNG optimized for embedded systems with limited resources
+- The RNG affects tree diversity during training (feature selection, sample bootstrap)
+- This difference is negligible and typically results in <0.03% accuracy reduction
+
+**Visual Comparison:**
+
+![PC vs MCU Model Equivalence](./imgs/result_pc_mcu.png)
+
+**Live Demonstration:**
+
+Watch this YouTube video to see the PC and MCU versions producing nearly identical results on the digit classification task:
+
+📺 **[YouTube: STL_MCU Random Forest PC vs MCU Equivalence Test](https://youtu.be/cGReRQigrko)**
+
+The video demonstrates:
+- Pre-training a model on PC
+- Transferring the model to ESP32
+- Running inference on both platforms
+- Comparing accuracy and performance metrics
+- Showing the negligible differences between versions
+
 ## Implementation details
 
 This section provides a comprehensive guide to using the `RandomForest` class API for implementing machine learning models on microcontrollers. For a complete working example, see [examples/](../examples/).
 
-### 1. Macro Configuration
+### 0. Macro Configuration
 
 Before including the library, you can configure various aspects of the Random Forest implementation through preprocessor macros. For detailed information about all available macros, see the [Configuration Macros Reference](./Configuration_Macros_Reference.md).
 
@@ -139,6 +167,55 @@ Common configuration macros:
 - **Storage Configuration**: Filesystem selection (SD_MMC, SPI, LittleFS)
 - **Debug Configuration**: Logging levels and memory tracking
 - **Training Configuration**: Enable/disable on-device training features
+
+### 1. Decision Tree Mode
+
+When you configure the model with only **one tree** (`num_trees = 1`), the system automatically switches to **Decision Tree Mode**. This is a specialized configuration optimized for training a single, comprehensive decision tree rather than an ensemble.
+
+### Activation
+
+**PC-side (`model_config.json`):**
+```json
+{
+    "num_trees": {"value": 1},
+    "use_bootstrap": {"value": true},  // Will be overridden to false
+    "training_score": {"value": "oob_score"},  // Will switch to validation
+    "max_depth": {
+        "value": 50,
+        "status": "enabled"
+    }
+}
+```
+
+**MCU-side (Arduino):**
+```cpp
+RandomForest forest = RandomForest("model_name");
+forest.enable_decision_tree_mode(); 
+forest.build_model();     // Uses all features and all training data
+```
+
+#### Automatic Adjustments
+
+When in Decision Tree Mode, the following configurations are automatically adjusted:
+
+1. **Bootstrap Sampling Disabled**: `use_bootstrap` is set to `false`
+2. **Full Dataset Usage**: `bootstrap_ratio` is set to `1.0` 
+3. **All Features Considered**: At each split, all features are evaluated (not just √n random features)
+4. **Evaluation Method**: setting `training_score` is switched to `VALID_SCORE` (if it was `OOB_SCORE`)
+
+
+### Trade-offs
+
+**Advantages:**
+- ✅ Faster training time
+- ✅ Faster inference time (~40% faster than 20-tree forest)
+- ✅ Minimal memory usage
+
+**Disadvantages:**
+- ⚠️ The likelihood of being overfitted is higher.
+- ⚠️ Less robust than ensemble methods
+- ⚠️ Lower accuracy on complex problems
+
 
 ### 2. Model Initialization
 

@@ -893,7 +893,10 @@ public:
             }
             
             // Random feature subset
-            uint16_t num_selected_features = static_cast<uint16_t>(sqrt(config.num_features));
+            uint16_t num_selected_features;
+            if(config.num_trees > 1) num_selected_features =  static_cast<uint16_t>(sqrt(config.num_features));
+            else num_selected_features = config.num_features; //only one tree - desscision tree mode
+
             if (num_selected_features == 0) num_selected_features = 1;
             vector<uint16_t> selectedFeatures;
             uint16_t N = static_cast<uint16_t>(config.num_features);
@@ -1039,6 +1042,12 @@ public:
     // Enhanced training with adaptive evaluation strategy
     void training(){
         std::cout << "\n🚀 Training Random Forest...\n";
+        
+        // Decision tree mode: OOB evaluation is not applicable with single tree
+        if (config.num_trees == 1) {
+            std::cout << "⚠️  Decision Tree Mode: OOB evaluation requires multiple trees.\n";
+        }
+        
         bool use_cv = (config.training_score == "k_fold_score");
         const int num_runs = 1; // Single run with fixed seed is sufficient
 

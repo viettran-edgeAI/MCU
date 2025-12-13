@@ -929,6 +929,14 @@ public:
             max_samples = static_cast<uint32_t>(std::stoul(max_samples_value));
         }
 
+        if(num_trees == 1){
+            use_bootstrap = false; // disable bootstrap for single tree
+            boostrap_ratio = 1.0f;
+            if(training_score == "oob_score"){
+                training_score = "valid_score";
+            }
+        }
+
         // Check for invalid configuration cases and apply automatic ratio setting
         // This will be done after dataset analysis in init() method
         

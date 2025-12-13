@@ -1,14 +1,14 @@
 {
     "data_path": {
-        "value": "../data_quantization/data/result/hand_nml.csv",
+        "value": "../data_quantization/data/result/run_walk_nml.csv",
         "description": "Path to the normalized cv dataset."
     },
     "random_seed": {
-        "value":37,
+        "value":42,
         "description": "Random seed for Rf_random."
     },
     "num_trees": {
-        "value": 30,
+        "value": 1,
         "description": "Number of trees in the random forest. default - 20, max - 100."
     },
     "split_ratio":{
@@ -46,7 +46,7 @@
         "description": "disabled by default. enable to override max_depth in training process."
     },
     "training_score": {
-        "value": "oob_score",
+        "value": "k_fold_score",
         "options": ["oob_score", "valid_score", "k_fold_score"],
         "description": "Method for evaluating model performance during training. oob_score: Out-of-bag validation, valid_score: Validation set, k_fold_score: K-fold cross validation"
     },

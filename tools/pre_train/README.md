@@ -110,6 +110,42 @@ The tool supports two execution modes to accommodate different workflow needs:
 ./pre_train -training
 ```
 
+### Decision Tree Mode
+
+When you specify only **one tree** (`num_trees: 1`) in the configuration, the program automatically switches to **Decision Tree Mode**. This mode is optimized for training a single, comprehensive decision tree rather than an ensemble.
+
+**Automatic Adjustments:**
+- `use_bootstrap` is automatically set to `false`
+- `bootstrap_ratio` is automatically set to `1.0`
+- All training samples are used (no sampling)
+- All features are considered at each split (no random feature subset)
+- If `training_score` is set to `"oob_score"`, it will automatically switch to `"valid_score"` since OOB is not applicable for a single tree
+
+**When to use Decision Tree Mode:**
+- **Interpretability**: Single tree is easier to visualize and understand
+- **Debugging**: Simpler model for testing algorithms and data pipelines
+- **Memory-constrained scenarios**: Single tree requires minimal memory
+- **Baseline comparison**: Compare ensemble performance against single tree
+- **Fast inference**: Single tree has the lowest prediction latency
+
+**Example Configuration:**
+```json
+{
+    "num_trees": {"value": 1},
+    "use_bootstrap": {"value": true},  // Will be overridden to false
+    "max_depth": {
+        "value": 50,
+        "status": "enabled"  // Control tree complexity
+    }
+}
+```
+
+> **Note**: Even if you set `use_bootstrap: true` in the config file, it will be automatically overridden to `false` when `num_trees` is 1. The bootstrap ratio will also be set to 1.0 to ensure all training data is used.
+
+**Trade-offs:**
+- ✅ **Pros**: Faster training, simpler model, full dataset utilization, better interpretability
+- ⚠️ **Cons**: May overfit on small datasets, less robust than ensemble, lower accuracy on complex problems
+
 ## Configuration Guide
 
 ### Model Configuration File: `model_config.json`

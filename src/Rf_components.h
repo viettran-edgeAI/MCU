@@ -1104,6 +1104,14 @@ namespace mcu {
             label_bits = extractIntValue(jsonStr, "label_bits");
             child_bits = extractIntValue(jsonStr, "child_bits");
             max_samples = extractIntValue(jsonStr, "max_samples");
+
+            if(num_trees == 1){     // decision tree mode 
+                use_boostrap = false;
+                boostrap_ratio = 1.0f; // disable bootstrap for single tree
+                if(training_score == OOB_SCORE){
+                    training_score = VALID_SCORE; // use validation score for single tree
+                }
+            }
         }
 
         // Convert flag string to uint8_t

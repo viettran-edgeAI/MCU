@@ -15,13 +15,7 @@ PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-# Default values
-CSV_PATH=""
-MODEL_NAME=""  # Model name for output filenames (if not provided, extracted from CSV filename)
-HEADER_MODE=""  # Empty means auto-detect
-MAX_FEATURES=""  # Empty means use default (1023)
-QUANT_BITS=""  # Empty uses processing tool default (2 bits)
-RUN_VISUALIZATION="yes"  # Default to yes
+CONFIG_PATH="$SCRIPT_DIR/quantization_config.json"
 HELP=false
 
 # Function to show usage
@@ -29,81 +23,32 @@ show_usage() {
     echo -e "${CYAN}ESP32 Dataset Quantization Tool${NC}"
     echo -e "${BLUE}================================${NC}"
     echo ""
-    echo "Usage: $0 [options]"
+    echo "Usage: $0 [-c quantization_config.json]"
+    echo ""
+    echo "Configuration is provided in JSON (default: quantization_config.json in this folder)."
+    echo "Fields: input_path, model_name, header_mode, label_column, max_features, quantization_bits,"
+    echo "        remove_outliers, max_samples, run_visualization"
     echo ""
     echo "Options:"
-    echo "  -p, --path <file>         Path to input CSV file (required)"
-    echo "  -m, --model <name>        Model name for output filenames (optional; if not provided, extracted from CSV filename)"
-    echo "  -he, --header <yes/no>    Skip header if 'yes', process all lines if 'no' (auto-detect if not specified)"
-    echo "  -f, --features <number>   Maximum number of features (default: 1023, range: 1-1023)"
-    echo "  -q, --bits <1-8>          Quantization coefficient in bits per feature (default: 2)"
-    echo "  -v, --visualize           Run quantization visualization after processing (default: yes)"
-    echo "  -nv, --no-visualize       Skip visualization"
-    echo "  -h, --help                Show this help message"
-    echo ""
-    echo "Examples:"
-    echo "  $0 -p data/iris_data.csv                           # Auto-detect header, default max features, visualize"
-    echo "  $0 -p data/iris_data.csv --header no               # Process all lines (no header)"
-    echo "  $0 -p data/iris_data.csv --header yes              # Skip first line (has header)"
-    echo "  $0 -p data/iris_data.csv -f 512                    # Limit to 512 features max"
-    echo "  $0 -p data/iris_data.csv -nv                       # Skip visualization"
-    echo "  $0 -p data/iris_data.csv -q 3                      # Quantize with 3 bits per feature"
-    echo "  $0 -p data/iris_data.csv -m my_iris_classifier     # Use custom model name for output files"
-    echo "  $0 -p data/iris_data.csv --header yes -f 256       # Skip header + 256 features + visualize (default)"
-    echo ""
-    echo -e "${YELLOW}Note: Header detection analyzes first two rows to determine if dataset has headers${NC}"
-    echo -e "${YELLOW}      --header yes: Skip first line (treat as header)${NC}"
-    echo -e "${YELLOW}      --header no:  Process all lines (no header present)${NC}"
-    echo -e "${YELLOW}      (no --header): Automatically detect header presence${NC}"
-    echo ""
-    echo -e "${GREEN}ℹ️  No sample count limits - process datasets of any size!${NC}"
+    echo "  -c, --config <file>   Path to configuration JSON (default: ./quantization_config.json)"
+    echo "  -h, --help            Show this help message"
 }
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
-        -p|--path)
-            CSV_PATH="$2"
+        -c|--config)
+            CONFIG_PATH="$2"
             shift 2
-            ;;
-        -m|--model)
-            MODEL_NAME="$2"
-            shift 2
-            ;;
-        -he|--header)
-            HEADER_MODE="$2"
-            shift 2
-            ;;
-        -f|--features)
-            MAX_FEATURES="$2"
-            shift 2
-            ;;
-        -q|--bits|--quant|--quantization)
-            QUANT_BITS="$2"
-            shift 2
-            ;;
-        -v|--visualize)
-            RUN_VISUALIZATION="yes"
-            shift
-            ;;
-        -nv|--no-visualize)
-            RUN_VISUALIZATION="no"
-            shift
             ;;
         -h|--help)
             HELP=true
             shift
             ;;
         *)
-            if [[ -z "$CSV_PATH" && "$1" != -* ]]; then
-                # Backward compatibility: treat first non-flag argument as CSV path
-                CSV_PATH="$1"
-            else
-                echo -e "${RED}Error: Unknown option $1${NC}"
-                show_usage
-                exit 1
-            fi
-            shift
+            echo -e "${RED}Error: Unknown option $1${NC}"
+            show_usage
+            exit 1
             ;;
     esac
 done
@@ -114,52 +59,72 @@ if [ "$HELP" = true ]; then
     exit 0
 fi
 
-# Validate required arguments
-if [[ -z "$CSV_PATH" ]]; then
-    echo -e "${RED}Error: CSV file path is required${NC}"
-    echo "Use -p <path> or --path <path> to specify the input file"
-    echo "Use -h or --help for usage information"
+if [[ ! -f "$CONFIG_PATH" ]]; then
+    echo -e "${RED}Error: Config file '$CONFIG_PATH' not found${NC}"
     exit 1
 fi
 
-# Validate quantization bits if provided
-if [[ -n "$QUANT_BITS" ]]; then
-    if ! [[ "$QUANT_BITS" =~ ^[1-8]$ ]]; then
-        echo -e "${RED}Error: Quantization bits must be an integer between 1 and 8${NC}"
-        exit 1
-    fi
+# Load configuration values once via Python (stdlib only)
+# Supports both nested {"value": ...} and flat formats
+readarray -t CFG < <(python3 - "$CONFIG_PATH" <<'PY'
+import json, sys
+cfg_path = sys.argv[1]
+with open(cfg_path) as f:
+    cfg = json.load(f)
+
+def get_value(obj, key, default):
+    """Extract value from either nested {value: ...} or flat format"""
+    val = obj.get(key)
+    if val is None:
+        return default
+    if isinstance(val, dict) and "value" in val:
+        return val["value"]
+    return val
+
+def emit(val):
+    print(val)
+
+emit(get_value(cfg, "input_path", ""))
+emit(get_value(cfg, "model_name", ""))
+emit(str(get_value(cfg, "header_mode", "auto")).lower())
+emit(get_value(cfg, "max_features", 1023))
+emit(get_value(cfg, "quantization_bits", 2))
+emit(str(get_value(cfg, "run_visualization", True)).lower())
+emit(get_value(cfg, "max_samples", -1))
+PY
+)
+
+CSV_PATH="${CFG[0]}"
+MODEL_NAME="${CFG[1]}"
+HEADER_MODE="${CFG[2]}"
+MAX_FEATURES="${CFG[3]}"
+QUANT_BITS="${CFG[4]}"
+RUN_VISUALIZATION="${CFG[5]}"
+MAX_SAMPLES="${CFG[6]}"
+
+if [[ -z "$CSV_PATH" ]]; then
+    echo -e "${RED}Error: 'input_path' is missing in $CONFIG_PATH${NC}"
+    exit 1
 fi
 
-# Check if file exists
 if [[ ! -f "$CSV_PATH" ]]; then
     echo -e "${RED}Error: File '$CSV_PATH' not found${NC}"
     exit 1
 fi
 
 echo -e "${CYAN}=== ESP32 Dataset Processing and Visualization ===${NC}"
-echo -e "${BLUE}Configuration:${NC}"
+echo -e "${BLUE}Configuration (from ${CONFIG_PATH}):${NC}"
 echo -e "  📁 Input file: ${GREEN}$CSV_PATH${NC}"
 if [[ -n "$MODEL_NAME" ]]; then
-    echo -e "  📛 Model name: ${GREEN}$MODEL_NAME${NC} (user-specified)"
+    echo -e "  📛 Model name: ${GREEN}$MODEL_NAME${NC}"
 else
-    echo -e "  📛 Model name: ${GREEN}(extracted from filename)${NC}"
+    echo -e "  📛 Model name: ${GREEN}(derived from input)${NC}"
 fi
-if [[ -n "$HEADER_MODE" ]]; then
-    echo -e "  📋 Header mode: ${GREEN}$HEADER_MODE${NC} (user-specified)"
-else
-    echo -e "  📋 Header mode: ${GREEN}auto-detect${NC}"
-fi
-if [[ -n "$MAX_FEATURES" ]]; then
-    echo -e "  📊 Max features: ${GREEN}$MAX_FEATURES${NC} (user-specified)"
-else
-    echo -e "  📊 Max features: ${GREEN}1023${NC} (default)"
-fi
-if [[ -n "$QUANT_BITS" ]]; then
-    echo -e "  🧮 Quantization bits: ${GREEN}$QUANT_BITS${NC} (user-specified)"
-else
-    echo -e "  🧮 Quantization bits: ${GREEN}2${NC} (default)"
-fi
-echo -e "  📊 Run visualization: ${GREEN}$RUN_VISUALIZATION${NC}"
+echo -e "  📋 Header mode: ${GREEN}${HEADER_MODE:-auto}${NC}"
+echo -e "  📊 Max features: ${GREEN}${MAX_FEATURES:-1023}${NC}"
+echo -e "  🧮 Quantization bits: ${GREEN}${QUANT_BITS:-2}${NC}"
+echo -e "  🔁 Max samples (bin): ${GREEN}${MAX_SAMPLES:-0}${NC}"
+echo -e "  📊 Run visualization: ${GREEN}${RUN_VISUALIZATION}${NC}"
 echo ""
 
 # Compile processing program if needed (quiet unless failure)
@@ -170,30 +135,8 @@ if [[ ! -f "processing_data" || "processing_data.cpp" -nt "processing_data" ]]; 
     fi
 fi
 
-# Run dataset processing
-PROCESS_ARGS="-p $CSV_PATH"
-
-# Add model name argument if user specified it
-if [[ -n "$MODEL_NAME" ]]; then
-    PROCESS_ARGS="$PROCESS_ARGS -m $MODEL_NAME"
-fi
-
-# Add header argument only if user specified it
-if [[ -n "$HEADER_MODE" ]]; then
-    PROCESS_ARGS="$PROCESS_ARGS -he $HEADER_MODE"
-fi
-
-# Add max features argument if user specified it
-if [[ -n "$MAX_FEATURES" ]]; then
-    PROCESS_ARGS="$PROCESS_ARGS -f $MAX_FEATURES"
-fi
-
-# Add quantization bits if user specified it
-if [[ -n "$QUANT_BITS" ]]; then
-    PROCESS_ARGS="$PROCESS_ARGS -q $QUANT_BITS"
-fi
-
-if ! ./processing_data $PROCESS_ARGS; then
+# Run dataset processing with config-driven executable
+if ! ./processing_data -c "$CONFIG_PATH"; then
     echo -e "${RED}❌ Dataset processing failed${NC}"
     exit 1
 fi
@@ -207,7 +150,7 @@ fi
 DIRNAME=$(dirname "$CSV_PATH")
 RESULT_DIR="$DIRNAME/result"
 
-if [[ "$RUN_VISUALIZATION" == "yes" ]]; then
+if [[ "$RUN_VISUALIZATION" == "true" ]]; then
     echo -e "\n📊 Running visualization..."
     if python3 quantization_visualizer.py "$BASENAME" >/dev/null 2>&1; then
         :
@@ -223,8 +166,8 @@ fi
 if [[ -f "$RESULT_DIR/${BASENAME}_nml.bin" ]]; then
     echo -e "  💾 Binary dataset: ${GREEN}$RESULT_DIR/${BASENAME}_nml.bin${NC}"
 fi
-if [[ -f "$RESULT_DIR/${BASENAME}_ctg.csv" ]]; then
-    echo -e "  📋 Quantizer: ${GREEN}$RESULT_DIR/${BASENAME}_ctg.csv${NC}"
+if [[ -f "$RESULT_DIR/${BASENAME}_qtz.bin" ]]; then
+    echo -e "  📋 Quantizer: ${GREEN}$RESULT_DIR/${BASENAME}_qtz.bin${NC}"
 fi
 if [[ -f "$RESULT_DIR/${BASENAME}_dp.csv" ]]; then
     echo -e "  ⚙️  Parameters: ${GREEN}$RESULT_DIR/${BASENAME}_dp.csv${NC}"

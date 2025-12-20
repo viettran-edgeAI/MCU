@@ -1509,6 +1509,21 @@ namespace mcu {
     class b_vector : hash_kernel {
     private:
         using vector_index_type = size_t;
+
+        static constexpr bool SBO_TRIVIAL =
+            std::is_trivially_copyable_v<T> &&
+            std::is_trivially_default_constructible_v<T> &&
+            std::is_trivially_destructible_v<T>;
+
+        static T& default_value_ref() noexcept {
+            static T v{};
+            return v;
+        }
+
+        static const T& default_value_cref() noexcept {
+            static const T v{};
+            return v;
+        }
         
         // Helper function to construct from another b_vector (reduces code duplication)
         template<size_t otherSboSize>
@@ -1518,11 +1533,17 @@ namespace mcu {
                 using_heap = false;
                 capacity_ = SBO_SIZE;
                 T* buffer_ptr = reinterpret_cast<T*>(buffer);
-                for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
-                    if (i < size_) {
-                        new(buffer_ptr + i) T(other[i]);
-                    } else {
-                        new(buffer_ptr + i) T();
+                if constexpr (SBO_TRIVIAL) {
+                    if (size_ > 0) {
+                        std::memcpy(buffer, other.data(), static_cast<size_t>(size_) * sizeof(T));
+                    }
+                } else {
+                    for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
+                        if (i < size_) {
+                            new(buffer_ptr + i) T(other[i]);
+                        } else {
+                            new(buffer_ptr + i) T();
+                        }
                     }
                 }
             } else {
@@ -1530,9 +1551,7 @@ namespace mcu {
                 using_heap = true;
                 capacity_ = size_;
                 heap_array = mem_alloc::allocate<T>(capacity_);
-                for (vector_index_type i = 0; i < size_; ++i) {
-                    heap_array[i] = other[i];
-                }
+                customCopy(other.data(), heap_array, size_);
             }
         }
         
@@ -1543,9 +1562,11 @@ namespace mcu {
             if (using_heap) {
                 mem_alloc::deallocate(heap_array);
             } else {
-                T* p = reinterpret_cast<T*>(buffer);
-                for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
-                    p[i].~T();
+                if constexpr (!SBO_TRIVIAL) {
+                    T* p = reinterpret_cast<T*>(buffer);
+                    for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
+                        p[i].~T();
+                    }
                 }
             }
 
@@ -1555,11 +1576,17 @@ namespace mcu {
                 using_heap = false;
                 capacity_ = SBO_SIZE;
                 T* buffer_ptr = reinterpret_cast<T*>(buffer);
-                for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
-                    if (i < size_) {
-                        new(buffer_ptr + i) T(other[i]);
-                    } else {
-                        new(buffer_ptr + i) T();
+                if constexpr (SBO_TRIVIAL) {
+                    if (size_ > 0) {
+                        std::memcpy(buffer, other.data(), static_cast<size_t>(size_) * sizeof(T));
+                    }
+                } else {
+                    for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
+                        if (i < size_) {
+                            new(buffer_ptr + i) T(other[i]);
+                        } else {
+                            new(buffer_ptr + i) T();
+                        }
                     }
                 }
             } else {
@@ -1567,9 +1594,7 @@ namespace mcu {
                 using_heap = true;
                 capacity_ = size_;
                 heap_array = mem_alloc::allocate<T>(capacity_);
-                for (vector_index_type i = 0; i < size_; ++i) {
-                    heap_array[i] = other[i];
-                }
+                customCopy(other.data(), heap_array, size_);
             }
         }
         
@@ -1588,7 +1613,7 @@ namespace mcu {
                 } else if constexpr (type_size == 4) {
                     return 8;   // 8 elements for 4-byte types (int, float, uint32_t, etc.)
                 } else if constexpr (type_size == 8) {
-                    return 6;   // 4 elements for 8-byte types (double, uint64_t, etc.)
+                    return 4;   // 4 elements for 8-byte types (double, uint64_t, etc.)
                 } else if constexpr (type_size <= 64) {
                     return 4;  
                 } else {
@@ -1651,34 +1676,62 @@ namespace mcu {
 
         // Internal helper: copy 'count' elements from src to dst
         void customCopy(const T* src, T* dst, vector_index_type count) noexcept {
-            for (vector_index_type i = 0; i < count; ++i) {
-                dst[i] = src[i];
+            if (!src || !dst || count == 0) {
+                return;
+            }
+            if constexpr (std::is_trivially_copyable_v<T>) {
+                const auto bytes = static_cast<size_t>(count) * sizeof(T);
+                const auto* src_bytes = reinterpret_cast<const uint8_t*>(src);
+                auto* dst_bytes = reinterpret_cast<uint8_t*>(dst);
+                if (dst_bytes + bytes <= src_bytes || src_bytes + bytes <= dst_bytes) {
+                    std::memcpy(dst, src, bytes);
+                } else {
+                    std::memmove(dst, src, bytes);
+                }
+            } else {
+                for (vector_index_type i = 0; i < count; ++i) {
+                    dst[i] = src[i];
+                }
             }
         }
 
     public:
         // Default: use internal buffer
         b_vector() noexcept : size_(0), capacity_(SBO_SIZE), using_heap(false) {
-            // Initialize buffer memory
-            for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
-                new(reinterpret_cast<T*>(buffer) + i) T();
+            if constexpr (!SBO_TRIVIAL) {
+                // Keep the old fully-constructed SBO model for non-trivial types
+                for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
+                    new(reinterpret_cast<T*>(buffer) + i) T();
+                }
             }
         }
 
-        // Constructor with initial capacity
-        explicit b_vector(vector_index_type initialCapacity) noexcept : size_(0) {
+        // Constructor with initial size (value-initialized elements)
+        explicit b_vector(vector_index_type initialCapacity) noexcept : size_(initialCapacity) {
             if (initialCapacity <= SBO_SIZE) {
                 using_heap = false;
                 capacity_ = SBO_SIZE;
-                T* buffer_ptr = reinterpret_cast<T*>(buffer);
-                for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
-                    new(buffer_ptr + i) T();
+                if constexpr (!SBO_TRIVIAL) {
+                    T* buffer_ptr = reinterpret_cast<T*>(buffer);
+                    for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
+                        new(buffer_ptr + i) T();
+                    }
+                } else {
+                    // Trivial types: value-initialize the active prefix.
+                    T* buffer_ptr = reinterpret_cast<T*>(buffer);
+                    for (vector_index_type i = 0; i < size_; ++i) {
+                        buffer_ptr[i] = T{};
+                    }
                 }
             } else {
                 using_heap = true;
                 capacity_ = initialCapacity;
                 heap_array = mem_alloc::allocate<T>(initialCapacity);
-                // No need to initialize elements since size is 0
+                // For trivial types, mem_alloc::allocate returns uninitialized storage.
+                // Value-initialize the active prefix to match std::vector(size) semantics.
+                for (vector_index_type i = 0; i < size_; ++i) {
+                    heap_array[i] = T{};
+                }
             }
         }
 
@@ -1688,8 +1741,14 @@ namespace mcu {
                 using_heap = false;
                 capacity_ = SBO_SIZE;
                 T* buffer_ptr = reinterpret_cast<T*>(buffer);
-                for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
-                    new(buffer_ptr + i) T(i < size_ ? value : T());
+                if constexpr (SBO_TRIVIAL) {
+                    for (vector_index_type i = 0; i < size_; ++i) {
+                        buffer_ptr[i] = value;
+                    }
+                } else {
+                    for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
+                        new(buffer_ptr + i) T(i < size_ ? value : T());
+                    }
                 }
             } else {
                 using_heap = true;
@@ -1707,15 +1766,20 @@ namespace mcu {
                 using_heap = false;
                 capacity_ = SBO_SIZE;
                 T* buffer_ptr = reinterpret_cast<T*>(buffer);
-                for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
-                    new(buffer_ptr + i) T(i < size_ ? init.data_[i] : T());
+                if constexpr (SBO_TRIVIAL) {
+                    if (size_ > 0) {
+                        std::memcpy(buffer_ptr, init.data_, static_cast<size_t>(size_) * sizeof(T));
+                    }
+                } else {
+                    for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
+                        new(buffer_ptr + i) T(i < size_ ? init.data_[i] : T());
+                    }
                 }
             } else {
                 using_heap = true;
                 capacity_ = init.size();
                 heap_array = mem_alloc::allocate<T>(capacity_);
-                for (unsigned i = 0; i < init.size(); ++i)
-                    heap_array[i] = init.data_[i];
+                customCopy(init.data_, heap_array, static_cast<vector_index_type>(init.size()));
             }
         }
 
@@ -1729,8 +1793,14 @@ namespace mcu {
                 capacity_ = SBO_SIZE;
                 T* buffer_ptr = reinterpret_cast<T*>(buffer);
                 const T* other_buffer_ptr = reinterpret_cast<const T*>(other.buffer);
-                for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
-                    new(buffer_ptr + i) T(other_buffer_ptr[i]);
+                if constexpr (SBO_TRIVIAL) {
+                    if (size_ > 0) {
+                        std::memcpy(buffer_ptr, other_buffer_ptr, static_cast<size_t>(size_) * sizeof(T));
+                    }
+                } else {
+                    for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
+                        new(buffer_ptr + i) T(other_buffer_ptr[i]);
+                    }
                 }
             }
         }
@@ -1754,8 +1824,14 @@ namespace mcu {
             } else {
                 T* buffer_ptr = reinterpret_cast<T*>(buffer);
                 T* other_buffer_ptr = reinterpret_cast<T*>(other.buffer);
-                for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
-                    new(buffer_ptr + i) T(std::move(other_buffer_ptr[i]));
+                if constexpr (SBO_TRIVIAL) {
+                    if (size_ > 0) {
+                        std::memcpy(buffer_ptr, other_buffer_ptr, static_cast<size_t>(size_) * sizeof(T));
+                    }
+                } else {
+                    for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
+                        new(buffer_ptr + i) T(std::move(other_buffer_ptr[i]));
+                    }
                 }
             }
             other.size_ = 0;
@@ -1769,11 +1845,12 @@ namespace mcu {
             if (using_heap) {
                 mem_alloc::deallocate(heap_array);
             } else {
-                // FIX: Manually call destructor for constructed objects in buffer to prevent leaks.
-                // This assumes the flawed but consistent model of initializing the whole buffer.
-                T* p = reinterpret_cast<T*>(buffer);
-                for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
-                    p[i].~T();
+                if constexpr (!SBO_TRIVIAL) {
+                    // Non-trivial: preserve legacy fully-constructed SBO behavior.
+                    T* p = reinterpret_cast<T*>(buffer);
+                    for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
+                        p[i].~T();
+                    }
                 }
             }
         }
@@ -1798,9 +1875,11 @@ namespace mcu {
                 if (using_heap) {
                     mem_alloc::deallocate(heap_array);
                 } else {
-                    T* p = reinterpret_cast<T*>(buffer);
-                    for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
-                        p[i].~T();
+                    if constexpr (!SBO_TRIVIAL) {
+                        T* p = reinterpret_cast<T*>(buffer);
+                        for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
+                            p[i].~T();
+                        }
                     }
                 }
 
@@ -1817,16 +1896,28 @@ namespace mcu {
                     // The SBO buffer is now uninitialized, so we must use placement-new.
                     T* this_buf = reinterpret_cast<T*>(buffer);
                     const T* other_buf = reinterpret_cast<const T*>(other.buffer);
-                    for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
-                        new (&this_buf[i]) T(other_buf[i]);
+                    if constexpr (SBO_TRIVIAL) {
+                        if (other.size_ > 0) {
+                            std::memcpy(this_buf, other_buf, static_cast<size_t>(other.size_) * sizeof(T));
+                        }
+                    } else {
+                        for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
+                            new (&this_buf[i]) T(other_buf[i]);
+                        }
                     }
                 } else {
                     // Both `this` and `other` are SBO. Objects are already constructed.
                     // We can perform a more efficient element-wise assignment.
                     T* this_buf = reinterpret_cast<T*>(buffer);
                     const T* other_buf = reinterpret_cast<const T*>(other.buffer);
-                    for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
-                        this_buf[i] = other_buf[i];
+                    if constexpr (SBO_TRIVIAL) {
+                        if (other.size_ > 0) {
+                            std::memcpy(this_buf, other_buf, static_cast<size_t>(other.size_) * sizeof(T));
+                        }
+                    } else {
+                        for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
+                            this_buf[i] = other_buf[i];
+                        }
                     }
                 }
 
@@ -1896,8 +1987,10 @@ namespace mcu {
                 if (using_heap) {
                     mem_alloc::deallocate(heap_array);
                 } else {
-                    T* p = reinterpret_cast<T*>(buffer);
-                    for (vector_index_type i = 0; i < SBO_SIZE; ++i) p[i].~T();
+                    if constexpr (!SBO_TRIVIAL) {
+                        T* p = reinterpret_cast<T*>(buffer);
+                        for (vector_index_type i = 0; i < SBO_SIZE; ++i) p[i].~T();
+                    }
                 }
                 
                 // Steal other's data
@@ -1912,8 +2005,14 @@ namespace mcu {
                     // CRASH FIX: Use placement-new to move-construct into our uninitialized buffer.
                     T* this_buf = reinterpret_cast<T*>(buffer);
                     T* other_buf = reinterpret_cast<T*>(other.buffer);
-                    for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
-                        new (&this_buf[i]) T(std::move(other_buf[i]));
+                    if constexpr (SBO_TRIVIAL) {
+                        if (other.size_ > 0) {
+                            std::memcpy(this_buf, other_buf, static_cast<size_t>(other.size_) * sizeof(T));
+                        }
+                    } else {
+                        for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
+                            new (&this_buf[i]) T(std::move(other_buf[i]));
+                        }
                     }
                 }
                 
@@ -1990,8 +2089,10 @@ namespace mcu {
                 mem_alloc::deallocate(heap_array);
                 heap_array = nullptr;
             } else {
-                T* p = reinterpret_cast<T*>(buffer);
-                for (vector_index_type i = 0; i < SBO_SIZE; ++i) p[i].~T();
+                if constexpr (!SBO_TRIVIAL) {
+                    T* p = reinterpret_cast<T*>(buffer);
+                    for (vector_index_type i = 0; i < SBO_SIZE; ++i) p[i].~T();
+                }
             }
             
             // Determine if we need heap or can use SBO
@@ -2001,8 +2102,16 @@ namespace mcu {
                 using_heap = false;
                 capacity_ = SBO_SIZE;
                 T* buffer_ptr = reinterpret_cast<T*>(buffer);
-                for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
-                    new(buffer_ptr + i) T(i < size_ ? other[i] : T());
+                if constexpr (SBO_TRIVIAL) {
+                    if (size_ > 0) {
+                        for (vector_index_type i = 0; i < size_; ++i) {
+                            buffer_ptr[i] = other[i];
+                        }
+                    }
+                } else {
+                    for (vector_index_type i = 0; i < SBO_SIZE; ++i) {
+                        new(buffer_ptr + i) T(i < size_ ? other[i] : T());
+                    }
                 }
             } else {
                 // Use heap
@@ -2492,50 +2601,25 @@ namespace mcu {
 
         // Operator[] with improved bounds checking
         T& operator[](vector_index_type index) noexcept {
-            // Safety: Check for empty vector first
-            if (size_ == 0) {
-                // For empty vector, return a static default value to prevent crashes
-                static T default_value{};
-                return default_value;
-            }
-            
-            // Safety: Bounds check with proper index validation
-            if (index >= size_) {
-                // Return last valid element instead of asserting for embedded safety
-                return data_ptr()[size_ - 1];
-            }
-            
-            // Safety: Verify data pointer is valid
             T* ptr = data_ptr();
-            if (ptr == nullptr) {
-                static T default_value{};
-                return default_value;
+            if (size_ == 0 || ptr == nullptr) {
+                return default_value_ref();
             }
-            
-            return ptr[index];
+            if (index < size_) {
+                return ptr[index];
+            }
+            return ptr[size_ - 1];
         }
     
         const T& operator[](vector_index_type index) const noexcept {
-            // Safety: Check for empty vector first
-            if (size_ == 0) {
-                static const T default_value{};
-                return default_value;
-            }
-            
-            // Safety: Bounds check with proper index validation
-            if (index >= size_) {
-                // Return last valid element instead of asserting for embedded safety
-                return data_ptr()[size_ - 1];
-            }
-            
-            // Safety: Verify data pointer is valid
             const T* ptr = data_ptr();
-            if (ptr == nullptr) {
-                static const T default_value{};
-                return default_value;
+            if (size_ == 0 || ptr == nullptr) {
+                return default_value_cref();
             }
-            
-            return ptr[index];
+            if (index < size_) {
+                return ptr[index];
+            }
+            return ptr[size_ - 1];
         }
 
         // Add safe at() method with bounds checking for debugging
@@ -2599,8 +2683,22 @@ namespace mcu {
 
         // Internal helper: copy 'count' elements from src to dst
         void customCopy(const T* src, T* dst, size_t count) noexcept {
-            for (size_t i = 0; i < count; ++i) {
-                dst[i] = src[i];
+            if (!src || !dst || count == 0) {
+                return;
+            }
+            if constexpr (std::is_trivially_copyable_v<T>) {
+                const auto bytes = count * sizeof(T);
+                const auto* src_bytes = reinterpret_cast<const uint8_t*>(src);
+                auto* dst_bytes = reinterpret_cast<uint8_t*>(dst);
+                if (dst_bytes + bytes <= src_bytes || src_bytes + bytes <= dst_bytes) {
+                    std::memcpy(dst, src, bytes);
+                } else {
+                    std::memmove(dst, src, bytes);
+                }
+            } else {
+                for (size_t i = 0; i < count; ++i) {
+                    dst[i] = src[i];
+                }
             }
         }
 
@@ -2638,9 +2736,17 @@ namespace mcu {
 
         // Copy constructor
         vector(const vector& other) noexcept
-            : array(mem_alloc::allocate<T>(other.capacity_)),
-            size_(other.size_), capacity_(other.capacity_) {
-            customCopy(other.array, array, size_);
+            : array(mem_alloc::allocate<T>(other.size_)),
+            size_(other.size_), capacity_(other.size_) {
+            if (size_ > 0) {
+                if constexpr (std::is_trivially_copyable_v<T>) {
+                    std::memcpy(array, other.array, size_ * sizeof(T));
+                } else {
+                    for (size_t i = 0; i < size_; ++i) {
+                        array[i] = other.array[i];
+                    }
+                }
+            }
         }
 
         // Move constructor
@@ -2659,12 +2765,33 @@ namespace mcu {
         // Copy assignment
         vector& operator=(const vector& other) noexcept {
             if (this != &other) {
-                T* newArray = mem_alloc::allocate<T>(other.capacity_);
-                customCopy(other.array, newArray, other.size_);
-                mem_alloc::deallocate(array);
-                array    = newArray;
-                size_    = other.size_;
-                capacity_ = other.capacity_;
+                // Reuse existing storage when possible.
+                if (other.size_ <= capacity_ && array != nullptr) {
+                    if constexpr (std::is_trivially_copyable_v<T>) {
+                        std::memcpy(array, other.array, other.size_ * sizeof(T));
+                    } else {
+                        for (size_t i = 0; i < other.size_; ++i) {
+                            array[i] = other.array[i];
+                        }
+                    }
+                    size_ = other.size_;
+                } else {
+                    const size_t newCap = (other.size_ == 0) ? 1 : other.size_;
+                    T* newArray = mem_alloc::allocate<T>(newCap);
+                    if (other.size_ > 0) {
+                        if constexpr (std::is_trivially_copyable_v<T>) {
+                            std::memcpy(newArray, other.array, other.size_ * sizeof(T));
+                        } else {
+                            for (size_t i = 0; i < other.size_; ++i) {
+                                newArray[i] = other.array[i];
+                            }
+                        }
+                    }
+                    mem_alloc::deallocate(array);
+                    array = newArray;
+                    size_ = other.size_;
+                    capacity_ = newCap;
+                }
             }
             return *this;
         }
@@ -2697,18 +2824,18 @@ namespace mcu {
         // Assignment from b_vector (enables implicit conversion in assignment)
         template<size_t sboSize>
         vector& operator=(const b_vector<T, sboSize>& other) noexcept {
-            // Clear current content
-            mem_alloc::deallocate(array);
-            
-            // Allocate new space
-            size_ = other.size();
-            capacity_ = size_ > 0 ? size_ : 1;
-            array = mem_alloc::allocate<T>(capacity_);
-            
-            // Copy elements
-            for (size_t i = 0; i < size_; ++i) {
-                array[i] = other[i];
+            const size_t otherSize = other.size();
+            if (otherSize <= capacity_ && array != nullptr) {
+                customCopy(other.data(), array, otherSize);
+                size_ = otherSize;
+                return *this;
             }
+
+            mem_alloc::deallocate(array);
+            size_ = otherSize;
+            capacity_ = (size_ > 0) ? size_ : 1;
+            array = mem_alloc::allocate<T>(capacity_);
+            customCopy(other.data(), array, size_);
             
             return *this;
         }

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <Arduino.h>
+#include "Rf_debug.h"
 #include <FS.h>
 
 #include <Rf_board_config.h>
@@ -198,70 +198,6 @@ inline bool rf_rename(const String& oldPath, const String& newPath) {
 }
 inline bool rf_rmdir(const String& path) { return rf_rmdir(path.c_str()); }
 inline File rf_open(const String& path, const char* mode) { return rf_open(path.c_str(), mode); }
-
-#ifndef RF_DEBUG_LEVEL
-    #define RF_DEBUG_LEVEL 1
-#else
-    #if RF_DEBUG_LEVEL > 3
-        #undef RF_DEBUG_LEVEL
-        #define RF_DEBUG_LEVEL 3
-    #endif
-#endif
-
-/*
- RF_DEBUG_LEVEL :
-    0 : silent mode - no messages
-    1 : forest messages (start, end, major events) 
-    2 : messages at components level + warnings
-    3 : all memory and event timing messages & detailed info
- note: all errors messages (lead to failed process) will be enabled with RF_DEBUG_LEVEL >=1
-*/
-
-#if RF_DEBUG_LEVEL > 0
-    inline void rf_debug_print(const char* msg) {
-        Serial.printf("%s\n", msg);
-    }
-    template<typename T>
-    inline void rf_debug_print(const char* msg, const T& obj) {
-        Serial.printf("%s", msg);
-        if constexpr (std::is_floating_point_v<T>) {
-            Serial.println(obj, 3);  // 3 decimal places for floats/doubles
-        } else {
-            Serial.println(obj);
-        }
-    }
-
-    template<typename T1, typename T2>
-    inline void rf_debug_print_2(const char* msg1, const T1& obj1, const char* msg2, const T2& obj2) {
-        Serial.printf("%s", msg1);
-        if constexpr (std::is_floating_point_v<T1>) {
-            Serial.print(obj1, 3);
-        } else {
-            Serial.print(obj1);
-        }
-        Serial.printf(" %s", msg2);
-        if constexpr (std::is_floating_point_v<T2>) {
-            Serial.println(obj2, 3);
-        } else {
-            Serial.println(obj2);
-        }
-    }
-
-    #define RF_DEBUG(level, ...)                        \
-        do{                                              \
-            if constexpr (RF_DEBUG_LEVEL > (level)) {     \
-                rf_debug_print(__VA_ARGS__);               \
-            }                                               \
-        }while(0)
-
-    #define RF_DEBUG_2(level, msg1, obj1, msg2, obj2)          \
-        do{                                                     \
-            if constexpr (RF_DEBUG_LEVEL > (level)) {            \
-                rf_debug_print_2(msg1, obj1, msg2, obj2);         \
-            }                                                      \
-        }while(0)
-#endif
-
 /**
  * @brief Clones any file from source to destination with format-aware handling
  * 

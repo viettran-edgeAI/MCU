@@ -101,7 +101,7 @@ python3 dataset_receiver.py --dataset <dataset_name> --port /dev/ttyUSB0
 
 **Files Transferred**:
 - `<model_name>_nml.bin` - Binary normalized dataset
-- `<model_name>_ctg.csv` - Category/quantizer information
+- `<model_name>_qtz.bin` - Category/quantizer information
 - `<model_name>_dp.csv` - Dataset parameters
 
 **Transfer Options**:
@@ -115,7 +115,7 @@ python3 unified_transfer.py <model_name> /dev/ttyUSB0
 **Option B - Individual Files**:
 ```bash
 cd tools/data_quantization/data_transfer/pc_side
-python3 transfer_quantizer.py ../data/result/<name>_ctg.csv /dev/ttyUSB0
+python3 transfer_quantizer.py ../data/result/<name>_qtz.bin /dev/ttyUSB0
 python3 transfer_dataset_params.py ../data/result/<name>_dp.csv /dev/ttyUSB0
 python3 transfer_dataset.py ../data/result/<name>_nml.bin /dev/ttyUSB0
 ```
@@ -178,7 +178,7 @@ python3 transfer_model.py /dev/ttyUSB0
 **Purpose**: Transfer ALL files in a single command - replaces individual transfers
 
 **Files Transferred in One Session**:
-- Dataset files (`*_nml.bin`, `*_ctg.csv`, `*_dp.csv`)
+- Dataset files (`*_nml.bin`, `*_qtz.bin`, `*_dp.csv`)
 - HOG configuration (`*_hogcfg.json`)
 - Model files (`*_config.json`, `*_forest.bin`, `*_npd.bin`, `*_nlg.csv`)
 
@@ -206,7 +206,7 @@ python3 unifier_transfer.py -m digit_data -p /dev/ttyUSB0
 ```
 /model_name/
   ├── model_name_nml.bin          # From data_quantization
-  ├── model_name_ctg.csv          # From data_quantization
+  ├── model_name_qtz.bin          # From data_quantization
   ├── model_name_dp.csv           # From data_quantization
   ├── model_name_hogcfg.json      # From hog_transform
   ├── model_name_config.json      # From pre_train
@@ -345,7 +345,7 @@ sudo usermod -a -G dialout $USER
 // On ESP32, load files by model name:
 FileManager fm;
 fm.loadDataset("/digit_data/digit_data_nml.bin");
-fm.loadQuantizer("/digit_data/digit_data_ctg.csv");
+fm.loadQuantizer("/digit_data/digit_data_qtz.bin");
 hog.loadConfig("/digit_data/digit_data_hogcfg.json");
 rf.loadModel("/digit_data/digit_data_config.json");
 ```
@@ -369,7 +369,7 @@ Typical file sizes for a digit recognition model:
 | File Type | Size Range | Notes |
 |-----------|------------|-------|
 | `*_nml.bin` | 10-500 KB | Depends on dataset size |
-| `*_ctg.csv` | 1-5 KB | Quantizer parameters |
+| `*_qtz.bin` | 1-5 KB | Quantizer parameters |
 | `*_dp.csv` | < 1 KB | Dataset metadata |
 | `*_hogcfg.json` | < 1 KB | HOG configuration |
 | `*_config.json` | < 5 KB | Model metadata |

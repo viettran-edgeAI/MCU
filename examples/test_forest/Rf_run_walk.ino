@@ -80,8 +80,6 @@ void setup() {
     Serial.printf("bits per node: %d\n", forest.bits_per_node());
     Serial.printf("model size in ram: %d\n", forest.model_size_in_ram());
     
-    // Optional: Enable dataset extension for online learning
-    // forest.enable_extend_base_data();
 
     // check actual prediction time 
     vector<float> sample_1 = MAKE_FLOAT_LIST(1,-0.3347,-0.8296,-0.1801,0.8974,-1.2157,-1.801);

@@ -15,7 +15,7 @@ Complete pipeline for STL_MCU Random Forest: converts CSV data to ESP32-ready fo
 ```mermaid
 flowchart LR
   A["Raw CSV<br/>[model_name.csv]"] --> B["Quantization<br/>1-8 bits"]
-  B --> C["Generated Files<br/>• model_name_nml.bin <br/>• model_name_nml.csv <br/>• model_name_dp.csv <br/>• model_name_ctg.csv"]
+  B --> C["Generated Files<br/>• model_name_nml.bin <br/>• model_name_nml.csv <br/>• model_name_dp.csv <br/>• model_name_qtz.bin"]
   B --> D["Visualization<br/>PCA 3D views"]
   C --> E["Transfer to ESP32<br/> (unified /individual /manual)"]
 ```
@@ -35,7 +35,7 @@ flowchart LR
    ├── model_name_nml.bin 
    ├── model_name_nml.csv 
    ├── model_name_dp.csv  
-   └── model_name_ctg.csv 
+   └── model_name_qtz.bin 
     ↓
 📈 Visualization (Optional)
    └── PCA 3D plots
@@ -49,7 +49,7 @@ flowchart LR
 ## 📛 Model Name Concept
 
 **Model Name Usage:**
-The system uses your CSV filename (without .csv extension) as the `model_name` by default. However, you can now **override this with the `-m` / `--model` option** to use a custom model name for your output files.
+The system uses your CSV filename (without .csv extension) as the `model_name` by default. However, you can **override this with the `model_name` field in `quantization_config.json`** to use a custom model name for your output files.
 
 **Examples:**
 - **Default (from filename):**
@@ -57,14 +57,14 @@ The system uses your CSV filename (without .csv extension) as the `model_name` b
   - Input: `walker_fall.csv` → Model name: `walker_fall`
 
 - **Custom model name:**
-  - Input: `digit_data.csv` with `-m digit_classifier` → Model name: `digit_classifier`
-  - Input: `walker_fall.csv` with `-m fall_detector_v2` → Model name: `fall_detector_v2`
+  - Input: `digit_data.csv` with `"model_name": "digit_classifier"` → Model name: `digit_classifier`
+  - Input: `walker_fall.csv` with `"model_name": "fall_detector_v2"` → Model name: `fall_detector_v2`
 
 **All generated files use the model_name:**
 - `{model_name}_nml.bin` - Standard format for transfer to ESP32
 - `{model_name}_nml.csv` - Used for pre_train tool or manual transfer
 - `{model_name}_dp.csv` - File containing general parameters of the dataset
-- `{model_name}_ctg.csv` - File containing quantizer
+- `{model_name}_qtz.bin` - Binary quantizer (feature quantization, label mapping, outlier filtering flag)
 
 **Technical Details:**
 For details on how variable quantization (1-8 bits) and quantizer work, please refer to:
@@ -93,116 +93,90 @@ For details on how variable quantization (1-8 bits) and quantizer work, please r
 - Python 3.7+ (for visualization/transfer)
 - Python packages: numpy, pandas, matplotlib, scikit-learn (installed via Makefile)
 
-## 🚀 Quick start
+## ⚙️ Configuration Guide
 
-### Basic Processing
+The quantization tool is configuration-driven via `quantization_config.json`. This provides a cleaner, more maintainable approach compared to command-line arguments.
+
+### Structure
+
+The configuration uses a nested JSON format with `value` and `description` fields for clarity:
+
+```json
+{
+    "field_name": {
+        "value": <actual_value>,
+        "description": "Explanation of what this field does"
+    }
+}
+```
+
+### Configuration Fields
+
+#### `input_path` (required)
+- **Type**: string
+- **Description**: Path to the input CSV dataset file.
+
+#### `model_name` (optional)
+- **Type**: string
+- **Default**: Empty (extracted from input filename)
+- **Description**: Model name used for output filenames.
+
+#### `header_mode`
+- **Type**: string
+- **Options**: `"auto"`, `"yes"`, `"no"`
+- **Default**: `"auto"`
+- **Description**: `"auto"` (detect), `"yes"` (skip first line), `"no"` (process all).
+
+#### `label_column`
+- **Type**: integer
+- **Default**: `0`
+- **Description**: Column index containing the label. 0 = first column.
+
+#### `max_features`
+- **Type**: integer
+- **Default**: `1023`
+- **Range**: 1-1023
+- **Description**: Maximum number of features to process.
+
+#### `quantization_bits`
+- **Type**: integer
+- **Default**: `2`
+- **Range**: 1-8
+- **Description**: Bits per feature value (1-8). Higher = more precision.
+
+#### `remove_outliers`
+- **Type**: boolean
+- **Default**: `true`
+- **Description**: Controls Z-score based outlier clipping. `true` for sensor data with noise, `false` for legitimate rapid fluctuations.
+
+#### `max_samples`
+- **Type**: integer
+- **Default**: `-1`
+- **Description**: Maximum samples retained in ESP32 binary dataset (FIFO).
+  - `-1`: Keep current dataset size (default)
+  - `0`: Unlimited
+  - `>0`: Specific limit (oldest removed first)
+
+#### `run_visualization`
+- **Type**: boolean
+- **Default**: `true`
+- **Description**: Whether to generate visualization plots.
+
+## 🚀 Usage
+
+### Basic Usage
+
+1. Edit `quantization_config.json` with your settings.
+2. Run the wrapper script:
+```bash
+./quantize_dataset.sh
+```
+
+### Custom Config File
 
 ```bash
-# Process with default settings (2-bit quantization, auto-detect header, visualization enabled)
-./quantize_dataset.sh -p data/iris_data.csv
-
-# Use custom model name for output files
-./quantize_dataset.sh -p data/iris_data.csv -m iris_classifier
-
-# Use 3-bit quantization instead of default 2-bit
-./quantize_dataset.sh -p data/iris_data.csv -q 3
-
-# Use 1-bit quantization (binary features)
-./quantize_dataset.sh -p data/iris_data.csv -q 1
-
-# Use 8-bit quantization (more granular, uses more memory)
-./quantize_dataset.sh -p data/iris_data.csv -q 8
-
-# Skip visualization for faster processing
-./quantize_dataset.sh -p data/iris_data.csv -nv
-
-# Limit to 512 features maximum
-./quantize_dataset.sh -p data/iris_data.csv -f 512
-
-# Combine options: 4-bit quantization + custom model name + 256 features + no visualization
-./quantize_dataset.sh -p data/iris_data.csv -m iris_v2 -q 4 -f 256 -nv
+./quantize_dataset.sh -c my_custom_config.json
 ```
-
-### With/Without Visualization and Quantization Options
-
-```bash
-# Process with visualization (default 2-bit quantization)
-./quantize_dataset.sh -p data/iris_data.csv
-
-# Use 1-bit (binary) quantization with visualization
-./quantize_dataset.sh -p data/iris_data.csv -q 1 -v
-
-# Use 3-bit quantization, skip visualization for faster processing
-./quantize_dataset.sh -p data/iris_data.csv -q 3 -nv
-
-# Compare different quantization levels (run separately):
-./quantize_dataset.sh -p data/iris_data.csv -q 2    # Default: 4 categories
-./quantize_dataset.sh -p data/iris_data.csv -q 3    # 8 categories (more detail)
-./quantize_dataset.sh -p data/iris_data.csv -q 4    # 16 categories (higher precision)
-
-# With custom feature limit and quantization, no visualization
-./quantize_dataset.sh -p data/iris_data.csv -q 2 -f 512 -nv
-
-# If label is in a different column (e.g., column 3)
-./quantize_dataset.sh -p data/mydata.csv --label_column 2 -q 3
-```
-
-Generated files will be in `data/result/` directory, ready for ESP32 transfer.
-
-### 📁 Flexible CSV Format Support
-
-**NEW:** You can now specify which column contains your labels!
-
-By default, the tool expects labels in the **first column** (index 0), but many datasets have different formats:
-
-```bash
-# Standard format: label in first column (default)
-./quantize_dataset.sh -p data/standard.csv
-
-# Label in second column (index 1)
-./quantize_dataset.sh -p data/custom.csv --label_column 1
-
-# Label in third column (index 2)
-./quantize_dataset.sh -p data/custom.csv --label_column 2
-
-# Label in last column
-./quantize_dataset.sh -p data/custom.csv --label_column 5  # if you have 6 columns total
-```
-
-**Example CSV formats:**
-
-```csv
-# Default: Label first (--label_column 0 or omit)
-Species,SepalLength,SepalWidth,PetalLength,PetalWidth
-setosa,5.1,3.5,1.4,0.2
-
-# Label in middle (--label_column 2)
-SepalLength,SepalWidth,Species,PetalLength,PetalWidth
-5.1,3.5,setosa,1.4,0.2
-
-# Label last (--label_column 4)
-SepalLength,SepalWidth,PetalLength,PetalWidth,Species
-5.1,3.5,1.4,0.2,setosa
-```
-
-All other columns are automatically treated as features. The tool validates column indices to prevent errors.
-
-## 🔧 Commands and interfaces
-
-### Basic Script
-
-`./quantize_dataset.sh -p <csv_path> [options]`
-
-### Available Options
-- `-p, --path <file>`: input CSV (required)
-- `-m, --model <name>`: Model name for output filenames (optional; if not provided, extracted from input filename)
-- `-he, --header <yes/no>`: Skip header if 'yes', process all lines if 'no' (auto-detect if not specified)
-- `-lc, --label_column <n>`: Column index containing the label (default: 0 for first column)
-- `-f, --features <number>`: Maximum number of features (default: 1023, range: 1-65535)
-- `-q, --bits <1-8>`: Quantization coefficient in bits per feature (default: 2, range: 1-8)
-- `-v, --visualize`: run visualization after processing (default: enabled)
-- `-nv, --no-visualize`: skip visualization for faster processing
-- `-h, --help`: usage
 
 ## 📊 Input format
 
@@ -290,14 +264,17 @@ make setup
 ls data/*.csv
 # You'll see: iris_data.csv, digit_data.csv, cancer_data.csv, walker_fall.csv
 
-# 4. Process with full options
-./quantize_dataset.sh -p data/iris_data.csv --visualize
+# 4. Edit quantization_config.json with your dataset path
+# e.g., "input_path": {"value": "data/iris_data.csv"}
 
-# 5. Check the generated files
+# 5. Process the dataset
+./quantize_dataset.sh
+
+# 6. Check the generated files
 ls -la data/result/
-# You'll see: iris_data_nml.csv, iris_data_ctg.csv, iris_data_dp.csv, iris_data_nml.bin
+# You'll see: iris_data_nml.csv, iris_data_qtz.bin, iris_data_dp.csv, iris_data_nml.bin
 
-# 6. Transfer to ESP32 (close Serial Monitor first!)
+# 7. Transfer to ESP32 (close Serial Monitor first!)
 cd data_transfer/pc_side
 python3 unified_transfer.py iris_data /dev/ttyUSB0
 ```
@@ -306,29 +283,129 @@ python3 unified_transfer.py iris_data /dev/ttyUSB0
 
 `quantize_dataset.sh`
 - Options:
-  - `-p, --path <file>`: input CSV (required)
-  - `-m, --model <name>`: Model name for output filenames (optional; if not provided, extracted from input filename)
-  - `-he, --header <yes/no>`: Skip header if 'yes', process all lines if 'no' (auto-detect if not specified)
-  - `-lc, --label_column <n>`: Column index containing the label (default: 0 for first column)
-  - `-f, --features <number>`: Maximum number of features (default: 1023, range: 1-65535)
-  - `-q, --bits <1-8>`: Quantization coefficient in bits per feature (default: 2, range: 1-8)
-  - `-v, --visualize`: run visualization after processing (default: enabled)
-  - `-nv, --no-visualize`: skip visualization for faster processing
+  - `-c, --config <file>`: Path to configuration JSON (default: ./quantization_config.json)
   - `-h, --help`: usage
 
-Examples:
-- Auto-detect header: `./quantize_dataset.sh -p data/iris_data.csv`
-- Custom model name: `./quantize_dataset.sh -p data/iris_data.csv -m iris_classifier`
-- Force skip header: `./quantize_dataset.sh -p data/iris_data.csv --header yes`
-- Force process all lines: `./quantize_dataset.sh -p data/iris_data.csv --header no`
-- Label in 3rd column: `./quantize_dataset.sh -p data/iris_data.csv --label_column 2`
-- Limit to 512 features: `./quantize_dataset.sh -p data/iris_data.csv -f 512`
-- Use 3-bit quantization: `./quantize_dataset.sh -p data/iris_data.csv -q 3`
-- Binary features (1-bit): `./quantize_dataset.sh -p data/iris_data.csv -q 1 -nv`
-- High precision (4-bit) with custom model name: `./quantize_dataset.sh -p data/iris_data.csv -m iris_precise -q 4 -f 256`
-- Skip visualization: `./quantize_dataset.sh -p data/iris_data.csv -nv`
-- Combined options: `./quantize_dataset.sh -p data/iris_data.csv -m iris_v2 -q 2 -f 256 --header yes -nv`
-- Label in last column: `./quantize_dataset.sh -p data/mydata.csv --label_column 10 -q 3`
+**Configuration Logic:**
+- **Header Detection**: Analyzes first two rows to detect header presence.
+- **Label Column**: Configurable via `label_column` (0-indexed).
+- **Feature Limit**: Default 1023 features, range 1-1023.
+- **Quantization Coefficient**: Range 1-8 bits per feature.
+- **Outlier Removal**: Z-score based clipping for cleaner data.
+- **Max Samples**: FIFO-style capping for the binary dataset.
+
+### Alternative Build Tools
+
+#### Makefile
+
+- `make setup` – build C++ tool, create venv, and make folders
+- `make build` – compile C++ processing program
+- `make visualize NAME=dataset_name` – visualize existing results
+- `make test` / `make test-viz` – quick tests
+
+#### C++ tool (low-level)
+
+- Binary: `processing_data`
+- Options:
+  - `-c, --config <file>`: Path to configuration JSON
+
+The script compiles this automatically if needed.
+
+---
+
+## 🧪 Processing details
+
+### How Quantization Works
+
+For comprehensive technical details on the variable quantization process (1-8 bits) and quantizer implementation, please refer to:
+
+**📖 [Rf_quantizer Technical Overview](../../docs/Quantization/Rf_quantizer.md)**
+
+### Quick Overview
+
+- **Input**: Continuous feature values and string/numeric labels.
+- **Process**: Variable quantization (1-8 bits configurable) with outlier handling.
+- **Output**: Categorical dataset optimized for ESP32 Random Forest.
+- **Binary Quantizer (`_qtz.bin`)**: Compact binary format containing feature bins, label mappings, and outlier statistics.
+
+## 🔌 Transfer to ESP32
+
+Close the Arduino Serial Monitor before automatic transfer.
+
+Options:
+
+1) Unified transfer (recommended)
+- From `tools/data_quantization/data_transfer/pc_side/`:
+  - `python3 unified_transfer.py <dataset_base_name> <serial_port>`
+  - Looks for files in `tools/data_quantization/data/result/`:
+    - `<name>_qtz.bin`, `<name>_dp.csv`, `<name>_nml.bin`
+- ESP32 sketch: `data_transfer/esp32_side/unified_receiver.ino`
+
+2) Individual transfer
+- From `data_transfer/pc_side/`:
+  - `transfer_quantizer.py ../data/result/<name>_qtz.bin <serial>`
+  - `transfer_dataset_params.py ../data/result/<name>_dp.csv <serial>`
+  - `transfer_dataset.py ../data/result/<name>_nml.bin <serial>`
+- ESP32 sketches: use corresponding receivers in `data_transfer/esp32_side/`
+
+3) Manual (Serial Monitor)
+- Use CSV versions and manual copy/paste:
+  - `manual_transfer/csv_dataset_receiver.ino`
+  - `manual_transfer/ctg_receiver.ino`
+  - `manual_transfer/dataset_params_receiver.ino`
+
+Transfer sequence (high level):
+
+```mermaid
+sequenceDiagram
+  participant PC as PC (unified_transfer.py)
+  participant ESP as ESP32 (unified_receiver.ino)
+  PC->>ESP: Start session + basename
+  ESP-->>PC: READY
+  PC->>ESP: File info *_qtz.bin + chunks
+  ESP-->>PC: ACKs per chunk
+  PC->>ESP: File info *_dp.csv + chunks
+  ESP-->>PC: ACKs per chunk
+  PC->>ESP: File info *_nml.bin + chunks
+  ESP-->>PC: ACKs per chunk
+  PC->>ESP: End session
+  ESP-->>PC: OK
+```
+
+## 🧰 Examples
+
+### Process Different Dataset Types
+
+- **Iris dataset**:
+  Edit `quantization_config.json`: `"input_path": {"value": "data/iris_data.csv"}`
+  Run `./quantize_dataset.sh`
+
+- **Digit dataset**:
+  Edit `quantization_config.json`: `"input_path": {"value": "data/digit_data.csv"}`
+  Run `./quantize_dataset.sh`
+
+## 🧱 Folder structure
+
+```
+tools/data_quantization/
+├── Makefile
+├── quantization_config.json        # Main configuration file
+├── quantize_dataset.sh             # Main script: CSV → quantized outputs
+├── processing_data.cpp             # C++ quantizer + binary exporter
+├── quantization_visualizer.py
+├── requirements.txt
+├── data/
+│   ├── iris_data.csv
+│   ├── digit_data.csv
+│   ├── walker_fall.csv
+│   └── result/                     # Generated files
+│       ├── <name>_nml.csv      
+│       ├── <name>_nml.bin        
+│       ├── <name>_qtz.bin       
+│       └── <name>_dp.csv         
+├── plots/                          # Visualization outputs
+└── data_transfer/                  # Transfer tools
+```
 
 **Header Detection Logic:**
 - Analyzes first two rows to detect header presence
@@ -424,12 +501,12 @@ Options:
 - From `tools/data_quantization/data_transfer/pc_side/`:
   - `python3 unified_transfer.py <dataset_base_name> <serial_port>`
   - Looks for files in `tools/data_quantization/data/result/`:
-    - `<name>_ctg.csv`, `<name>_dp.csv`, `<name>_nml.bin`
+    - `<name>_qtz.bin`, `<name>_dp.csv`, `<name>_nml.bin`
 - ESP32 sketch: `data_transfer/esp32_side/unified_receiver.ino`
 
 2) Individual transfer
 - From `data_transfer/pc_side/`:
-  - `transfer_quantizer.py ../data/result/<name>_ctg.csv <serial>`
+  - `transfer_quantizer.py ../data/result/<name>_qtz.bin <serial>`
   - `transfer_dataset_params.py ../data/result/<name>_dp.csv <serial>`
   - `transfer_dataset.py ../data/result/<name>_nml.bin <serial>`
 - ESP32 sketches: use corresponding receivers in `data_transfer/esp32_side/`
@@ -448,7 +525,7 @@ sequenceDiagram
   participant ESP as ESP32 (unified_receiver.ino)
   PC->>ESP: Start session + basename
   ESP-->>PC: READY
-  PC->>ESP: File info *_ctg.csv + chunks
+  PC->>ESP: File info *_qtz.bin + chunks
   ESP-->>PC: ACKs per chunk
   PC->>ESP: File info *_dp.csv + chunks
   ESP-->>PC: ACKs per chunk
@@ -539,7 +616,7 @@ tools/data_quantization/
 │   └── result/                     # Generated files
 │       ├── <name>_nml.csv      
 │       ├── <name>_nml.bin        
-│       ├── <name>_ctg.csv       
+│       ├── <name>_qtz.bin       
 │       └── <name>_dp.csv         
 ├── plots/                          # Visualization outputs
 └── data_transfer/                  # Transfer tools
@@ -580,7 +657,7 @@ ESP32-C3 transfer hiccups (USB-CDC):
 ## 📘 Notes
 
 - This tool is part of the STL_MCU ecosystem; designed for Random Forest on ESP32
-- Keep datasets tidy; inspect `_ctg.csv` and `_dp.csv` when debugging quantization
+- Keep datasets tidy; inspect `_qtz.bin` and `_dp.csv` when debugging quantization
 - The binary converter is integrated inside `processing_data.cpp` (no separate build needed)
 
 ---

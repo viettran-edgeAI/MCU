@@ -679,7 +679,7 @@ void retrainTask(void* parameter) {
 
     float accuracy = -1.0f;
     if (forest.build_model()) {
-#if defined(RF_ENABLE_TRAINING) && RF_ENABLE_TRAINING
+#ifndef RF_STATIC_MODEL
         accuracy = forest.best_training_score();
 #endif
         success = forest.loadForest();

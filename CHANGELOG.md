@@ -4,8 +4,20 @@ This changelog documents the sequential, technical evolution of the STL_MCU libr
 Entries are grouped: small and close commits are consolidated into date-based releases; large or breaking upgrades are separated as their own releases. Each release lists the high-level changes, followed by technical details and notable commit references (hash prefixes) so you can trace to the exact commit.
 
 ------------------------------------------------------------------------------------
+## [2025-12-24] - BIG update
+- update `quantization layer`:
+	- change file format : add mean , stddev  for each feature. csv -> binary format.
+	- add option: outlier removal using z-score method before quantization.
+	- Auto update when concept drift , allow adapt to gradually changing data streams.
+- Allows adding new layers in the model lifecycle through feedback operations.
+- Upgrade Rf_tree : normal `decision trees` -> `Hoeffding adaptive trees`.
+- New core model : `XGBoost model` (along with `Random Forest model` and `Decision Tree` model).
+- remove `extend_base_data` and add `remove_outliers` in config files.
+- combine `RF_DISABLE_RETRAIN` & `RF_ENABLE_RETRAIN` -> `RF_STATIC_MODEL` across all docs and code.
+- ... other minor fixes and improvements.
 
-## [2025-12-24] - add decision tree mode & fix validation score issue
+
+## [2025-12-14] - add decision tree mode & fix validation score issue
 - added decision tree mode : when num_trees = 1 , switch to decision tree mode 
 	- disable bootstrap sampling
 	- use validation score instead of oob score for training score calculation
@@ -21,7 +33,6 @@ Entries are grouped: small and close commits are consolidated into date-based re
 - Write all documentations , examples and imgs.
 - Final cleanup and repo organization.
 
-------------------------------------------------------------------------------------
 
 ## [2025-11-27] - finalize transfer tools & rename data_processing tool
 - added new tool data_transfer : transfer all needed files to ESP32

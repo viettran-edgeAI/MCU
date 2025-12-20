@@ -19,7 +19,7 @@ python3 unified_transfer.py -m digit_data -p /dev/ttyUSB0
 ```
 
 **Transfers:**
-- `<base_name>_ctg.csv` - Categorizer mapping
+- `<base_name>_qtz.bin` - Quantizer binary (feature quantization, label mapping, outlier filtering)
 - `<base_name>_dp.csv` - Dataset parameters  
 - `<base_name>_nml.bin` - Normalized binary dataset
 
@@ -27,8 +27,8 @@ python3 unified_transfer.py -m digit_data -p /dev/ttyUSB0
 Transfer files separately if needed:
 
 ```bash
-# Transfer categorizer
-python3 transfer_categorizer.py --model_name <model_name> --port <serial_port>
+# Transfer quantizer
+python3 transfer_quantizer.py --model_name <model_name> --port <serial_port>
 
 # Transfer dataset parameters
 python3 transfer_dp_file.py --model_name <model_name> --port <serial_port>
@@ -49,7 +49,7 @@ Upload the corresponding receiver sketch to your ESP32:
 **Generated files** (source):
 ```
 tools/data_quantization/data/result/
-├── <model_name>_ctg.csv
+├── <model_name>_qtz.bin
 ├── <model_name>_dp.csv
 └── <model_name>_nml.bin
 ```
@@ -57,7 +57,7 @@ tools/data_quantization/data/result/
 **ESP32 storage** (destination):
 ```
 /<model_name>/
-├── <model_name>_ctg.csv
+├── <model_name>_qtz.bin
 ├── <model_name>_dp.csv
 └── <model_name>_nml.bin
 ```

@@ -1,6 +1,6 @@
 /*
  * ESP32 Quantizer CSV Receiver with V2 Protocol
- * Upload this sketch to ESP32, then use transfer_categorizer.py to send files.
+ * Upload this sketch to ESP32, then use transfer_quantizer.py to send files.
  * Saves files to file system with model_name/filename structure and CRC verification.
  */
 
@@ -11,7 +11,7 @@ const RfStorageType STORAGE_MODE = RfStorageType::FLASH;
 
 /*
  * Transfer timing and size configuration.
- * IMPORTANT: Keep these in sync with the PC sender script (transfer_categorizer.py)
+ * IMPORTANT: Keep these in sync with the PC sender script (transfer_quantizer.py)
  * 
  * BUFFER_CHUNK must match CHUNK_SIZE in the PC script.
  * ESP32-C3: 220 bytes (USB CDC buffer constraint)

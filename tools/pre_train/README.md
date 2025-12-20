@@ -408,17 +408,6 @@ The `max_depth` parameter controls the maximum depth of trees in the forest. Thi
 - **Large datasets (> 10000 samples)**: set to `enabled` with 50 , allow trees to grow to their maximum depth. shorten training time
 
 
-##### Extend Base Data Configuration
-
-The `extend_base_data` parameter controls whether the training dataset can be extended with new data during online learning on ESP32.
-
-```json
-"extend_base_data": {
-    "value": true,
-    "options": [true, false]
-}
-```
-
 **Modes:**
 
 1. **Enabled** (`true`):
@@ -446,13 +435,12 @@ The `enable_retrain` parameter controls whether the model can be retrained on-de
 
 1. **Enabled** (`true`):
    - Allows the model to be retrained on the ESP32 using newly collected data
-   - Should be combined with `extend_base_data: true` to accumulate data for retraining
 
 2. **Disabled** (`false`):
    - Model remains static after embedding on ESP32
    - No retraining occurs, even if new data is collected
    - infer faster on ESP32.
-   - flags `extend_base_data` and `enable_auto_config` have no effect when retraining is disabled.
+   - flags `enable_auto_config` have no effect when retraining is disabled.
 
 ##### Enable Auto Config Configuration
 
@@ -471,13 +459,11 @@ The `enable_auto_config` parameter controls whether the model automatically reco
    - Uses configuration from pre-trained `model_config.json` without modification
    - Model parameters (`num_trees`, `max_depth`, etc.) remain fixed
    - Retraining uses original hyperparameters
-   - `extend_base_data` should be `false` or `max_samples` should not be too large compared to the current dataset size.
 
 2. **Enabled** (`true`):
    - On ESP32, each session of building a model based on a new dataset will compute optimal parameters automatically.
    - Recommended if you feel your current dataset is not big enough and can grow much bigger in the future on esp32.
    - `enable_retrain` must be `true` for this to have effect.
-   - `extend_base_data` should be `true` to accumulate new data for reconfiguration.
 
 ## Example Configurations
 
@@ -544,7 +530,6 @@ The `enable_auto_config` parameter controls whether the model automatically reco
         "valid_ratio": 0.0
     },
     "max_samples": {"value": 5000},
-    "extend_base_data": {"value": true},
     "enable_retrain": {"value": true},
     "training_score": {"value": "oob_score"}
 }

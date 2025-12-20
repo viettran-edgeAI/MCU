@@ -2,7 +2,7 @@
 """
 Unified ESP32 Data Transfer Utility
 
-This script sends a complete dataset (categorizer, parameters, and binary data)
+This script sends a complete dataset (quantizer, parameters, and binary data)
 to an ESP32 device in a single, coordinated process.
 
 Usage:
@@ -81,7 +81,7 @@ def get_file_paths(base_name):
     result_dir = os.path.join(os.path.dirname(__file__), '../..', 'data', 'result')
     result_dir = os.path.abspath(result_dir)
     return {
-        "categorizer": os.path.join(result_dir, f"{base_name}_ctg.csv"),
+        "quantizer": os.path.join(result_dir, f"{base_name}_qtz.bin"),
         "params": os.path.join(result_dir, f"{base_name}_dp.csv"),
         "dataset": os.path.join(result_dir, f"{base_name}_nml.bin")
     }
@@ -278,7 +278,7 @@ def main():
                 return
 
             # 2. Transfer each file
-            transfer_file(ser, files_to_send["categorizer"], f"/{base_name}_ctg.csv")
+            transfer_file(ser, files_to_send["quantizer"], f"/{base_name}_qtz.bin")
             transfer_file(ser, files_to_send["params"], f"/{base_name}_dp.csv")
             transfer_file(ser, files_to_send["dataset"], f"/{base_name}_nml.bin")
 

@@ -373,7 +373,7 @@ public:
         return feature_bits;
     }
 
-    // Load data from CSV format (used only once for initial dataset conversion)
+    // Load data from CSV format file
     void loadCSVData(std::string csvFilename, uint16_t numFeatures) {
         std::ifstream file(csvFilename);
         if (!file.is_open()) {
@@ -570,7 +570,6 @@ struct Rf_config{
     bool use_gini = false; // use Gini impurity for training
     bool use_bootstrap = true; // use bootstrap sampling for training
     bool enable_retrain = true; // enable retraining the model with new data
-    bool extend_base_data = true; // extend the base data with new data when retraining
     bool enable_auto_config = true; // enable automatic configuration based on dataset
 
     float result_score = 0.0f; // result score of the model
@@ -786,21 +785,6 @@ public:
                 
                 // std::cout << "📊 Split ratios loaded from JSON: train=" << train_ratio 
                 //           << ", test=" << test_ratio << ", valid=" << valid_ratio << std::endl;
-            }
-        }
-
-        // extract extend_base_data
-        pos = content.find("\"extend_base_data\"");
-        if (pos != std::string::npos) {
-            pos = content.find("\"value\":", pos);
-            if (pos != std::string::npos) {
-                pos = content.find(":", pos) + 1;
-                size_t end = content.find(",", pos);
-                if (end == std::string::npos) end = content.find("}", pos);
-                std::string value = content.substr(pos, end - pos);
-                value.erase(0, value.find_first_not_of(" \t\r\n"));
-                value.erase(value.find_last_not_of(" \t\r\n") + 1);
-                extend_base_data = (value == "true");
             }
         }
 
@@ -1387,7 +1371,6 @@ public:
             config_file << "  \"feature_bits\": " << (int)feature_bits << ",\n";
             config_file << "  \"label_bits\": " << (int)label_bits << ",\n";
             config_file << "  \"child_bits\": " << (int)child_bits << ",\n";
-            config_file << "  \"extendBaseData\": " << (extend_base_data ? "true" : "false") << ",\n";
             config_file << "  \"enableRetrain\": " << (enable_retrain ? "true" : "false") << ",\n";
             config_file << "  \"enableAutoConfig\": " << (enable_auto_config ? "true" : "false") << ",\n";
             config_file << "  \"max_samples\": " << max_samples << ",\n";

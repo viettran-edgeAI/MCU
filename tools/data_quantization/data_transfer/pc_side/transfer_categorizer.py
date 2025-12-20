@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Categorizer CSV Transfer to ESP32 with V2 Protocol
-Transfers CSV files with CRC verification and ACK/NACK
+Quantizer Binary Transfer to ESP32 with V2 Protocol
+Transfers binary files with CRC verification and ACK/NACK
 
 Usage: python3 transfer_categorizer.py --model_name <model_name> --port <serial_port>
 
@@ -44,10 +44,10 @@ def _readline_with_timeout(ser, timeout_s=5.0):
     return line.decode(errors='ignore').strip()
 
 def find_file(model_name):
-    """Find the categorizer CSV file in the ../../data/result folder"""
+    """Find the quantizer binary file in the ../../data/result folder"""
     script_dir = Path(__file__).parent
     result_dir = script_dir / ".." / ".." / "data" / "result"
-    filename = f"{model_name}_ctg.csv"
+    filename = f"{model_name}_qtz.bin"
     file_path = result_dir / filename
     
     if file_path.exists():
@@ -55,8 +55,8 @@ def find_file(model_name):
     else:
         raise FileNotFoundError(f"File {filename} not found in {result_dir}")
 
-def transfer_csv_file(file_path, port, baudrate=115200):
-    """Transfer CSV file to ESP32 with V2 protocol (CRC + ACK/NACK)"""
+def transfer_qtz_file(file_path, port, baudrate=115200):
+    """Transfer binary quantizer file to ESP32 with V2 protocol (CRC + ACK/NACK)"""
     print(f"Opening serial port {port} at {baudrate} baud...")
 
     try:
@@ -168,8 +168,8 @@ def list_serial_ports():
         print(f"  🔌 {port.device} - {port.description}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Categorizer CSV Transfer to ESP32")
-    parser.add_argument('--model_name', '-m', required=True, help='Name of the model for categorizer file')
+    parser = argparse.ArgumentParser(description="Quantizer Binary Transfer to ESP32")
+    parser.add_argument('--model_name', '-m', required=True, help='Name of the model for quantizer file')
     parser.add_argument('--port', '-p', required=True, help='Serial port for ESP32')
     args = parser.parse_args()
 
@@ -179,7 +179,7 @@ def main():
     try:
         file_path = find_file(model_name)
         print(f"Found file: {file_path}")
-        if transfer_csv_file(file_path, port):
+        if transfer_qtz_file(file_path, port):
             print("✅ SUCCESS: Data sent to ESP32")
         else:
             print("❌ FAILED: Could not send data")

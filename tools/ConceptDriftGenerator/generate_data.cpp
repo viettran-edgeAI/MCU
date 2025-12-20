@@ -13,7 +13,7 @@ namespace fs = std::filesystem;
 
 class DriftGenerator {
 public:
-    enum class DriftType { ABRUPT, GRADUAL };
+    enum class DriftType { ABRUPT, GRADUAL, REOCCURRING };
 
     struct Config {
         std::string name;
@@ -29,6 +29,8 @@ public:
         uint32_t seed;
         DriftType type = DriftType::ABRUPT;
         int drift_width = 100; // For gradual drift
+        std::string boundary_type = "hash"; // "hash" or "linear"
+        double drift_magnitude_linear = 0.5;
     };
 
 private:
@@ -37,6 +39,9 @@ private:
 
     std::vector<std::vector<double>> px_bd;
     std::vector<std::vector<double>> px_ad;
+    
+    std::vector<double> weights_bd;
+    std::vector<double> weights_ad;
 
     std::vector<std::vector<double>> generate_random_px() {
         std::vector<std::vector<double>> px(config.num_features, std::vector<double>(config.num_labels));
@@ -83,6 +88,21 @@ private:
     }
 
     int get_class(const std::vector<int>& x_values, bool is_after) {
+        if (config.boundary_type == "linear") {
+            const auto& weights = is_after ? weights_ad : weights_bd;
+            double score = 0;
+            for (int i = 0; i < x_values.size(); ++i) {
+                score += x_values[i] * weights[i];
+            }
+            
+            // Normalize score to [0, 1] roughly
+            // Max possible score is num_features * (num_labels - 1) * max_weight
+            // Min is 0
+            double max_possible = config.num_features * (config.num_labels - 1);
+            int label = static_cast<int>((score / max_possible) * config.num_labels);
+            return std::clamp(label, 0, config.num_labels - 1);
+        }
+
         // Use a stable hash of x_values to determine the class deterministically for each combination
         size_t h = 0;
         for (int v : x_values) {
@@ -117,6 +137,20 @@ public:
         } else {
             px_ad = px_bd;
         }
+
+        // Initialize linear weights
+        weights_bd.resize(config.num_features);
+        std::uniform_real_distribution<double> w_dist(0.0, 1.0);
+        for (int i = 0; i < config.num_features; ++i) weights_bd[i] = w_dist(rng);
+
+        weights_ad = weights_bd;
+        if (config.drift_conditional && config.boundary_type == "linear") {
+            for (int i = 0; i < config.num_features; ++i) {
+                if (w_dist(rng) < config.drift_magnitude_linear) {
+                    weights_ad[i] = w_dist(rng);
+                }
+            }
+        }
     }
 
     void generate_to_file(const std::string& filepath) {
@@ -132,13 +166,18 @@ public:
             double drift_prob = 0.0;
             if (config.type == DriftType::ABRUPT) {
                 drift_prob = (i > config.burn_in) ? 1.0 : 0.0;
-            } else {
+            } else if (config.type == DriftType::GRADUAL) {
                 // Gradual drift using sigmoid-like transition
                 if (i < config.burn_in) drift_prob = 0.0;
                 else if (i > config.burn_in + config.drift_width) drift_prob = 1.0;
                 else {
                     drift_prob = static_cast<double>(i - config.burn_in) / config.drift_width;
                 }
+            } else if (config.type == DriftType::REOCCURRING) {
+                // Reoccurring drift using a sine wave
+                // Period is drift_width
+                double period = config.drift_width > 0 ? config.drift_width : 500.0;
+                drift_prob = 0.5 * (1.0 + std::sin(2.0 * M_PI * i / period));
             }
 
             std::uniform_real_distribution<double> d_dist(0.0, 1.0);
@@ -193,6 +232,7 @@ std::vector<DriftGenerator::Config> parse_configs(const std::string& path) {
                 val = (block.find("true", colon) != std::string::npos);
             } else if constexpr (std::is_same_v<std::decay_t<decltype(val)>, DriftGenerator::DriftType>) {
                 if (block.find("gradual", colon) != std::string::npos) val = DriftGenerator::DriftType::GRADUAL;
+                else if (block.find("reoccurring", colon) != std::string::npos) val = DriftGenerator::DriftType::REOCCURRING;
                 else val = DriftGenerator::DriftType::ABRUPT;
             } else {
                 std::string sval = "";
@@ -220,6 +260,8 @@ std::vector<DriftGenerator::Config> parse_configs(const std::string& path) {
         extract("seed", cfg.seed);
         extract("type", cfg.type);
         extract("drift_width", cfg.drift_width);
+        extract("boundary_type", cfg.boundary_type);
+        extract("drift_magnitude_linear", cfg.drift_magnitude_linear);
         
         configs.push_back(cfg);
     }
@@ -234,8 +276,12 @@ int main() {
     
     auto configs = parse_configs(config_path);
     for (const auto& cfg : configs) {
+        std::string type_str = "abrupt";
+        if (cfg.type == DriftGenerator::DriftType::GRADUAL) type_str = "gradual";
+        else if (cfg.type == DriftGenerator::DriftType::REOCCURRING) type_str = "reoccurring";
+
         std::cout << "Generating dataset (C++): " << cfg.name << " (" 
-                  << (cfg.type == DriftGenerator::DriftType::ABRUPT ? "abrupt" : "gradual") << ")..." << std::endl;
+                  << type_str << ")..." << std::endl;
         DriftGenerator gen(cfg);
         gen.generate_to_file(output_dir + "/" + cfg.name + ".csv");
         std::cout << "Saved to " << output_dir << "/" << cfg.name << ".csv" << std::endl;

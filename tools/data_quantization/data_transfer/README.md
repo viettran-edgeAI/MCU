@@ -23,9 +23,9 @@ PC (Python Scripts)  ←→  Serial Connection  ←→  ESP32 (Arduino Sketches)
 ```
 data_transfer/
 ├── esp32_side/              # Arduino sketches for ESP32
-│   ├── unified_receiver.ino              # Complete dataset transfer (categorizer + params + binary)
+│   ├── unified_receiver.ino              # Complete dataset transfer (quantizer + params + binary)
 │   ├── dataset_receiver.ino              # Binary dataset transfer
-│   ├── categorizer_receiver.ino          # Categorizer CSV transfer
+│   ├── quantizer_receiver.ino          # Quantizer CSV transfer
 │   ├── dp_file_receiver.ino             # Dataset parameters CSV transfer
 │   └── manual_transfer/                  # Manual copy-paste transfer methods
 │       ├── csv_dataset_receiver.ino
@@ -34,7 +34,7 @@ data_transfer/
 ├── pc_side/                 # Python scripts for PC
 │   ├── unified_transfer.py               # Complete dataset transfer script
 │   ├── transfer_dataset.py               # Binary dataset transfer script
-│   ├── transfer_categorizer.py           # Categorizer transfer script
+│   ├── transfer_quantizer.py           # Quantizer transfer script
 │   └── transfer_dp_file.py              # Dataset parameters transfer script
 ├── MIGRATION_GUIDE.md       # Detailed migration guide from SPIFFS to LittleFS
 ├── CHANGES_SUMMARY.md       # Summary of all changes made
@@ -58,7 +58,7 @@ Transfer files one at a time.
 ```bash
 # Upload ONE of:
 # - esp32_side/dataset_receiver.ino
-# - esp32_side/categorizer_receiver.ino
+# - esp32_side/quantizer_receiver.ino
 # - esp32_side/dp_file_receiver.ino
 ```
 
@@ -83,7 +83,7 @@ python3 pc_side/unified_transfer.py --port /dev/ttyUSB0 --model mnist_model --ba
 **For individual transfers:**
 ```python
 python3 pc_side/transfer_dataset.py --port /dev/ttyUSB0 --file digit_nml.bin
-python3 pc_side/transfer_categorizer.py --port /dev/ttyUSB0 --file digit_ctg.csv
+python3 pc_side/transfer_quantizer.py --port /dev/ttyUSB0 --file digit_qtz.bin
 python3 pc_side/transfer_dp_file.py --port /dev/ttyUSB0 --file digit_dp.csv
 ```
 
@@ -94,15 +94,15 @@ python3 pc_side/transfer_dp_file.py --port /dev/ttyUSB0 --file digit_dp.csv
 /
 ├── mnist_model/
 │   ├── digit_nml.bin          # Binary dataset
-│   ├── digit_ctg.csv          # Categorizer
+│   ├── digit_qtz.bin          # Quantizer binary
 │   └── digit_dp.csv           # Dataset parameters
 ├── gesture_model/
 │   ├── gesture_nml.bin
-│   ├── gesture_ctg.csv
+│   ├── gesture_qtz.bin
 │   └── gesture_dp.csv
 └── default_model/
     ├── test_nml.bin
-    ├── test_ctg.csv
+    ├── test_qtz.bin
     └── test_dp.csv
 ```
 
@@ -110,7 +110,7 @@ python3 pc_side/transfer_dp_file.py --port /dev/ttyUSB0 --file digit_dp.csv
 
 ### 1. Unified Transfer (Best for Complete Datasets)
 
-**Use when:** Transferring a complete dataset with categorizer and parameters.
+**Use when:** Transferring a complete dataset with quantizer and parameters.
 
 **Advantages:**
 - Single coordinated session
@@ -126,7 +126,7 @@ python3 pc_side/unified_transfer.py \
     --port /dev/ttyUSB0 \
     --model mnist_model \
     --basename digit \
-    --categorizer digit_ctg.csv \
+    --quantizer digit_qtz.bin \
     --params digit_dp.csv \
     --dataset digit_nml.bin
 ```
@@ -147,8 +147,8 @@ python3 pc_side/unified_transfer.py \
 # Transfer binary dataset
 python3 pc_side/transfer_dataset.py --port /dev/ttyUSB0 --file digit_nml.bin
 
-# Transfer categorizer
-python3 pc_side/transfer_categorizer.py --port /dev/ttyUSB0 --file digit_ctg.csv
+# Transfer quantizer
+python3 pc_side/transfer_quantizer.py --port /dev/ttyUSB0 --file digit_qtz.bin
 
 # Transfer parameters
 python3 pc_side/transfer_dp_file.py --port /dev/ttyUSB0 --file digit_dp.csv
@@ -334,7 +334,7 @@ python3 pc_side/unified_transfer.py \
     --port /dev/ttyUSB0 \
     --model mnist_model \
     --basename digit \
-    --categorizer data/digit_ctg.csv \
+    --quantizer data/digit_qtz.bin \
     --params data/digit_dp.csv \
     --dataset data/digit_nml.bin
 ```
@@ -378,10 +378,10 @@ void verifyModel(const char* modelName) {
         return;
     }
     
-    // Check categorizer
-    snprintf(path, sizeof(path), "/%s/%s_ctg.csv", modelName, basename);
+    // Check quantizer
+    snprintf(path, sizeof(path), "/%s/%s_qtz.bin", modelName, basename);
     if (!LittleFS.exists(path)) {
-        Serial.println("Categorizer missing!");
+        Serial.println("Quantizer missing!");
         return;
     }
     

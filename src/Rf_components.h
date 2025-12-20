@@ -21,14 +21,7 @@
     #define ENABLE_TEST_DATA 0
 #endif
 
-#ifndef RF_ENABLE_TRAINING
-    #define RF_ENABLE_TRAINING 1
-#endif
-
-#ifdef DISABLE_TRAINING
-    #undef RF_ENABLE_TRAINING
-    #define RF_ENABLE_TRAINING 0
-#endif
+// RF_STATIC_MODEL: If defined, training code is excluded (inference only)
 
 namespace mcu {
 
@@ -60,7 +53,7 @@ namespace mcu {
     NOTE : Forest file components (with each model)
         1.  model_name_nml.bin       : base data (dataset)
         2.  model_name_config.json   : model configuration file 
-        3.  model_name_ctg.csv       : quantizer (feature quantizer and label mapping)
+        3.  model_name_qtz.bin       : quantizer binary (feature quantizer, label mapping, outlier filtering flag)
         4.  model_name_dp.csv        : information about dataset (num_features, num_labels...)
         5.  model_name_forest.bin    : model file (all trees) in unified format
         6.  model_name_hogcfg.json   : HOG & Camera configuration file (for hog_transform - model preprocessing)
@@ -179,7 +172,7 @@ namespace mcu {
             }
 
             // check : quantizer file exists
-            build_file_path(filepath, "_ctg.csv");
+            build_file_path(filepath, "_qtz.bin");
             if (RF_FS_EXISTS(filepath)) {
                 RF_DEBUG(1, "✅ Found quantizer file: ", filepath);
                 flags |= static_cast<Rf_base_flags>(CTG_FILE_EXIST);
@@ -307,8 +300,8 @@ namespace mcu {
         inline void get_dp_path(char* buffer, int buffer_size = RF_PATH_BUFFER ) 
                         const { build_file_path(buffer, "_dp.csv", buffer_size); }
 
-        inline void get_ctg_path(char* buffer, int buffer_size = RF_PATH_BUFFER ) 
-                        const { build_file_path(buffer, "_ctg.csv", buffer_size); }
+        inline void get_qtz_path(char* buffer, int buffer_size = RF_PATH_BUFFER ) 
+                        const { build_file_path(buffer, "_qtz.bin", buffer_size); }
 
         inline void get_infer_log_path(char* buffer, int buffer_size = RF_PATH_BUFFER ) 
                         const { build_file_path(buffer, "_ifl.bin", buffer_size); }
@@ -368,7 +361,7 @@ namespace mcu {
                 // Rename all model files
                 rename_file("_nml.bin");       // base file
                 rename_file("_dp.csv");        // data_params file
-                rename_file("_ctg.csv");       // quantizer file
+                rename_file("_qtz.bin");       // quantizer file
                 rename_file("_ifl.bin"); // inference log file
                 rename_file("_npd.bin"); // node predictor file
                 rename_file("_nlg.bin");  // node predict log file
@@ -483,7 +476,6 @@ namespace mcu {
         uint32_t    estimatedRAM;
         Rf_training_score training_score;
 
-        bool extend_base_data;
         bool enable_retrain;
         bool enable_auto_config;   // change config based on dataset parameters (when base_data expands)
         bool enable_partial_loading; // enable chunked training for large datasets that don't fit in RAM
@@ -530,7 +522,6 @@ namespace mcu {
             metric_score        = Rf_metric_scores::ACCURACY;
             result_score        = 0.0;
             estimatedRAM        = 0;
-            extend_base_data    = true;
             enable_retrain      = true;
             enable_auto_config  = false;
             enable_partial_loading = false;
@@ -819,7 +810,6 @@ namespace mcu {
             label_type numLabels = 0;
             uint8_t quantCoeff = 2;  // Default 2 bits
             unordered_map_s<label_type, sample_type> labelCounts; // label -> count
-            uint8_t maxFeatureValue = 3;    // Default for 2-bit quantized data
 
             // Parse parameters from CSV
             while (file.available()) {
@@ -844,8 +834,6 @@ namespace mcu {
                     numLabels = value.toInt();
                 } else if (parameter == "quantization_coefficient") {
                     quantCoeff = value.toInt();
-                } else if (parameter == "max_feature_value") {
-                    maxFeatureValue = value.toInt();
                 } else if (parameter.startsWith("samples_label_")) {
                     // Extract label index from parameter name
                     int labelIndex = parameter.substring(14).toInt(); // "samples_label_".length() = 14
@@ -979,9 +967,6 @@ namespace mcu {
                 RF_DEBUG(1, "🔧 Auto-config enabled: generating settings from dataset parameters");
                 auto_config();
             } 
-            if (!extend_base_data){
-                enable_auto_config = false; // disable auto config if not extending base dataset
-            }
             if constexpr (RF_DEBUG_LEVEL >1) print_config();
             isLoaded = true;
             return true;
@@ -1036,7 +1021,6 @@ namespace mcu {
             file.printf("  \"feature_bits\": %d,\n", feature_bits);
             file.printf("  \"label_bits\": %d,\n", label_bits);
             file.printf("  \"child_bits\": %d,\n", child_bits);
-            file.printf("  \"extendBaseData\": %s,\n", extend_base_data ? "true" : "false");
             file.printf("  \"enableRetrain\": %s,\n", enable_retrain ? "true" : "false");
             file.printf("  \"enableAutoConfig\": %s,\n", enable_auto_config ? "true" : "false");
             file.printf("  \"enablePartialLoading\": %s,\n", enable_partial_loading ? "true" : "false");
@@ -1091,7 +1075,6 @@ namespace mcu {
             valid_ratio = extractFloatValue(jsonStr, "valid_ratio");     
             training_score = parseTrainingScore(extractStringValue(jsonStr, "trainingScore")); 
             metric_score = parseFlagValue(extractStringValue(jsonStr, "metric_score"));
-            extend_base_data = extractBoolValue(jsonStr, "extendBaseData");
             enable_retrain = extractBoolValue(jsonStr, "enableRetrain");
             enable_auto_config = extractBoolValue(jsonStr, "enableAutoConfig");
             enable_partial_loading = extractBoolValue(jsonStr, "enablePartialLoading");
@@ -1306,7 +1289,6 @@ namespace mcu {
             RF_DEBUG(1, "   - child_bits: ", child_bits);
             RF_DEBUG(1, "   - training_score: ", getTrainingScoreString(training_score).c_str());
             RF_DEBUG(1, "   - metric_score: ", getFlagString(metric_score).c_str());
-            RF_DEBUG(1, "   - extend_base_data: ", extend_base_data ? "true" : "false");
             RF_DEBUG(1, "   - enable_retrain: ", enable_retrain ? "true" : "false");
             RF_DEBUG(1, "   - enable_auto_config: ", enable_auto_config ? "true" : "false");
 
@@ -1713,7 +1695,7 @@ namespace mcu {
             return size_;
         }
 
-        void setfile_path(const char* path) {
+        void setFilePath(const char* path) {
             strncpy(this->file_path, path, RF_PATH_BUFFER);
             this->file_path[RF_PATH_BUFFER - 1] = '\0';
         }
@@ -2299,13 +2281,8 @@ namespace mcu {
          * @return : deleted labels
          * @note Directly writes to file system file to save RAM. File must exist and be properly initialized.
          */
-        b_vector<label_type> addNewData(const b_vector<Rf_sample>& samples, bool extend = true) {
-            return addNewData(samples, extend, 0); // 0 = no max limit
-        }
-
-        // Overload with max_samples limit
-        b_vector<label_type> addNewData(const b_vector<Rf_sample>& samples, bool extend, sample_type max_samples) {
-            b_vector<label_type> deletedLabels;
+        vector<label_type> addNewData(const vector<Rf_sample>& samples, sample_type max_samples = 0) {
+            vector<label_type> deletedLabels;
 
             if (!isProperlyInitialized()) {
                 RF_DEBUG(0, "❌ Rf_data not properly initialized. Cannot add new data.");
@@ -2353,93 +2330,85 @@ namespace mcu {
             uint32_t newNumSamples;
             size_t writePosition;
             
-            if (extend) {
-                // Append mode: add to existing samples
-                newNumSamples = currentNumSamples + samples.size();
+            // Append mode: add to existing samples
+            newNumSamples = currentNumSamples + samples.size();
+            
+            // Apply max_samples limit if specified
+            if (max_samples > 0 && newNumSamples > max_samples) {
+                RF_DEBUG_2(1, "📊 Applying max_samples limit: ", max_samples, " (current: ", currentNumSamples);
+                // Calculate how many oldest samples to remove
+                sample_type samples_to_remove = newNumSamples - max_samples;
+                newNumSamples = max_samples;
                 
-                // Apply max_samples limit if specified
-                if (max_samples > 0 && newNumSamples > max_samples) {
-                    RF_DEBUG_2(1, "📊 Applying max_samples limit: ", max_samples, " (current: ", currentNumSamples);
-                    // Calculate how many oldest samples to remove
-                    sample_type samples_to_remove = newNumSamples - max_samples;
-                    newNumSamples = max_samples;
-                    
-                    // Read labels of samples that will be removed (oldest samples at the beginning)
-                    File readFile = RF_FS_OPEN(file_path, RF_FILE_READ);
-                    if (readFile) {
-                        readFile.seek(headerSize); // Skip to data section
-                        for (sample_type i = 0; i < samples_to_remove && i < currentNumSamples; i++) {
-                            uint8_t label;
-                            if (readFile.read(&label, sizeof(label)) == sizeof(label)) {
-                                deletedLabels.push_back(label);
-                            }
-                            // Skip the packed features to get to next sample
-                            readFile.seek(readFile.position() + packedFeatureBytes);
+                // Read labels of samples that will be removed (oldest samples at the beginning)
+                File readFile = RF_FS_OPEN(file_path, RF_FILE_READ);
+                if (readFile) {
+                    readFile.seek(headerSize); // Skip to data section
+                    for (sample_type i = 0; i < samples_to_remove && i < currentNumSamples; i++) {
+                        uint8_t label;
+                        if (readFile.read(&label, sizeof(label)) == sizeof(label)) {
+                            deletedLabels.push_back(label);
                         }
-                        readFile.close();
+                        // Skip the packed features to get to next sample
+                        readFile.seek(readFile.position() + packedFeatureBytes);
+                    }
+                    readFile.close();
+                }
+                
+                // Shift remaining samples to the beginning (remove oldest)
+                // This is done by reading samples after the removed ones and writing them at the beginning
+                if (samples_to_remove < currentNumSamples) {
+                    sample_type samples_to_keep = currentNumSamples - samples_to_remove;
+                    b_vector<uint8_t> temp_buffer;
+                    temp_buffer.reserve(sampleDataSize);
+                    
+                    File shiftFile = RF_FS_OPEN(file_path, "r+");
+                    if (shiftFile) {
+                        // Read and shift each sample
+                        for (sample_type i = 0; i < samples_to_keep; i++) {
+                            size_t read_pos = headerSize + (samples_to_remove + i) * sampleDataSize;
+                            size_t write_pos = headerSize + i * sampleDataSize;
+                            
+                            shiftFile.seek(read_pos);
+                            temp_buffer.clear();
+                            for (size_t b = 0; b < sampleDataSize; b++) {
+                                int byte_val = shiftFile.read();
+                                if (byte_val < 0) break;
+                                temp_buffer.push_back(static_cast<uint8_t>(byte_val));
+                            }
+                            
+                            if (temp_buffer.size() == sampleDataSize) {
+                                shiftFile.seek(write_pos);
+                                shiftFile.write(temp_buffer.data(), temp_buffer.size());
+                            }
+                        }
+                        shiftFile.close();
                     }
                     
-                    // Shift remaining samples to the beginning (remove oldest)
-                    // This is done by reading samples after the removed ones and writing them at the beginning
-                    if (samples_to_remove < currentNumSamples) {
-                        sample_type samples_to_keep = currentNumSamples - samples_to_remove;
-                        b_vector<uint8_t> temp_buffer;
-                        temp_buffer.reserve(sampleDataSize);
-                        
-                        File shiftFile = RF_FS_OPEN(file_path, "r+");
-                        if (shiftFile) {
-                            // Read and shift each sample
-                            for (sample_type i = 0; i < samples_to_keep; i++) {
-                                size_t read_pos = headerSize + (samples_to_remove + i) * sampleDataSize;
-                                size_t write_pos = headerSize + i * sampleDataSize;
-                                
-                                shiftFile.seek(read_pos);
-                                temp_buffer.clear();
-                                for (size_t b = 0; b < sampleDataSize; b++) {
-                                    int byte_val = shiftFile.read();
-                                    if (byte_val < 0) break;
-                                    temp_buffer.push_back(static_cast<uint8_t>(byte_val));
-                                }
-                                
-                                if (temp_buffer.size() == sampleDataSize) {
-                                    shiftFile.seek(write_pos);
-                                    shiftFile.write(temp_buffer.data(), temp_buffer.size());
-                                }
-                            }
-                            shiftFile.close();
-                        }
-                        
-                        currentNumSamples = samples_to_keep;
-                        RF_DEBUG_2(1, "♻️  Removed ", samples_to_remove, " oldest samples, kept ", samples_to_keep);
-                    }
+                    currentNumSamples = samples_to_keep;
+                    RF_DEBUG_2(1, "♻️  Removed ", samples_to_remove, " oldest samples, kept ", samples_to_keep);
                 }
-                
-                // Check RF_MAX_SAMPLES limit
-                if (newNumSamples > RF_MAX_SAMPLES) {
-                    size_t maxAddable = RF_MAX_SAMPLES - currentNumSamples;
-                    RF_DEBUG(2, "⚠️ Reaching maximum sample limit, limiting to ", maxAddable);
-                    newNumSamples = RF_MAX_SAMPLES;
-                }
-                
-                size_t newFileSize = headerSize + (newNumSamples * sampleDataSize);
-                const size_t datasetLimit = rf_max_dataset_size();
-                if (newFileSize > datasetLimit) {
-                    size_t maxSamplesBySize = (datasetLimit - headerSize) / sampleDataSize;
-                    RF_DEBUG(2, "⚠️ Limiting samples by file size to ", maxSamplesBySize);
-                    newNumSamples = maxSamplesBySize;
-                }
-                
-                writePosition = headerSize + (currentNumSamples * sampleDataSize);
-            } else {
-                // Overwrite mode: keep same file size, write from beginning
-                newNumSamples = currentNumSamples; // Keep same sample count - ALWAYS preserve original dataset size
-                writePosition = headerSize; // Write from beginning of data section
             }
+            
+            // Check RF_MAX_SAMPLES limit
+            if (newNumSamples > RF_MAX_SAMPLES) {
+                size_t maxAddable = RF_MAX_SAMPLES - currentNumSamples;
+                RF_DEBUG(2, "⚠️ Reaching maximum sample limit, limiting to ", maxAddable);
+                newNumSamples = RF_MAX_SAMPLES;
+            }
+            
+            size_t newFileSize = headerSize + (newNumSamples * sampleDataSize);
+            const size_t datasetLimit = rf_max_dataset_size();
+            if (newFileSize > datasetLimit) {
+                size_t maxSamplesBySize = (datasetLimit - headerSize) / sampleDataSize;
+                RF_DEBUG(2, "⚠️ Limiting samples by file size to ", maxSamplesBySize);
+                newNumSamples = maxSamplesBySize;
+            }
+            
+            writePosition = headerSize + (currentNumSamples * sampleDataSize);
 
             // Calculate actual number of samples to write
-            uint32_t samplesToWrite = extend ? 
-                (newNumSamples - currentNumSamples) : 
-                min((uint32_t)samples.size(), newNumSamples);
+            uint32_t samplesToWrite = (newNumSamples - currentNumSamples);
 
             RF_DEBUG_2(1, "📝 Adding ", samplesToWrite, "samples to ", file_path);
             RF_DEBUG_2(2, "📊 Dataset info: current=", currentNumSamples, ", new_total=", newNumSamples);
@@ -2449,39 +2418,6 @@ namespace mcu {
             if (!file) {
                 RF_DEBUG(0, "❌ Failed to open file for writing: ", file_path);
                 return deletedLabels;
-            }
-
-            // In overwrite mode, read the labels that will be overwritten
-            if (!extend && samplesToWrite > 0) {
-                RF_DEBUG(2, "📋 Reading labels that will be overwritten: ", samplesToWrite);
-                
-                // Seek to the start of data section to read existing labels
-                if (!file.seek(headerSize)) {
-                    RF_DEBUG(0, "Seek to data section for reading labels: ", file_path);
-                    file.close();
-                    return deletedLabels;
-                }
-                
-                // Reserve space for deleted labels
-                deletedLabels.reserve(samplesToWrite);
-                
-                // Read labels that will be overwritten
-                for (uint32_t i = 0; i < samplesToWrite; ++i) {
-                    label_type existingLabel;
-                    if (file.read(&existingLabel, sizeof(existingLabel)) != sizeof(existingLabel)) {
-                        RF_DEBUG_2(0, "❌ Read existing label failed at index ", i, ": ", file_path);
-                        break;
-                    }
-                    deletedLabels.push_back(existingLabel);
-                    
-                    // Skip the packed features to get to next label
-                    if (!file.seek(file.position() + packedFeatureBytes)) {
-                        RF_DEBUG_2(0, "❌ Seek past features failed at index ", i, ": ", file_path);
-                        break;
-                    }
-                }
-                
-                RF_DEBUG_2(1, "📋 Collected ", deletedLabels.size(), " labels that will be overwritten", "");
             }
 
             // Update header with new sample count
@@ -2555,9 +2491,6 @@ namespace mcu {
             }
 
             RF_DEBUG_2(1, "✅ Successfully wrote ", written, "samples to: ", file_path);
-            if (!extend && deletedLabels.size() > 0) {
-                RF_DEBUG_2(1, "📊 Overwrote ", deletedLabels.size(), "samples with labels: ","");
-            }
             
             return deletedLabels;
         }
@@ -3487,7 +3420,7 @@ namespace mcu {
     ------------------------------------------------------------------------------------------------------------------
     */
 
-    // Feature type definitions for CTG3 format
+    // Feature type definitions for quantizer (QTZ3 format)
     enum FeatureType { FT_DF = 0, FT_DC = 1, FT_CS = 2, FT_CU = 3 };
     
     // Packed feature reference structure (2 bytes per feature)
@@ -3529,43 +3462,30 @@ namespace mcu {
         label_type numLabels = 0;
         uint8_t quantization_coefficient = 2; // Bits per feature value (1-8)
         bool isLoaded = false;
+        float outlierZThreshold = 3.0f; // Z-score threshold for outlier detection
+        bool removeOutliers = true; // Whether to apply outlier filtering before quantization
         const Rf_base* base_ptr = nullptr;
+        
+    #ifndef RF_STATIC_MODEL
+        // Statistics for outlier filtering (computed during training)
+        vector<float> featureMeans;
+        vector<float> featureStdDevs;
+    #endif
 
         // Compact storage arrays
-        b_vector<FeatureRef, 16> featureRefs;              // One per feature
-        b_vector<uint16_t> sharedPatterns;             // Concatenated pattern edges
-        b_vector<uint16_t, 32> allUniqueEdges;             // Concatenated unique edges
-        b_vector<uint8_t> allDiscreteValues;           // Concatenated discrete values
-        b_vector<int64_t> featureBaselines;            // Per-feature baseline offsets (scaled)
-        b_vector<uint64_t> featureScales;             // Per-feature scaling factors
-        b_vector<uint16_t> labelOffsets;               // Offsets into labelStorage for each normalized label
-        b_vector<uint16_t> labelLengths;               // Cached label lengths for faster copy
-        b_vector<char, 256> labelStorage;                   // Contiguous storage for label strings (null terminated)
+        vector<FeatureRef> featureRefs;              // One per feature
+        vector<uint16_t> sharedPatterns;             // Concatenated pattern edges
+        vector<uint16_t> allUniqueEdges;             // Concatenated unique edges
+        vector<uint8_t> allDiscreteValues;           // Concatenated discrete values
+        vector<int64_t> featureBaselines;            // Per-feature baseline offsets (scaled)
+        vector<uint64_t> featureScales;             // Per-feature scaling factors
+        vector<uint16_t> labelOffsets;               // Offsets into labelStorage for each normalized label
+        mutable vector<uint8_t> labelLengths;                // Cached label lengths for faster copy (uint8_t sufficient for max 32 char labels)
+        vector<char> labelStorage;                   // Contiguous storage for label strings (null terminated)
             
         bool has_base() const {
             return base_ptr != nullptr && base_ptr->ready_to_use();
         }
-        static constexpr size_t MAX_LINE_BUFFER = 1024;
-
-        // Utility helpers for parsing text data without allocating Strings
-        static void trim(char* str) {
-            if (!str) {
-                return;
-            }
-            size_t len = strlen(str);
-            while (len > 0 && (str[len - 1] == '\r' || str[len - 1] == '\n' || str[len - 1] == ' ' || str[len - 1] == '\t')) {
-                str[--len] = '\0';
-            }
-
-            size_t start = 0;
-            while (str[start] == ' ' || str[start] == '\t' || str[start] == '\r') {
-                start++;
-            }
-            if (start > 0) {
-                memmove(str, str + start, strlen(str + start) + 1);
-            }
-        }
-
         static inline int64_t scaleToInt64(double value, uint64_t scale) {
             long double scaled = static_cast<long double>(value) * static_cast<long double>(scale);
             const long double maxVal = static_cast<long double>(std::numeric_limits<int64_t>::max());
@@ -3584,78 +3504,24 @@ namespace mcu {
             return static_cast<int64_t>(scaled);
         }
 
-        static bool readLine(File& file, char* buffer, size_t bufferSize, size_t& outLength) {
-            if (bufferSize == 0) {
-                return false;
-            }
-
-            size_t readCount = file.readBytesUntil('\n', buffer, bufferSize - 1);
-            outLength = readCount;
-
-            if (outLength == 0 && !file.available()) {
-                buffer[0] = '\0';
-                return false; // EOF
-            }
-
-            buffer[outLength] = '\0';
-
-            // Detect truncated line
-            if (outLength >= bufferSize - 1 && file.available()) {
-                // If next char isn't newline, line exceeded buffer
-                int next = file.peek();
-                if (next != '\n' && next != '\r') {
-                    RF_DEBUG(0, "❌ Quantizer line exceeds buffer size");
-                    return false;
-                }
-            }
-            return true;
-        }
-
-        static size_t tokenize(char* line, char delimiter, char** tokens, size_t maxTokens) {
-            size_t count = 0;
-            char* current = line;
-            while (current && *current != '\0' && count < maxTokens) {
-                tokens[count++] = current;
-                char* next = strchr(current, delimiter);
-                if (!next) {
-                    break;
-                }
-                *next = '\0';
-                current = next + 1;
-            }
-            return count;
-        }
-
-        static bool readTrimmedLine(File& file, char* buffer, size_t bufferSize, size_t& outLength) {
-            while (true) {
-                if (!readLine(file, buffer, bufferSize, outLength)) {
-                    buffer[0] = '\0';
-                    return false;
-                }
-                trim(buffer);
-                if (buffer[0] == '\0') {
-                    if (!file.available()) {
-                        return false;
-                    }
-                    continue;
-                }
-                return true;
-            }
-        }
-
         bool storeLabel(label_type id, const char* label) {
-            if (id >= numLabels || label == nullptr) {
+            if (label == nullptr || id >= RF_MAX_LABELS) {
                 return false;
+            }
+
+            if (id >= labelOffsets.size()) {
+                labelOffsets.resize(id + 1, UINT16_MAX);
+            }
+            if (id >= labelLengths.size()) {
+                labelLengths.resize(id + 1, 0);
+            }
+            
+            // Update numLabels to reflect the highest label ID encountered
+            if (id >= numLabels) {
+                numLabels = id + 1;
             }
 
             size_t len = strlen(label);
-            if (labelOffsets.size() < numLabels) {
-                labelOffsets.resize(numLabels, UINT16_MAX);
-            }
-            if (labelLengths.size() < numLabels) {
-                labelLengths.resize(numLabels, 0);
-            }
-
             if (len > 0xFFFF) {
                 len = 0xFFFF;
             }
@@ -3667,7 +3533,7 @@ namespace mcu {
 
             uint16_t offset = static_cast<uint16_t>(labelStorage.size());
             labelOffsets[id] = offset;
-            labelLengths[id] = static_cast<uint16_t>(len);
+            labelLengths[id] = static_cast<uint8_t>(len);
             for (size_t i = 0; i < len; ++i) {
                 labelStorage.push_back(label[i]);
             }
@@ -3676,7 +3542,26 @@ namespace mcu {
         }
         
         // Optimized feature categorization - hot path, force inline
-        __attribute__((always_inline)) inline uint8_t quantizeFeature(uint16_t featureIdx, float value) const {
+        __attribute__((always_inline)) inline uint8_t quantizeValue(uint16_t featureIdx, float value) const {
+            // Apply outlier filtering if enabled and statistics are available
+#ifndef RF_STATIC_MODEL
+            if (removeOutliers && featureIdx < featureMeans.size() && featureIdx < featureStdDevs.size()) {
+                const float mean = featureMeans[featureIdx];
+                const float stdDev = featureStdDevs[featureIdx];
+                
+                // Only apply if we have enough standard deviation to avoid division by near-zero
+                if (stdDev > 1e-6f) {
+                    const float zScore = (value - mean) / stdDev;
+                    
+                    if (zScore > this->outlierZThreshold) {
+                        value = mean + outlierZThreshold * stdDev; // Upper bound
+                    } else if (zScore < -outlierZThreshold) {
+                        value = mean - outlierZThreshold* stdDev; // Lower bound
+                    }
+                }
+            }
+#endif
+            
             // Fast path: assume valid input during prediction (bounds checked during loading)
             const FeatureRef& ref = featureRefs[featureIdx];
             const uint8_t type = ref.getType();
@@ -3733,6 +3618,12 @@ namespace mcu {
             // FT_DC: Discrete custom values
             const uint8_t count = ref.getAux();
             const uint8_t offset = ref.getOffset();
+            // int intValue = static_cast<int>(value);
+            // if (intValue < 0) {
+            //     intValue = 0;
+            // } else if (intValue > 255) {
+            //     intValue = 255;
+            // }
             const uint8_t targetValue = static_cast<uint8_t>(value);
             const uint8_t* discreteVals = &allDiscreteValues[offset];
             
@@ -3741,14 +3632,20 @@ namespace mcu {
                     return i;
                 }
             }
-            return 0;
+
+            // Unseen category: prefer mapping to a dedicated "unknown" bucket if there is spare capacity.
+            // This helps on-device retraining not collapse novel categories into an existing one.
+            if (groupsPerFeature == 0) {
+                return 0;
+            }
+            return (count < groupsPerFeature) ? count : static_cast<uint8_t>(groupsPerFeature - 1);
         }
-         
+      
     public:
         Rf_quantizer() = default;
         
-        Rf_quantizer(Rf_base* base) {
-            init(base);
+        Rf_quantizer(Rf_base* base, Rf_config& config) {
+            init(base, config);
         }
         ~Rf_quantizer() {
             base_ptr = nullptr;
@@ -3764,13 +3661,36 @@ namespace mcu {
             labelStorage.clear();
         }
 
+        uint8_t getQuantizationCoefficient() const {
+            return quantization_coefficient;
+        }
 
-        void init(Rf_base* base) {
+        label_type getNumLabels() const {
+            return numLabels;
+        }
+
+        void init(Rf_base* base, Rf_config& config) {
             base_ptr = base;
             isLoaded = false;
-        }
+
+            uint16_t num_features = config.num_features;
+            uint8_t num_labels = config.num_labels;
+
+            // Reserve memory for member vectors
+            featureRefs.reserve(num_features);
+            featureBaselines.reserve(num_features);
+            featureScales.reserve(num_features);
+            labelOffsets.reserve(num_labels);
+            labelStorage.reserve(num_labels * 8); // Heuristic: 8 chars per label
+
+#ifndef RF_STATIC_MODEL
+            featureMeans.reserve(num_features);
+            featureStdDevs.reserve(num_features);
+#endif
+            // Initialize labelLengths vector
+            labelLengths.reserve(num_labels);
+        }        // Load quantizer data from binary format
         
-    // Load quantizer data from CTG3 format without dynamic String allocations
         bool loadQuantizer() {
             if (isLoaded) {
                 return true;
@@ -3781,15 +3701,15 @@ namespace mcu {
             }
 
             char file_path[RF_PATH_BUFFER];
-            base_ptr->get_ctg_path(file_path);
+            base_ptr->get_qtz_path(file_path);
             if (!RF_FS_EXISTS(file_path)) {
-                RF_DEBUG(0, "❌ Quantizer file not found: ", file_path);
+                RF_DEBUG(0, "❌ Quantizer binary file not found: ", file_path);
                 return false;
             }
 
             File file = RF_FS_OPEN(file_path, "r");
             if (!file) {
-                RF_DEBUG(0, "❌ Failed to open Quantizer file: ", file_path);
+                RF_DEBUG(0, "❌ Failed to open Quantizer binary file: ", file_path);
                 return false;
             }
 
@@ -3798,6 +3718,7 @@ namespace mcu {
                 groupsPerFeature = 0;
                 numLabels = 0;
                 quantization_coefficient = 2;
+                removeOutliers = true;
                 isLoaded = false;
                 featureRefs.clear();
                 sharedPatterns.clear();
@@ -3808,283 +3729,314 @@ namespace mcu {
                 labelOffsets.clear();
                 labelLengths.clear();
                 labelStorage.clear();
+#ifndef RF_STATIC_MODEL
+                featureMeans.clear();
+                featureStdDevs.clear();
+#endif
             };
 
             resetData();
 
-            char line[MAX_LINE_BUFFER];
-            size_t lineLength = 0;
-            bool success = true;
-            uint16_t numSharedPatterns = 0;
+            // Read magic number
+            char magic[4];
+            if (file.readBytes(magic, 4) != 4 || memcmp(magic, "QTZ3", 4) != 0) {
+                RF_DEBUG(0, "❌ Invalid quantizer binary magic number");
+                file.close();
+                return false;
+            }
 
-            do {
-                if (!readTrimmedLine(file, line, MAX_LINE_BUFFER, lineLength)) {
-                    RF_DEBUG(0, "❌ Empty Quantizer file: ", file_path);
-                    success = false;
-                    break;
-                }
-
-                char* tokens[64];
-                size_t tokenCount = tokenize(line, ',', tokens, 64);
-                if (tokenCount != 5) {
-                    RF_DEBUG(0, "❌ Invalid Quantizer header token count");
-                    success = false;
-                    break;
-                }
-                for (size_t i = 0; i < tokenCount; ++i) {
-                    trim(tokens[i]);
-                }
-
-                if (strcmp(tokens[0], "CTG3") != 0) {
-                    RF_DEBUG(0, "❌ Unsupported Quantizer format identifier");
-                    success = false;
-                    break;
-                }
-
-                numFeatures = static_cast<uint16_t>(strtoul(tokens[1], nullptr, 10));
-                groupsPerFeature = static_cast<uint8_t>(strtoul(tokens[2], nullptr, 10));
-                numLabels = static_cast<uint8_t>(strtoul(tokens[3], nullptr, 10));
-                numSharedPatterns = static_cast<uint16_t>(strtoul(tokens[4], nullptr, 10));
-
-                // Calculate quantization_coefficient from groupsPerFeature
-                if (groupsPerFeature == 0) {
-                    RF_DEBUG(0, "❌ Invalid groupsPerFeature value in quantizer header");
-                    success = false;
-                    break;
-                }
-                
-                // Compute bits needed: groupsPerFeature = 2^quantization_coefficient
-                quantization_coefficient = 0;
-                uint16_t temp = groupsPerFeature;
-                while (temp > 1) {
-                    temp >>= 1;
-                    quantization_coefficient++;
-                }
-                // Clamp to valid range
-                if (quantization_coefficient < 1) quantization_coefficient = 1;
-                if (quantization_coefficient > 8) quantization_coefficient = 8;
-
-                featureRefs.reserve(numFeatures);
-                if (groupsPerFeature > 1) {
-                    sharedPatterns.reserve(static_cast<size_t>(numSharedPatterns) * (groupsPerFeature - 1));
-                    allUniqueEdges.reserve(static_cast<size_t>(numFeatures) * (groupsPerFeature - 1));
-                }
-                allDiscreteValues.reserve(static_cast<size_t>(numFeatures) * groupsPerFeature);
-                featureBaselines.reserve(numFeatures);
-                featureScales.reserve(numFeatures);
-                labelOffsets.resize(numLabels, UINT16_MAX);
-                labelLengths.resize(numLabels, 0);
-                labelStorage.reserve(numLabels * 8);
-
-                // Read label mappings: L,normalizedId,originalLabel
-                while (true) {
-                    size_t lineStart = file.position();
-                    if (!readTrimmedLine(file, line, MAX_LINE_BUFFER, lineLength)) {
-                        break;
-                    }
-
-                    if (strncmp(line, "L,", 2) != 0) {
-                        file.seek(lineStart);
-                        break;
-                    }
-
-                    char* idText = line + 2;
-                    char* comma = strchr(idText, ',');
-                    if (!comma) {
-                        RF_DEBUG(0, "❌ Invalid label line format");
-                        success = false;
-                        break;
-                    }
-                    *comma = '\0';
-                    trim(idText);
-
-                    char* labelText = comma + 1;
-                    trim(labelText);
-
-                    label_type labelId = static_cast<label_type>(strtoul(idText, nullptr, 10));
-                    if (!storeLabel(labelId, labelText)) {
-                        RF_DEBUG(0, "❌ Failed to store label mapping");
-                        success = false;
-                        break;
-                    }
-                }
-                if (!success) {
-                    break;
-                }
-
-                // Read shared patterns: P,patternId,edgeCount,e1,e2,...
-                char* patternTokens[64];
-                for (uint16_t i = 0; i < numSharedPatterns; ++i) {
-                    if (!readTrimmedLine(file, line, MAX_LINE_BUFFER, lineLength)) {
-                        RF_DEBUG(0, "❌ Unexpected end of file while reading shared patterns");
-                        success = false;
-                        break;
-                    }
-                    size_t count = tokenize(line, ',', patternTokens, 64);
-                    if (count < 3) {
-                        RF_DEBUG(0, "❌ Invalid pattern line format");
-                        success = false;
-                        break;
-                    }
-                    for (size_t j = 0; j < count; ++j) {
-                        trim(patternTokens[j]);
-                    }
-                    if (strcmp(patternTokens[0], "P") != 0) {
-                        RF_DEBUG(0, "❌ Pattern line missing 'P' prefix");
-                        success = false;
-                        break;
-                    }
-
-                    (void)strtoul(patternTokens[1], nullptr, 10); // Pattern ID reserved for future validation
-                    uint16_t edgeCount = static_cast<uint16_t>(strtoul(patternTokens[2], nullptr, 10));
-                    if (count != static_cast<size_t>(3 + edgeCount)) {
-                        RF_DEBUG_2(0, "❌ Pattern edge count mismatch - Expected: ", 3 + edgeCount, ", Found: ", count);
-                        success = false;
-                        break;
-                    }
-
-                    for (uint16_t j = 0; j < edgeCount; ++j) {
-                        sharedPatterns.push_back(static_cast<uint16_t>(strtoul(patternTokens[3 + j], nullptr, 10)));
-                    }
-                }
-                if (!success) {
-                    break;
-                }
-
-                // Read feature definitions
-                char* featureTokens[64];
-                for (uint16_t i = 0; i < numFeatures; ++i) {
-                    if (!readTrimmedLine(file, line, MAX_LINE_BUFFER, lineLength)) {
-                        RF_DEBUG(0, "❌ Unexpected end of file while reading features");
-                        success = false;
-                        break;
-                    }
-
-                    size_t count = tokenize(line, ',', featureTokens, 64);
-                    if (count == 0) {
-                        RF_DEBUG(0, "❌ Empty feature line encountered");
-                        success = false;
-                        break;
-                    }
-                    for (size_t j = 0; j < count; ++j) {
-                        trim(featureTokens[j]);
-                    }
-
-                    int64_t baselineValue = 0;
-                    uint64_t scaleValue = 1;
-
-                    if (strcmp(featureTokens[0], "DF") == 0) {
-                        if (count != 3) {
-                            RF_DEBUG(0, "❌ Invalid DF line format");
-                            success = false;
-                            break;
-                        }
-                        featureRefs.push_back(FeatureRef(FT_DF, 0, 0));
-                        baselineValue = static_cast<int64_t>(strtoll(featureTokens[1], nullptr, 10));
-                        scaleValue = static_cast<uint64_t>(strtoull(featureTokens[2], nullptr, 10));
-                        if (scaleValue == 0) {
-                            scaleValue = 1;
-                        }
-                    } else if (strcmp(featureTokens[0], "DC") == 0) {
-                        if (count < 4) {
-                            RF_DEBUG(0, "❌ Invalid DC line format");
-                            success = false;
-                            break;
-                        }
-                        uint8_t customCount = static_cast<uint8_t>(strtoul(featureTokens[1], nullptr, 10));
-                        size_t expectedCount = static_cast<size_t>(2 + customCount + 2);
-                        if (count != expectedCount) {
-                            RF_DEBUG_2(0, "❌ DC value count mismatch - Expected: ", expectedCount, ", Found: ", count);
-                            success = false;
-                            break;
-                        }
-                        uint8_t offset = static_cast<uint8_t>(allDiscreteValues.size());
-                        for (uint8_t j = 0; j < customCount; ++j) {
-                            allDiscreteValues.push_back(static_cast<uint8_t>(strtoul(featureTokens[2 + j], nullptr, 10)));
-                        }
-                        baselineValue = static_cast<int64_t>(strtoll(featureTokens[2 + customCount], nullptr, 10));
-                        scaleValue = static_cast<uint64_t>(strtoull(featureTokens[3 + customCount], nullptr, 10));
-                        if (scaleValue == 0) {
-                            scaleValue = 1;
-                        }
-                        featureRefs.push_back(FeatureRef(FT_DC, customCount, offset));
-                    } else if (strcmp(featureTokens[0], "CS") == 0) {
-                        if (count != 4) {
-                            RF_DEBUG(0, "❌ Invalid CS line format");
-                            success = false;
-                            break;
-                        }
-                        uint16_t patternId = static_cast<uint16_t>(strtoul(featureTokens[1], nullptr, 10));
-                        baselineValue = static_cast<int64_t>(strtoll(featureTokens[2], nullptr, 10));
-                        scaleValue = static_cast<uint64_t>(strtoull(featureTokens[3], nullptr, 10));
-                        if (scaleValue == 0) {
-                            scaleValue = 1;
-                        }
-                        featureRefs.push_back(FeatureRef(FT_CS, patternId, 0));
-                    } else if (strcmp(featureTokens[0], "CU") == 0) {
-                        if (count < 4) {
-                            RF_DEBUG(0, "❌ Invalid CU line format");
-                            success = false;
-                            break;
-                        }
-                        uint8_t edgeCount = static_cast<uint8_t>(strtoul(featureTokens[1], nullptr, 10));
-                        size_t expectedCount = static_cast<size_t>(2 + edgeCount + 2);
-                        if (count != expectedCount) {
-                            char mismatchMsg[112];
-                            snprintf(mismatchMsg, sizeof(mismatchMsg), "❌ CU edge count mismatch - Found: %u, Expected: %u",
-                                     static_cast<unsigned>(count),
-                                     static_cast<unsigned>(expectedCount));
-                            RF_DEBUG(0, "", mismatchMsg);
-                            success = false;
-                            break;
-                        }
-                        if (groupsPerFeature <= 1) {
-                            RF_DEBUG(0, "❌ Invalid groupsPerFeature for CU definition");
-                            success = false;
-                            break;
-                        }
-                        uint16_t divisor = static_cast<uint16_t>(groupsPerFeature - 1);
-                        if (divisor == 0) {
-                            RF_DEBUG(0, "❌ Division by zero in CU offset calculation");
-                            success = false;
-                            break;
-                        }
-                        uint8_t offset = static_cast<uint8_t>(allUniqueEdges.size() / divisor);
-                        for (uint8_t j = 0; j < edgeCount; ++j) {
-                            allUniqueEdges.push_back(static_cast<uint16_t>(strtoul(featureTokens[2 + j], nullptr, 10)));
-                        }
-                        baselineValue = static_cast<int64_t>(strtoll(featureTokens[2 + edgeCount], nullptr, 10));
-                        scaleValue = static_cast<uint64_t>(strtoull(featureTokens[3 + edgeCount], nullptr, 10));
-                        if (scaleValue == 0) {
-                            scaleValue = 1;
-                        }
-                        featureRefs.push_back(FeatureRef(FT_CU, edgeCount, offset));
-                    } else {
-                        RF_DEBUG(0, "❌ Unknown feature type encountered");
-                        success = false;
-                        break;
-                    }
-
-                    featureBaselines.push_back(baselineValue);
-                    featureScales.push_back(scaleValue);
-                }
-            } while (false);
-
-            file.close();
-
-            if (!success) {
+            // Read basic parameters
+            if (file.readBytes(reinterpret_cast<char*>(&numFeatures), sizeof(uint16_t)) != sizeof(uint16_t)) {
+                RF_DEBUG(0, "❌ Failed to read numFeatures");
+                file.close();
                 resetData();
                 return false;
             }
 
+            if (file.readBytes(reinterpret_cast<char*>(&groupsPerFeature), sizeof(uint16_t)) != sizeof(uint16_t)) {
+                RF_DEBUG(0, "❌ Failed to read groupsPerFeature");
+                file.close();
+                resetData();
+                return false;
+            }
+
+            uint8_t labelCount;
+            if (file.readBytes(reinterpret_cast<char*>(&labelCount), sizeof(uint8_t)) != sizeof(uint8_t)) {
+                RF_DEBUG(0, "❌ Failed to read label count");
+                file.close();
+                resetData();
+                return false;
+            }
+            // numLabels will be updated by storeLabel calls
+            numLabels = 0; 
+
+            uint16_t numSharedPatterns;
+            if (file.readBytes(reinterpret_cast<char*>(&numSharedPatterns), sizeof(uint16_t)) != sizeof(uint16_t)) {
+                RF_DEBUG(0, "❌ Failed to read numSharedPatterns");
+                file.close();
+                resetData();
+                return false;
+            }
+
+            // Read outlier filtering flag
+            uint8_t outlierFlag;
+            if (file.readBytes(reinterpret_cast<char*>(&outlierFlag), sizeof(uint8_t)) != sizeof(uint8_t)) {
+                RF_DEBUG(0, "❌ Failed to read outlier flag");
+                file.close();
+                resetData();
+                return false;
+            }
+            removeOutliers = (outlierFlag != 0);
+
+            // Read outlier statistics if enabled
+            if (removeOutliers) {
+#ifndef RF_STATIC_MODEL
+                featureMeans.reserve(numFeatures);
+                featureStdDevs.reserve(numFeatures);
+#endif
+                for (uint16_t i = 0; i < numFeatures; ++i) {
+                    float mean, stdDev;
+                    if (file.readBytes(reinterpret_cast<char*>(&mean), sizeof(float)) != sizeof(float) ||
+                        file.readBytes(reinterpret_cast<char*>(&stdDev), sizeof(float)) != sizeof(float)) {
+                        RF_DEBUG(0, "❌ Failed to read outlier statistics");
+                        file.close();
+                        resetData();
+                        return false;
+                    }
+#ifndef RF_STATIC_MODEL
+                    featureMeans.push_back(mean);
+                    featureStdDevs.push_back(stdDev);
+#endif
+                }
+            }
+
+            // Calculate quantization_coefficient from groupsPerFeature
+            if (groupsPerFeature == 0) {
+                RF_DEBUG(0, "❌ Invalid groupsPerFeature value");
+                file.close();
+                resetData();
+                return false;
+            }
+            
+            quantization_coefficient = 0;
+            uint16_t temp = groupsPerFeature;
+            while (temp > 1) {
+                temp >>= 1;
+                quantization_coefficient++;
+            }
+            if (quantization_coefficient < 1) quantization_coefficient = 1;
+            if (quantization_coefficient > 8) quantization_coefficient = 8;
+
+            // Reserve memory
+            featureRefs.reserve(numFeatures);
+            if (groupsPerFeature > 1) {
+                sharedPatterns.reserve(static_cast<size_t>(numSharedPatterns) * (groupsPerFeature - 1));
+                allUniqueEdges.reserve(static_cast<size_t>(numFeatures) * (groupsPerFeature - 1));
+            }
+            allDiscreteValues.reserve(static_cast<size_t>(numFeatures) * groupsPerFeature);
+            featureBaselines.reserve(numFeatures);
+            featureScales.reserve(numFeatures);
+            labelOffsets.resize(labelCount, UINT16_MAX);
+            labelLengths.resize(labelCount, 0);
+            labelStorage.reserve(labelCount * 8);
+
+            // Read label mappings
+            for (uint8_t i = 0; i < labelCount; ++i) {
+                uint8_t labelId;
+                if (file.readBytes(reinterpret_cast<char*>(&labelId), sizeof(uint8_t)) != sizeof(uint8_t)) {
+                    RF_DEBUG(0, "❌ Failed to read label ID");
+                    file.close();
+                    resetData();
+                    return false;
+                }
+
+                uint8_t labelLen;
+                if (file.readBytes(reinterpret_cast<char*>(&labelLen), sizeof(uint8_t)) != sizeof(uint8_t)) {
+                    RF_DEBUG(0, "❌ Failed to read label length");
+                    file.close();
+                    resetData();
+                    return false;
+                }
+
+                char labelBuffer[256];
+                if (labelLen > 0) {
+                    if (file.readBytes(labelBuffer, labelLen) != labelLen) {
+                        RF_DEBUG(0, "❌ Failed to read label text");
+                        file.close();
+                        resetData();
+                        return false;
+                    }
+                    labelBuffer[labelLen] = '\0';
+                    if (!storeLabel(labelId, labelBuffer)) {
+                        RF_DEBUG(0, "❌ Failed to store label");
+                        file.close();
+                        resetData();
+                        return false;
+                    }
+                }
+            }
+
+            // Read shared patterns
+            for (uint16_t i = 0; i < numSharedPatterns; ++i) {
+                uint16_t patternId;
+                if (file.readBytes(reinterpret_cast<char*>(&patternId), sizeof(uint16_t)) != sizeof(uint16_t)) {
+                    RF_DEBUG(0, "❌ Failed to read pattern ID");
+                    file.close();
+                    resetData();
+                    return false;
+                }
+
+                uint16_t edgeCount;
+                if (file.readBytes(reinterpret_cast<char*>(&edgeCount), sizeof(uint16_t)) != sizeof(uint16_t)) {
+                    RF_DEBUG(0, "❌ Failed to read pattern edge count");
+                    file.close();
+                    resetData();
+                    return false;
+                }
+
+                for (uint16_t j = 0; j < edgeCount; ++j) {
+                    uint16_t edge;
+                    if (file.readBytes(reinterpret_cast<char*>(&edge), sizeof(uint16_t)) != sizeof(uint16_t)) {
+                        RF_DEBUG(0, "❌ Failed to read pattern edge");
+                        file.close();
+                        resetData();
+                        return false;
+                    }
+                    sharedPatterns.push_back(edge);
+                }
+            }
+
+            // Read feature definitions
+            for (uint16_t i = 0; i < numFeatures; ++i) {
+                uint8_t typeU8;
+                if (file.readBytes(reinterpret_cast<char*>(&typeU8), sizeof(uint8_t)) != sizeof(uint8_t)) {
+                    RF_DEBUG(0, "❌ Failed to read feature type");
+                    file.close();
+                    resetData();
+                    return false;
+                }
+
+                int64_t baselineValue;
+                if (file.readBytes(reinterpret_cast<char*>(&baselineValue), sizeof(int64_t)) != sizeof(int64_t)) {
+                    RF_DEBUG(0, "❌ Failed to read baseline");
+                    file.close();
+                    resetData();
+                    return false;
+                }
+
+                uint64_t scaleValue;
+                if (file.readBytes(reinterpret_cast<char*>(&scaleValue), sizeof(uint64_t)) != sizeof(uint64_t)) {
+                    RF_DEBUG(0, "❌ Failed to read scale");
+                    file.close();
+                    resetData();
+                    return false;
+                }
+                if (scaleValue == 0) scaleValue = 1;
+
+                FeatureType type = static_cast<FeatureType>(typeU8);
+
+                switch (type) {
+                    case FT_DF:
+                        featureRefs.push_back(FeatureRef(FT_DF, 0, 0));
+                        break;
+
+                    case FT_DC:
+                        {
+                            uint8_t count;
+                            if (file.readBytes(reinterpret_cast<char*>(&count), sizeof(uint8_t)) != sizeof(uint8_t)) {
+                                RF_DEBUG(0, "❌ Failed to read DC count");
+                                file.close();
+                                resetData();
+                                return false;
+                            }
+
+                            uint8_t offset = static_cast<uint8_t>(allDiscreteValues.size());
+                            for (uint8_t j = 0; j < count; ++j) {
+                                uint8_t val;
+                                if (file.readBytes(reinterpret_cast<char*>(&val), sizeof(uint8_t)) != sizeof(uint8_t)) {
+                                    RF_DEBUG(0, "❌ Failed to read DC value");
+                                    file.close();
+                                    resetData();
+                                    return false;
+                                }
+                                allDiscreteValues.push_back(val);
+                            }
+                            featureRefs.push_back(FeatureRef(FT_DC, count, offset));
+                        }
+                        break;
+
+                    case FT_CS:
+                        {
+                            uint16_t patternId;
+                            if (file.readBytes(reinterpret_cast<char*>(&patternId), sizeof(uint16_t)) != sizeof(uint16_t)) {
+                                RF_DEBUG(0, "❌ Failed to read CS pattern ID");
+                                file.close();
+                                resetData();
+                                return false;
+                            }
+                            featureRefs.push_back(FeatureRef(FT_CS, patternId, 0));
+                        }
+                        break;
+
+                    case FT_CU:
+                        {
+                            uint8_t edgeCount;
+                            if (file.readBytes(reinterpret_cast<char*>(&edgeCount), sizeof(uint8_t)) != sizeof(uint8_t)) {
+                                RF_DEBUG(0, "❌ Failed to read CU edge count");
+                                file.close();
+                                resetData();
+                                return false;
+                            }
+
+                            if (groupsPerFeature <= 1) {
+                                RF_DEBUG(0, "❌ Invalid groupsPerFeature for CU");
+                                file.close();
+                                resetData();
+                                return false;
+                            }
+
+                            uint16_t divisor = static_cast<uint16_t>(groupsPerFeature - 1);
+                            if (divisor == 0) {
+                                RF_DEBUG(0, "❌ Division by zero in CU offset");
+                                file.close();
+                                resetData();
+                                return false;
+                            }
+
+                            uint8_t offset = static_cast<uint8_t>(allUniqueEdges.size() / divisor);
+                            for (uint8_t j = 0; j < edgeCount; ++j) {
+                                uint16_t edge;
+                                if (file.readBytes(reinterpret_cast<char*>(&edge), sizeof(uint16_t)) != sizeof(uint16_t)) {
+                                    RF_DEBUG(0, "❌ Failed to read CU edge");
+                                    file.close();
+                                    resetData();
+                                    return false;
+                                }
+                                allUniqueEdges.push_back(edge);
+                            }
+                            featureRefs.push_back(FeatureRef(FT_CU, edgeCount, offset));
+                        }
+                        break;
+
+                    default:
+                        RF_DEBUG(0, "❌ Unknown feature type");
+                        file.close();
+                        resetData();
+                        return false;
+                }
+
+                featureBaselines.push_back(baselineValue);
+                featureScales.push_back(scaleValue);
+            }
+
+            file.close();
             isLoaded = true;
-            RF_DEBUG(1, "✅ Quantizer loaded successfully! : ", file_path);
+            RF_DEBUG(1, "✅ Quantizer binary loaded successfully! : ", file_path);
             RF_DEBUG_2(2, "📊 Features: ", numFeatures, ", Groups: ", groupsPerFeature);
-            RF_DEBUG_2(2, "   Labels: ", numLabels, ", Patterns: ", numSharedPatterns);
+            RF_DEBUG_2(2, "   Labels: ", numLabels, ", Outlier filtering: ", removeOutliers ? "enabled" : "disabled");
             return true;
         }
-        
-        
+
         // Release loaded data from memory
         void releaseQuantizer(bool re_use = true) {
             if (!isLoaded) {
@@ -4101,7 +4053,25 @@ namespace mcu {
             labelOffsets.clear();
             labelLengths.clear();
             labelStorage.clear();
+
+            featureRefs.fit();
+            sharedPatterns.fit();
+            allUniqueEdges.fit();
+            allDiscreteValues.fit();
+            featureBaselines.fit();
+            featureScales.fit();
+            labelOffsets.fit();
+            labelLengths.fit();
+            labelStorage.fit();
+            
+#ifndef RF_STATIC_MODEL
+            featureMeans.clear();
+            featureStdDevs.clear();
+            featureMeans.fit();
+            featureStdDevs.fit();
+#endif
             isLoaded = false;
+
             RF_DEBUG(2, "🧹 Quantizer data released from memory");
         }
 
@@ -4110,7 +4080,7 @@ namespace mcu {
         __attribute__((always_inline)) inline void quantizeFeatures(const float* features, packed_vector<8>& output) const {
             // Write directly to pre-allocated buffer
             for (uint16_t i = 0; i < numFeatures; ++i) {
-                output.set(i, quantizeFeature(i, features[i]));
+                output.set(i, quantizeValue(i, features[i]));
             }
         }
         
@@ -4123,25 +4093,60 @@ namespace mcu {
             usage += 4;
             
             // Core data structures
-            usage += featureRefs.size() * sizeof(FeatureRef);
-            usage += sharedPatterns.size() * sizeof(uint16_t);
-            usage += allUniqueEdges.size() * sizeof(uint16_t);
-            usage += allDiscreteValues.size() * sizeof(uint8_t);
-        usage += featureBaselines.size() * sizeof(int64_t);
-        usage += featureScales.size() * sizeof(uint64_t);
-            usage += labelOffsets.size() * sizeof(uint16_t);
-            usage += labelLengths.size() * sizeof(uint16_t);
-            usage += labelStorage.size() * sizeof(char);
+            usage += featureRefs.memory_usage();
+            usage += sharedPatterns.memory_usage();
+            usage += allUniqueEdges.memory_usage();
+            usage += allDiscreteValues.memory_usage();
+            usage += featureBaselines.memory_usage();
+            usage += featureScales.memory_usage();
+            usage += labelOffsets.memory_usage();
+            usage += labelLengths.memory_usage();
+            usage += labelStorage.memory_usage();
+#ifndef RF_STATIC_MODEL
+            usage += featureMeans.memory_usage();
+            usage += featureStdDevs.memory_usage();
+#endif
             
             return usage;
         }
         
-        // Getters
-        uint16_t getNumFeatures() const { return numFeatures; }
-        uint8_t getGroupsPerFeature() const { return groupsPerFeature; }
-        label_type getNumLabels() const { return numLabels; }
-        uint8_t getQuantizationCoefficient() const { return quantization_coefficient; }
+        // Getters}
         bool loaded() const { return isLoaded; }
+        
+#ifndef RF_STATIC_MODEL
+        // Set outlier filtering statistics (for retraining scenarios)
+        void setOutlierStatistics(const float* means, const float* stdDevs, uint16_t count) {
+            if (!means || !stdDevs || count != numFeatures) {
+                return;
+            }
+            featureMeans.clear();
+            featureStdDevs.clear();
+            featureMeans.reserve(count);
+            featureStdDevs.reserve(count);
+            for (uint16_t i = 0; i < count; ++i) {
+                featureMeans.push_back(means[i]);
+                featureStdDevs.push_back(stdDevs[i]);
+            }
+            // RF_DEBUG_2(2, "📊 Outlier statistics loaded for ", count, " features");
+        }
+
+        bool set_outliner_zscore_filtering(float zscore_threshold) {
+            if (!removeOutliers || zscore_threshold <= 0.0f) {
+                return false;
+            }else{
+                outlierZThreshold = zscore_threshold;
+                return true;
+            }
+        }
+
+        void enable_outliner_zscore_filtering() {
+            removeOutliers = true;
+        }
+
+        void disable_outliner_zscore_filtering() {
+            removeOutliers = false;
+        }
+#endif
 
         const char* getOriginalLabelPtr(label_type normalizedLabel) const {
             if (normalizedLabel >= labelOffsets.size()) {
@@ -4155,7 +4160,7 @@ namespace mcu {
         }
 
         bool getOriginalLabelView(label_type normalizedLabel, const char** outData, uint16_t* outLength = nullptr) const {
-            if (!outData) {
+            if (!outData || normalizedLabel >= RF_MAX_LABELS) {
                 return false;
             }
             const char* data = getOriginalLabelPtr(normalizedLabel);
@@ -4168,13 +4173,13 @@ namespace mcu {
             }
             *outData = data;
             if (outLength) {
-                uint16_t cached = (normalizedLabel < labelLengths.size()) ? labelLengths[normalizedLabel] : 0;
+                uint8_t cached = labelLengths[normalizedLabel];
                 // Fallback: if cache is empty (0), compute length once and update cache for future calls
                 if (cached == 0) {
-                    cached = static_cast<uint16_t>(strlen(data));
+                    cached = static_cast<uint8_t>(strlen(data));
                     // Update cache if within bounds to avoid repeated strlen calls
-                    if (normalizedLabel < labelLengths.size() && labelLengths[normalizedLabel] == 0) {
-                        const_cast<b_vector<uint16_t>&>(labelLengths)[normalizedLabel] = cached;
+                    if (labelLengths[normalizedLabel] == 0) {
+                        labelLengths[normalizedLabel] = cached;
                     }
                 }
                 *outLength = cached;
@@ -4183,7 +4188,7 @@ namespace mcu {
         }
 
         bool getOriginalLabel(label_type normalizedLabel, char* buffer, size_t bufferSize) const {
-            if (!buffer || bufferSize == 0) {
+            if (!buffer || bufferSize == 0 || normalizedLabel >= RF_MAX_LABELS) {
                 return false;
             }
             const char* labelPtr = getOriginalLabelPtr(normalizedLabel);
@@ -4191,7 +4196,7 @@ namespace mcu {
                 buffer[0] = '\0';
                 return false;
             }
-            uint16_t length = (normalizedLabel < labelLengths.size()) ? labelLengths[normalizedLabel] : 0;
+            uint8_t length = labelLengths[normalizedLabel];
             if (length == 0) {
                 buffer[0] = '\0';
                 return true;
@@ -4216,7 +4221,7 @@ namespace mcu {
                 if (offset == UINT16_MAX || offset >= labelStorage.size()) {
                     continue;
                 }
-                uint16_t length = (i < labelLengths.size()) ? labelLengths[i] : 0;
+                uint8_t length = (i < labelOffsets.size()) ? labelLengths[i] : 0;
                 if (length == 0) {
                     if (originalLabel[0] == '\0') {
                         return i;
@@ -6303,14 +6308,15 @@ namespace mcu {
                 return false; // No valid samples to add
             }
 
-            auto deleted_labels = base_data.addNewData(valid_samples, config_ptr->extend_base_data, config_ptr->max_samples);
+            auto deleted_labels = base_data.addNewData(valid_samples, config_ptr->max_samples);
 
             // update config 
-            if(config_ptr->extend_base_data) {
-                config_ptr->num_samples += valid_samples_count;
-                if(config_ptr->num_samples > RF_MAX_SAMPLES) 
-                    config_ptr->num_samples = RF_MAX_SAMPLES;
+            config_ptr->num_samples += valid_samples_count;
+            if(config_ptr->max_samples > 0 && config_ptr->num_samples > config_ptr->max_samples) {
+                config_ptr->num_samples = config_ptr->max_samples;
             }
+            if(config_ptr->num_samples > RF_MAX_SAMPLES) 
+                config_ptr->num_samples = RF_MAX_SAMPLES;
 
             for(sample_type i = 0; i < pending_samples.size() && i < actual_labels.size(); i++) {
                 if(actual_labels[i] < RF_ERROR_LABEL) { // Valid actual label provided

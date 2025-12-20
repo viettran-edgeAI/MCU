@@ -53,7 +53,7 @@ Tracks how much the current data deviates from the initial "Reference" concept.
 ### 2. Feature Space Geometry Drift (`*_centroid_drift.png` & `*_pca_time.png`)
 Visualizes the physical movement of data in the feature space.
 - **Centroid Drift**: Plots the Euclidean distance between the reference centroid ($\mu_{ref}$) and the moving window centroid ($\mu_t$). A steady climb indicates incremental or gradual drift.
-- **PCA Projection**: Projects high-dimensional data into 2D. Points are colored by **Time** (dark purple $\rightarrow$ yellow). Large 'X' markers show the shift in the center of mass before and after drift.
+- **3D PCA Projection**: Projects high-dimensional data into 3D. Points are colored by **Time** (dark purple $\rightarrow$ yellow). Large 'X' markers show the shift in the center of mass before and after drift.
 
 ### 3. Label Distribution over Time (`*_label_dist_time.png`)
 A line graph showing the relative frequency of each class over time.

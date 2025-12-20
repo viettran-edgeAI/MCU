@@ -289,15 +289,15 @@ RF_DEBUG_2(1, "Samples: ", num_samples, " Features: ", num_features);
 
 ### Feature Control
 
-#### `DISABLE_TRAINING`
-**Purpose:** Completely disable training functionality to save code space  
+#### `RF_STATIC_MODEL`
+**Purpose:** Completely disable training functionality to save code space (Inference only)  
 **Default:** Not defined (training enabled)  
-**Effect:** Sets `RF_ENABLE_TRAINING` to 0  
+**Effect:** If defined, training code is excluded from compilation  
 **Code size savings:** ~30-40KB on ESP32
 
 **Usage for inference-only deployment:**
 ```cpp
-#define DISABLE_TRAINING
+#define RF_STATIC_MODEL
 #include <random_forest_mcu.h>
 
 void setup() {
@@ -306,17 +306,9 @@ void setup() {
 }
 ```
 
-#### `RF_ENABLE_TRAINING`
-**Purpose:** Internal flag controlling training compilation  
-**Auto-set:** Based on `DISABLE_TRAINING` macro  
-**Default:** 1 (enabled)  
-**Values:**
-- 0: Training code excluded from compilation
-- 1: Training code included
-
 **Conditional compilation:**
 ```cpp
-#if RF_ENABLE_TRAINING
+#ifndef RF_STATIC_MODEL
   // Training-related code only compiled when enabled
   rf.train();
 #endif
@@ -478,7 +470,7 @@ These macros help write portable code across different microcontroller platforms
 |-------|---------|---------|--------|------|
 | `RF_USE_PSRAM` | Enable PSRAM usage | Not defined | 0, 1 | Rf_board_config.h |
 | `RF_DEBUG_LEVEL` | Debug verbosity | 1 | 0-3 | Rf_file_manager.h |
-| `DISABLE_TRAINING` | Disable training | Not defined | defined/not | Rf_components.h |
+| `RF_STATIC_MODEL` | Disable training | Not defined | defined/not | Rf_components.h |
 | `DEV_STAGE` | Development mode | Not defined | defined/not | Rf_components.h |
 | `USER_CHUNK_SIZE` | USB transfer chunk | Board default | 64-512 | Rf_board_config.h |
 | `SD_CS_PIN` | SD SPI chip select | 5 | Any GPIO | Rf_file_manager.h |
@@ -496,7 +488,7 @@ These macros help write portable code across different microcontroller platforms
 ### Example 1: Production Inference-Only Deployment
 ```cpp
 // Optimize for minimal code size and maximum speed
-#define DISABLE_TRAINING      // Exclude training code
+#define RF_STATIC_MODEL      // Exclude training code
 #define RF_USE_PSRAM         // Use external RAM
 #define RF_DEBUG_LEVEL 0     // Silent mode
 #define USER_CHUNK_SIZE 512  // Fast transfers
@@ -661,7 +653,7 @@ void setup() {
 
 ### Issue: Code size too large
 **Solutions:**
-- Disable training: `#define DISABLE_TRAINING`
+- Disable training: `#define RF_STATIC_MODEL`
 - Reduce debug level: `#define RF_DEBUG_LEVEL 0`
 - Use release build flags in Arduino IDE
 
@@ -683,7 +675,7 @@ void setup() {
 - PSRAM: Not available
 - USB: Native USB CDC
 - Storage: LittleFS or SD_SPI
-- Note: Limited RAM, use `DISABLE_TRAINING` for large models
+- Note: Limited RAM, use `RF_STATIC_MODEL` for large models
 
 ### ESP32-C6/H2
 - PSRAM: Not available  

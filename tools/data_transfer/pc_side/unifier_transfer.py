@@ -7,7 +7,7 @@ Transfers files to /model_name/ directory on ESP32 filesystem.
 
 Files transferred:
 1. From data_quantization/data/result/:
-    - {model_name}_ctg.csv (category labels)
+    - {model_name}_qtz.bin (quantizer binary)
     - {model_name}_dp.csv (descriptor payload)
     - {model_name}_nml.bin (normalized dataset for training/testing)
    
@@ -80,7 +80,7 @@ def find_dataset_files(model_name):
     tools_root = get_script_root()
     result_dir = tools_root / "data_quantization" / "data" / "result"
 
-    suffixes = ["_ctg.csv", "_dp.csv", "_nml.bin"]
+    suffixes = ["_qtz.bin", "_dp.csv", "_nml.bin"]
     files = []
 
     for suffix in suffixes:
@@ -371,8 +371,8 @@ def print_file_summary(files_by_category):
             total_size += size
             total_files += 1
             filename = os.path.basename(file_path)
-            if filename.endswith('_ctg.csv'):
-                label = 'Category labels'
+            if filename.endswith('_qtz.bin'):
+                label = 'Quantizer binary'
             elif filename.endswith('_dp.csv'):
                 label = 'Descriptor payload'
             elif filename.endswith('_nml.bin'):

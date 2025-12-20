@@ -13,6 +13,7 @@
 #include <cerrno>
 #include <filesystem>
 #include <cstdint>
+#include <cctype>
 
 using u8 = uint8_t;
 
@@ -55,6 +56,144 @@ static uint16_t getPackedFeatureBytes(uint16_t featureCount) {
 static int num_features = 1023;
 static int label_column_index = 0; // Column index containing the label (0 = first column)
 
+struct QuantizationConfig {
+    std::string inputPath;
+    std::string modelName;
+    std::string headerMode = "auto"; // auto|yes|no
+    int maxFeatures = MAX_FEATURES;
+    int quantBits = quantization_coefficient;
+    int labelColumn = 0;
+    bool runVisualization = true;
+    bool removeOutliers = true;
+    int32_t maxSamples = -1; // -1 = current size (default), 0 = unlimited, >0 = specific limit
+};
+
+static std::string trimWhitespace(const std::string& in) {
+    size_t start = in.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) return "";
+    size_t end = in.find_last_not_of(" \t\r\n");
+    return in.substr(start, end - start + 1);
+}
+
+static std::string toLowerCopy(std::string value) {
+    for (char& c : value) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return value;
+}
+
+// Tiny JSON extractor supporting both flat and nested {"value": ...} format
+static bool extractValue(const std::string& content, const std::string& key, std::string& out) {
+    const std::string pattern = "\"" + key + "\"";
+    size_t keyPos = content.find(pattern);
+    if (keyPos == std::string::npos) return false;
+
+    size_t colon = content.find(':', keyPos + pattern.size());
+    if (colon == std::string::npos) return false;
+
+    size_t valueStart = content.find_first_not_of(" \t\r\n", colon + 1);
+    if (valueStart == std::string::npos) return false;
+
+    // Check if value is a nested object
+    if (content[valueStart] == '{') {
+        // Find the nested "value" field
+        size_t objEnd = content.find('}', valueStart);
+        if (objEnd == std::string::npos) return false;
+        std::string objContent = content.substr(valueStart, objEnd - valueStart + 1);
+        
+        size_t valueKeyPos = objContent.find("\"value\"");
+        if (valueKeyPos == std::string::npos) return false;
+        
+        size_t valueColon = objContent.find(':', valueKeyPos + 7);
+        if (valueColon == std::string::npos) return false;
+        
+        size_t nestedStart = objContent.find_first_not_of(" \t\r\n", valueColon + 1);
+        if (nestedStart == std::string::npos) return false;
+        
+        if (objContent[nestedStart] == '"') {
+            size_t end = objContent.find('"', nestedStart + 1);
+            if (end == std::string::npos) return false;
+            out = objContent.substr(nestedStart + 1, end - nestedStart - 1);
+        } else {
+            size_t end = objContent.find_first_of(",}\n\r", nestedStart);
+            out = objContent.substr(nestedStart, end - nestedStart);
+            out = trimWhitespace(out);
+        }
+        return true;
+    }
+    
+    // Flat format (backward compatibility)
+    if (content[valueStart] == '"') {
+        size_t end = content.find('"', valueStart + 1);
+        if (end == std::string::npos) return false;
+        out = content.substr(valueStart + 1, end - valueStart - 1);
+    } else {
+        size_t end = content.find_first_of(",}\n\r", valueStart);
+        out = content.substr(valueStart, end - valueStart);
+        out = trimWhitespace(out);
+    }
+    return true;
+}
+
+static QuantizationConfig loadQuantizationConfig(const std::string& configPath) {
+    QuantizationConfig cfg;
+    std::ifstream fin(configPath);
+    if (!fin) {
+        throw std::runtime_error(std::string("Cannot open config file: ") + configPath);
+    }
+
+    std::ostringstream ss;
+    ss << fin.rdbuf();
+    std::string content = ss.str();
+
+    std::string raw;
+    if (extractValue(content, "input_path", raw)) {
+        cfg.inputPath = trimWhitespace(raw);
+    }
+    if (extractValue(content, "model_name", raw)) {
+        cfg.modelName = trimWhitespace(raw);
+    }
+    if (extractValue(content, "header_mode", raw)) {
+        cfg.headerMode = toLowerCopy(trimWhitespace(raw));
+    }
+    if (extractValue(content, "max_features", raw)) {
+        cfg.maxFeatures = std::stoi(raw);
+    }
+    if (extractValue(content, "quantization_bits", raw)) {
+        cfg.quantBits = std::stoi(raw);
+    }
+    if (extractValue(content, "label_column", raw)) {
+        cfg.labelColumn = std::stoi(raw);
+    }
+    if (extractValue(content, "run_visualization", raw)) {
+        std::string lowered = toLowerCopy(raw);
+        cfg.runVisualization = (lowered == "true" || lowered == "1" || lowered == "yes");
+    }
+    if (extractValue(content, "remove_outliers", raw)) {
+        std::string lowered = toLowerCopy(raw);
+        cfg.removeOutliers = (lowered == "true" || lowered == "1" || lowered == "yes");
+    }
+    if (extractValue(content, "max_samples", raw)) {
+        cfg.maxSamples = std::stoi(raw);
+    }
+
+    // Validation and defaults fallback
+    if (cfg.inputPath.empty()) {
+        throw std::runtime_error("Config missing required field: input_path");
+    }
+    if (cfg.maxFeatures < 1 || cfg.maxFeatures > MAX_FEATURES) {
+        cfg.maxFeatures = MAX_FEATURES;
+    }
+    if (cfg.quantBits < 1 || cfg.quantBits > 8) {
+        cfg.quantBits = quantization_coefficient;
+    }
+    if (cfg.labelColumn < 0) {
+        cfg.labelColumn = 0;
+    }
+
+    return cfg;
+}
+
 // Split a line on commas (naïve; assumes no embedded commas/quotes)
 static mcu::vector<std::string> split(const std::string &line) {
     mcu::vector<std::string> out;
@@ -82,7 +221,7 @@ struct FeatureStats {
     bool isDiscrete = false;
 };
 
-// Structure for building CTG3 format with pattern sharing and optimization
+// Structure for building QTZ3 format with pattern sharing and optimization
 class Rf_quantizer{
     uint16_t numFeatures = 0;
     uint16_t groupsPerFeature = 0;
@@ -125,6 +264,9 @@ class Rf_quantizer{
     mcu::vector<SharedPattern> sharedPatterns;
     mcu::unordered_map_s<std::string, uint16_t> patternMap; // key -> patternId
     mcu::vector<mcu::pair<std::string, uint8_t>> labelMapping;
+    bool removeOutliers = true; // Whether outlier filtering was applied during quantization
+    mcu::vector<float> featureMeans;
+    mcu::vector<float> featureStdDevs;
 
     static int64_t scaleFloatToInt64(double value, uint64_t scale) {
         long double scaled = static_cast<long double>(value) * static_cast<long double>(scale);
@@ -153,9 +295,15 @@ public:
     }
     
     // Constructor with label mapping
-    Rf_quantizer(uint16_t featureCount, uint16_t gpf, const mcu::vector<mcu::pair<std::string, uint8_t>>& labelMap)
-        : numFeatures(featureCount), groupsPerFeature(gpf), labelMapping(labelMap) {
+    Rf_quantizer(uint16_t featureCount, uint16_t gpf, const mcu::vector<mcu::pair<std::string, uint8_t>>& labelMap, bool enableOutlierRemoval = true)
+        : numFeatures(featureCount), groupsPerFeature(gpf), labelMapping(labelMap), removeOutliers(enableOutlierRemoval) {
         features.resize(numFeatures);
+    }
+
+    // Set outlier statistics for Z-score clipping
+    void setOutlierStatistics(const mcu::vector<float>& means, const mcu::vector<float>& stdDevs) {
+        featureMeans = means;
+        featureStdDevs = stdDevs;
     }
     
     // Set feature as discrete full range (0..groupsPerFeature-1)
@@ -350,68 +498,104 @@ public:
         return result;
     }
     
-    // Save quantizer to CTG3 format for ESP32 transfer
+    // Save quantizer to binary format for ESP32 transfer
     void saveQuantizer(const char* filename) const {
-        std::ofstream fout(filename);
+        std::ofstream fout(filename, std::ios::binary);
         if (!fout) {
-            throw std::runtime_error(std::string("Cannot open CTG3 file: ") + filename);
+            throw std::runtime_error(std::string("Cannot open quantizer binary file: ") + filename);
         }
+
+        // Write header: magic number "QTZ3" + version
+        const char magic[4] = {'Q', 'T', 'Z', '3'};
+        fout.write(magic, 4);
+
+        // Write basic parameters
+        fout.write(reinterpret_cast<const char*>(&numFeatures), sizeof(uint16_t));
+        fout.write(reinterpret_cast<const char*>(&groupsPerFeature), sizeof(uint16_t));
         
-       // Header: CTG3,numFeatures,groupsPerFeature,numLabels,numSharedPatterns
-       fout << "CTG3," << numFeatures << "," << static_cast<int>(groupsPerFeature) 
-           << "," << labelMapping.size() << "," << sharedPatterns.size() << "\n";
+        uint8_t numLabelsU8 = static_cast<uint8_t>(labelMapping.size());
+        fout.write(reinterpret_cast<const char*>(&numLabelsU8), sizeof(uint8_t));
         
-        // Label mappings (optional, can be disabled with compile flag)
-        for (const auto& mapping : labelMapping) {
-            fout << "L," << static_cast<int>(mapping.second) << "," << mapping.first << "\n";
-        }
+        uint16_t numSharedPatternsU16 = static_cast<uint16_t>(sharedPatterns.size());
+        fout.write(reinterpret_cast<const char*>(&numSharedPatternsU16), sizeof(uint16_t));
         
-        // Shared pattern block
-        for (const auto& pattern : sharedPatterns) {
-            fout << "P," << pattern.patternId << "," << pattern.scaledEdges.size();
-            for (uint16_t edge : pattern.scaledEdges) {
-                fout << "," << edge;
+        // Write outlier filtering flag
+        uint8_t outlierFlag = removeOutliers ? 1 : 0;
+        fout.write(reinterpret_cast<const char*>(&outlierFlag), sizeof(uint8_t));
+
+        // Write outlier statistics if enabled
+        if (removeOutliers) {
+            for (uint16_t i = 0; i < numFeatures; ++i) {
+                float mean = (i < featureMeans.size()) ? featureMeans[i] : 0.0f;
+                float stdDev = (i < featureStdDevs.size()) ? featureStdDevs[i] : 0.0f;
+                fout.write(reinterpret_cast<const char*>(&mean), sizeof(float));
+                fout.write(reinterpret_cast<const char*>(&stdDev), sizeof(float));
             }
-            fout << "\n";
         }
-        
-        // Feature definitions
+
+        // Write label mappings
+        for (const auto& mapping : labelMapping) {
+            fout.write(reinterpret_cast<const char*>(&mapping.second), sizeof(uint8_t));
+            uint8_t labelLen = static_cast<uint8_t>(mapping.first.length());
+            fout.write(reinterpret_cast<const char*>(&labelLen), sizeof(uint8_t));
+            fout.write(mapping.first.c_str(), labelLen);
+        }
+
+        // Write shared patterns
+        for (const auto& pattern : sharedPatterns) {
+            uint16_t patternId = pattern.patternId;
+            fout.write(reinterpret_cast<const char*>(&patternId), sizeof(uint16_t));
+            
+            uint16_t edgeCount = static_cast<uint16_t>(pattern.scaledEdges.size());
+            fout.write(reinterpret_cast<const char*>(&edgeCount), sizeof(uint16_t));
+            
+            for (uint16_t edge : pattern.scaledEdges) {
+                fout.write(reinterpret_cast<const char*>(&edge), sizeof(uint16_t));
+            }
+        }
+
+        // Write feature definitions
         for (uint16_t i = 0; i < numFeatures; ++i) {
             const FeatureInfo& info = features[i];
             
+            uint8_t typeU8 = static_cast<uint8_t>(info.type);
+            fout.write(reinterpret_cast<const char*>(&typeU8), sizeof(uint8_t));
+            
+            fout.write(reinterpret_cast<const char*>(&info.baselineScaled), sizeof(int64_t));
+            fout.write(reinterpret_cast<const char*>(&info.scaleFactor), sizeof(uint64_t));
+            
             switch (info.type) {
                 case FT_DF:
-                    fout << "DF," << info.baselineScaled << "," << info.scaleFactor << "\n";
+                    // No additional data
                     break;
                     
                 case FT_DC:
-                    fout << "DC," << info.discreteValues.size();
-                    for (uint8_t val : info.discreteValues) {
-                        fout << "," << static_cast<int>(val);
+                    {
+                        uint8_t count = static_cast<uint8_t>(info.discreteValues.size());
+                        fout.write(reinterpret_cast<const char*>(&count), sizeof(uint8_t));
+                        for (uint8_t val : info.discreteValues) {
+                            fout.write(reinterpret_cast<const char*>(&val), sizeof(uint8_t));
+                        }
                     }
-                    fout << "," << info.baselineScaled << "," << info.scaleFactor << "\n";
                     break;
                     
                 case FT_CS:
-                    fout << "CS," << info.patternId << "," << info.baselineScaled << "," << info.scaleFactor << "\n";
+                    fout.write(reinterpret_cast<const char*>(&info.patternId), sizeof(uint16_t));
                     break;
                     
                 case FT_CU:
-                    fout << "CU," << info.uniqueEdges.size();
-                    for (uint16_t edge : info.uniqueEdges) {
-                        fout << "," << edge;
+                    {
+                        uint8_t edgeCount = static_cast<uint8_t>(info.uniqueEdges.size());
+                        fout.write(reinterpret_cast<const char*>(&edgeCount), sizeof(uint8_t));
+                        for (uint16_t edge : info.uniqueEdges) {
+                            fout.write(reinterpret_cast<const char*>(&edge), sizeof(uint16_t));
+                        }
                     }
-                    fout << "," << info.baselineScaled << "," << info.scaleFactor << "\n";
                     break;
             }
         }
-        
+
         fout.close();
-    }
-    
-    // Legacy CSV format (keep for backward compatibility if needed)
-    void saveToCSV(const char* filename) const {
-        saveQuantizer(filename); // Default to CTG3 format
     }
     
     // Accessors
@@ -419,8 +603,8 @@ public:
     uint16_t getGroupsPerFeature() const { return groupsPerFeature; }
     const mcu::vector<mcu::pair<std::string, uint8_t>>& getLabelMapping() const { return labelMapping; }
     
-    // Estimate memory usage for CTG3 format
-    size_t estimateCTG3MemoryUsage() const {
+    // Estimate memory usage for QTZ3 format
+    size_t estimateQTZ3MemoryUsage() const {
         size_t usage = 0;
         
         // Basic header data
@@ -434,6 +618,11 @@ public:
 
         // Scale factors per feature
         usage += numFeatures * sizeof(uint64_t);
+
+        // Outlier statistics
+        if (removeOutliers) {
+            usage += numFeatures * sizeof(float) * 2;
+        }
         
         // Shared patterns
         for (const auto& pattern : sharedPatterns) {
@@ -654,7 +843,12 @@ bool detectCSVHeader(const char* inputFilePath) {
 // Forward declaration
 uint8_t getNormalizedLabel(const std::string& originalLabel, const mcu::vector<mcu::pair<std::string, uint8_t>>& labelMapping);
 
-Rf_quantizer quantizeCSVFeatures(const char* inputFilePath, const char* outputFilePath, int groupsPerFeature, const mcu::vector<mcu::pair<std::string, uint8_t>>& labelMapping, bool skipHeader = false){
+Rf_quantizer quantizeCSVFeatures(const char* inputFilePath,
+                                const char* outputFilePath,
+                                int groupsPerFeature,
+                                const mcu::vector<mcu::pair<std::string, uint8_t>>& labelMapping,
+                                bool skipHeader = false,
+                                bool enableOutlierClipping = true){
     if (groupsPerFeature < 1) {
         throw std::runtime_error("groupsPerFeature must be >= 1");
     }
@@ -782,17 +976,19 @@ Rf_quantizer quantizeCSVFeatures(const char* inputFilePath, const char* outputFi
         }
     }
 
-    // Apply Z-score outlier clipping to continuous features
-    for (int i = 0; i < n_samples; ++i) {
-        for (int j = 0; j < n_feats; ++j) {
-            if (!featureStats[j].isDiscrete) {
-                data[i][j] = clipOutlier(
-                    data[i][j], 
-                    featureStats[j].mean, 
-                    featureStats[j].stdDev,
-                    featureStats[j].min,
-                    featureStats[j].max
-                );
+    // Apply Z-score outlier clipping to continuous features (optional)
+    if (enableOutlierClipping) {
+        for (int i = 0; i < n_samples; ++i) {
+            for (int j = 0; j < n_feats; ++j) {
+                if (!featureStats[j].isDiscrete) {
+                    data[i][j] = clipOutlier(
+                        data[i][j], 
+                        featureStats[j].mean, 
+                        featureStats[j].stdDev,
+                        featureStats[j].min,
+                        featureStats[j].max
+                    );
+                }
             }
         }
     }
@@ -814,9 +1010,20 @@ Rf_quantizer quantizeCSVFeatures(const char* inputFilePath, const char* outputFi
         featureStats[j].max = updatedMax;
     }
 
-    // Setup quantizer with CTG3 format
-    Rf_quantizer ctg(n_feats, groupsPerFeature, labelMapping);
+    // Setup quantizer with QTZ3 format and outlier removal flag
+    Rf_quantizer ctg(n_feats, groupsPerFeature, labelMapping, enableOutlierClipping);
     
+    // Pass outlier statistics to quantizer
+    if (enableOutlierClipping) {
+        mcu::vector<float> means(n_feats);
+        mcu::vector<float> stdDevs(n_feats);
+        for (int j = 0; j < n_feats; ++j) {
+            means[j] = featureStats[j].mean;
+            stdDevs[j] = featureStats[j].stdDev;
+        }
+        ctg.setOutlierStatistics(means, stdDevs);
+    }
+
     for (int j = 0; j < n_feats; ++j) {
     mcu::vector<float> distinct_after_clip = collectUniqueValues(data, j, n_samples, static_cast<size_t>(groupsPerFeature));
         
@@ -1032,8 +1239,6 @@ void generateDatasetParamsCSV(std::string path, const DatasetInfo& datasetInfo, 
     
     // Write core parameters
     fout << "quantization_coefficient," << static_cast<int>(quantization_coefficient) << "\n";
-    fout << "max_feature_value," << static_cast<int>(getMaxFeatureValue()) << "\n";
-    fout << "features_per_byte," << static_cast<int>(getFeaturesPerByte()) << "\n";
     fout << "num_features," << actualFeatures << "\n";
     fout << "num_samples," << actualTotalSamples << "\n";
     fout << "num_labels," << datasetInfo.labelMapping.size() << "\n";
@@ -1219,12 +1424,33 @@ void saveBinaryDataset(const mcu::vector<ESP32_Sample>& samples,
 }
 
 // Integrated CSV to binary conversion function
-void convertCSVToBinary(const std::string& inputCSV, const std::string& outputBinary, uint16_t numFeatures) {
+void convertCSVToBinary(const std::string& inputCSV, const std::string& outputBinary, uint16_t numFeatures, int32_t maxSamples) {
     // Load CSV data
     auto samples = loadCSVForBinary(inputCSV, numFeatures);
     
     if (samples.empty()) {
         throw std::runtime_error("No valid samples found in CSV file");
+    }
+
+    // Enforce FIFO-style cap for ESP32 binary data (keep the newest samples)
+    // maxSamples: -1 = keep current size (no change), 0 = unlimited (no cap), >0 = specific limit
+    uint32_t effectiveLimit = 0;
+    if (maxSamples == -1) {
+        // Keep current dataset size (no capping)
+        effectiveLimit = static_cast<uint32_t>(samples.size());
+    } else if (maxSamples > 0) {
+        effectiveLimit = static_cast<uint32_t>(maxSamples);
+    }
+    // maxSamples == 0 means unlimited, no capping applied
+    
+    if (maxSamples != 0 && samples.size() > effectiveLimit) {
+        size_t startIndex = samples.size() - static_cast<size_t>(effectiveLimit);
+        mcu::vector<ESP32_Sample> limited;
+        limited.reserve(static_cast<size_t>(effectiveLimit));
+        for (size_t i = startIndex; i < samples.size(); ++i) {
+            limited.push_back(samples[i]);
+        }
+        samples = std::move(limited);
     }
     
     // Convert to binary format
@@ -1233,118 +1459,55 @@ void convertCSVToBinary(const std::string& inputCSV, const std::string& outputBi
 
 int main(int argc, char* argv[]) {
     try {
-        bool skipHeader = false; // Default to not skipping header (process all lines)
-        bool headerSpecified = false; // Track if user explicitly specified header option
-        bool runVisualization = false; // Visualization handled by wrapper script
-        std::string inputFile;
-        std::string modelName; // Model name for output filenames
-        
-        // Parse command line arguments
-        for (int i = 1; i < argc; i++) {
+        std::string configPath = "quantization_config.json";
+        for (int i = 1; i < argc; ++i) {
             std::string arg = argv[i];
-            if (arg == "-p" || arg == "-path") {
+            if (arg == "-c" || arg == "--config") {
                 if (i + 1 < argc) {
-                    inputFile = argv[++i];
+                    configPath = argv[++i];
                 } else {
-                    std::cerr << "Error: -p/-path requires a file path\n";
-                    return 1;
-                }
-            } else if (arg == "-m" || arg == "-model") {
-                if (i + 1 < argc) {
-                    modelName = argv[++i];
-                } else {
-                    std::cerr << "Error: -m/-model requires a model name\n";
-                    return 1;
-                }
-            } else if (arg == "-he" || arg == "-header") {
-                if (i + 1 < argc) {
-                    std::string headerArg = argv[++i];
-                    skipHeader = (headerArg == "yes" || headerArg == "true" || headerArg == "1");
-                    headerSpecified = true;
-                } else {
-                    skipHeader = true; // Default to skipping header if no value provided
-                    headerSpecified = true;
-                }
-            } else if (arg == "-f" || arg == "-features") {
-                if (i + 1 < argc) {
-                    try {
-                        int featureLimit = std::stoi(argv[++i]);
-                        if (featureLimit <= 0 || featureLimit > MAX_FEATURES) {
-                            std::cerr << "Error: num_features must be between 1 and 1023\n";
-                            return 1;
-                        }
-                        num_features = featureLimit;
-                    } catch (const std::exception& e) {
-                        std::cerr << "Error: Invalid number for -f/-features option\n";
-                        return 1;
-                    }
-                } else {
-                    std::cerr << "Error: -f/-features requires a numeric value\n";
-                    return 1;
-                }
-            } else if (arg == "-q" || arg == "-bits" || arg == "-quant" || arg == "-quantization") {
-                if (i + 1 < argc) {
-                    try {
-                        int bits = std::stoi(argv[++i]);
-                        if (bits < 1 || bits > 8) {
-                            std::cerr << "Error: quantization coefficient must be between 1 and 8\n";
-                            return 1;
-                        }
-                        quantization_coefficient = static_cast<uint8_t>(bits);
-                    } catch (const std::exception& e) {
-                        std::cerr << "Error: Invalid number for -q/-bits option\n";
-                        return 1;
-                    }
-                } else {
-                    std::cerr << "Error: -q/-bits requires a numeric value\n";
-                    return 1;
-                }
-            } else if (arg == "-v" || arg == "-visualize") {
-                runVisualization = true; // Accepted for backward compatibility
-            } else if (arg == "-lc" || arg == "--label_column") {
-                if (i + 1 < argc) {
-                    try {
-                        int column = std::stoi(argv[++i]);
-                        if (column < 0) {
-                            std::cerr << "Error: label column index must be non-negative\n";
-                            return 1;
-                        }
-                        label_column_index = column;
-                    } catch (const std::exception& e) {
-                        std::cerr << "Error: Invalid number for -lc/--label_column option\n";
-                        return 1;
-                    }
-                } else {
-                    std::cerr << "Error: -lc/--label_column requires a numeric value\n";
+                    std::cerr << "Error: -c/--config requires a file path\n";
                     return 1;
                 }
             } else if (arg == "-h" || arg == "--help") {
-                std::cout << "Usage: " << argv[0] << " [options]\n";
-                std::cout << "Options:\n";
-                std::cout << "  -p, -path <file>        Path to input CSV file (required)\n";
-                std::cout << "  -m, -model <name>       Model name for output filenames (optional; if not provided, extracted from input filename)\n";
-                std::cout << "  -he, -header <yes/no>   Skip header if 'yes', process all lines if 'no' (auto-detect if not specified)\n";
-                std::cout << "  -lc, --label_column <n> Column index containing the label (default: 0 for first column)\n";
-                std::cout << "  -f, -features <number>  Maximum number of features (default: 1023, range: 1-1023)\n";
-                std::cout << "  -q, -bits <1-8>         Quantization coefficient in bits per feature (default: 2)\n";
-                std::cout << "  -v, -visualize          Run quantization visualization after processing (default: enabled)\n";
-                std::cout << "  -h, --help              Show this help message\n";
-                std::cout << "\nExamples:\n";
-                std::cout << "  " << argv[0] << " -p data/mydata.csv -header yes -features 512 -q 3\n";
-                std::cout << "  " << argv[0] << " -p data/mydata.csv -model my_rf_model -q 3\n";
-                std::cout << "  " << argv[0] << " -p data/mydata.csv --label_column 2 -q 3\n";
+                std::cout << "Usage: " << argv[0] << " [-c quantization_config.json]\n";
+                std::cout << "Configuration is provided via quantization_config.json with fields:\n";
+                std::cout << "  input_path (string, required)\n";
+                std::cout << "  model_name (string, optional)\n";
+                std::cout << "  header_mode (auto|yes|no, default auto)\n";
+                std::cout << "  label_column (int, default 0)\n";
+                std::cout << "  max_features (1-1023, default 1023)\n";
+                std::cout << "  quantization_bits (1-8, default 2)\n";
+                std::cout << "  remove_outliers (bool, default true)\n";
+                std::cout << "  max_samples (int, -1=current size (default), 0=unlimited, >0=limit, applies to binary FIFO)\n";
+                std::cout << "  run_visualization (bool, handled by wrapper script)\n";
                 return 0;
-            } else if (inputFile.empty() && arg.find('-') != 0) {
-                // If no flags and inputFile not set, treat as positional argument (backward compatibility)
-                inputFile = arg;
+            } else {
+                std::cerr << "Unknown argument: " << arg << " (use -h for help)\n";
+                return 1;
             }
         }
-        
-        if (inputFile.empty()) {
-            std::cerr << "Error: Input file path is required. Use -p <path> or provide as first argument.\n";
-            std::cerr << "Use -h or --help for usage information.\n";
-            return 1;
+
+        QuantizationConfig config = loadQuantizationConfig(configPath);
+
+        // Apply configuration to globals used elsewhere
+        quantization_coefficient = static_cast<uint8_t>(config.quantBits);
+        num_features = config.maxFeatures;
+        label_column_index = config.labelColumn;
+
+        bool skipHeader = false;
+        bool headerSpecified = false;
+        std::string headerLower = toLowerCopy(config.headerMode);
+        if (headerLower == "yes") {
+            skipHeader = true;
+            headerSpecified = true;
+        } else if (headerLower == "no") {
+            skipHeader = false;
+            headerSpecified = true;
         }
+
+        const std::string inputFile = config.inputPath;
+        const std::string modelName = config.modelName;
 
         // Generate output file names based on inputFile or modelName
         std::string baseName;
@@ -1380,7 +1543,7 @@ int main(int argc, char* argv[]) {
         if (!std::filesystem::exists(resultDir)) {
             std::filesystem::create_directories(resultDir);
         }
-        std::string quantizerFile = resultDir + "/" + baseName + "_ctg.csv";
+        std::string quantizerFile = resultDir + "/" + baseName + "_qtz.bin";
         std::string dataParamsFile = resultDir + "/" + baseName + "_dp.csv";
         std::string normalizedFile = resultDir + "/" + baseName + "_nml.csv";
         std::string binaryFile = resultDir + "/" + baseName + "_nml.bin";
@@ -1396,7 +1559,12 @@ int main(int argc, char* argv[]) {
         }
 
         // Step 2: Quantize features with the dataset
-        Rf_quantizer test_ctg = quantizeCSVFeatures(inputFile.c_str(), normalizedFile.c_str(), getGroupsPerFeature(), datasetInfo.labelMapping, skipHeader);
+        Rf_quantizer test_ctg = quantizeCSVFeatures(inputFile.c_str(),
+                               normalizedFile.c_str(),
+                               getGroupsPerFeature(),
+                               datasetInfo.labelMapping,
+                               skipHeader,
+                               config.removeOutliers);
 
         // Save quantizer for ESP32 transfer
         test_ctg.saveQuantizer(quantizerFile.c_str());
@@ -1405,7 +1573,7 @@ int main(int argc, char* argv[]) {
         generateDatasetParamsCSV(normalizedFile, datasetInfo, dataParamsFile.c_str());
 
         // Step 4: Convert CSV to binary format
-        convertCSVToBinary(normalizedFile, binaryFile, test_ctg.getNumFeatures());
+        convertCSVToBinary(normalizedFile, binaryFile, test_ctg.getNumFeatures(), config.maxSamples);
 
         // Calculate file size compression ratio
         size_t inputFileSize = 0;
@@ -1434,8 +1602,8 @@ int main(int argc, char* argv[]) {
                       << compressionRatio << "x (" << compressionPercent << "% size reduction)\n";
             std::cout << "      Input: " << inputFileSize << " bytes → Output: " << outputFileSize << " bytes\n";
         }
+        (void)config.runVisualization; // Wrapper script controls visualization
         
-        (void)runVisualization; // Silence unused warning; visualization runs in shell script
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
         return 1;

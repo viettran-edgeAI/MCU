@@ -54,7 +54,7 @@ Running the demo code with the server inference online will consume a lot of ele
     - Navigate to [tools/data_quantization](../../tools/data_quantization/).
     - Copy & paste `<model_name>.csv` from `hog_transform/result/` into `data_quantization/datasets`.
     - Follow instructions in [data_quantization/README.md](../../tools/data_quantization/README.md) to quantize dataset and generate quantized dataset files.
->**Result:** In `data_quantization/data/result/` folder, u will have 4 files : `<model_name>_nml.bin`, `<model_name>_nml.csv`, `<model_name>_ctg.csv`, `<model_name>_dp.csv`.
+>**Result:** In `data_quantization/data/result/` folder, u will have 4 files : `<model_name>_nml.bin`, `<model_name>_nml.csv`, `<model_name>_qtz.bin`, `<model_name>_dp.csv`.
 
 5. **Pre-train Random Forest model on PC**
     - Navigate to [tools/pre_train](../../tools/pre_train/).

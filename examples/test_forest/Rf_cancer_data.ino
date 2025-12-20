@@ -87,9 +87,6 @@ void setup() {
         Serial.println("❌ FAILED");
         return;
     }
-    
-    // Optional: Enable dataset extension for online learning
-    // forest.enable_extend_base_data();
 
     // check actual prediction time 
     b_vector<float> sample_1 = MAKE_FLOAT_LIST(14.54,27.54,96.73,658.8,0.1139,0.1595,0.1639,0.07364,0.2303,0.07077,0.37,1.033,2.879,32.55,0.005607,0.0424,0.04741,0.0109,0.01857,0.005466,17.46,37.13,124.1,943.2,0.1678,0.6577,0.7026,0.1712,0.4218,0.1341);

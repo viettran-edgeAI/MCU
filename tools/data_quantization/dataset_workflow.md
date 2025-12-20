@@ -14,7 +14,7 @@ The dataset processing has been separated into two distinct steps for better mod
 - Apply Z-score outlier detection and clipping
 - Quantize features to 2-bit values (0,1,2,3) using quantile binning
 - Generate normalized CSV without headers
-- Create categorizer and parameter files for ESP32
+- Create quantizer and parameter files for ESP32
 
 ### Usage
 ```bash
@@ -33,7 +33,7 @@ g++ -std=c++17 -I../../src -o processing_data processing_data.cpp
 
 ### Outputs (saved to data/ folder)
 - `data/<dataset_name>_nml.csv` - Normalized dataset (no header, values 0-3)
-- `data/<dataset_name>_ctg.csv` - Feature categorization rules for ESP32
+- `data/<dataset_name>_qtz.bin` - Feature quantization rules for ESP32
 - `data/<dataset_name>_dp.csv` - Dataset metadata for ESP32
 - `data/<dataset_name>_nml.bin` - Binary dataset for ESP32
 
@@ -131,8 +131,8 @@ Transfer each file separately:
 ```bash
 cd pc_side
 
-# Transfer categorizer
-python3 transfer_categorizer.py ../data/<dataset_name>_ctg.csv <serial_port>
+# Transfer quantizer
+python3 transfer_quantizer.py ../data/<dataset_name>_qtz.bin <serial_port>
 
 # Transfer dataset parameters  
 python3 transfer_dataset_params.py ../data/<dataset_name>_dp.csv <serial_port>
@@ -148,13 +148,13 @@ For manual input using CSV files through Serial Monitor:
 1. **Create manual_transfer folder:**
    ```bash
    mkdir manual_transfer
-   cp data/<dataset_name>_ctg.csv manual_transfer/
+   cp data/<dataset_name>_qtz.bin manual_transfer/
    cp data/<dataset_name>_dp.csv manual_transfer/
    # Note: Use CSV versions for manual entry
    ```
 
 2. **Upload appropriate ESP32 sketch:**
-   - `esp32_side/ctg_serialMonitor_receiver.ino` for categorizer
+   - `esp32_side/ctg_serialMonitor_receiver.ino` for quantizer
    - `esp32_side/dataset_params_receiver.ino` for parameters
    - `esp32_side/csv_dataset_receiver.ino` for dataset
 
@@ -162,7 +162,7 @@ For manual input using CSV files through Serial Monitor:
 
 ### Files transferred to ESP32:
 - `<dataset_name>_nml.bin` or `<dataset_name>_nml.csv` (dataset)
-- `<dataset_name>_ctg.csv` (categorizer)
+- `<dataset_name>_qtz.bin` (quantizer)
 - `<dataset_name>_dp.csv` (parameters)
 
 ## Advantages of Separation
@@ -260,16 +260,16 @@ tools/data_transfer/
 │   ├── walker_fall.csv         # Input: Walker fall detection dataset
 │   ├── <dataset_name>_nml.csv  # Output: Normalized CSV
 │   ├── <dataset_name>_nml.bin  # Output: ESP32 binary format
-│   ├── <dataset_name>_ctg.csv  # Output: Categorizer rules
+│   ├── <dataset_name>_qtz.bin  # Output: Quantizer rules
 │   └── <dataset_name>_dp.csv   # Output: Dataset parameters
 ├── manual_transfer/             # Optional: CSV files for manual entry
-│   ├── <dataset_name>_ctg.csv  # Copy for manual Serial Monitor input
+│   ├── <dataset_name>_qtz.bin  # Copy for manual Serial Monitor input
 │   └── <dataset_name>_dp.csv   # Copy for manual Serial Monitor input
 ├── pc_side/                     # PC-side processing tools
 │   ├── processing_data.cpp     # CSV normalization (main pipeline)
 │   ├── convert_dataset_to_binary.cpp  # Binary conversion (standalone)
 │   ├── unified_transfer.py     # Complete transfer utility (recommended)
-│   ├── transfer_categorizer.py # Individual categorizer transfer
+│   ├── transfer_quantizer.py # Individual quantizer transfer
 │   ├── transfer_dataset.py     # Individual dataset transfer
 │   ├── transfer_dataset_params.py  # Individual params transfer
 │   └── tranfer_bin_from_esp32.py   # Retrieve data from ESP32
@@ -277,8 +277,8 @@ tools/data_transfer/
     ├── unified_receiver.ino     # Complete receiver (recommended)
     ├── binary_dataset_receiver.ino     # Dataset only receiver
     ├── dataset_params_receiver.ino     # Parameters only receiver
-    ├── ctg_pySerial_receiver.ino       # Categorizer from Python
-    ├── ctg_serialMonitor_receiver.ino  # Categorizer from Serial Monitor
+    ├── ctg_pySerial_receiver.ino       # Quantizer from Python
+    ├── ctg_serialMonitor_receiver.ino  # Quantizer from Serial Monitor
     └── csv_dataset_receiver.ino        # CSV dataset receiver
 ```
 
@@ -287,7 +287,7 @@ tools/data_transfer/
 data/
 ├── <dataset_name>_nml.csv      # Normalized CSV
 ├── <dataset_name>_nml.bin      # ESP32 binary format  
-├── <dataset_name>_ctg.csv      # Categorizer rules
+├── <dataset_name>_qtz.bin      # Quantizer rules
 └── <dataset_name>_dp.csv       # Dataset parameters
 ```
 

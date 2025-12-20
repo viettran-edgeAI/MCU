@@ -157,7 +157,7 @@ Common configuration macros:
 #define DEV_STAGE              // Enable development features and detailed logging
 #define RF_DEBUG_LEVEL 1       // Set debug verbosity (0-3)
 #define RF_USE_PSRAM           // Enable PSRAM support for larger models
-#define RF_ENABLE_TRAINING 1   // Enable on-device training (default: 1)
+#define RF_STATIC_MODEL        // Disable on-device training (inference only)
 
 #include "random_forest_mcu.h"
 ```
@@ -326,8 +326,6 @@ forest.set_impurity_threshold(0.05f);  // Gini: 0.0-0.25, Entropy: 0.0-0.1
 |-----|-------------|
 | `enable_retrain()` | Enable on-device retraining and pending data collection |
 | `disable_retrain()` | Disable retraining to save memory during inference |
-| `enable_extend_base_data()` | Allow dataset to grow when adding new samples |
-| `disable_extend_base_data()` | Keep dataset size fixed (FIFO removal of old samples) |
 | `enable_auto_config()` | Auto-adjust config when dataset grows significantly |
 | `disable_auto_config()` | Use pre-optimized configuration from PC tools (default) |
 

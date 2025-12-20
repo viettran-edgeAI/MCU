@@ -17,7 +17,7 @@ namespace mcu{
         uint8_t boostrap_bits = 3;
         template<uint8_t bits>
         using TreeSampleIDs = ID_vector<sample_type,bits>;
-#if RF_ENABLE_TRAINING
+#ifndef RF_STATIC_MODEL
         struct TrainingContext {
             Rf_data base_data;
             Rf_data train_data;
@@ -88,7 +88,7 @@ namespace mcu{
         packed_vector<8> categorization_buffer;
         mutable char path_buffer[RF_PATH_BUFFER] = {'\0'};
 
-    #if RF_ENABLE_TRAINING
+    #ifndef RF_STATIC_MODEL
         inline TrainingContext* ensure_training_context(){
             if(!training_ctx){
                 release_base_data_stub();
@@ -127,7 +127,7 @@ namespace mcu{
         }
 
         inline Rf_data* ensure_base_data_stub(){
-    #if RF_ENABLE_TRAINING
+    #ifndef RF_STATIC_MODEL
             if(training_ctx){
                 if(training_ctx->base_data.isProperlyInitialized()){
                     return &training_ctx->base_data;
@@ -140,7 +140,7 @@ namespace mcu{
                 if(config.num_features > 0){
                     base_data_stub->init(path_buffer, config);
                 } else {
-                    base_data_stub->setfile_path(path_buffer);
+                    base_data_stub->setFilePath(path_buffer);
                 }
             }
             return base_data_stub;
@@ -176,7 +176,7 @@ namespace mcu{
             logger.init(&base);
             config.init(&base);
             config.loadConfig();    
-            quantizer.init(&base);
+            quantizer.init(&base, config);
             node_pred.init(&base, &config);
 
             quantizer.loadQuantizer();  // Load quantizer first to get quantization_coefficient
@@ -209,7 +209,7 @@ namespace mcu{
         }
 
         bool begin_training_session(){
-#if RF_ENABLE_TRAINING
+#ifndef RF_STATIC_MODEL
             auto ctx = ensure_training_context();
             ctx->data_prepared = false;
             return true;
@@ -219,7 +219,7 @@ namespace mcu{
         }
 
         void end_training_session(){
-#if RF_ENABLE_TRAINING
+#ifndef RF_STATIC_MODEL
             cleanup_training_data();
             destroy_training_context();
 #endif
@@ -228,7 +228,7 @@ namespace mcu{
 
         
         void cleanup_training_data(){
-#if RF_ENABLE_TRAINING
+#ifndef RF_STATIC_MODEL
             if(!training_ctx){
                 return;
             }
@@ -264,7 +264,7 @@ namespace mcu{
         }
 
         bool build_model(){
-#if RF_ENABLE_TRAINING
+#ifndef RF_STATIC_MODEL
             if(!config.enable_retrain){
                 RF_DEBUG(0, "❌ Retraining mode not enabled");
                 return false;
@@ -321,13 +321,13 @@ namespace mcu{
             end_training_session();
             return success;
 #else
-            RF_DEBUG(0, "❌ Training disabled (RF_ENABLE_TRAINING = 0)");
+            RF_DEBUG(0, "❌ Training disabled (RF_STATIC_MODEL = 1)");
             return false;
 #endif
         }
 
     private:
-#if RF_ENABLE_TRAINING
+#ifndef RF_STATIC_MODEL
         bool build_forest(){
             auto* ctx = training_ctx;
             if(!ctx){
@@ -1933,7 +1933,7 @@ namespace mcu{
 
         // Memory-Efficient Grid Search Training Function
         void training(int epochs = 99999) {
-#if RF_ENABLE_TRAINING
+#ifndef RF_STATIC_MODEL
             if(!base.able_to_training()){
                 RF_DEBUG(0, "❌ Model not set for training");
                 return;
@@ -2057,7 +2057,7 @@ namespace mcu{
             end_training_session();
 #else
             (void)epochs;
-            RF_DEBUG(0, "❌ Training disabled (RF_ENABLE_TRAINING = 0)");
+            RF_DEBUG(0, "❌ Training disabled (RF_STATIC_MODEL = 1)");
 #endif
         }
 
@@ -2304,17 +2304,11 @@ namespace mcu{
             RF_DEBUG(1, "✅ Partial loading mode disabled");
         }
     #endif
-
-       // allow dataset to grow when new data is added, but limited to max_samples/max_dataset_size
-        void enable_extend_base_data(){
-            config.extend_base_data = true;
+        // set max samples store in base dataset
+        void set_max_base_samples(size_t max_samples) {
+            config.max_samples = max_samples;
+            //...
         }
-
-        // keep dataset size fixed when new data is added (oldest data will be removed)
-        void disable_extend_base_data(){
-            config.extend_base_data = false;
-        }
-
         /**
          * @brief: Enable automatic configuration adjustment.
          * when enabled, interpolate the best configuration for the model based on the current dataset at each training session.
@@ -2414,7 +2408,7 @@ namespace mcu{
         // set random seed, default is 37
         void set_random_seed(uint32_t seed) {
             config.random_seed = seed;
-#if RF_ENABLE_TRAINING
+#ifndef RF_STATIC_MODEL
             if(training_ctx){
                 training_ctx->random_generator.seed(seed);
             }
@@ -2453,6 +2447,32 @@ namespace mcu{
             if(pd){
                 pd->set_max_pending_samples(max_samples);
             }
+        }
+
+        // set Z-score in outliner filtering
+        bool set_outliner_zscore(float zscore) {
+    #ifndef RF_STATIC_MODEL
+            if(quantizer.set_outliner_zscore_filtering(zscore)){
+                return true;
+            }
+    #endif
+            RF_DEBUG(1, "❌ Failed to set outliner z-score filtering");
+            return false;
+        }
+
+        // disable outliner filtering
+        // this action will remove outliner filtering from quantizer
+        void disable_outliner_filtering() {
+    #ifndef RF_STATIC_MODEL
+            quantizer.disable_outliner_zscore_filtering();
+    #endif
+        }
+
+        // enable outliner filtering
+        void enable_outliner_filtering() {
+    #ifndef RF_STATIC_MODEL
+            quantizer.enable_outliner_zscore_filtering();
+    #endif
         }
 
     // ----------------------------------------getters---------------------------------------
@@ -2766,26 +2786,22 @@ namespace mcu{
         }
 
         // print metrix score on test set
-        void model_report(){
-#if RF_ENABLE_TRAINING
+        void model_report() {
+#ifndef RF_STATIC_MODEL
             auto* ctx = training_ctx;
-            if(!ctx || config.test_ratio == 0.0f || ctx->test_data.size() == 0){
+            if (!ctx || config.test_ratio == 0.0f || ctx->test_data.size() == 0) {
                 RF_DEBUG(0, "❌ No test set available for evaluation!", "");
                 return;
             }
             auto result = predict(ctx->test_data);
-#else
-            RF_DEBUG(0, "❌ Training disabled (RF_ENABLE_TRAINING = 0)");
-            return;
-#endif
             RF_DEBUG(0, "Precision in test set:");
             b_vector<pair<label_type, float>> precision = result[0];
-            for (const auto& p : precision) {;
+            for (const auto& p : precision) {
                 RF_DEBUG_2(0, "Label: ", p.first, "- ", p.second);
             }
             float avgPrecision = 0.0f;
             for (const auto& p : precision) {
-            avgPrecision += p.second;
+                avgPrecision += p.second;
             }
             avgPrecision /= precision.size();
             RF_DEBUG(0, "Avg: ", avgPrecision);
@@ -2798,12 +2814,12 @@ namespace mcu{
             }
             float avgRecall = 0.0f;
             for (const auto& r : recall) {
-            avgRecall += r.second;
+                avgRecall += r.second;
             }
             avgRecall /= recall.size();
             RF_DEBUG(0, "Avg: ", avgRecall);
 
-            // Calculate F1 Score;
+            // Calculate F1 Score
             RF_DEBUG(0, "F1 Score in test set:");
             b_vector<pair<label_type, float>> f1_scores = result[2];
             for (const auto& f1 : f1_scores) {
@@ -2811,7 +2827,7 @@ namespace mcu{
             }
             float avgF1 = 0.0f;
             for (const auto& f1 : f1_scores) {
-            avgF1 += f1.second;
+                avgF1 += f1.second;
             }
             avgF1 /= f1_scores.size();
             RF_DEBUG(0, "Avg: ", avgF1);
@@ -2820,30 +2836,30 @@ namespace mcu{
             b_vector<pair<label_type, float>> accuracies = result[3];
             float avgAccuracy = 0.0f;
             for (const auto& acc : accuracies) {
-            avgAccuracy += acc.second;
+                avgAccuracy += acc.second;
             }
             avgAccuracy /= accuracies.size();
 
             // result score
             uint8_t total_scores = 0;
             float total_result_score = 0.0f;
-            if(config.metric_score & Rf_metric_scores::PRECISION){
+            if (config.metric_score & Rf_metric_scores::PRECISION) {
                 total_result_score += avgPrecision;
                 total_scores++;
             }
-            if(config.metric_score & Rf_metric_scores::RECALL){
+            if (config.metric_score & Rf_metric_scores::RECALL) {
                 total_result_score += avgRecall;
                 total_scores++;
             }
-            if(config.metric_score & Rf_metric_scores::F1_SCORE){
+            if (config.metric_score & Rf_metric_scores::F1_SCORE) {
                 total_result_score += avgF1;
                 total_scores++;
             }
-            if(config.metric_score & Rf_metric_scores::ACCURACY){
+            if (config.metric_score & Rf_metric_scores::ACCURACY) {
                 total_result_score += avgAccuracy;
                 total_scores++;
             }
-            if(total_scores > 0){
+            if (total_scores > 0) {
                 config.result_score = total_result_score / total_scores;
             } else {
                 config.result_score = avgAccuracy; // fallback to accuracy
@@ -2858,6 +2874,9 @@ namespace mcu{
             RF_DEBUG(0, "Accuracy: ", avgAccuracy);
             RF_DEBUG(0, "Result Score: ", config.result_score);
             RF_DEBUG(0, "Lowest RAM: ", logger.lowest_ram);
+#else
+            RF_DEBUG(0, "❌ Training disabled (RF_STATIC_MODEL = 1)");
+#endif
         }
 
         float precision(Rf_data& data) {
@@ -2955,7 +2974,7 @@ namespace mcu{
         
         // printout predicted & actual label for each sample in test set
         void visual_result() {
-#if RF_ENABLE_TRAINING
+#ifndef RF_STATIC_MODEL
             auto* ctx = training_ctx;
             if(!ctx){
                 RF_DEBUG(0, "❌ No training context available for visual_result!", "");
@@ -2973,7 +2992,7 @@ namespace mcu{
             ctx->test_data.releaseData(true); 
             forest_container.releaseForest(); 
 #else
-            RF_DEBUG(0, "❌ Training disabled (RF_ENABLE_TRAINING = 0)");
+            RF_DEBUG(0, "❌ Training disabled (RF_STATIC_MODEL = 1)");
 #endif
         }
     #endif

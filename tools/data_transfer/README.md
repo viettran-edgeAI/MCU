@@ -25,7 +25,7 @@ The script summarizes which files it found, streams each file via chunks with CR
 
 | Source directory | Pattern | Role |
 |------------------|---------|------|
-| `data_quantization/data/result/` | `{model_name}_ctg.csv`, `{model_name}_dp.csv`, `{model_name}_nml.bin` | Category labels, descriptor payload, and normalized dataset for testing/retraining |
+| `data_quantization/data/result/` | `{model_name}_qtz.bin`, `{model_name}_dp.csv`, `{model_name}_nml.bin` | Quantizer binary, descriptor payload, and normalized dataset for testing/retraining |
 | `hog_transform/result/` (or repo root) | `{model_name}_hogcfg.json` | HOG configuration, included when present |
 | `pre_train/trained_model/` | `{model_name}_config.json`, `_forest.bin`, `_npd.bin`, `_nlg.csv` | Model configuration and artifacts (config + forest required, others optional) |
 

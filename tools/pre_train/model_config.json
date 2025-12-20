@@ -64,11 +64,6 @@
         "value": 4,
         "description": "Number of folds for cross-validation when using k_fold_score."
     },
-    "extend_base_data": {
-        "value": true,
-        "options": [true, false],
-        "description": "Whether to extend the base dataset with new data."
-    },
     "enable_retrain": {
         "value": true,
         "options": [true, false],

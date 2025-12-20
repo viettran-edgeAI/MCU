@@ -137,8 +137,8 @@ void deleteOldDatasetFiles(const char* basename) {
      */
     char filepath[128];
     
-    // Delete quantizer file (categories/histogram info)
-    snprintf(filepath, sizeof(filepath), "/%s/%s_ctg.csv", basename, basename);
+    // Delete quantizer file (quantizer binary with feature quantization, label mapping, outlier filtering)
+    snprintf(filepath, sizeof(filepath), "/%s/%s_qtz.bin", basename, basename);
     safeDeleteFile(filepath);
     
     // Delete parameters file (model hyperparameters, feature scaling)

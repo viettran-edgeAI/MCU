@@ -24,7 +24,8 @@ def plot_distance_over_time(df, config, output_dir):
     step = 50
     
     features = df.columns[:-1]
-    ref_data = df.iloc[:burn_in][features]
+    ref_len = max(100, burn_in)
+    ref_data = df.iloc[:ref_len][features]
     
     distances = []
     indices = []
@@ -75,7 +76,8 @@ def plot_geometry_drift(df, config, output_dir):
     features = df.columns[:-1]
     
     # Centroid Distance over Time
-    ref_centroid = df.iloc[:burn_in][features].mean().values
+    ref_len = max(100, burn_in)
+    ref_centroid = df.iloc[:ref_len][features].mean().values
     window_size = 100
     centroid_dists = []
     indices = []
@@ -97,26 +99,44 @@ def plot_geometry_drift(df, config, output_dir):
     plt.savefig(os.path.join(output_dir, f'{name}_centroid_drift.png'))
     plt.close()
 
-    # PCA Projection with Time Color
-    pca = PCA(n_components=2)
+    # PCA Projection with Time Color (3D)
+    n_comp = min(3, len(features))
+    pca = PCA(n_components=n_comp)
     pca_result = pca.fit_transform(df[features])
     
-    plt.figure(figsize=(10, 8))
-    sc = plt.scatter(pca_result[:, 0], pca_result[:, 1], c=range(len(df)), cmap='viridis', s=10, alpha=0.6)
-    plt.colorbar(sc, label='Time (Instance Index)')
+    fig = plt.figure(figsize=(12, 10))
+    if n_comp == 3:
+        ax = fig.add_subplot(111, projection='3d')
+        sc = ax.scatter(pca_result[:, 0], pca_result[:, 1], pca_result[:, 2], 
+                        c=range(len(df)), cmap='viridis', s=10, alpha=0.6)
+        ax.set_zlabel('PC3')
+    else:
+        ax = fig.add_subplot(111)
+        sc = ax.scatter(pca_result[:, 0], pca_result[:, 1], 
+                        c=range(len(df)), cmap='viridis', s=10, alpha=0.6)
+    
+    plt.colorbar(sc, ax=ax, label='Time (Instance Index)')
     
     # Mark Centroids
     ref_pca = pca.transform(ref_centroid.reshape(1, -1))
     after_centroid = df.iloc[burn_in:][features].mean().values
     after_pca = pca.transform(after_centroid.reshape(1, -1))
     
-    plt.scatter(ref_pca[0, 0], ref_pca[0, 1], color='red', marker='X', s=200, label='Ref Centroid', edgecolors='black')
-    plt.scatter(after_pca[0, 0], after_pca[0, 1], color='cyan', marker='X', s=200, label='Post-Drift Centroid', edgecolors='black')
+    if n_comp == 3:
+        ax.scatter(ref_pca[0, 0], ref_pca[0, 1], ref_pca[0, 2], 
+                   color='red', marker='X', s=200, label='Ref Centroid', edgecolors='black')
+        ax.scatter(after_pca[0, 0], after_pca[0, 1], after_pca[0, 2], 
+                   color='cyan', marker='X', s=200, label='Post-Drift Centroid', edgecolors='black')
+    else:
+        ax.scatter(ref_pca[0, 0], ref_pca[0, 1], 
+                   color='red', marker='X', s=200, label='Ref Centroid', edgecolors='black')
+        ax.scatter(after_pca[0, 0], after_pca[0, 1], 
+                   color='cyan', marker='X', s=200, label='Post-Drift Centroid', edgecolors='black')
     
-    plt.title(f'PCA Projection (Color=Time) - {name}')
-    plt.xlabel('PC1')
-    plt.ylabel('PC2')
-    plt.legend()
+    ax.set_title(f'{n_comp}D PCA Projection (Color=Time) - {name}')
+    ax.set_xlabel('PC1')
+    ax.set_ylabel('PC2')
+    ax.legend()
     plt.savefig(os.path.join(output_dir, f'{name}_pca_time.png'))
     plt.close()
 

@@ -56,7 +56,7 @@ void setup() {
     forest.set_num_trees(20);
     // forest.set_random_seed(42);
     // forest.set_training_score(OOB_SCORE);
-    // forest.enable_partial_loading();
+
 
 
     // Build and train the model

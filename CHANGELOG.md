@@ -12,6 +12,7 @@ Entries are grouped: small and close commits are consolidated into date-based re
 - Allows adding new layers in the model lifecycle through feedback operations.
 - Upgrade Rf_tree : normal `decision trees` -> `Hoeffding adaptive trees`.
 - New core model : `XGBoost model` (along with `Random Forest model` and `Decision Tree` model).
+- remove `partial loading mode`.
 - remove `extend_base_data` and add `remove_outliers` in config files.
 - combine `RF_DISABLE_RETRAIN` & `RF_ENABLE_RETRAIN` -> `RF_STATIC_MODEL` across all docs and code.
 - ... other minor fixes and improvements.

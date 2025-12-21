@@ -360,7 +360,7 @@ Performs grid search over hyperparameters to find optimal configuration. This us
 
 **Important Notes:**
 - Only works when `enable_auto_config()` is enabled
-- Disabled in partial loading mode (use `build_model()` instead)
+
 - Much slower than `build_model()` but finds better hyperparameters
 - Should be called after `build_model()` for best results
 
@@ -585,8 +585,7 @@ Available only when `DEV_STAGE` is defined:
 
 | API | Description |
 |-----|-------------|
-| `enable_partial_loading()` | Enable chunked data loading for large datasets |
-| `disable_partial_loading()` | Use standard full-dataset loading |
+
 | `lowest_ram()` | Minimum RAM recorded during training |
 | `lowest_storage()` | Minimum storage recorded during training |
 | `model_report()` | Print detailed metrics on test set |

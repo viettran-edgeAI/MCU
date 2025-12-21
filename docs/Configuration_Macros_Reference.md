@@ -636,7 +636,7 @@ void setup() {
 **Solutions:**
 - Enable PSRAM: `#define RF_USE_PSRAM`
 - Reduce model size in config
-- Enable partial loading: `config.enable_partial_loading = true`
+
 
 ### Issue: USB data transfer fails
 **Solutions:**

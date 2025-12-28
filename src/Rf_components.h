@@ -2657,13 +2657,14 @@ namespace mcu {
         uint16_t depth;
         uint8_t index;
         bool isLoaded;
+        ID_vector<sample_type, 3> bootstrapIDs;
 
         Rf_tree() : nodes(), layout(nullptr), index(255), isLoaded(false) {}
 
         explicit Rf_tree(uint8_t idx) : nodes(), layout(nullptr), index(idx), isLoaded(false) {}
 
         Rf_tree(const Rf_tree& other)
-            : nodes(other.nodes), layout(other.layout), index(other.index), isLoaded(other.isLoaded) {}
+            : nodes(other.nodes), layout(other.layout), index(other.index), isLoaded(other.isLoaded), bootstrapIDs(other.bootstrapIDs) {}
 
         Rf_tree& operator=(const Rf_tree& other) {
             if (this != &other) {
@@ -2671,6 +2672,7 @@ namespace mcu {
                 layout = other.layout;
                 index = other.index;
                 isLoaded = other.isLoaded;
+                bootstrapIDs = other.bootstrapIDs;
             }
             return *this;
         }
@@ -2679,7 +2681,8 @@ namespace mcu {
             : nodes(std::move(other.nodes)),
             layout(other.layout),
             index(other.index),
-            isLoaded(other.isLoaded) {
+            isLoaded(other.isLoaded),
+            bootstrapIDs(std::move(other.bootstrapIDs)) {
             other.layout = nullptr;
             other.index = 255;
             other.isLoaded = false;
@@ -2691,6 +2694,7 @@ namespace mcu {
                 layout = other.layout;
                 index = other.index;
                 isLoaded = other.isLoaded;
+                bootstrapIDs = std::move(other.bootstrapIDs);
                 other.layout = nullptr;
                 other.index = 255;
                 other.isLoaded = false;
@@ -2884,6 +2888,70 @@ namespace mcu {
                 RF_DEBUG(2, "♻️ Single-load mode: removing tree file after loading; ", path);
                 RF_FS_REMOVE(path);
             }
+            return true;
+        }
+
+        bool saveBootstrapIDs(const char* path) {
+            if (bootstrapIDs.empty()) {
+                if (RF_FS_EXISTS(path)) RF_FS_REMOVE(path);
+                return true;
+            }
+            File file = RF_FS_OPEN(path, RF_FILE_WRITE);
+            if (!file) return false;
+            
+            uint32_t magic = 0x42544944; // "BTID"
+            file.write((uint8_t*)&magic, 4);
+            
+            sample_type min_id = bootstrapIDs.minID();
+            sample_type max_id = bootstrapIDs.maxID();
+            uint32_t size = bootstrapIDs.size();
+            
+            file.write((uint8_t*)&min_id, sizeof(sample_type));
+            file.write((uint8_t*)&max_id, sizeof(sample_type));
+            file.write((uint8_t*)&size, sizeof(uint32_t));
+
+            for (sample_type id = min_id; id <= max_id; ++id) {
+                uint32_t c = bootstrapIDs.count(id);
+                if (c > 0) {
+                    file.write((uint8_t*)&id, sizeof(sample_type));
+                    file.write((uint8_t*)&c, sizeof(uint32_t));
+                }
+            }
+            file.close();
+            return true;
+        }
+
+        bool loadBootstrapIDs(const char* path) {
+            bootstrapIDs.clear();
+            if (!RF_FS_EXISTS(path)) return true;
+            
+            File file = RF_FS_OPEN(path, RF_FILE_READ);
+            if (!file) return false;
+            
+            uint32_t magic;
+            if (file.read((uint8_t*)&magic, 4) != 4 || magic != 0x42544944) {
+                file.close();
+                return false;
+            }
+            
+            sample_type min_id, max_id;
+            uint32_t size;
+            file.read((uint8_t*)&min_id, sizeof(sample_type));
+            file.read((uint8_t*)&max_id, sizeof(sample_type));
+            file.read((uint8_t*)&size, sizeof(uint32_t));
+            
+            bootstrapIDs.set_ID_range(min_id, max_id);
+            
+            while (file.available()) {
+                sample_type id;
+                uint32_t c;
+                if (file.read((uint8_t*)&id, sizeof(sample_type)) != sizeof(sample_type)) break;
+                if (file.read((uint8_t*)&c, sizeof(uint32_t)) != sizeof(uint32_t)) break;
+                for (uint32_t i = 0; i < c; ++i) {
+                    bootstrapIDs.push_back(id);
+                }
+            }
+            file.close();
             return true;
         }
 

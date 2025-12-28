@@ -1,6 +1,6 @@
 {
     "input_path": {
-        "value": "data/cancer_data.csv",
+        "value": "data/iot_device_failure.csv",
         "description": "Path to the input CSV dataset file (required)."
     },
     "quantization_bits": {

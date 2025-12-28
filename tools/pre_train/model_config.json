@@ -1,6 +1,6 @@
 {
     "data_path": {
-        "value": "../data_quantization/data/result/run_walk_nml.csv",
+        "value": "../data_quantization/data/result/iot_device_failure_nml.csv",
         "description": "Path to the normalized cv dataset."
     },
     "random_seed": {

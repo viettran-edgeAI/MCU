@@ -813,8 +813,9 @@ bool detectCSVHeader(const char* inputFilePath) {
     int secondRowNumeric = 0;
     int totalCols = firstCols.size();
     
-    // Skip the first column (label) for numeric analysis, focus on feature columns
-    for (int i = 1; i < totalCols; ++i) {
+    // Skip the label column for numeric analysis, focus on feature columns
+    for (int i = 0; i < totalCols; ++i) {
+        if (i == label_column_index) continue;
         if (isLikelyNumeric(firstCols[i])) {
             firstRowNumeric++;
         }
@@ -875,7 +876,7 @@ Rf_quantizer quantizeCSVFeatures(const char* inputFilePath,
                                " is out of range (0-" + std::to_string(n_cols-1) + ")");
     }
     
-    int n_feats = n_cols - 1;
+    int n_feats = std::min(n_cols - 1, num_features);
     
     // First pass: collect data and calculate statistics for Z-score
     mcu::vector<FeatureStats> featureStats(n_feats);
@@ -895,11 +896,12 @@ Rf_quantizer quantizeCSVFeatures(const char* inputFilePath,
             
             for (int j = 0; j < n_cols; ++j) {
                 if (j == label_column_index) continue; // Skip label column
+                if ((int)feats.size() >= n_feats) break; // Truncate features
                 try {
                     float val = std::stof(cols[j]);
                     feats.push_back(val);
                     
-                    int idx = (j < label_column_index) ? j : (j - 1);
+                    int idx = (int)feats.size() - 1;
                     featureStats[idx].min = std::min(featureStats[idx].min, val);
                     featureStats[idx].max = std::max(featureStats[idx].max, val);
                     featureStats[idx].mean += val;
@@ -928,11 +930,12 @@ Rf_quantizer quantizeCSVFeatures(const char* inputFilePath,
         
         for (int j = 0; j < n_cols; ++j) {
             if (j == label_column_index) continue; // Skip label column
+            if ((int)feats.size() >= n_feats) break; // Truncate features
             try {
                 float val = std::stof(cells[j]);
                 feats.push_back(val);
                 
-                int idx = (j < label_column_index) ? j : (j - 1);
+                int idx = (int)feats.size() - 1;
                 featureStats[idx].min = std::min(featureStats[idx].min, val);
                 featureStats[idx].max = std::max(featureStats[idx].max, val);
                 featureStats[idx].mean += val;
@@ -1129,8 +1132,8 @@ DatasetInfo scanDataset(const char* inputFilePath) {
                                " is out of range (0-" + std::to_string(n_cols-1) + ")");
     }
     
-    info.numFeatures = n_cols - 1; // Exclude label column
-    info.needsHorizontalTruncation = (info.numFeatures > num_features);
+    info.numFeatures = std::min(n_cols - 1, num_features); // Exclude label column and truncate if needed
+    info.needsHorizontalTruncation = ((n_cols - 1) > num_features);
     
     // Collect unique labels
     mcu::vector<std::string> uniqueLabels;

@@ -4402,6 +4402,28 @@ namespace mcu {
             return *this;
         }
 
+        // Assignment from another ID_vector with different BitsPerValue
+        template<uint8_t OtherBits>
+        ID_vector& operator=(const ID_vector<T, OtherBits>& other) {
+            clear();
+            if (other.empty()) return *this;
+            
+            min_id_ = other.minID();
+            max_id_ = other.maxID();
+            allocate_bits();
+            
+            for (index_type id = min_id_; id <= max_id_; ++id) {
+                count_type c = other.count(id);
+                if (c > 0) {
+                    // Cap count to MAX_COUNT of this ID_vector
+                    count_type capped_c = (c > MAX_COUNT) ? MAX_COUNT : c;
+                    id_array.set(id_to_index(id), capped_c);
+                    size_ += capped_c;
+                }
+            }
+            return *this;
+        }
+
         // Destructor (default is fine since PackedArray handles its own cleanup)
         ~ID_vector() = default;
 
@@ -4935,7 +4957,7 @@ namespace mcu {
         }
 
         // get the smallest ID currently stored in the vector
-        T minID(){
+        T minID() const {
             if(size_ == 0) {
                 throw std::out_of_range("ID_vector is empty");
             }
@@ -4949,7 +4971,7 @@ namespace mcu {
         }
 
         // get the largest ID currently stored in the vector
-        index_type maxID(){
+        index_type maxID() const {
             if(size_ == 0) {
                 throw std::out_of_range("ID_vector is empty");
             }

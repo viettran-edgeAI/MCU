@@ -77,9 +77,9 @@ void setup() {
     Serial.printf("Model built in %lu ms\n", build_time - start_forest);
     
 
-    // Serial.print("Training model (3 epochs)... ");
-    // forest.training(3);
-    // Serial.println("✅ OK");
+    Serial.print("Training model (3 epochs)... ");
+    forest.training(3);
+    Serial.println("✅ OK");
 
     // Load trained forest from filesystem
     Serial.print("Loading forest... ");

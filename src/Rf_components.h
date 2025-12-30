@@ -478,6 +478,8 @@ namespace mcu {
 
         bool enable_retrain;
         bool enable_auto_config;   // change config based on dataset parameters (when base_data expands)
+        bool allow_new_labels;     // allow new labels to be added to the dataset (default: false)
+
 
         // runtime parameters
         pair<uint8_t, uint8_t> min_split_range;
@@ -523,6 +525,7 @@ namespace mcu {
             estimatedRAM        = 0;
             enable_retrain      = true;
             enable_auto_config  = false;
+            allow_new_labels    = false;
             quantization_coefficient = 2; 
             max_samples = 0; // unlimited by default
         }
@@ -1334,6 +1337,77 @@ namespace mcu {
         template<uint8_t bpv>
         Rf_sample(const packed_vector<bpv>& features, label_type label) : features(features), label(label) {}
     };
+
+    // Record of a detected concept-drift sample (value exceeded current per-feature min/max).
+    struct Rf_drift_sample {
+        sample_type pending_index = 0; // index inside pending_samples
+        uint16_t feature_index = 0;
+        float value = 0.0f;
+    };
+
+    // Mapping filter used to lazily re-quantize previously stored samples after quantizer range updates.
+    // Stored inside Rf_data; applied the next time the dataset is loaded into RAM for model reconstruction.
+    class Rf_quantizer_update_filter {
+    private:
+        uint16_t numFeatures_ = 0;
+        uint16_t groupsPerFeature_ = 0;
+        bool active_ = false;
+        vector<uint8_t> mapping_; // size = numFeatures * groupsPerFeature, maps oldBin -> newBin
+
+        inline size_t index(uint16_t featureIdx, uint8_t oldBin) const {
+            return static_cast<size_t>(featureIdx) * static_cast<size_t>(groupsPerFeature_) + static_cast<size_t>(oldBin);
+        }
+
+    public:
+        void clear() {
+            numFeatures_ = 0;
+            groupsPerFeature_ = 0;
+            active_ = false;
+            mapping_.clear();
+            mapping_.fit();
+        }
+
+        void init(uint16_t numFeatures, uint16_t groupsPerFeature) {
+            clear();
+            numFeatures_ = numFeatures;
+            groupsPerFeature_ = groupsPerFeature;
+            if (numFeatures_ == 0 || groupsPerFeature_ == 0) {
+                return;
+            }
+            mapping_.resize(static_cast<size_t>(numFeatures_) * static_cast<size_t>(groupsPerFeature_), 0);
+            // Default: identity mapping
+            for (uint16_t f = 0; f < numFeatures_; ++f) {
+                for (uint16_t b = 0; b < groupsPerFeature_; ++b) {
+                    mapping_[index(f, static_cast<uint8_t>(b))] = static_cast<uint8_t>(b);
+                }
+            }
+            active_ = true;
+        }
+
+        bool active() const { return active_; }
+        uint16_t numFeatures() const { return numFeatures_; }
+        uint16_t groupsPerFeature() const { return groupsPerFeature_; }
+
+        void setMapping(uint16_t featureIdx, uint8_t oldBin, uint8_t newBin) {
+            if (!active_ || featureIdx >= numFeatures_ || groupsPerFeature_ == 0) {
+                return;
+            }
+            if (oldBin >= groupsPerFeature_ || newBin >= groupsPerFeature_) {
+                return;
+            }
+            mapping_[index(featureIdx, oldBin)] = newBin;
+        }
+
+        uint8_t map(uint16_t featureIdx, uint8_t oldBin) const {
+            if (!active_ || featureIdx >= numFeatures_ || groupsPerFeature_ == 0) {
+                return oldBin;
+            }
+            if (oldBin >= groupsPerFeature_) {
+                return oldBin;
+            }
+            return mapping_[index(featureIdx, oldBin)];
+        }
+    };
     
     class Rf_data {
     private:
@@ -1352,6 +1426,9 @@ namespace mcu {
         size_t size_;  
         uint8_t quantization_coefficient;              // Bits per feature value (1-8)
         char file_path[RF_PATH_BUFFER] = {0};          // dataset file_path 
+
+        // Pending quantizer update mapping (concept drift): applied on next RAM load.
+        Rf_quantizer_update_filter quantizer_update_filter;
 
         uint8_t num_labels_2_bpv(label_type num_labels) {
             if (num_labels <= 2) return 1;
@@ -1383,7 +1460,39 @@ namespace mcu {
             size_ = config.num_samples;
             sampleChunks.clear();
             allLabels.clear();
+            quantizer_update_filter.clear();
             return isProperlyInitialized();
+        }
+
+        Rf_quantizer_update_filter& get_update_filter() { return quantizer_update_filter; }
+        const Rf_quantizer_update_filter& get_update_filter() const { return quantizer_update_filter; }
+
+        void clear_update_filter() { quantizer_update_filter.clear(); }
+
+        // Apply a mapping filter to currently loaded (RAM) quantized samples.
+        // This is used for immediate remapping after a quantizer update/shrink.
+        bool apply_update_filter_inplace(const Rf_quantizer_update_filter& filter) {
+            if (!isLoaded) {
+                return false;
+            }
+            const uint16_t numFeatures = bitsPerSample / quantization_coefficient;
+            if (!filter.active() || filter.numFeatures() != numFeatures || filter.groupsPerFeature() != (1u << quantization_coefficient)) {
+                return false;
+            }
+            const uint16_t gpf = filter.groupsPerFeature();
+            for (size_t ci = 0; ci < sampleChunks.size(); ++ci) {
+                packed_vector<8>& chunk = sampleChunks[ci];
+                const size_t chunkSize = chunk.size();
+                for (size_t ei = 0; ei < chunkSize; ++ei) {
+                    const uint16_t fidx = static_cast<uint16_t>(ei % numFeatures);
+                    const uint8_t oldVal = static_cast<uint8_t>(chunk[ei]);
+                    if (oldVal < gpf) {
+                        const uint8_t newVal = filter.map(fidx, oldVal);
+                        chunk.set_unsafe(ei, newVal);
+                    }
+                }
+            }
+            return true;
         }
 
         // Iterator class (returns Rf_sample by value for read-only querying)
@@ -1830,6 +1939,9 @@ namespace mcu {
                 }
                 free(writeBuffer);
                 file.close();
+
+                // If we wrote the remapped data back to storage, any pending update filter is now obsolete.
+                quantizer_update_filter.clear();
             }
             
             // Clear chunked memory
@@ -2032,6 +2144,16 @@ namespace mcu {
             allLabels.fit();
             for (auto& chunk : sampleChunks) {
                 chunk.fit();
+            }
+
+            // Apply mapping if a quantizer update was recorded.
+            if (quantizer_update_filter.active() &&
+                quantizer_update_filter.numFeatures() == numFeatures &&
+                quantizer_update_filter.groupsPerFeature() == (1u << quantization_coefficient)) {
+                RF_DEBUG(1, "🔁 Applying quantizer update filter to loaded data");
+                (void)apply_update_filter_inplace(quantizer_update_filter);
+                // One-shot application completed.
+                quantizer_update_filter.clear();
             }
             isLoaded = true;
             file.close();
@@ -3031,24 +3153,8 @@ namespace mcu {
     ------------------------------------------------------------------------------------------------------------------
     */
 
-    // Feature type definitions for quantizer (QTZ3 format)
-    enum FeatureType { FT_DF = 0, FT_DC = 1, FT_CS = 2, FT_CU = 3 };
-    
-    // Packed feature reference structure (2 bytes per feature)
-    struct FeatureRef {
-        uint16_t packed; // bits 15..14: type, bits 13..8: aux, bits 7..0: offset
-        
-        FeatureRef() : packed(0) {}
-        FeatureRef(FeatureType type, uint8_t aux, uint8_t offset) {
-            packed = (static_cast<uint16_t>(type) << 14) | 
-                    ((static_cast<uint16_t>(aux) & 0x3F) << 8) | 
-                    static_cast<uint16_t>(offset);
-        }
-        
-        FeatureType getType() const { return static_cast<FeatureType>(packed >> 14); }
-        uint8_t getAux() const { return (packed >> 8) & 0x3F; }
-        uint8_t getOffset() const { return packed & 0xFF; }
-    };
+    // Feature type definitions for quantizer (QTZ4 format)
+    enum FeatureType : uint8_t { FT_DF = 0, FT_DC = 1, FT_CU = 2 };
 
     // Template trait to check supported vector types for Rf_quantizer
     template<typename T>
@@ -3069,7 +3175,7 @@ namespace mcu {
     class Rf_quantizer {
     private:
         uint16_t numFeatures = 0;
-        uint8_t groupsPerFeature = 0;
+        uint16_t groupsPerFeature = 0;
         label_type numLabels = 0;
         uint8_t quantization_coefficient = 2; // Bits per feature value (1-8)
         bool isLoaded = false;
@@ -3083,13 +3189,21 @@ namespace mcu {
         vector<float> featureStdDevs;
     #endif
 
-        // Compact storage arrays
-        vector<FeatureRef> featureRefs;              // One per feature
-        vector<uint16_t> sharedPatterns;             // Concatenated pattern edges
-        vector<uint16_t> allUniqueEdges;             // Concatenated unique edges
-        vector<uint8_t> allDiscreteValues;           // Concatenated discrete values
-        vector<int64_t> featureBaselines;            // Per-feature baseline offsets (scaled)
-        vector<uint64_t> featureScales;             // Per-feature scaling factors
+        // Per-feature quantization rules (QTZ4)
+        vector<uint8_t> featureTypes;                // FeatureType per feature
+        vector<float> featureMins;                   // Per-feature min
+        vector<float> featureMaxs;                   // Per-feature max
+        vector<int64_t> featureBaselinesScaled;      // Per-feature baseline offsets (scaled)
+        vector<uint64_t> featureScales;              // Per-feature scaling factors
+
+        // Concatenated storage for per-feature payloads
+        vector<uint16_t> allEdgesScaled;             // Scaled edges for FT_CU
+        vector<uint32_t> edgeOffsets;                // Per-feature offset into allEdgesScaled
+        vector<uint8_t> edgeCounts;                  // Per-feature number of edges
+
+        vector<float> allDiscreteValuesF;            // Discrete values for FT_DC
+        vector<uint32_t> dcOffsets;                  // Per-feature offset into allDiscreteValuesF
+        vector<uint8_t> dcCounts;                    // Per-feature number of discrete values
         vector<uint16_t> labelOffsets;               // Offsets into labelStorage for each normalized label
         mutable vector<uint8_t> labelLengths;                // Cached label lengths for faster copy (uint8_t sufficient for max 32 char labels)
         vector<char> labelStorage;                   // Contiguous storage for label strings (null terminated)
@@ -3153,7 +3267,14 @@ namespace mcu {
         }
         
         // Optimized feature categorization - hot path, force inline
-        __attribute__((always_inline)) inline uint8_t quantizeValue(uint16_t featureIdx, float value) const {
+        static inline uint8_t clampU8(int32_t v, uint8_t lo, uint8_t hi) {
+            if (v < static_cast<int32_t>(lo)) return lo;
+            if (v > static_cast<int32_t>(hi)) return hi;
+            return static_cast<uint8_t>(v);
+        }
+
+        // Quantize with drift signal: return value may be <0 or >=groupsPerFeature to indicate out-of-range.
+        __attribute__((always_inline)) inline int16_t quantizeValueSignal(uint16_t featureIdx, float value) const {
             // Apply outlier filtering if enabled and statistics are available
 #ifndef RF_STATIC_MODEL
             if (removeOutliers && featureIdx < featureMeans.size() && featureIdx < featureStdDevs.size()) {
@@ -3172,84 +3293,84 @@ namespace mcu {
                 }
             }
 #endif
-            
-            // Fast path: assume valid input during prediction (bounds checked during loading)
-            const FeatureRef& ref = featureRefs[featureIdx];
-            const uint8_t type = ref.getType();
+
+            const uint8_t type = (featureIdx < featureTypes.size()) ? featureTypes[featureIdx] : static_cast<uint8_t>(FT_DF);
+            const float fmin = (featureIdx < featureMins.size()) ? featureMins[featureIdx] : 0.0f;
+            const float fmax = (featureIdx < featureMaxs.size()) ? featureMaxs[featureIdx] : 0.0f;
+
+            const bool under = value < fmin;
+            const bool over = value > fmax;
             
             // FT_DF is most common, check first
             if (__builtin_expect(type == FT_DF, 1)) {
                 // Full discrete range: clamp to 0..groupsPerFeature-1
                 int intValue = static_cast<int>(value);
-                return static_cast<uint8_t>((intValue < 0) ? 0 : ((intValue >= groupsPerFeature) ? (groupsPerFeature - 1) : intValue));
-            }
-
-            if (type == FT_CS) {
-                // Continuous shared pattern
-                const int64_t baseline = (featureIdx < featureBaselines.size()) ? featureBaselines[featureIdx] : 0;
-                const uint64_t scale = (featureIdx < featureScales.size()) ? featureScales[featureIdx] : 1ULL;
-                int64_t adjusted = scaleToInt64(static_cast<double>(value), scale) - baseline;
-                if (adjusted <= 0) {
-                    return 0;
-                }
-                uint32_t scaledValue = static_cast<uint32_t>(adjusted <= std::numeric_limits<uint32_t>::max() ? adjusted : std::numeric_limits<uint32_t>::max());
-                const uint16_t baseOffset = ref.getAux() * (groupsPerFeature - 1);
-                const uint8_t limit = groupsPerFeature - 1;
-                const uint16_t* patterns = &sharedPatterns[baseOffset];
-
-                for (uint8_t bin = 0; bin < limit; ++bin) {
-                    if (scaledValue < patterns[bin]) {
-                        return bin;
-                    }
-                }
-                return limit;
+                const int32_t clamped = (intValue < 0) ? 0 : ((intValue >= groupsPerFeature) ? (groupsPerFeature - 1) : intValue);
+                // DF drift (rare): signal if outside min/max (should be 0..gpf-1)
+                if (under) return -1;
+                if (over) return static_cast<int16_t>(groupsPerFeature);
+                return static_cast<int16_t>(clamped);
             }
 
             if (type == FT_CU) {
-                // Continuous unique edges
-                const int64_t baseline = (featureIdx < featureBaselines.size()) ? featureBaselines[featureIdx] : 0;
+                const int64_t baselineScaled = (featureIdx < featureBaselinesScaled.size()) ? featureBaselinesScaled[featureIdx] : 0;
                 const uint64_t scale = (featureIdx < featureScales.size()) ? featureScales[featureIdx] : 1ULL;
-                int64_t adjusted = scaleToInt64(static_cast<double>(value), scale) - baseline;
+                int64_t adjusted = scaleToInt64(static_cast<double>(value), scale) - baselineScaled;
                 if (adjusted <= 0) {
-                    return 0;
+                    // underflow signal
+                    return under ? static_cast<int16_t>(-1) : 0;
                 }
                 uint32_t scaledValue = static_cast<uint32_t>(adjusted <= std::numeric_limits<uint32_t>::max() ? adjusted : std::numeric_limits<uint32_t>::max());
-                const uint8_t edgeCount = ref.getAux();
-                const uint16_t baseOffset = ref.getOffset() * (groupsPerFeature - 1);
-                const uint16_t* edges = &allUniqueEdges[baseOffset];
+                const uint32_t off = (featureIdx < edgeOffsets.size()) ? edgeOffsets[featureIdx] : 0;
+                const uint8_t cnt = (featureIdx < edgeCounts.size()) ? edgeCounts[featureIdx] : 0;
+                const uint16_t* edges = (off < allEdgesScaled.size()) ? &allEdgesScaled[off] : nullptr;
 
-                for (uint8_t bin = 0; bin < edgeCount; ++bin) {
-                    if (scaledValue < edges[bin]) {
-                        return bin;
+                for (uint8_t bin = 0; bin < cnt; ++bin) {
+                    if (edges && scaledValue < edges[bin]) {
+                        return static_cast<int16_t>(bin);
                     }
                 }
-                return edgeCount;
-            }
-            
-            // FT_DC: Discrete custom values
-            const uint8_t count = ref.getAux();
-            const uint8_t offset = ref.getOffset();
-            // int intValue = static_cast<int>(value);
-            // if (intValue < 0) {
-            //     intValue = 0;
-            // } else if (intValue > 255) {
-            //     intValue = 255;
-            // }
-            const uint8_t targetValue = static_cast<uint8_t>(value);
-            const uint8_t* discreteVals = &allDiscreteValues[offset];
-            
-            for (uint8_t i = 0; i < count; ++i) {
-                if (discreteVals[i] == targetValue) {
-                    return i;
+                const int16_t inRangeBin = static_cast<int16_t>(cnt);
+                // If value exceeds (min,max), return a larger drift code instead of rounding/clamping.
+                if (over) {
+                    float span = fmax - fmin;
+                    float bw = (groupsPerFeature > 0) ? (span / static_cast<float>(groupsPerFeature)) : 0.0f;
+                    if (bw > 1e-9f) {
+                        int16_t extra = static_cast<int16_t>(std::floor((value - fmax) / bw) + 1.0f);
+                        return static_cast<int16_t>(groupsPerFeature - 1) + extra;
+                    }
+                    return static_cast<int16_t>(groupsPerFeature);
                 }
+                if (under) {
+                    float span = fmax - fmin;
+                    float bw = (groupsPerFeature > 0) ? (span / static_cast<float>(groupsPerFeature)) : 0.0f;
+                    if (bw > 1e-9f) {
+                        int16_t extra = static_cast<int16_t>(std::floor((fmin - value) / bw) + 1.0f);
+                        return static_cast<int16_t>(-extra);
+                    }
+                    return static_cast<int16_t>(-1);
+                }
+                return inRangeBin;
             }
 
-            // Unseen category: prefer mapping to a dedicated "unknown" bucket if there is spare capacity.
-            // This helps on-device retraining not collapse novel categories into an existing one.
-            if (groupsPerFeature == 0) {
-                return 0;
+            // FT_DC: Discrete custom values
+            const uint32_t off = (featureIdx < dcOffsets.size()) ? dcOffsets[featureIdx] : 0;
+            const uint8_t cnt = (featureIdx < dcCounts.size()) ? dcCounts[featureIdx] : 0;
+            if (cnt == 0 || off >= allDiscreteValuesF.size()) {
+                return under ? static_cast<int16_t>(-1) : (over ? static_cast<int16_t>(groupsPerFeature) : 0);
             }
-            return (count < groupsPerFeature) ? count : static_cast<uint8_t>(groupsPerFeature - 1);
+            const float* vals = &allDiscreteValuesF[off];
+
+            // Exact/near match first
+            for (uint8_t i = 0; i < cnt; ++i) {
+                if (std::fabs(vals[i] - value) <= 1e-6f) {
+                    return static_cast<int16_t>(i);
+                }
+            }
+            // Drift in discrete: unknown category => drift signal
+            if (under) return static_cast<int16_t>(-1);
+            if (over) return static_cast<int16_t>(groupsPerFeature);
+            return static_cast<int16_t>(groupsPerFeature);
         }
       
     public:
@@ -3261,12 +3382,17 @@ namespace mcu {
         ~Rf_quantizer() {
             base_ptr = nullptr;
             isLoaded = false;
-            featureRefs.clear();
-            sharedPatterns.clear();
-            allUniqueEdges.clear();
-            allDiscreteValues.clear();
-            featureBaselines.clear();
+            featureTypes.clear();
+            featureMins.clear();
+            featureMaxs.clear();
+            featureBaselinesScaled.clear();
             featureScales.clear();
+            allEdgesScaled.clear();
+            edgeOffsets.clear();
+            edgeCounts.clear();
+            allDiscreteValuesF.clear();
+            dcOffsets.clear();
+            dcCounts.clear();
             labelOffsets.clear();
             labelLengths.clear();
             labelStorage.clear();
@@ -3288,9 +3414,15 @@ namespace mcu {
             uint8_t num_labels = config.num_labels;
 
             // Reserve memory for member vectors
-            featureRefs.reserve(num_features);
-            featureBaselines.reserve(num_features);
+            featureTypes.reserve(num_features);
+            featureMins.reserve(num_features);
+            featureMaxs.reserve(num_features);
+            featureBaselinesScaled.reserve(num_features);
             featureScales.reserve(num_features);
+            edgeOffsets.reserve(num_features);
+            edgeCounts.reserve(num_features);
+            dcOffsets.reserve(num_features);
+            dcCounts.reserve(num_features);
             labelOffsets.reserve(num_labels);
             labelStorage.reserve(num_labels * 8); // Heuristic: 8 chars per label
 
@@ -3331,12 +3463,17 @@ namespace mcu {
                 quantization_coefficient = 2;
                 removeOutliers = true;
                 isLoaded = false;
-                featureRefs.clear();
-                sharedPatterns.clear();
-                allUniqueEdges.clear();
-                allDiscreteValues.clear();
-                featureBaselines.clear();
+                featureTypes.clear();
+                featureMins.clear();
+                featureMaxs.clear();
+                featureBaselinesScaled.clear();
                 featureScales.clear();
+                allEdgesScaled.clear();
+                edgeOffsets.clear();
+                edgeCounts.clear();
+                allDiscreteValuesF.clear();
+                dcOffsets.clear();
+                dcCounts.clear();
                 labelOffsets.clear();
                 labelLengths.clear();
                 labelStorage.clear();
@@ -3350,7 +3487,7 @@ namespace mcu {
 
             // Read magic number
             char magic[4];
-            if (file.readBytes(magic, 4) != 4 || memcmp(magic, "QTZ3", 4) != 0) {
+            if (file.readBytes(magic, 4) != 4 || memcmp(magic, "QTZ4", 4) != 0) {
                 RF_DEBUG(0, "❌ Invalid quantizer binary magic number");
                 file.close();
                 return false;
@@ -3380,14 +3517,6 @@ namespace mcu {
             }
             // numLabels will be updated by storeLabel calls
             numLabels = 0; 
-
-            uint16_t numSharedPatterns;
-            if (file.readBytes(reinterpret_cast<char*>(&numSharedPatterns), sizeof(uint16_t)) != sizeof(uint16_t)) {
-                RF_DEBUG(0, "❌ Failed to read numSharedPatterns");
-                file.close();
-                resetData();
-                return false;
-            }
 
             // Read outlier filtering flag
             uint8_t outlierFlag;
@@ -3439,14 +3568,15 @@ namespace mcu {
             if (quantization_coefficient > 8) quantization_coefficient = 8;
 
             // Reserve memory
-            featureRefs.reserve(numFeatures);
-            if (groupsPerFeature > 1) {
-                sharedPatterns.reserve(static_cast<size_t>(numSharedPatterns) * (groupsPerFeature - 1));
-                allUniqueEdges.reserve(static_cast<size_t>(numFeatures) * (groupsPerFeature - 1));
-            }
-            allDiscreteValues.reserve(static_cast<size_t>(numFeatures) * groupsPerFeature);
-            featureBaselines.reserve(numFeatures);
+            featureTypes.reserve(numFeatures);
+            featureMins.reserve(numFeatures);
+            featureMaxs.reserve(numFeatures);
+            featureBaselinesScaled.reserve(numFeatures);
             featureScales.reserve(numFeatures);
+            edgeOffsets.reserve(numFeatures);
+            edgeCounts.reserve(numFeatures);
+            dcOffsets.reserve(numFeatures);
+            dcCounts.reserve(numFeatures);
             labelOffsets.resize(labelCount, UINT16_MAX);
             labelLengths.resize(labelCount, 0);
             labelStorage.reserve(labelCount * 8);
@@ -3487,36 +3617,6 @@ namespace mcu {
                 }
             }
 
-            // Read shared patterns
-            for (uint16_t i = 0; i < numSharedPatterns; ++i) {
-                uint16_t patternId;
-                if (file.readBytes(reinterpret_cast<char*>(&patternId), sizeof(uint16_t)) != sizeof(uint16_t)) {
-                    RF_DEBUG(0, "❌ Failed to read pattern ID");
-                    file.close();
-                    resetData();
-                    return false;
-                }
-
-                uint16_t edgeCount;
-                if (file.readBytes(reinterpret_cast<char*>(&edgeCount), sizeof(uint16_t)) != sizeof(uint16_t)) {
-                    RF_DEBUG(0, "❌ Failed to read pattern edge count");
-                    file.close();
-                    resetData();
-                    return false;
-                }
-
-                for (uint16_t j = 0; j < edgeCount; ++j) {
-                    uint16_t edge;
-                    if (file.readBytes(reinterpret_cast<char*>(&edge), sizeof(uint16_t)) != sizeof(uint16_t)) {
-                        RF_DEBUG(0, "❌ Failed to read pattern edge");
-                        file.close();
-                        resetData();
-                        return false;
-                    }
-                    sharedPatterns.push_back(edge);
-                }
-            }
-
             // Read feature definitions
             for (uint16_t i = 0; i < numFeatures; ++i) {
                 uint8_t typeU8;
@@ -3527,8 +3627,18 @@ namespace mcu {
                     return false;
                 }
 
-                int64_t baselineValue;
-                if (file.readBytes(reinterpret_cast<char*>(&baselineValue), sizeof(int64_t)) != sizeof(int64_t)) {
+                float minValue;
+                float maxValue;
+                if (file.readBytes(reinterpret_cast<char*>(&minValue), sizeof(float)) != sizeof(float) ||
+                    file.readBytes(reinterpret_cast<char*>(&maxValue), sizeof(float)) != sizeof(float)) {
+                    RF_DEBUG(0, "❌ Failed to read feature min/max");
+                    file.close();
+                    resetData();
+                    return false;
+                }
+
+                int64_t baselineValueScaled;
+                if (file.readBytes(reinterpret_cast<char*>(&baselineValueScaled), sizeof(int64_t)) != sizeof(int64_t)) {
                     RF_DEBUG(0, "❌ Failed to read baseline");
                     file.close();
                     resetData();
@@ -3546,9 +3656,18 @@ namespace mcu {
 
                 FeatureType type = static_cast<FeatureType>(typeU8);
 
+                featureTypes.push_back(typeU8);
+                featureMins.push_back(minValue);
+                featureMaxs.push_back(maxValue);
+                featureBaselinesScaled.push_back(baselineValueScaled);
+                featureScales.push_back(scaleValue);
+
                 switch (type) {
                     case FT_DF:
-                        featureRefs.push_back(FeatureRef(FT_DF, 0, 0));
+                        edgeOffsets.push_back(0);
+                        edgeCounts.push_back(0);
+                        dcOffsets.push_back(0);
+                        dcCounts.push_back(0);
                         break;
 
                     case FT_DC:
@@ -3561,31 +3680,21 @@ namespace mcu {
                                 return false;
                             }
 
-                            uint8_t offset = static_cast<uint8_t>(allDiscreteValues.size());
+                            uint32_t offset = static_cast<uint32_t>(allDiscreteValuesF.size());
                             for (uint8_t j = 0; j < count; ++j) {
-                                uint8_t val;
-                                if (file.readBytes(reinterpret_cast<char*>(&val), sizeof(uint8_t)) != sizeof(uint8_t)) {
+                                float val;
+                                if (file.readBytes(reinterpret_cast<char*>(&val), sizeof(float)) != sizeof(float)) {
                                     RF_DEBUG(0, "❌ Failed to read DC value");
                                     file.close();
                                     resetData();
                                     return false;
                                 }
-                                allDiscreteValues.push_back(val);
+                                allDiscreteValuesF.push_back(val);
                             }
-                            featureRefs.push_back(FeatureRef(FT_DC, count, offset));
-                        }
-                        break;
-
-                    case FT_CS:
-                        {
-                            uint16_t patternId;
-                            if (file.readBytes(reinterpret_cast<char*>(&patternId), sizeof(uint16_t)) != sizeof(uint16_t)) {
-                                RF_DEBUG(0, "❌ Failed to read CS pattern ID");
-                                file.close();
-                                resetData();
-                                return false;
-                            }
-                            featureRefs.push_back(FeatureRef(FT_CS, patternId, 0));
+                            dcOffsets.push_back(offset);
+                            dcCounts.push_back(count);
+                            edgeOffsets.push_back(0);
+                            edgeCounts.push_back(0);
                         }
                         break;
 
@@ -3599,22 +3708,7 @@ namespace mcu {
                                 return false;
                             }
 
-                            if (groupsPerFeature <= 1) {
-                                RF_DEBUG(0, "❌ Invalid groupsPerFeature for CU");
-                                file.close();
-                                resetData();
-                                return false;
-                            }
-
-                            uint16_t divisor = static_cast<uint16_t>(groupsPerFeature - 1);
-                            if (divisor == 0) {
-                                RF_DEBUG(0, "❌ Division by zero in CU offset");
-                                file.close();
-                                resetData();
-                                return false;
-                            }
-
-                            uint8_t offset = static_cast<uint8_t>(allUniqueEdges.size() / divisor);
+                            uint32_t offset = static_cast<uint32_t>(allEdgesScaled.size());
                             for (uint8_t j = 0; j < edgeCount; ++j) {
                                 uint16_t edge;
                                 if (file.readBytes(reinterpret_cast<char*>(&edge), sizeof(uint16_t)) != sizeof(uint16_t)) {
@@ -3623,9 +3717,13 @@ namespace mcu {
                                     resetData();
                                     return false;
                                 }
-                                allUniqueEdges.push_back(edge);
+                                allEdgesScaled.push_back(edge);
                             }
-                            featureRefs.push_back(FeatureRef(FT_CU, edgeCount, offset));
+
+                            edgeOffsets.push_back(offset);
+                            edgeCounts.push_back(edgeCount);
+                            dcOffsets.push_back(0);
+                            dcCounts.push_back(0);
                         }
                         break;
 
@@ -3636,8 +3734,6 @@ namespace mcu {
                         return false;
                 }
 
-                featureBaselines.push_back(baselineValue);
-                featureScales.push_back(scaleValue);
             }
 
             file.close();
@@ -3655,22 +3751,32 @@ namespace mcu {
             }
             
             // Clear all data structures
-            featureRefs.clear();
-            sharedPatterns.clear();
-            allUniqueEdges.clear();
-            allDiscreteValues.clear();
-            featureBaselines.clear();
+            featureTypes.clear();
+            featureMins.clear();
+            featureMaxs.clear();
+            featureBaselinesScaled.clear();
             featureScales.clear();
+            allEdgesScaled.clear();
+            edgeOffsets.clear();
+            edgeCounts.clear();
+            allDiscreteValuesF.clear();
+            dcOffsets.clear();
+            dcCounts.clear();
             labelOffsets.clear();
             labelLengths.clear();
             labelStorage.clear();
 
-            featureRefs.fit();
-            sharedPatterns.fit();
-            allUniqueEdges.fit();
-            allDiscreteValues.fit();
-            featureBaselines.fit();
+            featureTypes.fit();
+            featureMins.fit();
+            featureMaxs.fit();
+            featureBaselinesScaled.fit();
             featureScales.fit();
+            allEdgesScaled.fit();
+            edgeOffsets.fit();
+            edgeCounts.fit();
+            allDiscreteValuesF.fit();
+            dcOffsets.fit();
+            dcCounts.fit();
             labelOffsets.fit();
             labelLengths.fit();
             labelStorage.fit();
@@ -3686,13 +3792,378 @@ namespace mcu {
             RF_DEBUG(2, "🧹 Quantizer data released from memory");
         }
 
-        // Core categorization function: write directly to pre-allocated buffer
-        // This is the ONLY internal categorization method - optimized for zero allocations
-        __attribute__((always_inline)) inline void quantizeFeatures(const float* features, packed_vector<8>& output) const {
-            // Write directly to pre-allocated buffer
+        // Core categorization function: write directly to pre-allocated buffer.
+        // Drift signaling: values outside (min,max) return <0 or >=groupsPerFeature from quantizeValueSignal().
+        // For inference, we still clamp stored bins to [0..groupsPerFeature-1].
+        __attribute__((always_inline)) inline bool quantizeFeatures(
+            const float* features,
+            packed_vector<8>& output,
+            uint16_t* drift_feature = nullptr,
+            float* drift_value = nullptr
+        ) const {
+            bool drift = false;
+            const uint16_t gpf = groupsPerFeature;
+            const uint8_t hi = (gpf > 0) ? static_cast<uint8_t>(gpf - 1) : 0;
             for (uint16_t i = 0; i < numFeatures; ++i) {
-                output.set(i, quantizeValue(i, features[i]));
+                const float v = features[i];
+                const int16_t q = quantizeValueSignal(i, v);
+                if (!drift && (q < 0 || q >= static_cast<int16_t>(gpf))) {
+                    drift = true;
+                    if (drift_feature) {
+                        *drift_feature = i;
+                    }
+                    if (drift_value) {
+                        *drift_value = v;
+                    }
+                }
+                const uint8_t stored = (gpf == 0) ? 0 : clampU8(static_cast<int32_t>(q), 0, hi);
+                output.set(i, stored);
             }
+            return drift;
+        }
+
+        // Backward-compatible overload (no drift info requested)
+        __attribute__((always_inline)) inline void quantizeFeatures(const float* features, packed_vector<8>& output) const {
+            (void)quantizeFeatures(features, output, nullptr, nullptr);
+        }
+
+        // Expand quantizer ranges based on recorded drift samples, update continuous edges (bins widen),
+        // and create a mapping filter oldBin->newBin for each feature.
+        // The filter should be applied to existing quantized data the next time Rf_data is loaded into RAM.
+        bool apply_concept_drift_update(const vector<Rf_drift_sample>& drift_samples, Rf_quantizer_update_filter& out_filter) {
+            if (!isLoaded || numFeatures == 0 || groupsPerFeature == 0) {
+                return false;
+            }
+            if (drift_samples.empty()) {
+                return false;
+            }
+
+            out_filter.init(numFeatures, groupsPerFeature);
+
+            // Compute new min/max per feature.
+            vector<float> newMins = featureMins;
+            vector<float> newMaxs = featureMaxs;
+            for (const auto& ds : drift_samples) {
+                if (ds.feature_index >= numFeatures) {
+                    continue;
+                }
+                float& mn = newMins[ds.feature_index];
+                float& mx = newMaxs[ds.feature_index];
+                if (ds.value < mn) mn = ds.value;
+                if (ds.value > mx) mx = ds.value;
+            }
+
+            const uint16_t gpf = groupsPerFeature;
+            const uint16_t bins = gpf;
+
+            for (uint16_t f = 0; f < numFeatures; ++f) {
+                const float oldMin = featureMins[f];
+                const float oldMax = featureMaxs[f];
+                const float nm = newMins[f];
+                const float nx = newMaxs[f];
+                const bool changed = (nm < oldMin) || (nx > oldMax);
+                if (!changed) {
+                    continue;
+                }
+
+                const uint8_t ftype = featureTypes[f];
+                if (ftype != static_cast<uint8_t>(FT_CU)) {
+                    // For non-continuous features, keep mapping identity but still expand stored min/max.
+                    featureMins[f] = nm;
+                    featureMaxs[f] = nx;
+                    continue;
+                }
+
+                const uint32_t off = edgeOffsets[f];
+                const uint8_t ecount = edgeCounts[f];
+                if (off + ecount > allEdgesScaled.size()) {
+                    continue;
+                }
+                const uint64_t oldScale = featureScales[f] ? featureScales[f] : 1ULL;
+
+                // Old edge positions in float.
+                vector<float> oldEdges;
+                oldEdges.reserve(ecount);
+                for (uint8_t i = 0; i < ecount; ++i) {
+                    oldEdges.push_back(oldMin + static_cast<float>(allEdgesScaled[off + i]) / static_cast<float>(oldScale));
+                }
+
+                // New edge positions keep the same fractional positions within range (bins only widen when range expands).
+                vector<float> newEdges;
+                newEdges.reserve(ecount);
+                const float oldRange = oldMax - oldMin;
+                const float newRange = nx - nm;
+                if (oldRange > 1e-9f && newRange > 1e-9f) {
+                    for (uint8_t i = 0; i < ecount; ++i) {
+                        float frac = (oldEdges[i] - oldMin) / oldRange;
+                        if (frac < 0.0f) frac = 0.0f;
+                        if (frac > 1.0f) frac = 1.0f;
+                        newEdges.push_back(nm + frac * newRange);
+                    }
+                } else if (newRange > 1e-9f && bins > 1) {
+                    // Degenerate old range, fall back to uniform edges.
+                    for (uint8_t i = 0; i < ecount; ++i) {
+                        float frac = static_cast<float>(i + 1) / static_cast<float>(bins);
+                        newEdges.push_back(nm + frac * newRange);
+                    }
+                } else {
+                    // Still degenerate, keep edges at min.
+                    for (uint8_t i = 0; i < ecount; ++i) {
+                        newEdges.push_back(nm);
+                    }
+                }
+
+                // Build mapping oldBin -> newBin based on >50% overlap.
+                auto bin_bounds = [&](const float mn, const float mx, const vector<float>& edges, uint16_t bin, float& lo, float& hi) {
+                    if (bin == 0) {
+                        lo = mn;
+                        hi = edges.empty() ? mx : edges[0];
+                        return;
+                    }
+                    const uint16_t last = static_cast<uint16_t>(edges.size());
+                    if (bin >= last) {
+                        lo = edges.empty() ? mn : edges[last - 1];
+                        hi = mx;
+                        return;
+                    }
+                    lo = edges[bin - 1];
+                    hi = edges[bin];
+                };
+
+                for (uint16_t oldBin = 0; oldBin < bins; ++oldBin) {
+                    float oLo, oHi;
+                    bin_bounds(oldMin, oldMax, oldEdges, oldBin, oLo, oHi);
+                    float oWidth = oHi - oLo;
+                    if (oWidth <= 0.0f) {
+                        // Degenerate old bin: map via midpoint.
+                        float mid = oLo;
+                        uint8_t bestNew = 0;
+                        for (uint16_t newBin = 0; newBin < bins; ++newBin) {
+                            float nLo, nHi;
+                            bin_bounds(nm, nx, newEdges, newBin, nLo, nHi);
+                            if (mid >= nLo && mid <= nHi) {
+                                bestNew = static_cast<uint8_t>(newBin);
+                                break;
+                            }
+                        }
+                        out_filter.setMapping(f, static_cast<uint8_t>(oldBin), bestNew);
+                        continue;
+                    }
+
+                    float bestOverlap = -1.0f;
+                    uint8_t bestNew = 0;
+                    for (uint16_t newBin = 0; newBin < bins; ++newBin) {
+                        float nLo, nHi;
+                        bin_bounds(nm, nx, newEdges, newBin, nLo, nHi);
+                        float overlap = std::min(oHi, nHi) - std::max(oLo, nLo);
+                        if (overlap < 0.0f) overlap = 0.0f;
+                        if (overlap > bestOverlap) {
+                            bestOverlap = overlap;
+                            bestNew = static_cast<uint8_t>(newBin);
+                        }
+                    }
+
+                    if (bestOverlap / oWidth <= 0.5f) {
+                        // Spec says only map when overlap > 50%.
+                        // If not, still map to the best-overlap bin to keep values stable.
+                    }
+                    out_filter.setMapping(f, static_cast<uint8_t>(oldBin), bestNew);
+                }
+
+                // Update stored feature range & scaled edges.
+                featureMins[f] = nm;
+                featureMaxs[f] = nx;
+
+                uint64_t newScale = 1ULL;
+                if (newRange > 1e-9f) {
+                    long double rawScale = static_cast<long double>(std::numeric_limits<uint16_t>::max()) / static_cast<long double>(newRange);
+                    if (rawScale < 1.0L) rawScale = 1.0L;
+                    if (rawScale > static_cast<long double>(std::numeric_limits<uint64_t>::max())) {
+                        rawScale = static_cast<long double>(std::numeric_limits<uint64_t>::max());
+                    }
+                    newScale = static_cast<uint64_t>(rawScale);
+                    if (newScale == 0) newScale = 1ULL;
+                }
+                featureScales[f] = newScale;
+                featureBaselinesScaled[f] = scaleToInt64(static_cast<double>(nm), newScale);
+
+                for (uint8_t i = 0; i < ecount; ++i) {
+                    double diff = static_cast<double>(newEdges[i]) - static_cast<double>(nm);
+                    if (diff < 0.0) diff = 0.0;
+                    long double scaled = static_cast<long double>(diff) * static_cast<long double>(newScale);
+                    if (scaled < 0.0L) scaled = 0.0L;
+                    if (scaled > static_cast<long double>(std::numeric_limits<uint16_t>::max())) {
+                        scaled = static_cast<long double>(std::numeric_limits<uint16_t>::max());
+                    }
+                    allEdgesScaled[off + i] = static_cast<uint16_t>(scaled + 0.5L);
+                }
+            }
+
+            return true;
+        }
+
+        // Shrink continuous feature ranges if edge bins are unused in the currently loaded dataset.
+        // This is intended for FIFO datasets where older samples are discarded and extreme bins may become empty.
+        // Policy: shrink at most 2 bins at the low end and/or 2 bins at the high end, only if ALL samples miss them.
+        // Emits an update filter (oldBin -> newBin) and can be applied in-place to the loaded data.
+        bool apply_fifo_bin_shrink(Rf_data& loaded_train_data, Rf_quantizer_update_filter& out_filter, uint8_t maxBinsToShrink = 2) {
+            if (!isLoaded || numFeatures == 0 || groupsPerFeature == 0) {
+                return false;
+            }
+            if (!loaded_train_data.isLoaded || loaded_train_data.size() == 0) {
+                return false;
+            }
+            const uint16_t dataFeatures = loaded_train_data.total_features();
+            if (dataFeatures != numFeatures) {
+                return false;
+            }
+
+            const uint16_t gpf = groupsPerFeature;
+            const uint8_t ecount_expected = (gpf > 0) ? static_cast<uint8_t>(gpf - 1) : 0;
+            bool changed_any = false;
+
+            Rf_quantizer_update_filter tempFilter;
+            tempFilter.init(numFeatures, gpf);
+
+            vector<uint32_t> counts;
+            counts.resize(gpf, 0);
+
+            for (uint16_t f = 0; f < numFeatures; ++f) {
+                const uint8_t ftype = (f < featureTypes.size()) ? featureTypes[f] : static_cast<uint8_t>(FT_DF);
+                if (ftype != static_cast<uint8_t>(FT_CU)) {
+                    continue;
+                }
+
+                // Histogram current quantized bins for this feature.
+                std::fill(counts.begin(), counts.end(), 0);
+                const sample_type n = loaded_train_data.size();
+                for (sample_type si = 0; si < n; ++si) {
+                    const uint16_t v = loaded_train_data.getFeature(si, f);
+                    if (v < gpf) {
+                        counts[v]++;
+                    }
+                }
+
+                uint8_t lowShift = 0;
+                while (lowShift < maxBinsToShrink && lowShift < gpf && counts[lowShift] == 0) {
+                    lowShift++;
+                }
+                uint8_t highDrop = 0;
+                while (highDrop < maxBinsToShrink && highDrop < gpf && counts[gpf - 1 - highDrop] == 0) {
+                    highDrop++;
+                }
+
+                // Avoid degeneracy: must leave at least one non-collapsed bin.
+                if (lowShift == 0 && highDrop == 0) {
+                    continue;
+                }
+                if (static_cast<uint16_t>(lowShift) + static_cast<uint16_t>(highDrop) >= gpf) {
+                    continue;
+                }
+
+                const float oldMin = featureMins[f];
+                const float oldMax = featureMaxs[f];
+                const uint32_t off = edgeOffsets[f];
+                const uint8_t ecount = edgeCounts[f];
+                if (ecount != ecount_expected || off + ecount > allEdgesScaled.size()) {
+                    continue;
+                }
+                const uint64_t oldScale = featureScales[f] ? featureScales[f] : 1ULL;
+
+                // Decode old edges to absolute float positions.
+                vector<float> oldEdges;
+                oldEdges.reserve(ecount);
+                for (uint8_t i = 0; i < ecount; ++i) {
+                    oldEdges.push_back(oldMin + static_cast<float>(allEdgesScaled[off + i]) / static_cast<float>(oldScale));
+                }
+
+                float newMin = oldMin;
+                float newMax = oldMax;
+
+                if (lowShift > 0) {
+                    const uint8_t edgeIdx = static_cast<uint8_t>(lowShift - 1);
+                    if (edgeIdx < oldEdges.size()) {
+                        newMin = oldEdges[edgeIdx];
+                    }
+                }
+                if (highDrop > 0) {
+                    // Drop highest bins by moving max down to the upper boundary of the last kept bin.
+                    const uint16_t keptHighestBin = static_cast<uint16_t>(gpf - 1 - highDrop);
+                    if (keptHighestBin < oldEdges.size()) {
+                        newMax = oldEdges[static_cast<uint8_t>(keptHighestBin)];
+                    }
+                }
+
+                if (!(newMax > newMin + 1e-9f)) {
+                    continue;
+                }
+
+                // Build mapping oldBin -> newBin (shift down by lowShift; clamp into last kept bin).
+                const uint8_t lastKept = static_cast<uint8_t>(gpf - 1 - highDrop);
+                for (uint16_t oldBin = 0; oldBin < gpf; ++oldBin) {
+                    int32_t nb = static_cast<int32_t>(oldBin) - static_cast<int32_t>(lowShift);
+                    if (nb < 0) nb = 0;
+                    if (nb > static_cast<int32_t>(lastKept)) nb = static_cast<int32_t>(lastKept);
+                    tempFilter.setMapping(f, static_cast<uint8_t>(oldBin), static_cast<uint8_t>(nb));
+                }
+
+                // Construct new absolute edges: shift left by lowShift (preserve existing boundaries),
+                // and collapse any removed high-edge boundaries to newMax.
+                vector<float> newEdgesAbs;
+                newEdgesAbs.reserve(ecount);
+                const int32_t lastKeptEdgeIdx = static_cast<int32_t>(ecount) - static_cast<int32_t>(highDrop) - 1;
+                for (uint8_t ei = 0; ei < ecount; ++ei) {
+                    int32_t src = static_cast<int32_t>(ei) + static_cast<int32_t>(lowShift);
+                    if (src >= 0 && src <= lastKeptEdgeIdx && src < static_cast<int32_t>(oldEdges.size())) {
+                        newEdgesAbs.push_back(oldEdges[static_cast<size_t>(src)]);
+                    } else {
+                        newEdgesAbs.push_back(newMax);
+                    }
+                }
+
+                // Update stored feature range & scaled edges.
+                featureMins[f] = newMin;
+                featureMaxs[f] = newMax;
+
+                const float newRange = newMax - newMin;
+                uint64_t newScale = 1ULL;
+                if (newRange > 1e-9f) {
+                    long double rawScale = static_cast<long double>(std::numeric_limits<uint16_t>::max()) / static_cast<long double>(newRange);
+                    if (rawScale < 1.0L) rawScale = 1.0L;
+                    if (rawScale > static_cast<long double>(std::numeric_limits<uint64_t>::max())) {
+                        rawScale = static_cast<long double>(std::numeric_limits<uint64_t>::max());
+                    }
+                    newScale = static_cast<uint64_t>(rawScale);
+                    if (newScale == 0) newScale = 1ULL;
+                }
+                featureScales[f] = newScale;
+                featureBaselinesScaled[f] = scaleToInt64(static_cast<double>(newMin), newScale);
+
+                for (uint8_t i = 0; i < ecount; ++i) {
+                    double diff = static_cast<double>(newEdgesAbs[i]) - static_cast<double>(newMin);
+                    if (diff < 0.0) diff = 0.0;
+                    long double scaled = static_cast<long double>(diff) * static_cast<long double>(newScale);
+                    if (scaled < 0.0L) scaled = 0.0L;
+                    if (scaled > static_cast<long double>(std::numeric_limits<uint16_t>::max())) {
+                        scaled = static_cast<long double>(std::numeric_limits<uint16_t>::max());
+                    }
+                    allEdgesScaled[off + i] = static_cast<uint16_t>(scaled + 0.5L);
+                }
+
+                changed_any = true;
+            }
+
+            if (!changed_any) {
+                tempFilter.clear();
+                return false;
+            }
+
+            // Apply remapping to the currently loaded dataset so training uses the updated bins immediately.
+            (void)loaded_train_data.apply_update_filter_inplace(tempFilter);
+
+            // Store filter for next time this dataset is loaded from storage.
+            out_filter = tempFilter;
+            return true;
         }
         
         size_t memory_usage() const {
@@ -3704,12 +4175,17 @@ namespace mcu {
             usage += 4;
             
             // Core data structures
-            usage += featureRefs.memory_usage();
-            usage += sharedPatterns.memory_usage();
-            usage += allUniqueEdges.memory_usage();
-            usage += allDiscreteValues.memory_usage();
-            usage += featureBaselines.memory_usage();
+            usage += featureTypes.memory_usage();
+            usage += featureMins.memory_usage();
+            usage += featureMaxs.memory_usage();
+            usage += featureBaselinesScaled.memory_usage();
             usage += featureScales.memory_usage();
+            usage += allEdgesScaled.memory_usage();
+            usage += edgeOffsets.memory_usage();
+            usage += edgeCounts.memory_usage();
+            usage += allDiscreteValuesF.memory_usage();
+            usage += dcOffsets.memory_usage();
+            usage += dcCounts.memory_usage();
             usage += labelOffsets.memory_usage();
             usage += labelLengths.memory_usage();
             usage += labelStorage.memory_usage();
@@ -3842,6 +4318,30 @@ namespace mcu {
                 if (strncmp(originalLabel, &labelStorage[offset], length) == 0 && originalLabel[length] == '\0') {
                     return i;
                 }
+            }
+            return RF_ERROR_LABEL;
+        }
+
+        // Add a new label to the quantizer
+        label_type addNewLabel(const char* label) {
+            if (!label || label[0] == '\0') {
+                return RF_ERROR_LABEL;
+            }
+            // Check if label already exists
+            label_type existing = getNormalizedLabel(label);
+            if (existing != RF_ERROR_LABEL) {
+                return existing;
+            }
+            
+            if (numLabels >= RF_MAX_LABELS) {
+                RF_DEBUG(0, "❌ Max labels reached, cannot add new label: ", label);
+                return RF_ERROR_LABEL;
+            }
+            
+            label_type newId = numLabels;
+            if (storeLabel(newId, label)) {
+                // RF_DEBUG_2(1, "🆕 Added new label: ", label, " (ID: ", newId, ")");
+                return newId;
             }
             return RF_ERROR_LABEL;
         }
@@ -5822,6 +6322,7 @@ namespace mcu {
         }
         vector<Rf_sample> pending_samples; // buffer for pending samples
         vector<label_type> actual_labels; // true labels of the samples
+        vector<Rf_drift_sample> drift_samples; // concept-drift samples recorded during inference
         uint16_t max_pending_samples; // max number of pending samples in buffer
 
         // interval between 2 inferences. If after this interval the actual label is not provided, the currently labeled waiting sample will be skipped.
@@ -5831,6 +6332,7 @@ namespace mcu {
 
         const Rf_base* base_ptr = nullptr; // pointer to base data, used for auto-flush
         Rf_config* config_ptr = nullptr; // pointer to config, used for auto-flush
+        Rf_quantizer* quantizer_ptr = nullptr; // optional pointer for drift-aware auto-flush
 
         inline bool ptr_ready() const {
             return base_ptr != nullptr && config_ptr != nullptr && base_ptr->ready_to_use();
@@ -5838,7 +6340,7 @@ namespace mcu {
 
         public:
         Rf_pending_data() {
-            init(nullptr, nullptr);
+            init(nullptr, nullptr, nullptr);
         }
         // destructor
         ~Rf_pending_data() {
@@ -5846,27 +6348,42 @@ namespace mcu {
             config_ptr = nullptr;
             pending_samples.clear();
             actual_labels.clear();
+            drift_samples.clear();
         }
 
-        void init(Rf_base* base, Rf_config* config){
+        void init(Rf_base* base, Rf_config* config, Rf_quantizer* quantizer = nullptr){
             base_ptr = base;
             config_ptr = config;
+            quantizer_ptr = quantizer;
             pending_samples.clear();
             actual_labels.clear();
+            drift_samples.clear();
             set_max_pending_samples(100);
             max_wait_time = 2147483647; // ~24 days
         }
 
         // add pending sample to buffer, including the label predicted by the model
-        void add_pending_sample(const Rf_sample& sample, Rf_data& base_data){
+        void add_pending_sample(const Rf_sample& sample, Rf_data& base_data, bool drift_sample = false, uint16_t drift_feature = 0, float drift_value = 0.0f){
             pending_samples.push_back(sample);
+            if (drift_sample) {
+                Rf_drift_sample ds;
+                ds.pending_index = static_cast<sample_type>(pending_samples.size() - 1);
+                ds.feature_index = drift_feature;
+                ds.value = drift_value;
+                drift_samples.push_back(ds);
+            }
             if(pending_samples.size() > max_pending_samples){
                 // Auto-flush if parameters are provided
                 if(ptr_ready()){
-                    flush_pending_data(base_data);
+                    if (quantizer_ptr) {
+                        flush_pending_data(base_data, *quantizer_ptr);
+                    } else {
+                        flush_pending_data(base_data);
+                    }
                 } else {
                     pending_samples.clear();
                     actual_labels.clear();
+                    drift_samples.clear();
                 }
             }
         }
@@ -6068,6 +6585,37 @@ namespace mcu {
             // Clear buffers after processing
             pending_samples.clear();
             actual_labels.clear();
+            drift_samples.clear();
+        }
+
+        // Drift-aware flush: update quantizer ranges and create mapping filter before writing.
+        void flush_pending_data(Rf_data& base_data, Rf_quantizer& quantizer) {
+            if (pending_samples.empty()) {
+                return;
+            }
+
+            if (!drift_samples.empty()) {
+                // Update quantizer and create mapping rule.
+                auto& uf = base_data.get_update_filter();
+                if (quantizer.apply_concept_drift_update(drift_samples, uf)) {
+                    // Apply mapping immediately to the currently-buffered pending samples
+                    // (these samples were quantized with the old bins).
+                    for (size_t si = 0; si < pending_samples.size(); ++si) {
+                        Rf_sample& s = pending_samples[si];
+                        for (uint16_t f = 0; f < s.features.size(); ++f) {
+                            uint8_t oldBin = static_cast<uint8_t>(s.features[f]);
+                            uint8_t newBin = uf.map(f, oldBin);
+                            s.features.set(f, newBin);
+                        }
+                    }
+                }
+            }
+
+            write_to_base_data(base_data);
+            write_to_infer_log();
+            pending_samples.clear();
+            actual_labels.clear();
+            drift_samples.clear();
         }
 
     private:

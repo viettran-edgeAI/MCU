@@ -67,7 +67,7 @@ namespace mcu{
         inline Rf_pending_data* ensure_pending_data(){
             if(!pending_data){
                 pending_data = new Rf_pending_data();
-                pending_data->init(&base, &config);
+                pending_data->init(&base, &config, &quantizer);
             }
             return pending_data;
         }
@@ -312,6 +312,14 @@ namespace mcu{
                 return false;
             }
             logger.m_log("load train_data");
+
+            // FIFO bin shrink: if extreme bins are unused (0..2 on either side), shrink quantizer ranges
+            // and remap the loaded dataset immediately. Store mapping for future loads.
+            {
+                auto& uf = ctx->train_data.get_update_filter();
+                uf.clear();
+                (void)quantizer.apply_fifo_bin_shrink(ctx->train_data, uf);
+            }
             
             for(uint8_t i = 0; i < config.num_trees; i++){
                 Rf_tree tree(i);
@@ -396,14 +404,14 @@ namespace mcu{
         }
 
         // ----------------------------------------------------------------------------------
-        // Split data into training and testing sets. Dest data must be init() before called by this function
+        // Stratified split: ensures all classes are proportionally represented in each split
         bool splitData(Rf_data& source, vector<pair<float, Rf_data*>>& dest) {
             auto* ctx = training_ctx;
             if(!ctx){
                 return false;
             }
             size_t start = logger.drop_anchor();
-            RF_DEBUG(0, "🔀 splitting data...");
+            RF_DEBUG(0, "🔀 stratified splitting data...");
             if(dest.empty() || source.size() == 0) {
                 RF_DEBUG(0, "❌ Error: No data to split or destination is empty.");
                 return false;
@@ -422,23 +430,58 @@ namespace mcu{
             }
 
             size_t maxID = source.size();
-            sampleID_set used(maxID);       // Track used sample IDs to avoid overlap
-            sampleID_set sink_IDs(maxID);   // sample IDs for each dest Rf_data
-
-            for(uint8_t i=0; i< dest.size(); i++){
-                sink_IDs.clear();
-                sample_type sink_require = static_cast<sample_type>(static_cast<float>(maxID) * dest[i].first);
-                while(sink_IDs.size() < sink_require) {
-                    sample_type sampleId = static_cast<sample_type>(ctx->random_generator.bounded(static_cast<uint32_t>(maxID)));
-                    // Only add if not already used (1-bit ID_vector behavior)
-                    if (!used.contains(sampleId)) {
-                        sink_IDs.push_back(sampleId);
-                        used.push_back(sampleId);
+            
+            // Group sample indices by label for stratified split
+            unordered_map_s<label_type, vector<sample_type>> label_indices;
+            label_indices.reserve(config.num_labels);
+            for (sample_type id = 0; id < maxID; id++) {
+                label_type label = source.getLabel(id);
+                label_indices[label].push_back(id);
+            }
+            
+            // Shuffle indices within each label group
+            for (auto& kv : label_indices) {
+                auto& indices = kv.second;
+                for (size_t i = indices.size() - 1; i > 0; i--) {
+                    size_t j = ctx->random_generator.bounded(static_cast<uint32_t>(i + 1));
+                    sample_type tmp = indices[i];
+                    indices[i] = indices[j];
+                    indices[j] = tmp;
+                }
+            }
+            
+            // For each label, split proportionally across destinations
+            for (auto& kv : label_indices) {
+                auto& indices = kv.second;
+                size_t class_size = indices.size();
+                size_t idx = 0;
+                
+                for (uint8_t d = 0; d < dest.size(); d++) {
+                    size_t count = static_cast<size_t>(class_size * dest[d].first);
+                    // Ensure at least 1 sample per class per split (for small datasets)
+                    if (count == 0 && (class_size - idx) > 0 && d < dest.size() - 1) {
+                        count = 1;
+                    }
+                    // Last destination gets remaining samples
+                    if (d == dest.size() - 1) {
+                        count = class_size - idx;
+                    }
+                    // Add samples to this destination
+                    sampleID_set sink_IDs(class_size);
+                    for (size_t i = 0; i < count && idx < class_size; i++, idx++) {
+                        sink_IDs.push_back(indices[idx]);
+                    }
+                    if (sink_IDs.size() > 0) {
+                        dest[d].second->loadData(source, sink_IDs, true);
                     }
                 }
-                dest[i].second->loadData(source, sink_IDs, true);
-                dest[i].second->releaseData(false); 
             }
+            
+            // Release data for all destinations
+            for (auto& d : dest) {
+                d.second->releaseData(false);
+            }
+            
             size_t end = logger.drop_anchor();
             logger.m_log("split data");
             long unsigned dur = logger.t_log("split time", start, end, "s");
@@ -1488,8 +1531,10 @@ namespace mcu{
                 return;
             }
 
-            // Quantize input features into preallocated buffer
-            quantizer.quantizeFeatures(features, categorization_buffer);
+            // Quantize input features into preallocated buffer (also detect concept drift)
+            uint16_t drift_feature = 0;
+            float drift_value = 0.0f;
+            const bool drift_sample = quantizer.quantizeFeatures(features, categorization_buffer, &drift_feature, &drift_value);
 
             // perform prediction using the quantized buffer (categorization_buffer -> actual features expected by forest)
             result.i_label = forest_container.predict_features(categorization_buffer);
@@ -1498,7 +1543,7 @@ namespace mcu{
                 Rf_sample sample(categorization_buffer, result.i_label);
                 if(auto* pd = ensure_pending_data()){
                     if(Rf_data* base_handle = ensure_base_data_stub()){
-                        pd->add_pending_sample(sample, *base_handle);
+                        pd->add_pending_sample(sample, *base_handle, drift_sample, drift_feature, drift_value);
                     }
                 }
             }
@@ -1582,6 +1627,19 @@ namespace mcu{
                 return;
             }
             label_type i_label = quantizer.getNormalizedLabel(label);
+
+            // Handle new label if allowed
+            if (i_label == RF_ERROR_LABEL && config.allow_new_labels) {
+                i_label = quantizer.addNewLabel(label);
+                if (i_label != RF_ERROR_LABEL) {
+                    config.num_labels = quantizer.getNumLabels();
+                    // Also need to update samples_per_label in config
+                    if (config.samples_per_label.size() < config.num_labels) {
+                        config.samples_per_label.resize(config.num_labels, 0);
+                    }
+                }
+            }
+
             Rf_pending_data* pd = config.enable_retrain ? ensure_pending_data() : pending_data;
             if(!pd){
                 return;
@@ -1629,7 +1687,7 @@ namespace mcu{
                 return;
             }
             if(Rf_data* base_handle = ensure_base_data_stub()){
-                pd->flush_pending_data(*base_handle);
+                pd->flush_pending_data(*base_handle, quantizer);
             }
         }
 
@@ -1701,6 +1759,22 @@ namespace mcu{
          */
         void disable_auto_config(){
             config.enable_auto_config = false;
+        }
+
+        /**
+         * @brief: Allow new labels to be added to the dataset.
+         * @param allow: true to allow new labels, false to reject them.
+         */
+        void allow_new_labels(bool allow){
+            config.allow_new_labels = allow;
+        }
+
+        /**
+         * @brief: Check if new labels are allowed.
+         * @return: true if new labels are allowed, false otherwise.
+         */
+        bool is_new_labels_allowed() const {
+            return config.allow_new_labels;
         }
 
         /**

@@ -136,7 +136,6 @@ struct NodeToBuild {
         : nodeIndex(idx), begin(b), end(e), depth(d) {}
 };
 
-
 class Rf_tree {
   public:
     vector<Tree_node> nodes;  // Vector-based tree storage
@@ -1970,6 +1969,5 @@ public:
         return h;
     }
 };
-
 
 

@@ -11,6 +11,12 @@
 #include <iomanip>
 #include <algorithm>
 #include <limits>
+#include <thread>
+#include <mutex>
+#include <atomic>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #ifdef _WIN32
 #include <direct.h>
 #define mkdir _mkdir
@@ -50,6 +56,7 @@ private:
     vector<Rf_tree> root;                     // vector storing root nodes of trees (now manages SPIFFS filenames)
     vector<TreeSampleIDs> dataList; // list of training data sample IDs for each tree, matches MCU ID_vector layout
     Rf_random rng;
+    mutable std::mutex peak_nodes_mutex;  // Mutex for thread-safe peak_nodes access
 
     std::string node_log_path;
     std::string node_predictor_path;
@@ -111,12 +118,16 @@ public:
 
     void MakeForest(){
         root.clear();
-        root.reserve(config.num_trees);
+        root.resize(config.num_trees);  // Pre-allocate for parallel access
         // std::cout << "🌳 Building Random Forest with " << (int)config.num_trees << " trees...\n";
-        for(uint16_t i = 0; i < config.num_trees; i++){
+        
+        #ifdef _OPENMP
+        #pragma omp parallel for schedule(dynamic)
+        #endif
+        for(int i = 0; i < static_cast<int>(config.num_trees); i++){
             Rf_tree tree("");
-            build_tree(tree, dataList[i]);
-            root.push_back(tree);
+            build_tree_parallel(tree, dataList[i]);
+            root[i] = std::move(tree);
         }
         // uint32_t total_nodes = 0;
         // for(const auto& tree : root){
@@ -166,40 +177,55 @@ public:
         // Prepare data for forest construction
         ClonesData();
         
-        // Build forest with progress bar
+        // Build forest with parallel tree construction
         root.clear();
-        root.reserve(config.num_trees);
-        uint32_t max_nodes = 0;
-        for(uint16_t i = 0; i < config.num_trees; i++){
-            // Progress bar
-            float progress = static_cast<float>(i + 1) / config.num_trees;
-            int bar_width = 50;
-            int pos = static_cast<int>(bar_width * progress);
-            std::cout << "\r[";
-            for (int j = 0; j < bar_width; ++j) {
-                if (j < pos) std::cout << "█";
-                else if (j == pos) std::cout << "▓";
-                else std::cout << "░";
-            }
-            std::cout << "] " << std::fixed << std::setprecision(1) << (progress * 100.0f) << "% ";
-            std::cout << "(" << (i + 1) << "/" << config.num_trees << " trees)";
-            std::cout.flush();
-            
+        root.resize(config.num_trees);  // Pre-allocate for parallel access
+        std::atomic<uint32_t> max_nodes{0};
+        std::atomic<uint32_t> trees_completed{0};
+        
+        #ifdef _OPENMP
+        int num_threads = omp_get_max_threads();
+        std::cout << "🧵 Using " << num_threads << " threads for parallel tree building\n";
+        #pragma omp parallel for schedule(dynamic)
+        #endif
+        for(int i = 0; i < static_cast<int>(config.num_trees); i++){
             // Build tree
             Rf_tree tree("");
-            build_tree(tree, dataList[i]);
-            root.push_back(tree);
-            if(tree.countNodes() > max_nodes){
-                max_nodes = tree.countNodes();
+            build_tree_parallel(tree, dataList[i]);
+            root[i] = std::move(tree);
+            
+            uint32_t node_count = root[i].countNodes();
+            uint32_t current_max = max_nodes.load();
+            while(node_count > current_max && !max_nodes.compare_exchange_weak(current_max, node_count)) {}
+            
+            // Thread-safe progress update
+            uint32_t completed = ++trees_completed;
+            #ifdef _OPENMP
+            #pragma omp critical
+            #endif
+            {
+                float progress = static_cast<float>(completed) / config.num_trees;
+                int bar_width = 50;
+                int pos = static_cast<int>(bar_width * progress);
+                std::cout << "\r[";
+                for (int j = 0; j < bar_width; ++j) {
+                    if (j < pos) std::cout << "█";
+                    else if (j == pos) std::cout << "▓";
+                    else std::cout << "░";
+                }
+                std::cout << "] " << std::fixed << std::setprecision(1) << (progress * 100.0f) << "% ";
+                std::cout << "(" << completed << "/" << config.num_trees << " trees)";
+                std::cout.flush();
             }
         }
-        if (max_nodes > 0.0f) {
+        
+        if (max_nodes.load() > 0) {
             std::ofstream log_file(node_log_path, std::ios::app);
             if (log_file.is_open()) {
                 log_file << static_cast<int>(config.min_split) << ","
                         << static_cast<int>(config.min_leaf) << ","
                         << static_cast<int>(config.max_depth) << ","
-                        << static_cast<int>(std::round(max_nodes)) << "\n";
+                        << static_cast<int>(max_nodes.load()) << "\n";
             }
         }
 
@@ -829,15 +855,17 @@ public:
         return bestSplit;
     }
 
-    // Breadth-first tree building for optimal node layout
-
-    void build_tree(Rf_tree& tree, TreeSampleIDs& sampleIDs) {
+    // Thread-safe version of build_tree for parallel execution
+    void build_tree_parallel(Rf_tree& tree, TreeSampleIDs& sampleIDs) {
         tree.nodes.clear();
         if (train_data.allSamples.empty()) return;
         
+        // Thread-local RNG for feature selection (avoid race conditions on shared rng)
+        thread_local Rf_random local_rng(static_cast<uint32_t>(std::hash<std::thread::id>{}(std::this_thread::get_id())), true);
+        
         // Queue for breadth-first processing
         vector<NodeToBuild> queue_nodes;
-        queue_nodes.reserve(200); // Reserve space for efficiency
+        queue_nodes.reserve(200);
 
         // Build a single contiguous index array for this tree
         vector<uint32_t> indices;
@@ -851,25 +879,20 @@ public:
         tree.nodes.push_back(rootNode);
         queue_nodes.push_back(NodeToBuild(0, 0, static_cast<uint32_t>(indices.size()), 0));
 
-        // ---- BFS queue peak tracking  ----
         size_t peak_queue_size = 0;
         auto track_peak = [&](size_t cur) {
             if (cur > peak_queue_size) peak_queue_size = cur;
         };
         track_peak(queue_nodes.size());
-        // ------------------------------------------------------------
         
-        // Process nodes breadth-first with minimal allocations
         while (!queue_nodes.empty()) {
             NodeToBuild current = std::move(queue_nodes.front());
             queue_nodes.erase(queue_nodes.begin());
             
-            // Analyze node samples over the slice
             NodeStats stats(config.num_labels);
             stats.analyzeSamplesRange(indices, current.begin, current.end, config.num_labels, train_data);
 
             if(current.nodeIndex >= RF_MAX_NODES){
-                // force leaf if exceeding max nodes
                 uint8_t leafLabel = stats.majorityLabel;
                 tree.nodes[current.nodeIndex].setIsLeaf(true);
                 tree.nodes[current.nodeIndex].setLabel(leafLabel);
@@ -892,10 +915,10 @@ public:
                 continue;
             }
             
-            // Random feature subset
+            // Random feature subset using thread-local RNG
             uint16_t num_selected_features;
-            if(config.num_trees > 1) num_selected_features =  static_cast<uint16_t>(sqrt(config.num_features));
-            else num_selected_features = config.num_features; //only one tree - desscision tree mode
+            if(config.num_trees > 1) num_selected_features = static_cast<uint16_t>(sqrt(config.num_features));
+            else num_selected_features = config.num_features;
 
             if (num_selected_features == 0) num_selected_features = 1;
             vector<uint16_t> selectedFeatures;
@@ -905,7 +928,7 @@ public:
             selectedFeatures.reserve(K);
             vector<uint8_t> featureUsed(N, 0);
             for (uint16_t j = N - K; j < N; ++j) {
-                uint16_t t = static_cast<uint16_t>(rng.bounded(j + 1));
+                uint16_t t = static_cast<uint16_t>(local_rng.bounded(j + 1));
                 uint16_t candidate = (t < N) ? t : (N - 1);
                 if (featureUsed[candidate] == 0) {
                     featureUsed[candidate] = 1;
@@ -932,11 +955,9 @@ public:
                 selectedFeatures.push_back(0);
             }
             
-            // Find best split on the slice
             SplitInfo bestSplit = findBestSplitRange(indices, current.begin, current.end,
                                                      selectedFeatures, config.use_gini, config.num_labels);
 
-            // Check if either child would violate min_leaf constraint
             if (bestSplit.leftCount < config.min_leaf || bestSplit.rightCount < config.min_leaf) {
                 tree.nodes[current.nodeIndex].setIsLeaf(true);
                 tree.nodes[current.nodeIndex].setLabel(leafLabel);
@@ -970,12 +991,10 @@ public:
                 continue;
             }
 
-            // Configure as internal node
             tree.nodes[current.nodeIndex].setFeatureID(bestSplit.featureID);
             tree.nodes[current.nodeIndex].setThresholdSlot(bestSplit.threshold_slot);
             tree.nodes[current.nodeIndex].setIsLeaf(false);
             
-            // In-place partition of indices[current.begin, current.end) using the best feature
             uint32_t iLeft = current.begin;
             for (uint32_t k = current.begin; k < current.end; ++k) {
                 uint32_t sid = indices[k];
@@ -1015,15 +1034,15 @@ public:
                 tree.nodes[rightChildIndex].setLabel(leafLabel);
                 tree.nodes[rightChildIndex].setFeatureID(0);
             }
-            if(queue_nodes.size() > peak_queue_size) {
-                peak_queue_size = queue_nodes.size();
-            }
             track_peak(queue_nodes.size());
         }
         
-        // Print BFS queue peak after the tree is built
+        // Thread-safe update of peak_nodes
         float peak_nodes_percent = (float)peak_queue_size / (float)tree.nodes.size() * 100.0f;
-        pre.peak_nodes.push_back(peak_nodes_percent);
+        {
+            std::lock_guard<std::mutex> lock(peak_nodes_mutex);
+            pre.peak_nodes.push_back(peak_nodes_percent);
+        }
     }
 
 
@@ -2361,18 +2380,44 @@ void post_process_model(RandomForest& forest) {
 int main(int argc, char** argv) {
     // Parse command line arguments
     bool enable_training = true;
+    int num_threads = -1; // -1 means use all available threads
+    
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "-skip_training" || arg == "--skip_training") {
             enable_training = false;
+        } else if (arg == "-threads" || arg == "--threads") {
+            if (i + 1 < argc) {
+                try {
+                    num_threads = std::stoi(argv[++i]);
+                    if (num_threads < 1) {
+                        std::cerr << "Error: Number of threads must be at least 1\n";
+                        return 1;
+                    }
+                } catch (...) {
+                    std::cerr << "Error: Invalid thread count\n";
+                    return 1;
+                }
+            } else {
+                std::cerr << "Error: -threads requires a value\n";
+                return 1;
+            }
         } else if (arg == "-h" || arg == "--help") {
             std::cout << "Usage: " << argv[0] << " [options]\n";
             std::cout << "Options:\n";
-            std::cout << "  -skip_training, --_skiptraining    Enable training mode (grid search for best parameters)\n";
-            std::cout << "  -h, --help              Show this help message\n";
+            std::cout << "  -skip_training, --skip_training    Skip training mode (build with default parameters)\n";
+            std::cout << "  -threads N, --threads N            Set number of threads for parallel tree building (default: all available)\n";
+            std::cout << "  -h, --help                         Show this help message\n";
             return 0;
         }
     }
+    
+    // Set OpenMP thread count if specified
+    #ifdef _OPENMP
+    if (num_threads > 0) {
+        omp_set_num_threads(num_threads);
+    }
+    #endif
     
     auto start = std::chrono::high_resolution_clock::now();
     std::cout << "Random Forest PC Training v" << VERSION << "\n";

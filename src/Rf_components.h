@@ -2,9 +2,13 @@
 
 #include "STL_MCU.h"  
 #include "Rf_file_manager.h"
-#include "esp_system.h"
-#if RF_BOARD_SUPPORTS_PSRAM
-#include <esp_psram.h>
+
+#if defined(ESP_PLATFORM)
+    #include "esp_system.h"
+
+    #if RF_BOARD_SUPPORTS_PSRAM
+    #include <esp_psram.h>
+    #endif
 #endif
 #include <cstdlib>
 #include <cstring>
@@ -92,7 +96,7 @@ namespace mcu {
     }
 
     // struct Rf_sample;           // single data sample
-    // struct Tree_node;           // single tree node
+    // struct Building_node;           // single tree node
     // ...
 
     class Rf_data;              // dataset object
@@ -2640,81 +2644,253 @@ namespace mcu {
     ---------------------------------------------------- RF_TREE -----------------------------------------------------
     ------------------------------------------------------------------------------------------------------------------
     */
-    struct node_layout{
-        // <start bit, length in bits>
-        pair<uint8_t, uint8_t> threshold_layout;  
-        pair<uint8_t, uint8_t> featureID_layout; 
-        pair<uint8_t, uint8_t> label_layout;     
-        pair<uint8_t, uint8_t> left_child_layout; 
 
-        node_layout() {
-            set_layout(10, 8, 10, 3);
+    // node_resource: holds dynamic bit-width configuration and provides layout accessors for
+    // build-time Building_node and compact inference-time node formats.
+    struct node_resource {
+        uint8_t threshold_bits = 3;
+        uint8_t feature_bits = 8;
+        uint8_t label_bits = 3;
+        uint8_t child_bits = 10;
+
+        // Building_node layout: [is_leaf:1][threshold][feature][label][left_child]
+        pair<uint8_t, uint8_t> build_threshold_layout;
+        pair<uint8_t, uint8_t> build_featureID_layout;
+        pair<uint8_t, uint8_t> build_label_layout;
+        pair<uint8_t, uint8_t> build_left_child_layout;
+
+        // Internal_node: [child_is_leaf:1][threshold][feature][left_child]
+        pair<uint8_t, uint8_t> in_threshold_layout;
+        pair<uint8_t, uint8_t> in_featureID_layout;
+        pair<uint8_t, uint8_t> in_left_child_layout;
+
+        // Mixed_node: [left_is_leaf:1][threshold][feature][left_child][right_child]
+        pair<uint8_t, uint8_t> mx_threshold_layout;
+        pair<uint8_t, uint8_t> mx_featureID_layout;
+        pair<uint8_t, uint8_t> mx_left_child_layout;
+        pair<uint8_t, uint8_t> mx_right_child_layout;
+
+        void set_bits(uint8_t featureBits, uint8_t labelBits, uint8_t childBits, uint8_t thresholdBits) {
+            // Clamp to supported ranges
+            if (thresholdBits < 1) thresholdBits = 1;
+            if (thresholdBits > 8) thresholdBits = 8;
+            if (labelBits < 1) labelBits = 1;
+            if (labelBits > 8) labelBits = 8;
+            if (featureBits < 1) featureBits = 1;
+            if (featureBits > 10) featureBits = 10;
+            if (childBits < 1) childBits = 1;
+
+            threshold_bits = thresholdBits;
+            feature_bits = featureBits;
+            label_bits = labelBits;
+            child_bits = childBits;
+
+            // Building_node layout (for training)
+            build_threshold_layout = make_pair(static_cast<uint8_t>(1), threshold_bits);
+            build_featureID_layout = make_pair(static_cast<uint8_t>(build_threshold_layout.first + build_threshold_layout.second), feature_bits);
+            build_label_layout = make_pair(static_cast<uint8_t>(build_featureID_layout.first + build_featureID_layout.second), label_bits);
+            build_left_child_layout = make_pair(static_cast<uint8_t>(build_label_layout.first + build_label_layout.second), child_bits);
+
+            // Internal_node layout (compact inference)
+            in_threshold_layout = make_pair(static_cast<uint8_t>(1), threshold_bits);
+            in_featureID_layout = make_pair(static_cast<uint8_t>(in_threshold_layout.first + in_threshold_layout.second), feature_bits);
+            in_left_child_layout = make_pair(static_cast<uint8_t>(in_featureID_layout.first + in_featureID_layout.second), child_bits);
+
+            // Mixed_node layout (compact inference)
+            mx_threshold_layout = make_pair(static_cast<uint8_t>(1), threshold_bits);
+            mx_featureID_layout = make_pair(static_cast<uint8_t>(mx_threshold_layout.first + mx_threshold_layout.second), feature_bits);
+            mx_left_child_layout = make_pair(static_cast<uint8_t>(mx_featureID_layout.first + mx_featureID_layout.second), child_bits);
+            mx_right_child_layout = make_pair(static_cast<uint8_t>(mx_left_child_layout.first + mx_left_child_layout.second), child_bits);
         }
 
-        node_layout(uint8_t feature_bits, uint8_t label_bits, uint8_t child_index_bits) {
-            set_layout(feature_bits, label_bits, child_index_bits, 3);
+        // Building_node layout accessors
+        inline pair<uint8_t, uint8_t> get_Building_node_threshold_layout() const { return build_threshold_layout; }
+        inline pair<uint8_t, uint8_t> get_Building_node_featureID_layout() const { return build_featureID_layout; }
+        inline pair<uint8_t, uint8_t> get_Building_node_label_layout() const { return build_label_layout; }
+        inline pair<uint8_t, uint8_t> get_Building_node_left_child_layout() const { return build_left_child_layout; }
+
+        // Internal_node layout accessors
+        inline pair<uint8_t, uint8_t> get_Internal_node_threshold_layout() const { return in_threshold_layout; }
+        inline pair<uint8_t, uint8_t> get_Internal_node_featureID_layout() const { return in_featureID_layout; }
+        inline pair<uint8_t, uint8_t> get_Internal_node_left_child_layout() const { return in_left_child_layout; }
+
+        // Mixed_node layout accessors
+        inline pair<uint8_t, uint8_t> get_Mixed_node_threshold_layout() const { return mx_threshold_layout; }
+        inline pair<uint8_t, uint8_t> get_Mixed_node_featureID_layout() const { return mx_featureID_layout; }
+        inline pair<uint8_t, uint8_t> get_Mixed_node_left_child_layout() const { return mx_left_child_layout; }
+        inline pair<uint8_t, uint8_t> get_Mixed_node_right_child_layout() const { return mx_right_child_layout; }
+
+        // Bits-per-node calculations
+        inline uint8_t bits_per_internal_node() const {
+            return static_cast<uint8_t>(1 + threshold_bits + feature_bits + child_bits);
         }
 
-        node_layout(uint8_t feature_bits, uint8_t label_bits, uint8_t child_index_bits, uint8_t threshold_bits) {
-            set_layout(feature_bits, label_bits, child_index_bits, threshold_bits);
+        inline uint8_t bits_per_mixed_node() const {
+            return static_cast<uint8_t>(1 + threshold_bits + feature_bits + child_bits + child_bits);
         }
 
-        void set_layout(uint8_t feature_bits, uint8_t label_bits, uint8_t child_index_bits, uint8_t threshold_bits = 3) {
-            if (threshold_bits < 1) {
-                threshold_bits = 1;
-            }
-            if (threshold_bits > 8) {
-                threshold_bits = 8;
-            }
-            threshold_layout = make_pair(static_cast<uint8_t>(1), threshold_bits);
-            featureID_layout = make_pair(static_cast<uint8_t>(threshold_layout.first + threshold_layout.second), feature_bits);
-            label_layout = make_pair(static_cast<uint8_t>(featureID_layout.first + featureID_layout.second), label_bits);
-            left_child_layout = make_pair(static_cast<uint8_t>(label_layout.first + label_layout.second), child_index_bits);
+        inline uint8_t bits_per_leaf_node() const {
+            return label_bits;
         }
-        // return max_features, allow exceed RF_MAX_FEATURES
-        uint16_t max_features() const {
-            uint16_t mf = 1 << featureID_layout.second;
+
+        inline uint8_t bits_per_building_node() const {
+            return static_cast<uint8_t>(1 + threshold_bits + feature_bits + label_bits + child_bits);
+        }
+
+        // Utility methods (formerly in node_layout)
+        inline uint16_t max_features() const {
+            uint16_t mf = 1 << feature_bits;
             return mf > RF_MAX_FEATURES ? mf : RF_MAX_FEATURES;
         }
-        // return max_labels,NOT allow exceed RF_MAX_CLASSES
-        uint8_t max_labels() const {
-            return (1 << label_layout.second);
-        }
-        // return max_nodes, allow exceed RF_MAX_NODES
-        node_type max_nodes() const {
-            // If child index bits specify >= 64 bits of index, fallback to RF_MAX_NODES limit
-            if (left_child_layout.second >= 64) {
-                return RF_MAX_NODES;
-            }
-            if (left_child_layout.second >= 32) {
-                // Support up to 32+ bits but clamp to RF_MAX_NODES for MCU sanity
-                return RF_MAX_NODES;
-            }
-            uint32_t mn = 1u << left_child_layout.second;
-            return mn > RF_MAX_NODES ? mn : RF_MAX_NODES;
-        }
-        uint8_t bits_per_node() const {
-            return static_cast<uint8_t>(1 + threshold_layout.second + featureID_layout.second + label_layout.second + left_child_layout.second);
+
+        inline uint8_t max_labels() const {
+            return (1 << label_bits);
         }
 
-        uint8_t threshold_bits() const {
-            return threshold_layout.second;
-        }
-        uint8_t feature_bits() const {
-            return featureID_layout.second;
-        }
-        uint8_t label_bits() const {
-            return label_layout.second;
-        }
-        uint8_t child_bits() const {
-            return left_child_layout.second;
+        inline node_type max_nodes() const {
+            if (child_bits >= 64) return RF_MAX_NODES;
+            if (child_bits >= 32) return RF_MAX_NODES;
+            uint32_t mn = 1u << child_bits;
+            return mn > RF_MAX_NODES ? mn : RF_MAX_NODES;
         }
     };
 
-    struct Tree_node{
+    struct Internal_node {
+        size_t packed_data;
+        Internal_node() : packed_data(0) {}
+
+        inline bool childrenAreLeaf() const {
+            return (packed_data >> 0) & 0x01;
+        }
+
+        inline uint16_t getThresholdSlot(const node_resource& res) const noexcept {
+            const auto& layout = res.in_threshold_layout;
+            if (layout.second == 0) {
+                return 0;
+            }
+            const uint16_t mask = static_cast<uint16_t>((1u << layout.second) - 1u);
+            return static_cast<uint16_t>((packed_data >> layout.first) & mask);
+        }
+
+        inline uint16_t getFeatureID(const node_resource& res) const noexcept {
+            const auto& layout = res.in_featureID_layout;
+            return (packed_data >> layout.first) & ((1u << layout.second) - 1u);
+        }
+
+        inline node_type getLeftChildIndex(const node_resource& res) const noexcept {
+            const auto& layout = res.in_left_child_layout;
+            return (packed_data >> layout.first) & ((static_cast<size_t>(1) << layout.second) - 1u);
+        }
+
+        inline node_type getRightChildIndex(const node_resource& res) const noexcept {
+            (void)res;
+            // Breadth-first property: right = left + 1 when both children are in the same vector space
+            return getLeftChildIndex(res) + 1;
+        }
+
+        inline void setChildrenAreLeaf(bool v) {
+            packed_data &= ~(static_cast<size_t>(0x01u));
+            packed_data |= (v ? 1u : 0u) << 0;
+        }
+
+        inline void setThresholdSlot(uint16_t slot, const node_resource& res) noexcept {
+            const auto& layout = res.in_threshold_layout;
+            if (layout.second == 0) {
+                return;
+            }
+            const size_t mask = (((static_cast<size_t>(1) << layout.second) - 1u) << layout.first);
+            packed_data &= ~mask;
+            packed_data |= (static_cast<size_t>(slot) & ((static_cast<size_t>(1) << layout.second) - 1u)) << layout.first;
+        }
+
+        inline void setFeatureID(uint16_t featureID, const node_resource& res) noexcept {
+            const auto& layout = res.in_featureID_layout;
+            const size_t mask = (((static_cast<size_t>(1) << layout.second) - 1u) << layout.first);
+            packed_data &= ~mask;
+            packed_data |= (static_cast<size_t>(featureID) & ((static_cast<size_t>(1) << layout.second) - 1u)) << layout.first;
+        }
+
+        inline void setLeftChildIndex(node_type index, const node_resource& res) noexcept {
+            const auto& layout = res.in_left_child_layout;
+            const size_t mask = (((static_cast<size_t>(1) << layout.second) - 1u) << layout.first);
+            packed_data &= ~mask;
+            packed_data |= (static_cast<size_t>(index) & ((static_cast<size_t>(1) << layout.second) - 1u)) << layout.first;
+        }
+    };
+
+    struct Mixed_node {
+        size_t packed_data;
+        Mixed_node() : packed_data(0) {}
+
+        inline bool leftIsLeaf() const {
+            return (packed_data >> 0) & 0x01;
+        }
+
+        inline uint16_t getThresholdSlot(const node_resource& res) const noexcept {
+            const auto& layout = res.mx_threshold_layout;
+            if (layout.second == 0) {
+                return 0;
+            }
+            const uint16_t mask = static_cast<uint16_t>((1u << layout.second) - 1u);
+            return static_cast<uint16_t>((packed_data >> layout.first) & mask);
+        }
+
+        inline uint16_t getFeatureID(const node_resource& res) const noexcept {
+            const auto& layout = res.mx_featureID_layout;
+            return (packed_data >> layout.first) & ((1u << layout.second) - 1u);
+        }
+
+        inline node_type getLeftChildIndex(const node_resource& res) const noexcept {
+            const auto& layout = res.mx_left_child_layout;
+            return (packed_data >> layout.first) & ((static_cast<size_t>(1) << layout.second) - 1u);
+        }
+
+        inline node_type getRightChildIndex(const node_resource& res) const noexcept {
+            const auto& layout = res.mx_right_child_layout;
+            return (packed_data >> layout.first) & ((static_cast<size_t>(1) << layout.second) - 1u);
+        }
+
+        inline void setLeftIsLeaf(bool v) {
+            packed_data &= ~(static_cast<size_t>(0x01u));
+            packed_data |= (v ? 1u : 0u) << 0;
+        }
+
+        inline void setThresholdSlot(uint16_t slot, const node_resource& res) noexcept {
+            const auto& layout = res.mx_threshold_layout;
+            if (layout.second == 0) {
+                return;
+            }
+            const size_t mask = (((static_cast<size_t>(1) << layout.second) - 1u) << layout.first);
+            packed_data &= ~mask;
+            packed_data |= (static_cast<size_t>(slot) & ((static_cast<size_t>(1) << layout.second) - 1u)) << layout.first;
+        }
+
+        inline void setFeatureID(uint16_t featureID, const node_resource& res) noexcept {
+            const auto& layout = res.mx_featureID_layout;
+            const size_t mask = (((static_cast<size_t>(1) << layout.second) - 1u) << layout.first);
+            packed_data &= ~mask;
+            packed_data |= (static_cast<size_t>(featureID) & ((static_cast<size_t>(1) << layout.second) - 1u)) << layout.first;
+        }
+
+        inline void setLeftChildIndex(node_type index, const node_resource& res) noexcept {
+            const auto& layout = res.mx_left_child_layout;
+            const size_t mask = (((static_cast<size_t>(1) << layout.second) - 1u) << layout.first);
+            packed_data &= ~mask;
+            packed_data |= (static_cast<size_t>(index) & ((static_cast<size_t>(1) << layout.second) - 1u)) << layout.first;
+        }
+
+        inline void setRightChildIndex(node_type index, const node_resource& res) noexcept {
+            const auto& layout = res.mx_right_child_layout;
+            const size_t mask = (((static_cast<size_t>(1) << layout.second) - 1u) << layout.first);
+            packed_data &= ~mask;
+            packed_data |= (static_cast<size_t>(index) & ((static_cast<size_t>(1) << layout.second) - 1u)) << layout.first;
+        }
+    };
+
+    struct Building_node{
         size_t packed_data; 
 
-        Tree_node() : packed_data(0) {}
+        Building_node() : packed_data(0) {}
 
         inline bool getIsLeaf() const {
             return (packed_data >> 0) & 0x01;  // Bit 0
@@ -2774,38 +2950,82 @@ namespace mcu {
     class Rf_tree {
         static constexpr uint8_t bits_per_node = sizeof(size_t) * 8;
     public:
-        packed_vector<bits_per_node, Tree_node> nodes;
-        node_layout* layout = nullptr;
+        // Build-time representation (Building_node, breadth-first).
+        packed_vector<bits_per_node, Building_node> nodes;
+
+        // Compact inference-time representation.
+        packed_vector<bits_per_node, Internal_node> internal_nodes;
+        packed_vector<bits_per_node, Mixed_node> mixed_nodes;
+        packed_vector<8, label_type> leaf_nodes;
+        packed_vector<8, uint8_t> branch_kind; // bpv=1; 0=internal, 1=mixed in branch-index space
+
+        // Prefix sums over branch_kind words to map branch index -> internal/mixed local index in O(1)
+        b_vector<uint16_t, 32> mixed_prefix;
+
+        node_resource* resource = nullptr;      // Node layouts and bit widths
+
+        // Root reference in compact form
+        bool root_is_leaf = false;
+        node_type root_index = 0; // leaf index if root_is_leaf, else branch index
+
         uint16_t depth;
         uint8_t index;
         bool isLoaded;
         ID_vector<sample_type, 3> bootstrapIDs;
 
-        Rf_tree() : nodes(), layout(nullptr), index(255), isLoaded(false) {}
+        Rf_tree() : nodes(), internal_nodes(), mixed_nodes(), leaf_nodes(), branch_kind(), mixed_prefix(), resource(nullptr), index(255), isLoaded(false) {}
 
-        explicit Rf_tree(uint8_t idx) : nodes(), layout(nullptr), index(idx), isLoaded(false) {}
+        explicit Rf_tree(uint8_t idx) : nodes(), internal_nodes(), mixed_nodes(), leaf_nodes(), branch_kind(), mixed_prefix(), resource(nullptr), index(idx), isLoaded(false) {}
 
-        Rf_tree(const Rf_tree& other)
-            : nodes(other.nodes), layout(other.layout), index(other.index), isLoaded(other.isLoaded), bootstrapIDs(other.bootstrapIDs) {}
+                Rf_tree(const Rf_tree& other)
+                        : nodes(other.nodes),
+                            internal_nodes(other.internal_nodes),
+                            mixed_nodes(other.mixed_nodes),
+                            leaf_nodes(other.leaf_nodes),
+                            branch_kind(other.branch_kind),
+                            mixed_prefix(other.mixed_prefix),
+                            resource(other.resource),
+                            root_is_leaf(other.root_is_leaf),
+                            root_index(other.root_index),
+                            depth(other.depth),
+                            index(other.index),
+                            isLoaded(other.isLoaded),
+                            bootstrapIDs(other.bootstrapIDs) {}
 
         Rf_tree& operator=(const Rf_tree& other) {
             if (this != &other) {
                 nodes = other.nodes;
-                layout = other.layout;
+                internal_nodes = other.internal_nodes;
+                mixed_nodes = other.mixed_nodes;
+                leaf_nodes = other.leaf_nodes;
+                branch_kind = other.branch_kind;
+                mixed_prefix = other.mixed_prefix;
+                resource = other.resource;
                 index = other.index;
                 isLoaded = other.isLoaded;
+                root_is_leaf = other.root_is_leaf;
+                root_index = other.root_index;
+                depth = other.depth;
                 bootstrapIDs = other.bootstrapIDs;
             }
             return *this;
         }
 
         Rf_tree(Rf_tree&& other) noexcept
-            : nodes(std::move(other.nodes)),
-            layout(other.layout),
-            index(other.index),
-            isLoaded(other.isLoaded),
-            bootstrapIDs(std::move(other.bootstrapIDs)) {
-            other.layout = nullptr;
+                : nodes(std::move(other.nodes)),
+                    internal_nodes(std::move(other.internal_nodes)),
+                    mixed_nodes(std::move(other.mixed_nodes)),
+                    leaf_nodes(std::move(other.leaf_nodes)),
+                    branch_kind(std::move(other.branch_kind)),
+                    mixed_prefix(std::move(other.mixed_prefix)),
+                    resource(other.resource),
+                    root_is_leaf(other.root_is_leaf),
+                    root_index(other.root_index),
+                    depth(other.depth),
+                    index(other.index),
+                    isLoaded(other.isLoaded),
+                    bootstrapIDs(std::move(other.bootstrapIDs)) {
+            other.resource = nullptr;
             other.index = 255;
             other.isLoaded = false;
         }
@@ -2813,19 +3033,27 @@ namespace mcu {
         Rf_tree& operator=(Rf_tree&& other) noexcept {
             if (this != &other) {
                 nodes = std::move(other.nodes);
-                layout = other.layout;
+                internal_nodes = std::move(other.internal_nodes);
+                mixed_nodes = std::move(other.mixed_nodes);
+                leaf_nodes = std::move(other.leaf_nodes);
+                branch_kind = std::move(other.branch_kind);
+                mixed_prefix = std::move(other.mixed_prefix);
+                resource = other.resource;
                 index = other.index;
                 isLoaded = other.isLoaded;
+                root_is_leaf = other.root_is_leaf;
+                root_index = other.root_index;
+                depth = other.depth;
                 bootstrapIDs = std::move(other.bootstrapIDs);
-                other.layout = nullptr;
+                other.resource = nullptr;
                 other.index = 255;
                 other.isLoaded = false;
             }
             return *this;
         }
 
-        void set_layout(node_layout* layout_ptr, bool reset_storage = false) {
-            layout = layout_ptr;
+        void set_resource(node_resource* res_ptr, bool reset_storage = false) {
+            resource = res_ptr;
             if (reset_storage) {
                 reset_node_storage();
             }
@@ -2841,10 +3069,49 @@ namespace mcu {
             if (reserveCount > 0) {
                 nodes.reserve(reserveCount);
             }
+
+            // Pre-allocate compact buffers too (heuristics: ~half leaves, ~half branch; mixed ~2%).
+            if (resource) {
+                const uint8_t inBits = resource->bits_per_internal_node();
+                const uint8_t mxBits = resource->bits_per_mixed_node();
+                const uint8_t lfBits = resource->bits_per_leaf_node();
+                if (internal_nodes.get_bits_per_value() != inBits) {
+                    internal_nodes.set_bits_per_value(inBits);
+                } else {
+                    internal_nodes.clear();
+                }
+                if (mixed_nodes.get_bits_per_value() != mxBits) {
+                    mixed_nodes.set_bits_per_value(mxBits);
+                } else {
+                    mixed_nodes.clear();
+                }
+                if (leaf_nodes.get_bits_per_value() != lfBits) {
+                    leaf_nodes.set_bits_per_value(lfBits);
+                } else {
+                    leaf_nodes.clear();
+                }
+                branch_kind.set_bits_per_value(1);
+                branch_kind.clear();
+                mixed_prefix.clear();
+
+                if (reserveCount > 0) {
+                    const size_t half = reserveCount / 2;
+                    internal_nodes.reserve(half);
+                    leaf_nodes.reserve(reserveCount - half);
+                    const size_t mx = (reserveCount > 50) ? (reserveCount * 2 / 100) : 1;
+                    mixed_nodes.reserve(mx);
+                    branch_kind.reserve(half + (reserveCount - half));
+                }
+            }
         }
 
         node_type countNodes() const {
-            return static_cast<uint32_t>(nodes.size());
+            // Prefer compact representation if present.
+            const size_t compact_total = internal_nodes.size() + mixed_nodes.size() + leaf_nodes.size();
+            if (compact_total > 0) {
+                return static_cast<node_type>(compact_total);
+            }
+            return static_cast<node_type>(nodes.size());
         }
 
         size_t memory_usage() const {
@@ -2852,6 +3119,9 @@ namespace mcu {
         }
 
         node_type countLeafNodes() const {
+            if (leaf_nodes.size() > 0) {
+                return static_cast<node_type>(leaf_nodes.size());
+            }
             node_type leafCount = 0;
             for (size_t i = 0; i < nodes.size(); ++i) {
                 if (nodes.get(i).getIsLeaf()) {
@@ -2865,11 +3135,137 @@ namespace mcu {
             return depth;
         }
 
+        // Convert build-time Building_node storage into compact storage.
+        // After successful conversion, build nodes are cleared to free RAM.
+        bool convert_to_compact() {
+            if (!resource) {
+                return false;
+            }
+            if (nodes.empty()) {
+                return false;
+            }
+
+            // Ensure compact buffers are reset (do not assume prior reserve state)
+            internal_nodes.clear();
+            mixed_nodes.clear();
+            leaf_nodes.clear();
+            branch_kind.clear();
+            mixed_prefix.clear();
+
+            internal_nodes.set_bits_per_value(resource->bits_per_internal_node());
+            mixed_nodes.set_bits_per_value(resource->bits_per_mixed_node());
+            leaf_nodes.set_bits_per_value(resource->bits_per_leaf_node());
+            branch_kind.set_bits_per_value(1);
+
+            const auto& featureLayout = resource->get_Building_node_featureID_layout();
+            const auto& labelLayout = resource->get_Building_node_label_layout();
+            const auto& childLayout = resource->get_Building_node_left_child_layout();
+            const auto& thresholdLayout = resource->get_Building_node_threshold_layout();
+
+            const node_type nodeCount = static_cast<node_type>(nodes.size());
+            if (nodeCount == 0) {
+                return false;
+            }
+
+            // Map old indices -> leaf index / branch index (branch index is in old-order filtering)
+            vector<node_type> old_to_leaf;
+            vector<node_type> old_to_branch;
+            old_to_leaf.resize(nodeCount, static_cast<node_type>(0xFFFFFFFFu));
+            old_to_branch.resize(nodeCount, static_cast<node_type>(0xFFFFFFFFu));
+
+            node_type branchCount = 0;
+            for (node_type i = 0; i < nodeCount; ++i) {
+                const Building_node n = nodes.get(i);
+                if (n.getIsLeaf()) {
+                    old_to_leaf[i] = static_cast<node_type>(leaf_nodes.size());
+                    leaf_nodes.push_back(n.getLabel(labelLayout));
+                } else {
+                    old_to_branch[i] = branchCount;
+                    branchCount++;
+                }
+            }
+
+            // Root
+            const Building_node root = nodes.get(0);
+            root_is_leaf = root.getIsLeaf();
+            root_index = root_is_leaf ? old_to_leaf[0] : old_to_branch[0];
+
+            // Build branch nodes in old-order filtering; branch_kind indicates which compact vector to use.
+            for (node_type i = 0; i < nodeCount; ++i) {
+                const Building_node n = nodes.get(i);
+                if (n.getIsLeaf()) {
+                    continue;
+                }
+                const node_type bidx = old_to_branch[i];
+                const node_type left_old = n.getLeftChildIndex(childLayout);
+                const node_type right_old = static_cast<node_type>(left_old + 1);
+                if (left_old >= nodeCount || right_old >= nodeCount) {
+                    return false;
+                }
+                const Building_node left_n = nodes.get(left_old);
+                const Building_node right_n = nodes.get(right_old);
+                const bool left_leaf = left_n.getIsLeaf();
+                const bool right_leaf = right_n.getIsLeaf();
+
+                const uint16_t featureID = n.getFeatureID(featureLayout);
+                const uint16_t threshold = n.getThresholdSlot(thresholdLayout);
+
+                if (left_leaf == right_leaf) {
+                    Internal_node inode;
+                    inode.setChildrenAreLeaf(left_leaf);
+                    inode.setThresholdSlot(threshold, *resource);
+                    inode.setFeatureID(featureID, *resource);
+                    const node_type left_new = left_leaf ? old_to_leaf[left_old] : old_to_branch[left_old];
+                    inode.setLeftChildIndex(left_new, *resource);
+
+                    // Append internal node and mark kind=0
+                    (void)bidx; // bidx used in branch_kind ordering only
+                    internal_nodes.push_back(inode);
+                    branch_kind.push_back(0);
+                } else {
+                    Mixed_node mnode;
+                    mnode.setLeftIsLeaf(left_leaf);
+                    mnode.setThresholdSlot(threshold, *resource);
+                    mnode.setFeatureID(featureID, *resource);
+                    const node_type left_new = left_leaf ? old_to_leaf[left_old] : old_to_branch[left_old];
+                    const node_type right_new = right_leaf ? old_to_leaf[right_old] : old_to_branch[right_old];
+                    mnode.setLeftChildIndex(left_new, *resource);
+                    mnode.setRightChildIndex(right_new, *resource);
+
+                    mixed_nodes.push_back(mnode);
+                    branch_kind.push_back(1);
+                }
+            }
+
+            // Build prefix sums for rank mapping
+            build_mixed_prefix();
+
+            // Drop build nodes to reclaim RAM
+            nodes.clear();
+            nodes.fit();
+
+            return true;
+        }
+
+        // Rebuild auxiliary indices (rank prefix) after loading compact data.
+        void rebuild_compact_index() {
+            if (branch_kind.size() > 0) {
+                build_mixed_prefix();
+            } else {
+                mixed_prefix.clear();
+            }
+        }
+
+
         bool releaseTree(const char* path, bool re_use = false) {
             if (!re_use) {
                 if (index > RF_MAX_TREES || nodes.empty()) {
-                    RF_DEBUG(0, "❌ save tree failed, invalid tree index: ", index);
-                    return false;
+                    // In compact mode nodes may be empty; allow save if compact buffers exist.
+                    const bool hasCompact = (internal_nodes.size() + mixed_nodes.size() + leaf_nodes.size()) > 0;
+                    if (!hasCompact) {
+                        RF_DEBUG(0, "❌ save tree failed, invalid tree index: ", index);
+                        return false;
+                    }
                 }
                 if (path == nullptr || strlen(path) == 0) {
                     RF_DEBUG(0, "❌ save tree failed, invalid path: ", path);
@@ -2887,44 +3283,109 @@ namespace mcu {
                     return false;
                 }
 
-                uint32_t magic = 0x54524545; // "TREE"
-                file.write(reinterpret_cast<uint8_t*>(&magic), sizeof(magic));
+                // Prefer compact format; if build nodes exist, convert first.
+                if ((internal_nodes.size() + mixed_nodes.size() + leaf_nodes.size()) == 0) {
+                    (void)convert_to_compact();
+                }
+                if (!resource) {
+                    RF_DEBUG(0, "❌ save tree failed: node_resource not set");
+                    file.close();
+                    return false;
+                }
 
-                // Write bits-per-node (1 byte) so readers know how many bytes follow per node
-                uint8_t bitsPerNode = nodes.get_bits_per_value();
-                if (bitsPerNode == 0) bitsPerNode = 32;
-                uint8_t bytesPerNode = static_cast<uint8_t>((bitsPerNode + 7) / 8);
-                file.write(reinterpret_cast<uint8_t*>(&bitsPerNode), sizeof(bitsPerNode));
+                // Compact tree format: TRC3 (portable: fixed-width counters + byte-packed branch_kind)
+                const uint32_t magic = 0x33524354; // 'T''R''C''3'
+                file.write(reinterpret_cast<const uint8_t*>(&magic), sizeof(magic));
 
-                node_type nodeCount = static_cast<node_type>(nodes.size());
-                file.write(reinterpret_cast<uint8_t*>(&nodeCount), sizeof(nodeCount));
+                const uint8_t version = 3;
+                file.write(reinterpret_cast<const uint8_t*>(&version), sizeof(version));
 
-                if (nodeCount > 0) {
-                    const size_t totalSize = static_cast<size_t>(nodeCount) * bytesPerNode;
-                    uint8_t* buffer = mem_alloc::allocate<uint8_t>(totalSize);
-                    if (buffer) {
-                        for (node_type i = 0; i < nodeCount; ++i) {
-                            const Tree_node node = nodes.get(i);
-                            node_type raw = node.packed_data;
-                            memcpy(buffer + (i * bytesPerNode), &raw, bytesPerNode);
-                        }
-                        size_t written = file.write(buffer, totalSize);
-                        mem_alloc::deallocate(buffer);
-                        if (written != totalSize) {
-                            RF_DEBUG(1, "⚠️ Incomplete tree write to file system");
-                        }
-                    } else {
-                        for (node_type i = 0; i < nodeCount; ++i) {
-                            const Tree_node node = nodes.get(i);
-                            node_type raw = node.packed_data;
-                            file.write(reinterpret_cast<const uint8_t*>(&raw), bytesPerNode);
+                auto write_u32 = [&](uint32_t v) {
+                    file.write(reinterpret_cast<const uint8_t*>(&v), sizeof(v));
+                };
+                auto write_le = [&](uint64_t v, uint8_t bytes) {
+                    for (uint8_t b = 0; b < bytes; ++b) {
+                        const uint8_t byte = static_cast<uint8_t>((v >> (8u * b)) & 0xFFu);
+                        file.write(reinterpret_cast<const uint8_t*>(&byte), 1);
+                    }
+                };
+
+                // Persist bit widths for robustness
+                file.write(reinterpret_cast<const uint8_t*>(&resource->threshold_bits), sizeof(uint8_t));
+                file.write(reinterpret_cast<const uint8_t*>(&resource->feature_bits), sizeof(uint8_t));
+                file.write(reinterpret_cast<const uint8_t*>(&resource->label_bits), sizeof(uint8_t));
+                file.write(reinterpret_cast<const uint8_t*>(&resource->child_bits), sizeof(uint8_t));
+
+                const uint8_t rootLeaf = root_is_leaf ? 1 : 0;
+                file.write(reinterpret_cast<const uint8_t*>(&rootLeaf), sizeof(rootLeaf));
+                write_u32(static_cast<uint32_t>(root_index));
+
+                const uint32_t branchCount = static_cast<uint32_t>(branch_kind.size());
+                const uint32_t internalCount = static_cast<uint32_t>(internal_nodes.size());
+                const uint32_t mixedCount = static_cast<uint32_t>(mixed_nodes.size());
+                const uint32_t leafCount = static_cast<uint32_t>(leaf_nodes.size());
+                write_u32(branchCount);
+                write_u32(internalCount);
+                write_u32(mixedCount);
+                write_u32(leafCount);
+
+                // Write packed payloads as raw little-endian bytes per element
+                const uint8_t inBits = internal_nodes.get_bits_per_value();
+                const uint8_t mxBits = mixed_nodes.get_bits_per_value();
+                const uint8_t lfBits = leaf_nodes.get_bits_per_value();
+                const uint8_t inBytes = static_cast<uint8_t>((inBits + 7) / 8);
+                const uint8_t mxBytes = static_cast<uint8_t>((mxBits + 7) / 8);
+                const uint8_t lfBytes = static_cast<uint8_t>((lfBits + 7) / 8);
+                file.write(reinterpret_cast<const uint8_t*>(&inBits), sizeof(inBits));
+                file.write(reinterpret_cast<const uint8_t*>(&mxBits), sizeof(mxBits));
+                file.write(reinterpret_cast<const uint8_t*>(&lfBits), sizeof(lfBits));
+
+                // branch_kind bits (bpv=1) as raw bytes (portable)
+                const uint32_t kindBytes = (branchCount + 7u) / 8u;
+                write_u32(kindBytes);
+                for (uint32_t byteIndex = 0; byteIndex < kindBytes; ++byteIndex) {
+                    uint8_t out = 0;
+                    const uint32_t base = byteIndex * 8u;
+                    for (uint8_t bit = 0; bit < 8; ++bit) {
+                        const uint32_t i = base + static_cast<uint32_t>(bit);
+                        if (i < branchCount) {
+                            out |= (static_cast<uint8_t>(branch_kind.get(i) & 1u) << bit);
                         }
                     }
+                    file.write(reinterpret_cast<const uint8_t*>(&out), 1);
+                }
+
+                // Internal nodes
+                for (uint32_t i = 0; i < internalCount; ++i) {
+                    const Internal_node n = internal_nodes.get(static_cast<node_type>(i));
+                    write_le(static_cast<uint64_t>(n.packed_data), inBytes);
+                }
+
+                // Mixed nodes
+                for (uint32_t i = 0; i < mixedCount; ++i) {
+                    const Mixed_node n = mixed_nodes.get(static_cast<node_type>(i));
+                    write_le(static_cast<uint64_t>(n.packed_data), mxBytes);
+                }
+
+                // Leaf nodes (labels)
+                for (uint32_t i = 0; i < leafCount; ++i) {
+                    const label_type lbl = leaf_nodes.get(static_cast<node_type>(i));
+                    write_le(static_cast<uint64_t>(lbl), lfBytes);
                 }
                 file.close();
             }
             nodes.clear();
             nodes.fit();
+            internal_nodes.clear();
+            internal_nodes.fit();
+            mixed_nodes.clear();
+            mixed_nodes.fit();
+            leaf_nodes.clear();
+            leaf_nodes.fit();
+            branch_kind.clear();
+            branch_kind.fit();
+            mixed_prefix.clear();
+            mixed_prefix.fit();
             isLoaded = false;
             RF_DEBUG(2, "✅ Tree saved to file system: ", index);
             return true;
@@ -2953,58 +3414,154 @@ namespace mcu {
                 return false;
             }
 
-            uint32_t magic;
-            if (file.read(reinterpret_cast<uint8_t*>(&magic), sizeof(magic)) != sizeof(magic) ||
-                magic != 0x54524545) {
-                RF_DEBUG(0, "❌ Invalid tree file format: ", path);
+            uint32_t magic = 0;
+            if (file.read(reinterpret_cast<uint8_t*>(&magic), sizeof(magic)) != sizeof(magic)) {
                 file.close();
                 return false;
             }
 
-            // New format: bitsPerNode (u8) then nodeCount (u32)
-            uint8_t bitsPerNode = 0;
-            if (file.read(reinterpret_cast<uint8_t*>(&bitsPerNode), sizeof(bitsPerNode)) != sizeof(bitsPerNode)) {
-                RF_DEBUG(0, "❌ Failed to read bits-per-node from tree file: ", path);
-                file.close();
-                return false;
-            }
-            if (bitsPerNode == 0) bitsPerNode = 32;
-            uint8_t bytesPerNode = static_cast<uint8_t>((bitsPerNode + 7) / 8);
-
-            node_type nodeCount;
-            if (file.read(reinterpret_cast<uint8_t*>(&nodeCount), sizeof(nodeCount)) != sizeof(nodeCount)) {
-                RF_DEBUG(0, "❌ Failed to read node count: ", path);
+            if (magic != 0x33524354) { // "TRC3"
+                RF_DEBUG(0, "❌ Invalid tree file format (expected TRC3): ", path);
                 file.close();
                 return false;
             }
 
-            if (nodeCount == 0 || nodeCount > RF_MAX_NODES) {
-                RF_DEBUG(1, "❌ Invalid node count in tree file");
-                file.close();
-                return false;
-            }
-
-            reset_node_storage(nodeCount);
-            for (node_type i = 0; i < nodeCount; ++i) {
-                Tree_node node;
-                node_type raw32 = 0ull;
-                // read only bytesPerNode bytes into raw32 (little-endian)
-                size_t readBytes = file.read(reinterpret_cast<uint8_t*>(&raw32), bytesPerNode);
-                if (readBytes == bytesPerNode) {
-                    node.packed_data = raw32 & 0xFFFFFFFFu;
-                } else {
-                    RF_DEBUG(0, "❌ Failed to read node data");
-                    nodes.clear();
+            {
+                uint8_t version = 0;
+                if (file.read(reinterpret_cast<uint8_t*>(&version), sizeof(version)) != sizeof(version) || version != 3) {
                     file.close();
                     return false;
                 }
-                nodes.push_back(node);
+
+                auto read_u32 = [&](uint32_t& out) -> bool {
+                    return file.read(reinterpret_cast<uint8_t*>(&out), sizeof(out)) == sizeof(out);
+                };
+                auto read_le = [&](uint64_t& out, uint8_t bytes) -> bool {
+                    out = 0;
+                    for (uint8_t b = 0; b < bytes; ++b) {
+                        uint8_t byte = 0;
+                        if (file.read(reinterpret_cast<uint8_t*>(&byte), 1) != 1) {
+                            return false;
+                        }
+                        out |= (static_cast<uint64_t>(byte) << (8u * b));
+                    }
+                    return true;
+                };
+
+                uint8_t tBits = 0, fBits = 0, lBits = 0, cBits = 0;
+                if (file.read(reinterpret_cast<uint8_t*>(&tBits), 1) != 1 ||
+                    file.read(reinterpret_cast<uint8_t*>(&fBits), 1) != 1 ||
+                    file.read(reinterpret_cast<uint8_t*>(&lBits), 1) != 1 ||
+                    file.read(reinterpret_cast<uint8_t*>(&cBits), 1) != 1) {
+                    file.close();
+                    return false;
+                }
+                if (resource) {
+                    resource->set_bits(fBits, lBits, cBits, tBits);
+                }
+
+                uint8_t rootLeaf = 0;
+                if (file.read(reinterpret_cast<uint8_t*>(&rootLeaf), sizeof(rootLeaf)) != sizeof(rootLeaf)) {
+                    file.close();
+                    return false;
+                }
+                root_is_leaf = (rootLeaf != 0);
+
+                uint32_t rootIndexU32 = 0;
+                if (!read_u32(rootIndexU32)) {
+                    file.close();
+                    return false;
+                }
+                root_index = static_cast<node_type>(rootIndexU32);
+
+                uint32_t branchCountU32 = 0, internalCountU32 = 0, mixedCountU32 = 0, leafCountU32 = 0;
+                if (!read_u32(branchCountU32) || !read_u32(internalCountU32) || !read_u32(mixedCountU32) || !read_u32(leafCountU32)) {
+                    file.close();
+                    return false;
+                }
+
+                uint8_t inBits = 0, mxBits = 0, lfBits = 0;
+                if (file.read(reinterpret_cast<uint8_t*>(&inBits), 1) != 1 ||
+                    file.read(reinterpret_cast<uint8_t*>(&mxBits), 1) != 1 ||
+                    file.read(reinterpret_cast<uint8_t*>(&lfBits), 1) != 1) {
+                    file.close();
+                    return false;
+                }
+                const uint8_t inBytes = static_cast<uint8_t>((inBits + 7) / 8);
+                const uint8_t mxBytes = static_cast<uint8_t>((mxBits + 7) / 8);
+                const uint8_t lfBytes = static_cast<uint8_t>((lfBits + 7) / 8);
+
+                internal_nodes.set_bits_per_value(inBits);
+                mixed_nodes.set_bits_per_value(mxBits);
+                leaf_nodes.set_bits_per_value(lfBits);
+                branch_kind.set_bits_per_value(1);
+
+                internal_nodes.clear();
+                mixed_nodes.clear();
+                leaf_nodes.clear();
+                branch_kind.clear();
+                mixed_prefix.clear();
+
+                uint32_t kindBytes = 0;
+                if (!read_u32(kindBytes)) {
+                    file.close();
+                    return false;
+                }
+
+                branch_kind.resize(static_cast<node_type>(branchCountU32), 0);
+                for (uint32_t byteIndex = 0; byteIndex < kindBytes; ++byteIndex) {
+                    uint8_t in = 0;
+                    if (file.read(reinterpret_cast<uint8_t*>(&in), 1) != 1) {
+                        file.close();
+                        return false;
+                    }
+                    const uint32_t base = byteIndex * 8u;
+                    for (uint8_t bit = 0; bit < 8; ++bit) {
+                        const uint32_t i = base + static_cast<uint32_t>(bit);
+                        if (i < branchCountU32) {
+                            branch_kind.set(static_cast<node_type>(i), static_cast<uint8_t>((in >> bit) & 1u));
+                        }
+                    }
+                }
+
+                internal_nodes.reserve(static_cast<node_type>(internalCountU32));
+                for (uint32_t i = 0; i < internalCountU32; ++i) {
+                    uint64_t raw = 0;
+                    if (!read_le(raw, inBytes)) {
+                        file.close();
+                        return false;
+                    }
+                    Internal_node n;
+                    n.packed_data = static_cast<size_t>(raw);
+                    internal_nodes.push_back(n);
+                }
+
+                mixed_nodes.reserve(static_cast<node_type>(mixedCountU32));
+                for (uint32_t i = 0; i < mixedCountU32; ++i) {
+                    uint64_t raw = 0;
+                    if (!read_le(raw, mxBytes)) {
+                        file.close();
+                        return false;
+                    }
+                    Mixed_node n;
+                    n.packed_data = static_cast<size_t>(raw);
+                    mixed_nodes.push_back(n);
+                }
+
+                leaf_nodes.reserve(static_cast<node_type>(leafCountU32));
+                for (uint32_t i = 0; i < leafCountU32; ++i) {
+                    uint64_t raw = 0;
+                    if (!read_le(raw, lfBytes)) {
+                        file.close();
+                        return false;
+                    }
+                    leaf_nodes.push_back(static_cast<label_type>(raw));
+                }
+
+                file.close();
+                rebuild_compact_index();
+                isLoaded = true;
             }
-
-            file.close();
-
-            isLoaded = true;
-            RF_DEBUG_2(2, "✅ Tree loaded (", nodeCount, "nodes): ", path);
 
             if (!re_use) {
                 RF_DEBUG(2, "♻️ Single-load mode: removing tree file after loading; ", path);
@@ -3079,41 +3636,73 @@ namespace mcu {
 
         __attribute__((always_inline)) inline label_type predict_features(
             const packed_vector<8>& packed_features) const {
-            if (!layout || nodes.empty()) {
+            // Early exit for empty tree
+            if (__builtin_expect(!resource || leaf_nodes.size() == 0, 0)) {
                 return RF_ERROR_LABEL;
             }
 
-            const auto& featureLayout = layout->featureID_layout;
-            const auto& labelLayout = layout->label_layout;
-            const auto& childLayout = layout->left_child_layout;
-            const auto& thresholdLayout = layout->threshold_layout;
+            // Handle leaf root
+            if (__builtin_expect(root_is_leaf, 0)) {
+                return (root_index < leaf_nodes.size()) ? leaf_nodes.get(root_index) : RF_ERROR_LABEL;
+            }
 
-            node_type currentIndex = 0;
-            const node_type nodeCount = static_cast<node_type>(nodes.size());
-            uint16_t maxDepth = 100; // Safety limit to prevent infinite loops
-
-            while (__builtin_expect(currentIndex < nodeCount, 1) && maxDepth-- > 0) {
-                const Tree_node node = nodes.get(currentIndex);
-
-                if (__builtin_expect(node.getIsLeaf(), 0)) {
-                    return node.getLabel(labelLayout);
+            // Cache resource reference to avoid repeated pointer dereference
+            const node_resource& res = *resource;
+            
+            node_type currentBranch = root_index;
+            const node_type branchCount = static_cast<node_type>(branch_kind.size());
+            const node_type leafCount = static_cast<node_type>(leaf_nodes.size());
+            
+            uint16_t maxDepth = 100;
+            while (__builtin_expect(maxDepth-- > 0, 1)) {
+                if (__builtin_expect(currentBranch >= branchCount, 0)) {
+                    return RF_ERROR_LABEL;
                 }
-
-                const uint16_t featureID = node.getFeatureID(featureLayout);
-                const uint16_t threshold = node.getThresholdSlot(thresholdLayout);
-
-                const uint16_t featureValue = static_cast<uint16_t>(packed_features[featureID]);
-                const node_type leftChild = node.getLeftChildIndex(childLayout);
-                currentIndex = (featureValue <= threshold)
-                                   ? leftChild
-                                   : node.getRightChildIndex(childLayout);
+                
+                const uint8_t kind = branch_kind.get(currentBranch);
+                if (__builtin_expect(kind == 0, 1)) {
+                    // Internal node (common case)
+                    const node_type mixedBefore = rank_mixed(currentBranch);
+                    const node_type internalIndex = currentBranch - mixedBefore;
+                    const Internal_node node = internal_nodes.get(internalIndex);
+                    
+                    const uint16_t featureID = node.getFeatureID(res);
+                    const uint16_t featureValue = static_cast<uint16_t>(packed_features[featureID]);
+                    const uint16_t threshold = node.getThresholdSlot(res);
+                    const node_type left = node.getLeftChildIndex(res);
+                    const node_type chosen = (featureValue <= threshold) ? left : (left + 1);
+                    
+                    if (__builtin_expect(node.childrenAreLeaf(), 0)) {
+                        return (chosen < leafCount) ? leaf_nodes.get(chosen) : RF_ERROR_LABEL;
+                    }
+                    currentBranch = chosen;
+                } else {
+                    // Mixed node (less common)
+                    const node_type mixedIndex = rank_mixed(currentBranch);
+                    const Mixed_node node = mixed_nodes.get(mixedIndex);
+                    
+                    const uint16_t featureID = node.getFeatureID(res);
+                    const uint16_t featureValue = static_cast<uint16_t>(packed_features[featureID]);
+                    const uint16_t threshold = node.getThresholdSlot(res);
+                    const bool goLeft = (featureValue <= threshold);
+                    const bool leftIsLeaf = node.leftIsLeaf();
+                    
+                    if (goLeft) {
+                        const node_type idx = node.getLeftChildIndex(res);
+                        if (leftIsLeaf) {
+                            return (idx < leafCount) ? leaf_nodes.get(idx) : RF_ERROR_LABEL;
+                        }
+                        currentBranch = idx;
+                    } else {
+                        const node_type idx = node.getRightChildIndex(res);
+                        if (!leftIsLeaf) {
+                            return (idx < leafCount) ? leaf_nodes.get(idx) : RF_ERROR_LABEL;
+                        }
+                        currentBranch = idx;
+                    }
+                }
             }
-            
-            // If we exceeded maxDepth, log a warning
-            if (maxDepth == 0) {
-                RF_DEBUG(2, "⚠️ Tree traversal exceeded maximum depth - possible infinite loop");
-            }
-            
+
             return RF_ERROR_LABEL;
         }
 
@@ -3121,12 +3710,32 @@ namespace mcu {
             (void)freeMemory;
             nodes.clear();
             nodes.fit();
+            internal_nodes.clear();
+            internal_nodes.fit();
+            mixed_nodes.clear();
+            mixed_nodes.fit();
+            leaf_nodes.clear();
+            leaf_nodes.fit();
+            branch_kind.clear();
+            branch_kind.fit();
+            mixed_prefix.clear();
+            mixed_prefix.fit();
             isLoaded = false;
         }
 
         void purgeTree(const char* path, bool rmf = true) {
             nodes.clear();
             nodes.fit();
+            internal_nodes.clear();
+            internal_nodes.fit();
+            mixed_nodes.clear();
+            mixed_nodes.fit();
+            leaf_nodes.clear();
+            leaf_nodes.fit();
+            branch_kind.clear();
+            branch_kind.fit();
+            mixed_prefix.clear();
+            mixed_prefix.fit();
             if (rmf && index < RF_MAX_TREES) {
                 if (RF_FS_EXISTS(path)) {
                     RF_FS_REMOVE(path);
@@ -3138,8 +3747,59 @@ namespace mcu {
         }
 
     private:
+        // Build mixed_prefix for rank queries
+        inline void build_mixed_prefix() {
+            mixed_prefix.clear();
+            const size_t wcount = branch_kind.words();
+            mixed_prefix.reserve(wcount + 1);
+            mixed_prefix.push_back(0);
+            uint16_t acc = 0;
+            const auto* w = branch_kind.raw_data();
+            for (size_t i = 0; i < wcount; ++i) {
+                const size_t word = w ? w[i] : 0;
+                if constexpr (sizeof(size_t) == 8) {
+                    acc = static_cast<uint16_t>(acc + static_cast<uint16_t>(__builtin_popcountll(static_cast<unsigned long long>(word))));
+                } else {
+                    acc = static_cast<uint16_t>(acc + static_cast<uint16_t>(__builtin_popcount(static_cast<unsigned int>(word))));
+                }
+                mixed_prefix.push_back(acc);
+            }
+        }
+
+        // Rank query: number of mixed nodes before branchIndex
+        inline node_type rank_mixed(node_type branchIndex) const {
+            // Number of mixed nodes strictly before branchIndex
+            const size_t WORD_BITS = sizeof(size_t) * 8;
+            const size_t wi = static_cast<size_t>(branchIndex) / WORD_BITS;
+            const size_t bi = static_cast<size_t>(branchIndex) % WORD_BITS;
+            if (wi >= mixed_prefix.size()) {
+                return 0;
+            }
+            const uint16_t base = mixed_prefix[wi];
+            const size_t* w = branch_kind.raw_data();
+            if (!w) {
+                return base;
+            }
+            size_t mask = 0;
+            if (bi == 0) {
+                mask = 0;
+            } else if (bi >= WORD_BITS) {
+                mask = static_cast<size_t>(~static_cast<size_t>(0));
+            } else {
+                mask = (static_cast<size_t>(1) << bi) - 1u;
+            }
+            const size_t word = w[wi] & mask;
+            uint16_t pc = 0;
+            if constexpr (sizeof(size_t) == 8) {
+                pc = static_cast<uint16_t>(__builtin_popcountll(static_cast<unsigned long long>(word)));
+            } else {
+                pc = static_cast<uint16_t>(__builtin_popcount(static_cast<unsigned int>(word)));
+            }
+            return static_cast<node_type>(base + pc);
+        }
+
         inline uint8_t desired_bits_per_node() const noexcept {
-            uint8_t bits = layout ? layout->bits_per_node() : static_cast<uint8_t>(32);
+            uint8_t bits = resource ? resource->bits_per_building_node() : static_cast<uint8_t>(32);
             if (bits == 0 || bits > 32) {
                 bits = 32;
             }
@@ -5490,8 +6150,8 @@ namespace mcu {
             Rf_node_predictor* node_pred_ptr = nullptr;
             char tree_path_buffer[RF_PATH_BUFFER] = {0}; // Buffer for tree file paths
 
-            vector<Rf_tree> trees;        // b_vector storing root nodes of trees (now manages file system file_paths)
-            node_layout layout;
+            vector<Rf_tree> trees;        // stores tree slots and manages file system file_paths
+            node_resource resources;
             size_t   total_depths;       // store total depth of all trees
             node_type   total_nodes;        // store total nodes of all trees
             node_type   total_leaves;       // store total leaves of all trees
@@ -5508,15 +6168,15 @@ namespace mcu {
                 trees.reserve(count);
                 for (uint8_t i = 0; i < count; ++i) {
                     Rf_tree tree(i);
-                    tree.set_layout(&layout, reset_storage);
+                    tree.set_resource(&resources, reset_storage);
                     trees.push_back(std::move(tree));
                 }
             }
 
             void ensure_tree_slot(uint8_t index) {
                 if (index < trees.size()) {
-                    if (trees[index].layout != &layout) {
-                        trees[index].set_layout(&layout);
+                    if (trees[index].resource != &resources) {
+                        trees[index].set_resource(&resources);
                     }
                     if (trees[index].index == 255) {
                         trees[index].index = index;
@@ -5528,7 +6188,7 @@ namespace mcu {
                 while (trees.size() < desired) {
                     uint8_t new_index = static_cast<uint8_t>(trees.size());
                     Rf_tree tree(new_index);
-                    tree.set_layout(&layout, true);
+                    tree.set_resource(&resources, true);
                     trees.push_back(std::move(tree));
                 }
             }
@@ -5619,13 +6279,13 @@ namespace mcu {
                     }
                 }
 
-                RF_DEBUG(1, "📐 Calculated node layout :");
+                RF_DEBUG(1, "📐 Calculated node resources :");
                 RF_DEBUG(1, "   - Threshold bits : ", static_cast<int>(threshold_bits));
                 RF_DEBUG(1, "   - Feature bits   : ", static_cast<int>(feature_bits));
                 RF_DEBUG(1, "   - Label bits     : ", static_cast<int>(label_bits));
                 RF_DEBUG(1, "   - Child index bits: ", static_cast<int>(child_index_bits));
 
-                layout.set_layout(feature_bits, label_bits, child_index_bits, threshold_bits);
+                resources.set_bits(feature_bits, label_bits, child_index_bits, threshold_bits);
             }
             
             bool is_loaded = false;
@@ -5649,8 +6309,8 @@ namespace mcu {
                 if (config_ptr->threshold_bits > 0 && config_ptr->feature_bits > 0 && 
                     config_ptr->label_bits > 0 && config_ptr->child_bits > 0) {
                     RF_DEBUG(2, "📐 Setting node layout from config file");
-                    layout.set_layout(config_ptr->feature_bits, config_ptr->label_bits, 
-                                     config_ptr->child_bits, config_ptr->threshold_bits);
+                    resources.set_bits(config_ptr->feature_bits, config_ptr->label_bits,
+                                       config_ptr->child_bits, config_ptr->threshold_bits);
                 } else {
                     RF_DEBUG(0, "❌ Cannot initialize tree container: layout bits missing in config.");
                     return false; 
@@ -5718,8 +6378,6 @@ namespace mcu {
             bool add_tree(Rf_tree&& tree){
                 if(!tree.isLoaded) RF_DEBUG(2, "🟡 Warning: Adding an unloaded tree to the container.");
                 if(tree.index != 255 && tree.index < config_ptr->num_trees) {
-                    // tree.set_layout(&layout);
-                    // Serial.println("here 3.1");
                     uint8_t index = tree.index;
                     ensure_tree_slot(index);
                     uint16_t d = tree.getTreeDepth();
@@ -5731,8 +6389,9 @@ namespace mcu {
                     total_leaves += l;
 
                     base_ptr->build_tree_file_path(tree_path_buffer, index);
+                    // Ensure the tree has access to resource before saving.
+                    tree.set_resource(&resources);
                     tree.releaseTree(tree_path_buffer); // Release tree nodes from memory after adding to container
-                    // slot = std::move(tree);
                     trees[tree.index] = std::move(tree);
                     RF_DEBUG_2(1, "🌲 Added tree index: ", index, "- nodes: ", n);
                     // slot.set_layout(&layout);
@@ -5875,7 +6534,7 @@ namespace mcu {
                 total_nodes = 0;
                 total_leaves = 0;
                 for(const auto& tree : trees) {
-                    if(tree.isLoaded && !tree.nodes.empty()) {
+                    if(tree.isLoaded && (tree.leaf_nodes.size() > 0 || tree.branch_kind.size() > 0 || !tree.nodes.empty())) {
                         loadedTrees++;
                         total_depths += tree.getTreeDepth();
                         total_nodes += tree.countNodes();
@@ -5917,122 +6576,165 @@ namespace mcu {
                     return false;
                 }
                 
-                if(magic != 0x464F5253) { // "FORS" 
-                    RF_DEBUG(0, "❌ Invalid forest file format (bad magic): ", unifiedfile_path);
+                if (magic != 0x33435246) { // "FRC3"
+                    RF_DEBUG(0, "❌ Invalid forest file format (expected FRC3): ", unifiedfile_path);
                     file.close();
                     return false;
                 }
-                
-                // New unified format: bitsPerNode (u8) then treeCount (u8)
-                uint8_t bitsPerNode = 0;
-                if (file.read(reinterpret_cast<uint8_t*>(&bitsPerNode), sizeof(bitsPerNode)) != sizeof(bitsPerNode)) {
-                    RF_DEBUG(0, "❌ Failed to read bits-per-node from: ", unifiedfile_path);
-                    file.close();
-                    return false;
-                }
-                if (bitsPerNode == 0) bitsPerNode = 32;
-                uint8_t bytesPerNode = static_cast<uint8_t>((bitsPerNode + 7) / 8);
 
-                uint8_t treeCount;
-                if(file.read((uint8_t*)&treeCount, sizeof(treeCount)) != sizeof(treeCount)) {
-                    RF_DEBUG(0, "❌ Failed to read tree count from: ", unifiedfile_path);
-                    file.close();
-                    return false;
-                }
-                if(treeCount != config_ptr->num_trees) {
-                    RF_DEBUG_2(1, "⚠️ Tree count mismatch in unified file: ", treeCount, "expected: ", config_ptr->num_trees);
-                    // config_ptr->num_trees = treeCount; // Adjust expected count
-                    file.close();
-                    return false;
-                }
-                RF_DEBUG(1, "📁 Loading from unified forest file", unifiedfile_path);
-                
-                // Read all trees with comprehensive error checking
-                uint8_t successfullyLoaded = 0;
-                for(uint8_t i = 0; i < treeCount; i++) {
-                    // Memory check during loading
-                    if(Rf_memory_status().first < 10000) { // 10KB safety buffer
-                        RF_DEBUG(1, "⚠️ Insufficient memory during tree loading, stopping.");
-                        break;
-                    }
-                    
-                    uint8_t treeIndex;
-                    if(file.read((uint8_t*)&treeIndex, sizeof(treeIndex)) != sizeof(treeIndex)) {
-                        RF_DEBUG(1, "❌ Failed to read tree index for tree: ", treeIndex);
-                        break;
+                {
+                    uint8_t version = 0;
+                    if (file.read(reinterpret_cast<uint8_t*>(&version), 1) != 1 || version != 3) {
+                        file.close();
+                        return false;
                     }
 
-                    node_type nodeCount;
-                    if(file.read((uint8_t*)&nodeCount, sizeof(nodeCount)) != sizeof(nodeCount)) {
-                        RF_DEBUG(1, "❌ Failed to read node count for tree: ", treeIndex);
-                        break;
-                    }
-                    
-                    // Validate node count based on current layout allowance
-                        const node_type allowedNodes = layout.max_nodes();
-                        if(nodeCount == 0 || nodeCount > allowedNodes) {
-                        RF_DEBUG(1, "❌ Invalid node count for tree: ", treeIndex);
-                        // Skip this tree's data
-                        size_t currentPos = file.position();
-                            size_t skipBytes = static_cast<size_t>(nodeCount) * bytesPerNode;
-                            if (!file.seek(currentPos + skipBytes)) {
-                                // Fallback to 32-bit stride for old files
-                                file.seek(currentPos + static_cast<size_t>(nodeCount) * sizeof(((Tree_node*)nullptr)->packed_data));
+                    auto read_u32 = [&](uint32_t& out) -> bool {
+                        return file.read(reinterpret_cast<uint8_t*>(&out), sizeof(out)) == sizeof(out);
+                    };
+                    auto read_le = [&](uint64_t& out, uint8_t bytes) -> bool {
+                        out = 0;
+                        for (uint8_t b = 0; b < bytes; ++b) {
+                            uint8_t byte = 0;
+                            if (file.read(reinterpret_cast<uint8_t*>(&byte), 1) != 1) {
+                                return false;
                             }
-                        continue;
-                    }
-                    
-                    ensure_tree_slot(treeIndex);
-                    auto& tree = trees[treeIndex];
-                    tree.set_layout(&layout);
-                    tree.reset_node_storage(nodeCount);
+                            out |= (static_cast<uint64_t>(byte) << (8u * b));
+                        }
+                        return true;
+                    };
 
-                    bool nodeReadSuccess = true;
-                    node_type nodesRead = 0;
-                    for(node_type j = 0; j < nodeCount; j++) {
-                        Tree_node node;
-                        node_type raw32 = 0ull;
-                        size_t readBytes = file.read(reinterpret_cast<uint8_t*>(&raw32), bytesPerNode);
-                        if (readBytes == bytesPerNode) {
-                            node.packed_data = raw32 & 0xFFFFFFFFu;
-                        } else {
-                            RF_DEBUG_2(1, "❌ Failed to read node", j, "in tree_", treeIndex);
-                            nodeReadSuccess = false;
+                    uint8_t treeCount = 0;
+                    if (file.read(reinterpret_cast<uint8_t*>(&treeCount), sizeof(treeCount)) != sizeof(treeCount)) {
+                        file.close();
+                        return false;
+                    }
+                    if (treeCount != config_ptr->num_trees) {
+                        RF_DEBUG_2(1, "⚠️ Tree count mismatch in unified file: ", treeCount, "expected: ", config_ptr->num_trees);
+                        file.close();
+                        return false;
+                    }
+
+                    // Bit widths for container
+                    uint8_t tBits = 0, fBits = 0, lBits = 0, cBits = 0;
+                    if (file.read(reinterpret_cast<uint8_t*>(&tBits), 1) != 1 ||
+                        file.read(reinterpret_cast<uint8_t*>(&fBits), 1) != 1 ||
+                        file.read(reinterpret_cast<uint8_t*>(&lBits), 1) != 1 ||
+                        file.read(reinterpret_cast<uint8_t*>(&cBits), 1) != 1) {
+                        file.close();
+                        return false;
+                    }
+                    resources.set_bits(fBits, lBits, cBits, tBits);
+
+                    RF_DEBUG(1, "📁 Loading from unified compact forest file", unifiedfile_path);
+
+                    uint8_t successfullyLoaded = 0;
+                    for (uint8_t i = 0; i < treeCount; ++i) {
+                        uint8_t treeIndex = 0;
+                        if (file.read(reinterpret_cast<uint8_t*>(&treeIndex), 1) != 1) {
                             break;
                         }
-                        tree.nodes.push_back(node);
-                        ++nodesRead;
-                    }
+                        ensure_tree_slot(treeIndex);
+                        auto& tree = trees[treeIndex];
+                        tree.set_resource(&resources);
 
-                    if(nodeReadSuccess) {
-                        tree.nodes.fit();
-                        tree.isLoaded = true;
-                        successfullyLoaded++;
+                        uint8_t rootLeaf = 0;
+                        if (file.read(reinterpret_cast<uint8_t*>(&rootLeaf), 1) != 1) {
+                            break;
+                        }
+                        tree.root_is_leaf = (rootLeaf != 0);
+                        uint32_t rootIndexU32 = 0;
+                        if (!read_u32(rootIndexU32)) {
+                            break;
+                        }
+                        tree.root_index = static_cast<node_type>(rootIndexU32);
 
-                        total_depths += tree.getTreeDepth();
-                        total_nodes += tree.countNodes();
-                        total_leaves += tree.countLeafNodes();
-                    } else {
-                        const size_t remaining = (nodesRead < nodeCount)
-                            ? static_cast<size_t>(nodeCount - nodesRead) * bytesPerNode
-                            : 0;
-                        if (remaining > 0) {
-                            if (!file.seek(file.position() + remaining)) {
-                                // fallback to 32-bit size per node
-                                file.seek(file.position() + static_cast<size_t>(nodeCount - nodesRead) * sizeof(((Tree_node*)nullptr)->packed_data));
+                        uint32_t branchCountU32 = 0, internalCountU32 = 0, mixedCountU32 = 0, leafCountU32 = 0;
+                        if (!read_u32(branchCountU32) || !read_u32(internalCountU32) || !read_u32(mixedCountU32) || !read_u32(leafCountU32)) {
+                            break;
+                        }
+
+                        uint8_t inBits = 0, mxBits = 0, lfBits = 0;
+                        if (file.read(reinterpret_cast<uint8_t*>(&inBits), 1) != 1 ||
+                            file.read(reinterpret_cast<uint8_t*>(&mxBits), 1) != 1 ||
+                            file.read(reinterpret_cast<uint8_t*>(&lfBits), 1) != 1) {
+                            break;
+                        }
+                        const uint8_t inBytes = static_cast<uint8_t>((inBits + 7) / 8);
+                        const uint8_t mxBytes = static_cast<uint8_t>((mxBits + 7) / 8);
+                        const uint8_t lfBytes = static_cast<uint8_t>((lfBits + 7) / 8);
+
+                        tree.internal_nodes.set_bits_per_value(inBits);
+                        tree.mixed_nodes.set_bits_per_value(mxBits);
+                        tree.leaf_nodes.set_bits_per_value(lfBits);
+                        tree.branch_kind.set_bits_per_value(1);
+
+                        tree.internal_nodes.clear();
+                        tree.mixed_nodes.clear();
+                        tree.leaf_nodes.clear();
+                        tree.branch_kind.clear();
+                        tree.mixed_prefix.clear();
+
+                        uint32_t kindBytes = 0;
+                        if (!read_u32(kindBytes)) {
+                            break;
+                        }
+                        tree.branch_kind.resize(static_cast<node_type>(branchCountU32), 0);
+                        for (uint32_t byteIndex = 0; byteIndex < kindBytes; ++byteIndex) {
+                            uint8_t in = 0;
+                            if (file.read(reinterpret_cast<uint8_t*>(&in), 1) != 1) {
+                                break;
+                            }
+                            const uint32_t base = byteIndex * 8u;
+                            for (uint8_t bit = 0; bit < 8; ++bit) {
+                                const uint32_t idx = base + static_cast<uint32_t>(bit);
+                                if (idx < branchCountU32) {
+                                    tree.branch_kind.set(static_cast<node_type>(idx), static_cast<uint8_t>((in >> bit) & 1u));
+                                }
                             }
                         }
-                        if(remaining > 0) {
-                            file.seek(file.position() + remaining);
+
+                        tree.internal_nodes.reserve(static_cast<node_type>(internalCountU32));
+                        for (uint32_t k = 0; k < internalCountU32; ++k) {
+                            uint64_t raw = 0;
+                            if (!read_le(raw, inBytes)) {
+                                break;
+                            }
+                            Internal_node n;
+                            n.packed_data = static_cast<size_t>(raw);
+                            tree.internal_nodes.push_back(n);
                         }
+
+                        tree.mixed_nodes.reserve(static_cast<node_type>(mixedCountU32));
+                        for (uint32_t k = 0; k < mixedCountU32; ++k) {
+                            uint64_t raw = 0;
+                            if (!read_le(raw, mxBytes)) {
+                                break;
+                            }
+                            Mixed_node n;
+                            n.packed_data = static_cast<size_t>(raw);
+                            tree.mixed_nodes.push_back(n);
+                        }
+
+                        tree.leaf_nodes.reserve(static_cast<node_type>(leafCountU32));
+                        for (uint32_t k = 0; k < leafCountU32; ++k) {
+                            uint64_t raw = 0;
+                            if (!read_le(raw, lfBytes)) {
+                                break;
+                            }
+                            tree.leaf_nodes.push_back(static_cast<label_type>(raw));
+                        }
+
+                        tree.isLoaded = true;
                         tree.nodes.clear();
                         tree.nodes.fit();
-                        tree.isLoaded = false;
+                        tree.rebuild_compact_index();
+                        successfullyLoaded++;
                     }
+                    file.close();
+                    (void)successfullyLoaded;
+                    return check_valid_after_load();
                 }
-                
-                file.close();
-                return check_valid_after_load();
             }
 
             // Load forest from individual tree files (used during training)
@@ -6046,7 +6748,7 @@ namespace mcu {
                 for (auto& tree : trees) {
                     if (!tree.isLoaded) {
                         try {
-                            tree.set_layout(&layout);
+                            tree.set_resource(&resources);
                             // Construct tree file path
                             base_ptr->build_tree_file_path(tree_path_buffer, tree.index);
                             tree.loadTree(tree_path_buffer);
@@ -6071,9 +6773,9 @@ namespace mcu {
                 uint8_t loadedCount = 0;
                 node_type totalNodes = 0;
                 for(auto& tree : trees) {
-                    if (tree.isLoaded && !tree.nodes.empty()) {
+                    if (tree.isLoaded && (tree.leaf_nodes.size() > 0 || tree.branch_kind.size() > 0 || !tree.nodes.empty())) {
                         loadedCount++;
-                        totalNodes += tree.nodes.size();
+                        totalNodes += tree.countNodes();
                     }
                 }
                 
@@ -6087,10 +6789,12 @@ namespace mcu {
                 size_t totalFS = RF_TOTAL_BYTES();
                 size_t usedFS = RF_USED_BYTES();
                 size_t freeFS = totalFS - usedFS;
-                uint8_t estBits = static_cast<uint8_t>(layout.bits_per_node());
-                if (estBits == 0) estBits = 32;
-                uint8_t estBytesPerNode = static_cast<uint8_t>((estBits + 7) / 8);
-                size_t estimatedSize = static_cast<size_t>(totalNodes) * estBytesPerNode + 100; // nodes + headers
+                // Estimate size using compact structure (rough): assume internal nodes ~half, leaf nodes ~half.
+                uint8_t estLeafBits = resources.bits_per_leaf_node();
+                uint8_t estInBits = resources.bits_per_internal_node();
+                uint8_t estLeafBytes = static_cast<uint8_t>((estLeafBits + 7) / 8);
+                uint8_t estInBytes = static_cast<uint8_t>((estInBits + 7) / 8);
+                size_t estimatedSize = static_cast<size_t>(totalNodes / 2) * estInBytes + static_cast<size_t>(totalNodes / 2) * estLeafBytes + 256;
                 
                 if(freeFS < estimatedSize) {
                     RF_DEBUG_2(1, "❌ Insufficient file system space to release forest (need ~", 
@@ -6113,8 +6817,8 @@ namespace mcu {
                     return false;
                 }
                 
-                // Write forest header
-                uint32_t magic = 0x464F5253; // "FORS" in hex (forest)
+                // Write forest header: FRC3 (portable)
+                uint32_t magic = 0x33435246; // 'F''R''C''3'
                 if(file.write((uint8_t*)&magic, sizeof(magic)) != sizeof(magic)) {
                     RF_DEBUG(0, "❌ Failed to write magic number to: ", unifiedfile_path);
                     file.close();
@@ -6122,16 +6826,22 @@ namespace mcu {
                     return false;
                 }
 
-                // Write bits-per-node (u8) so reader knows how many bytes per node follow
-                uint8_t bitsPerNode = static_cast<uint8_t>(layout.bits_per_node());
-                if (bitsPerNode == 0) bitsPerNode = sizeof(node_type) * 8; // default to 32 bits in 32-bit systems
-                uint8_t bytesPerNode = static_cast<uint8_t>((bitsPerNode + 7) / 8);
-                if(file.write(reinterpret_cast<uint8_t*>(&bitsPerNode), sizeof(bitsPerNode)) != sizeof(bitsPerNode)) {
-                    RF_DEBUG(0, "❌ Failed to write bits-per-node to: ", unifiedfile_path);
+                const uint8_t version = 3;
+                if (file.write(reinterpret_cast<const uint8_t*>(&version), 1) != 1) {
                     file.close();
                     RF_FS_REMOVE(unifiedfile_path);
                     return false;
                 }
+
+                auto write_u32 = [&](uint32_t v) {
+                    file.write(reinterpret_cast<const uint8_t*>(&v), sizeof(v));
+                };
+                auto write_le = [&](uint64_t v, uint8_t bytes) {
+                    for (uint8_t b = 0; b < bytes; ++b) {
+                        const uint8_t byte = static_cast<uint8_t>((v >> (8u * b)) & 0xFFu);
+                        file.write(reinterpret_cast<const uint8_t*>(&byte), 1);
+                    }
+                };
 
                 if(file.write((uint8_t*)&loadedCount, sizeof(loadedCount)) != sizeof(loadedCount)) {
                     RF_DEBUG(0, "❌ Failed to write tree count to: ", unifiedfile_path);
@@ -6139,51 +6849,83 @@ namespace mcu {
                     RF_FS_REMOVE(unifiedfile_path);
                     return false;
                 }
+
+                // Persist bit widths once per forest
+                file.write(reinterpret_cast<const uint8_t*>(&resources.threshold_bits), 1);
+                file.write(reinterpret_cast<const uint8_t*>(&resources.feature_bits), 1);
+                file.write(reinterpret_cast<const uint8_t*>(&resources.label_bits), 1);
+                file.write(reinterpret_cast<const uint8_t*>(&resources.child_bits), 1);
                 
                 size_t totalBytes = 0;
                 
                 // Write all trees in sequence with error checking
                 uint8_t savedCount = 0;
                 for(auto& tree : trees) {
-                    if (tree.isLoaded && tree.index != 255 && !tree.nodes.empty()) {
-                        tree.set_layout(&layout);
+                    if (tree.isLoaded && tree.index != 255 && (tree.leaf_nodes.size() > 0 || tree.branch_kind.size() > 0 || !tree.nodes.empty())) {
+                        tree.set_resource(&resources);
+                        if ((tree.internal_nodes.size() + tree.mixed_nodes.size() + tree.leaf_nodes.size()) == 0) {
+                            (void)tree.convert_to_compact();
+                        }
                         // Write tree header
                         if(file.write((uint8_t*)&tree.index, sizeof(tree.index)) != sizeof(tree.index)) {
                             RF_DEBUG(1, "❌ Failed to write tree index: ", tree.index);
                             break;
                         }
-                        
-                        node_type nodeCount = tree.nodes.size();
-                        if(file.write((uint8_t*)&nodeCount, sizeof(nodeCount)) != sizeof(nodeCount)) {
-                            RF_DEBUG(1, "❌ Failed to write node count for tree ", tree.index);
-                            break;
+
+                        const uint8_t rootLeaf = tree.root_is_leaf ? 1 : 0;
+                        file.write(reinterpret_cast<const uint8_t*>(&rootLeaf), 1);
+                        write_u32(static_cast<uint32_t>(tree.root_index));
+
+                        const uint32_t branchCount = static_cast<uint32_t>(tree.branch_kind.size());
+                        const uint32_t internalCount = static_cast<uint32_t>(tree.internal_nodes.size());
+                        const uint32_t mixedCount = static_cast<uint32_t>(tree.mixed_nodes.size());
+                        const uint32_t leafCount = static_cast<uint32_t>(tree.leaf_nodes.size());
+                        write_u32(branchCount);
+                        write_u32(internalCount);
+                        write_u32(mixedCount);
+                        write_u32(leafCount);
+
+                        const uint8_t inBits = tree.internal_nodes.get_bits_per_value();
+                        const uint8_t mxBits = tree.mixed_nodes.get_bits_per_value();
+                        const uint8_t lfBits = tree.leaf_nodes.get_bits_per_value();
+                        const uint8_t inBytes = static_cast<uint8_t>((inBits + 7) / 8);
+                        const uint8_t mxBytes = static_cast<uint8_t>((mxBits + 7) / 8);
+                        const uint8_t lfBytes = static_cast<uint8_t>((lfBits + 7) / 8);
+                        file.write(reinterpret_cast<const uint8_t*>(&inBits), 1);
+                        file.write(reinterpret_cast<const uint8_t*>(&mxBits), 1);
+                        file.write(reinterpret_cast<const uint8_t*>(&lfBits), 1);
+
+                        const uint32_t kindBytes = (branchCount + 7u) / 8u;
+                        write_u32(kindBytes);
+                        for (uint32_t byteIndex = 0; byteIndex < kindBytes; ++byteIndex) {
+                            uint8_t out = 0;
+                            const uint32_t base = byteIndex * 8u;
+                            for (uint8_t bit = 0; bit < 8; ++bit) {
+                                const uint32_t i = base + static_cast<uint32_t>(bit);
+                                if (i < branchCount) {
+                                    out |= (static_cast<uint8_t>(tree.branch_kind.get(i) & 1u) << bit);
+                                }
+                            }
+                            file.write(reinterpret_cast<const uint8_t*>(&out), 1);
+                        }
+                        totalBytes += kindBytes;
+
+                        for (uint32_t i = 0; i < internalCount; ++i) {
+                            const Internal_node n = tree.internal_nodes.get(static_cast<node_type>(i));
+                            write_le(static_cast<uint64_t>(n.packed_data), inBytes);
+                            totalBytes += inBytes;
+                        }
+                        for (uint32_t i = 0; i < mixedCount; ++i) {
+                            const Mixed_node n = tree.mixed_nodes.get(static_cast<node_type>(i));
+                            write_le(static_cast<uint64_t>(n.packed_data), mxBytes);
+                            totalBytes += mxBytes;
+                        }
+                        for (uint32_t i = 0; i < leafCount; ++i) {
+                            const label_type lbl = tree.leaf_nodes.get(static_cast<node_type>(i));
+                            write_le(static_cast<uint64_t>(lbl), lfBytes);
+                            totalBytes += lfBytes;
                         }
 
-                        // Write all nodes with progress tracking (only bytesPerNode bytes per node)
-                        bool writeSuccess = true;
-                        for (node_type i = 0; i < tree.nodes.size(); i++) {
-                            const Tree_node node = tree.nodes.get(i);
-                            node_type raw = node.packed_data;
-                            if(file.write(reinterpret_cast<const uint8_t*>(&raw), bytesPerNode) != bytesPerNode) {
-                                RF_DEBUG_2(1, "❌ Failed to write node ", i, "for tree ", tree.index);
-                                writeSuccess = false;
-                                break;
-                            }
-                            totalBytes += bytesPerNode;
-
-                            // Check for memory issues during write
-                            if(Rf_memory_status().first < 5000) { // 5KB safety threshold
-                                RF_DEBUG(1, "⚠️ Low memory during write, stopping.");
-                                writeSuccess = false;
-                                break;
-                            }
-                        }
-                        
-                        if(!writeSuccess) {
-                            RF_DEBUG(0, "❌ Failed to save tree ", tree.index);
-                            break;
-                        }
-                        
                         savedCount++;
                     }
                 }
@@ -6200,8 +6942,7 @@ namespace mcu {
                 uint8_t clearedCount = 0;
                 for(auto& tree : trees) {
                     if (tree.isLoaded) {
-                        tree.nodes.clear();
-                        tree.nodes.fit();
+                        tree.clearTree();
                         tree.isLoaded = false;
                         clearedCount++;
                     }
@@ -6223,16 +6964,16 @@ namespace mcu {
                 return trees[index];
             }
 
-            node_layout* layout_ptr() {
-                return &layout;
+            node_resource* resource_ptr() {
+                return &resources;
             }
 
-            const node_layout* layout_ptr() const {
-                return &layout;
+            const node_resource* resource_ptr() const {
+                return &resources;
             }
 
-            const node_layout& get_layout() const {
-                return layout;
+            const node_resource& get_resource() const {
+                return resources;
             }
 
             size_t get_total_nodes() const {
@@ -6265,7 +7006,7 @@ namespace mcu {
             }
 
             uint8_t bits_per_node() const {
-                return layout.bits_per_node();
+                return resources.bits_per_building_node();
             }
 
             //  model size in ram 
@@ -6273,7 +7014,8 @@ namespace mcu {
                 size_t size = 0;
                 size += sizeof(*this);                           
                 size += config_ptr->num_trees * sizeof(Rf_tree);    
-                size += (total_nodes * layout.bits_per_node() + 7) / 8;  
+                // Approximate: internal nodes + mixed nodes + leaf nodes are already packed.
+                size += (total_nodes * resources.bits_per_internal_node() + 7) / 8;
                 size += predictClass.memory_usage();
                 size += queue_nodes.memory_usage();
                 return size;

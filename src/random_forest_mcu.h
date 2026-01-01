@@ -16,7 +16,8 @@ namespace mcu{
     class RandomForest{
         template<uint8_t bits>
         using TreeSampleIDs = ID_vector<sample_type,bits>;
-#ifndef RF_STATIC_MODEL
+
+    #ifndef RF_STATIC_MODEL
         struct TrainingContext {
             Rf_data base_data;
             Rf_data train_data;
@@ -30,7 +31,7 @@ namespace mcu{
         };
 
         TrainingContext* training_ctx = nullptr;
-#endif
+    #endif
 
         Rf_base base;
         Rf_config config;
@@ -43,7 +44,7 @@ namespace mcu{
         Rf_data* base_data_stub = nullptr;
 
         // Pre-allocated buffers for inference
-        packed_vector<8> categorization_buffer;
+        packed_vector<8> quantization_buffer;
         mutable char path_buffer[RF_PATH_BUFFER] = {'\0'};
 
     #ifndef RF_STATIC_MODEL
@@ -148,8 +149,8 @@ namespace mcu{
             }
 
             // Initialize inference optimization buffers
-            categorization_buffer.set_bits_per_value(config.quantization_coefficient);
-            categorization_buffer.resize(config.num_features, 0);
+            quantization_buffer.set_bits_per_value(config.quantization_coefficient);
+            quantization_buffer.resize(config.num_features, 0);
             return true;
         }
         
@@ -264,11 +265,12 @@ namespace mcu{
             } while(false);
 
             if(success){
-                // update config with layout info after forest is built
-                config.threshold_bits = forest_container.layout_ptr()->threshold_bits();
-                config.feature_bits = forest_container.layout_ptr()->feature_bits();
-                config.label_bits = forest_container.layout_ptr()->label_bits();
-                config.child_bits = forest_container.layout_ptr()->child_bits();
+                // update config with resource info after forest is built
+                const node_resource* res = forest_container.resource_ptr();
+                config.threshold_bits = res->threshold_bits;
+                config.feature_bits = res->feature_bits;
+                config.label_bits = res->label_bits;
+                config.child_bits = res->child_bits;
         #ifdef DEV_STAGE
                 model_report();
         #endif
@@ -323,7 +325,7 @@ namespace mcu{
             
             for(uint8_t i = 0; i < config.num_trees; i++){
                 Rf_tree tree(i);
-                tree.set_layout(forest_container.layout_ptr(), true);
+                tree.set_resource(forest_container.resource_ptr(), true);
                 tree.reset_node_storage(estimated_nodes);
                 queue_nodes.clear();
 
@@ -903,11 +905,15 @@ namespace mcu{
                 return;
             }
 
-            node_layout* layout = tree.layout;
+            if (!tree.resource) {
+                RF_DEBUG(0, "❌ Tree resource not set");
+                return;
+            }
+            const node_resource& res = *tree.resource;
             RF_DEBUG(1, "🌳 Building tree... ");
 
             size_t reservedCapacity = tree.nodes.capacity();
-            if (tree.nodes.get_bits_per_value() != layout->bits_per_node()) {
+            if (tree.nodes.get_bits_per_value() != res.bits_per_building_node()) {
                 tree.reset_node_storage(reservedCapacity);
             } else {
                 tree.nodes.clear();
@@ -922,11 +928,11 @@ namespace mcu{
             }
 
             // Initialize root node as a safe leaf node (will be updated during build)
-            Tree_node rootNode;
+            Building_node rootNode;
             rootNode.setIsLeaf(true);
-            rootNode.setLabel(0, layout->label_layout);
-            rootNode.setFeatureID(0, layout->featureID_layout);
-            rootNode.setLeftChildIndex(0, layout->left_child_layout);
+            rootNode.setLabel(0, res.get_Building_node_label_layout());
+            rootNode.setFeatureID(0, res.get_Building_node_featureID_layout());
+            rootNode.setLeftChildIndex(0, res.get_Building_node_left_child_layout());
             tree.nodes.push_back(rootNode);
 
             vector<sample_type> indices;
@@ -946,13 +952,13 @@ namespace mcu{
                 NodeStats stats(config.num_labels);
                 stats.analyzeSamples(indices, current.begin, current.end, config.num_labels, ctx->train_data);
 
-                if(current.nodeIndex >= forest_container.get_layout().max_nodes()){
+                if(current.nodeIndex >= res.max_nodes()){
                     RF_DEBUG(2, "⚠️ Warning: Exceeded maximum node limit. Forcing leaf node 🌿.");
                     label_type leafLabel = stats.majorityLabel;
-                    Tree_node nodeValue = tree.nodes.get(current.nodeIndex);
+                    Building_node nodeValue = tree.nodes.get(current.nodeIndex);
                     nodeValue.setIsLeaf(true);
-                    nodeValue.setLabel(leafLabel, layout->label_layout);
-                    nodeValue.setFeatureID(0, layout->featureID_layout);
+                    nodeValue.setLabel(leafLabel, res.get_Building_node_label_layout());
+                    nodeValue.setFeatureID(0, res.get_Building_node_featureID_layout());
                     tree.nodes.set(current.nodeIndex, nodeValue);
                     continue;
                 }
@@ -967,10 +973,10 @@ namespace mcu{
                     shouldBeLeaf = true;
                 }
                 if (shouldBeLeaf) {
-                    Tree_node nodeValue = tree.nodes.get(current.nodeIndex);
+                    Building_node nodeValue = tree.nodes.get(current.nodeIndex);
                     nodeValue.setIsLeaf(true);
-                    nodeValue.setLabel(leafLabel, layout->label_layout);
-                    nodeValue.setFeatureID(0, layout->featureID_layout);
+                    nodeValue.setLabel(leafLabel, res.get_Building_node_label_layout());
+                    nodeValue.setFeatureID(0, res.get_Building_node_featureID_layout());
                     tree.nodes.set(current.nodeIndex, nodeValue);
                     continue;
                 }
@@ -988,10 +994,10 @@ namespace mcu{
                                                 selectedFeatures, config.use_gini, config.num_labels);
 
                 if (bestSplit.leftCount < config.min_leaf || bestSplit.rightCount < config.min_leaf) {
-                    Tree_node nodeValue = tree.nodes.get(current.nodeIndex);
+                    Building_node nodeValue = tree.nodes.get(current.nodeIndex);
                     nodeValue.setIsLeaf(true);
-                    nodeValue.setLabel(leafLabel, layout->label_layout);
-                    nodeValue.setFeatureID(0, layout->featureID_layout);
+                    nodeValue.setLabel(leafLabel, res.get_Building_node_label_layout());
+                    nodeValue.setFeatureID(0, res.get_Building_node_featureID_layout());
                     tree.nodes.set(current.nodeIndex, nodeValue);
                     continue;
                 }
@@ -1009,17 +1015,17 @@ namespace mcu{
                 }
 
                 if (bestSplit.gain <= adaptive_threshold) {
-                    Tree_node nodeValue = tree.nodes.get(current.nodeIndex);
+                    Building_node nodeValue = tree.nodes.get(current.nodeIndex);
                     nodeValue.setIsLeaf(true);
-                    nodeValue.setLabel(leafLabel, layout->label_layout);
-                    nodeValue.setFeatureID(0, layout->featureID_layout);
+                    nodeValue.setLabel(leafLabel, res.get_Building_node_label_layout());
+                    nodeValue.setFeatureID(0, res.get_Building_node_featureID_layout());
                     tree.nodes.set(current.nodeIndex, nodeValue);
                     continue;
                 }
 
-                Tree_node splitNode = tree.nodes.get(current.nodeIndex);
-                splitNode.setFeatureID(bestSplit.featureID, layout->featureID_layout);
-                splitNode.setThresholdSlot(bestSplit.thresholdSlot, layout->threshold_layout);
+                Building_node splitNode = tree.nodes.get(current.nodeIndex);
+                splitNode.setFeatureID(bestSplit.featureID, res.get_Building_node_featureID_layout());
+                splitNode.setThresholdSlot(bestSplit.thresholdSlot, res.get_Building_node_threshold_layout());
                 splitNode.setIsLeaf(false);
                 tree.nodes.set(current.nodeIndex, splitNode);
 
@@ -1044,22 +1050,22 @@ namespace mcu{
                 node_type leftChildIndex = tree.nodes.size();
                 node_type rightChildIndex = static_cast<node_type>(leftChildIndex + 1);
 
-                Tree_node parentNode = tree.nodes.get(current.nodeIndex);
-                parentNode.setLeftChildIndex(leftChildIndex, layout->left_child_layout);
+                Building_node parentNode = tree.nodes.get(current.nodeIndex);
+                parentNode.setLeftChildIndex(leftChildIndex, res.get_Building_node_left_child_layout());
                 tree.nodes.set(current.nodeIndex, parentNode);
 
                 // Initialize child nodes as leaves with default label to prevent uninitialized traversal
-                Tree_node leftChild;
+                Building_node leftChild;
                 leftChild.setIsLeaf(true);
-                leftChild.setLabel(leafLabel, layout->label_layout);
-                leftChild.setFeatureID(0, layout->featureID_layout);
-                leftChild.setLeftChildIndex(0, layout->left_child_layout);
+                leftChild.setLabel(leafLabel, res.get_Building_node_label_layout());
+                leftChild.setFeatureID(0, res.get_Building_node_featureID_layout());
+                leftChild.setLeftChildIndex(0, res.get_Building_node_left_child_layout());
                 
-                Tree_node rightChild;
+                Building_node rightChild;
                 rightChild.setIsLeaf(true);
-                rightChild.setLabel(leafLabel, layout->label_layout);
-                rightChild.setFeatureID(0, layout->featureID_layout);
-                rightChild.setLeftChildIndex(0, layout->left_child_layout);
+                rightChild.setLabel(leafLabel, res.get_Building_node_label_layout());
+                rightChild.setFeatureID(0, res.get_Building_node_featureID_layout());
+                rightChild.setLeftChildIndex(0, res.get_Building_node_left_child_layout());
                 
                 tree.nodes.push_back(leftChild);
                 tree.nodes.push_back(rightChild);
@@ -1072,16 +1078,16 @@ namespace mcu{
                     queue_nodes.push_back(NodeToBuild(leftChildIndex, leftBegin, leftEnd, current.depth + 1));
                 } else {
                     // Already initialized as leaf, just ensure correct label
-                    Tree_node leafNode = tree.nodes.get(leftChildIndex);
-                    leafNode.setLabel(leafLabel, layout->label_layout);
+                    Building_node leafNode = tree.nodes.get(leftChildIndex);
+                    leafNode.setLabel(leafLabel, res.get_Building_node_label_layout());
                     tree.nodes.set(leftChildIndex, leafNode);
                 }
                 if (rightEnd > rightBegin) {
                     queue_nodes.push_back(NodeToBuild(rightChildIndex, rightBegin, rightEnd, current.depth + 1));
                 } else {
                     // Already initialized as leaf, just ensure correct label
-                    Tree_node leafNode = tree.nodes.get(rightChildIndex);
-                    leafNode.setLabel(leafLabel, layout->label_layout);
+                    Building_node leafNode = tree.nodes.get(rightChildIndex);
+                    leafNode.setLabel(leafLabel, res.get_Building_node_label_layout());
                     tree.nodes.set(rightChildIndex, leafNode);
                 }
             }
@@ -1534,13 +1540,13 @@ namespace mcu{
             // Quantize input features into preallocated buffer (also detect concept drift)
             uint16_t drift_feature = 0;
             float drift_value = 0.0f;
-            const bool drift_sample = quantizer.quantizeFeatures(features, categorization_buffer, &drift_feature, &drift_value);
+            const bool drift_sample = quantizer.quantizeFeatures(features, quantization_buffer, &drift_feature, &drift_value);
 
-            // perform prediction using the quantized buffer (categorization_buffer -> actual features expected by forest)
-            result.i_label = forest_container.predict_features(categorization_buffer);
+            // perform prediction using the quantized buffer (quantization_buffer -> actual features expected by forest)
+            result.i_label = forest_container.predict_features(quantization_buffer);
 
             if (__builtin_expect(config.enable_retrain, 1)) {
-                Rf_sample sample(categorization_buffer, result.i_label);
+                Rf_sample sample(quantization_buffer, result.i_label);
                 if(auto* pd = ensure_pending_data()){
                     if(Rf_data* base_handle = ensure_base_data_stub()){
                         pd->add_pending_sample(sample, *base_handle, drift_sample, drift_feature, drift_value);

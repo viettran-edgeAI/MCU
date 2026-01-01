@@ -1547,8 +1547,8 @@ public:
 
     // Convert and save forest in MCU-friendly 32-bit packed format
     bool convertForestToMCU(const std::string& folder_path = result_folder) {
-        std::cout << "🔄 Convert model to mcu format...\n";
-        // Determine MCU packing requirements
+        std::cout << "🔄 Converting model to MCU unified compact format (FRC3)...\n";
+
         auto bits_required = [](uint32_t value) -> uint8_t {
             uint8_t bits = 0;
             do {
@@ -1558,216 +1558,391 @@ public:
             return static_cast<uint8_t>(bits == 0 ? 1 : bits);
         };
 
-        // Collect metadata
+        // MCU unified forest format expected by Rf_tree_container::loadForestUnified():
+        // magic(u32)="FRC3" + version(u8)=3 + treeCount(u8) + tBits,fBits,lBits,cBits (u8 each)
+        // then per tree:
+        // treeIndex(u8) + rootLeaf(u8) + rootIndex(u32)
+        // branchCount(u32) + internalCount(u32) + mixedCount(u32) + leafCount(u32)
+        // inBits(u8)+mxBits(u8)+lfBits(u8)
+        // kindBytes(u32) + kindBytes raw (bit-packed)
+        // internal nodes (little-endian, inBytes each)
+        // mixed nodes (little-endian, mxBytes each)
+        // leaf labels (little-endian, lfBytes each)
+
+        auto write_u8 = [](std::ofstream& out, uint8_t v) {
+            out.write(reinterpret_cast<const char*>(&v), 1);
+        };
+        auto write_u32_le = [](std::ofstream& out, uint32_t v) {
+            uint8_t b[4] = {
+                static_cast<uint8_t>(v & 0xFFu),
+                static_cast<uint8_t>((v >> 8) & 0xFFu),
+                static_cast<uint8_t>((v >> 16) & 0xFFu),
+                static_cast<uint8_t>((v >> 24) & 0xFFu),
+            };
+            out.write(reinterpret_cast<const char*>(b), 4);
+        };
+        auto write_le = [](std::ofstream& out, uint64_t v, uint8_t bytes) {
+            for (uint8_t b = 0; b < bytes; ++b) {
+                uint8_t byte = static_cast<uint8_t>((v >> (8u * b)) & 0xFFu);
+                out.write(reinterpret_cast<const char*>(&byte), 1);
+            }
+        };
+
+        struct NodeResourceBits {
+            uint8_t threshold_bits = 1;
+            uint8_t feature_bits = 1;
+            uint8_t label_bits = 1;
+            uint8_t child_bits = 1;
+
+            uint8_t bits_per_internal_node() const {
+                return static_cast<uint8_t>(1 + threshold_bits + feature_bits + child_bits);
+            }
+            uint8_t bits_per_mixed_node() const {
+                return static_cast<uint8_t>(1 + threshold_bits + feature_bits + child_bits + child_bits);
+            }
+            uint8_t bits_per_leaf_node() const {
+                return label_bits;
+            }
+        } res;
+
+        struct CompactTree {
+            uint8_t tree_index = 0;
+            bool root_is_leaf = false;
+            uint32_t root_index = 0;
+            vector<uint8_t> branch_kind;      // 0=internal, 1=mixed (branch-index space)
+            vector<uint64_t> internal_nodes;  // packed_data
+            vector<uint64_t> mixed_nodes;     // packed_data
+            vector<uint16_t> leaf_nodes;      // label ids
+            uint32_t max_child_index = 0;
+            uint32_t max_feature_id = 0;
+            uint32_t max_label_id = 0;
+            uint32_t max_threshold_slot = 0;
+        };
+
+        auto pack_internal = [&](bool children_are_leaf, uint16_t threshold_slot, uint16_t feature_id, uint32_t left_child) -> uint64_t {
+            uint64_t packed = 0;
+            packed |= static_cast<uint64_t>(children_are_leaf ? 1u : 0u);
+            const uint8_t tStart = 1;
+            const uint8_t fStart = static_cast<uint8_t>(tStart + res.threshold_bits);
+            const uint8_t cStart = static_cast<uint8_t>(fStart + res.feature_bits);
+
+            const uint64_t tMask = (res.threshold_bits >= 64) ? ~0ull : ((1ull << res.threshold_bits) - 1ull);
+            const uint64_t fMask = (res.feature_bits >= 64) ? ~0ull : ((1ull << res.feature_bits) - 1ull);
+            const uint64_t cMask = (res.child_bits >= 64) ? ~0ull : ((1ull << res.child_bits) - 1ull);
+
+            packed |= (static_cast<uint64_t>(threshold_slot) & tMask) << tStart;
+            packed |= (static_cast<uint64_t>(feature_id) & fMask) << fStart;
+            packed |= (static_cast<uint64_t>(left_child) & cMask) << cStart;
+            return packed;
+        };
+
+        auto pack_mixed = [&](bool left_is_leaf, uint16_t threshold_slot, uint16_t feature_id, uint32_t left_child, uint32_t right_child) -> uint64_t {
+            uint64_t packed = 0;
+            packed |= static_cast<uint64_t>(left_is_leaf ? 1u : 0u);
+            const uint8_t tStart = 1;
+            const uint8_t fStart = static_cast<uint8_t>(tStart + res.threshold_bits);
+            const uint8_t lStart = static_cast<uint8_t>(fStart + res.feature_bits);
+            const uint8_t rStart = static_cast<uint8_t>(lStart + res.child_bits);
+
+            const uint64_t tMask = (res.threshold_bits >= 64) ? ~0ull : ((1ull << res.threshold_bits) - 1ull);
+            const uint64_t fMask = (res.feature_bits >= 64) ? ~0ull : ((1ull << res.feature_bits) - 1ull);
+            const uint64_t cMask = (res.child_bits >= 64) ? ~0ull : ((1ull << res.child_bits) - 1ull);
+
+            packed |= (static_cast<uint64_t>(threshold_slot) & tMask) << tStart;
+            packed |= (static_cast<uint64_t>(feature_id) & fMask) << fStart;
+            packed |= (static_cast<uint64_t>(left_child) & cMask) << lStart;
+            packed |= (static_cast<uint64_t>(right_child) & cMask) << rStart;
+            return packed;
+        };
+
+        auto convert_tree_to_compact = [&](uint16_t tree_idx) -> CompactTree {
+            CompactTree ct;
+            ct.tree_index = static_cast<uint8_t>(tree_idx);
+
+            const auto& tree = root[tree_idx];
+            const uint32_t nodeCount = static_cast<uint32_t>(tree.nodes.size());
+            if (nodeCount == 0) {
+                return ct;
+            }
+
+            vector<uint32_t> old_to_leaf(nodeCount, 0xFFFFFFFFu);
+            vector<uint32_t> old_to_branch(nodeCount, 0xFFFFFFFFu);
+
+            for (uint32_t i = 0; i < nodeCount; ++i) {
+                const auto& n = tree.nodes[i];
+                ct.max_feature_id = std::max<uint32_t>(ct.max_feature_id, n.getFeatureID());
+                ct.max_label_id = std::max<uint32_t>(ct.max_label_id, n.getLabel());
+                ct.max_threshold_slot = std::max<uint32_t>(ct.max_threshold_slot, n.getThresholdSlot());
+
+                if (n.getIsLeaf()) {
+                    old_to_leaf[i] = static_cast<uint32_t>(ct.leaf_nodes.size());
+                    ct.leaf_nodes.push_back(static_cast<uint16_t>(n.getLabel()));
+                } else {
+                    old_to_branch[i] = static_cast<uint32_t>(ct.branch_kind.size());
+                    // Reserve branch_kind size later; we use branch_kind size as branchCounter during scan
+                    ct.branch_kind.push_back(0);
+                }
+            }
+
+            // branch_kind currently sized=branchCount but values are placeholders.
+            // We'll rebuild it in correct old-order below.
+            const uint32_t branchCount = static_cast<uint32_t>(ct.branch_kind.size());
+            ct.branch_kind.clear();
+            ct.branch_kind.reserve(branchCount);
+
+            // Root mapping
+            const auto& rootNode = tree.nodes[0];
+            ct.root_is_leaf = rootNode.getIsLeaf();
+            ct.root_index = ct.root_is_leaf ? old_to_leaf[0] : old_to_branch[0];
+
+            // Build compact branch nodes in old-order filtering.
+            for (uint32_t i = 0; i < nodeCount; ++i) {
+                const auto& n = tree.nodes[i];
+                if (n.getIsLeaf()) {
+                    continue;
+                }
+
+                const uint32_t left_old = n.getLeftChildIndex();
+                const uint32_t right_old = left_old + 1u;
+                if (left_old >= nodeCount || right_old >= nodeCount) {
+                    // Invalid tree layout
+                    ct.branch_kind.clear();
+                    ct.internal_nodes.clear();
+                    ct.mixed_nodes.clear();
+                    ct.leaf_nodes.clear();
+                    return ct;
+                }
+
+                const bool left_leaf = tree.nodes[left_old].getIsLeaf();
+                const bool right_leaf = tree.nodes[right_old].getIsLeaf();
+
+                const uint16_t feature_id = static_cast<uint16_t>(n.getFeatureID());
+                const uint16_t threshold_slot = static_cast<uint16_t>(n.getThresholdSlot());
+
+                if (left_leaf == right_leaf) {
+                    const bool children_are_leaf = left_leaf;
+                    const uint32_t left_new = children_are_leaf ? old_to_leaf[left_old] : old_to_branch[left_old];
+                    ct.internal_nodes.push_back(pack_internal(children_are_leaf, threshold_slot, feature_id, left_new));
+                    ct.branch_kind.push_back(0);
+                    ct.max_child_index = std::max<uint32_t>(ct.max_child_index, left_new + 1u); // right = left + 1
+                } else {
+                    const bool left_is_leaf = left_leaf;
+                    const uint32_t left_new = left_is_leaf ? old_to_leaf[left_old] : old_to_branch[left_old];
+                    const uint32_t right_new = right_leaf ? old_to_leaf[right_old] : old_to_branch[right_old];
+                    ct.mixed_nodes.push_back(pack_mixed(left_is_leaf, threshold_slot, feature_id, left_new, right_new));
+                    ct.branch_kind.push_back(1);
+                    ct.max_child_index = std::max<uint32_t>(ct.max_child_index, std::max(left_new, right_new));
+                }
+            }
+
+            // Update max_child_index for leaf root case
+            if (ct.root_is_leaf) {
+                ct.max_child_index = std::max<uint32_t>(ct.max_child_index, ct.root_index);
+            } else {
+                ct.max_child_index = std::max<uint32_t>(ct.max_child_index, ct.root_index);
+            }
+
+            return ct;
+        };
+
+        if (config.num_trees == 0) {
+            std::cout << "❌ num_trees is 0; nothing to export\n";
+            return false;
+        }
+
+        if (config.num_labels > 255) {
+            std::cout << "❌ MCU label_type is uint8_t; num_labels=" << config.num_labels << " exceeds 255\n";
+            return false;
+        }
+
+        // First pass: collect global maxima for bit sizing.
         uint32_t maxFeatureId = 0;
         uint32_t maxLabelId = 0;
-        uint32_t maxChildIndex = 0;
-        uint32_t maxNodesPerTree = 0;
         uint32_t maxThresholdSlot = 0;
+        uint32_t maxNodesInAnyTree = 0;
         bool missingTree = false;
 
         for (uint16_t i = 0; i < config.num_trees; ++i) {
-            const auto& tree = root[i];
-            const size_t nodeCount = tree.nodes.size();
-            if (nodeCount == 0) {
+            if (i >= root.size() || root[i].nodes.empty()) {
                 missingTree = true;
-                continue;
+                break;
             }
-            if (nodeCount > RF_MAX_NODES) {
-                std::cout << "❌ Tree " << static_cast<int>(i)
-                          << " exceeds MCU node limit (" << nodeCount << "/" << RF_MAX_NODES << ")\n";
-                return false;
-            } 
-
-            maxNodesPerTree = std::max(maxNodesPerTree, static_cast<uint32_t>(nodeCount));
-            if (nodeCount > 0) {
-                uint32_t upperIndex = static_cast<uint32_t>(nodeCount - 1);
-                maxChildIndex = std::max(maxChildIndex, upperIndex);
-            }
-
-            for (const auto& node : tree.nodes) {
-                if (!node.getIsLeaf()) {
-                    uint32_t leftIndex = node.getLeftChildIndex();
-                    uint32_t rightIndex = node.getRightChildIndex();
-                    if (leftIndex > maxChildIndex) maxChildIndex = leftIndex;
-                    if (rightIndex > maxChildIndex) maxChildIndex = rightIndex;
-                }
-                maxFeatureId = std::max<uint32_t>(maxFeatureId, node.getFeatureID());
-                maxLabelId = std::max<uint32_t>(maxLabelId, node.getLabel());
-                maxThresholdSlot = std::max<uint32_t>(maxThresholdSlot, node.getThresholdSlot());
+            maxNodesInAnyTree = std::max<uint32_t>(maxNodesInAnyTree, static_cast<uint32_t>(root[i].nodes.size()));
+            for (const auto& n : root[i].nodes) {
+                maxFeatureId = std::max(maxFeatureId, n.getFeatureID());
+                maxLabelId = std::max(maxLabelId, n.getLabel());
+                maxThresholdSlot = std::max(maxThresholdSlot, (uint32_t)n.getThresholdSlot());
             }
         }
 
-
         if (missingTree) {
-            std::cout << "❌ One or more trees are empty; aborting MCU export\n";
+            std::cout << "❌ One or more trees are empty/invalid; aborting MCU export\n";
             return false;
         }
 
         if (config.num_features > 0) {
             uint32_t cfgMaxFeature = static_cast<uint32_t>(config.num_features - 1);
-            if (cfgMaxFeature > maxFeatureId) maxFeatureId = cfgMaxFeature;
+            maxFeatureId = std::max(maxFeatureId, cfgMaxFeature);
         }
         if (config.num_labels > 0) {
             uint32_t cfgMaxLabel = static_cast<uint32_t>(config.num_labels - 1);
-            if (cfgMaxLabel > maxLabelId) maxLabelId = cfgMaxLabel;
+            maxLabelId = std::max(maxLabelId, cfgMaxLabel);
         }
 
-        if (maxNodesPerTree > 0) {
-            uint32_t upperIndex = maxNodesPerTree - 1;
-            if (upperIndex > maxChildIndex) maxChildIndex = upperIndex;
-        }
+        // Compute resource bit-widths (must match MCU node_resource expectations)
+        res.threshold_bits = QuantizationHelper::sanitizeBits(static_cast<int>(config.quantization_coefficient));
+        res.feature_bits = std::min<uint8_t>(10, std::max<uint8_t>(1, bits_required(maxFeatureId)));
+        res.label_bits = std::min<uint8_t>(8, std::max<uint8_t>(1, bits_required(maxLabelId)));
+        res.child_bits = std::max<uint8_t>(1, bits_required(maxNodesInAnyTree));
 
-        // Basic bit layout per user principle: is_leaf(1) + threshold_bits + feature_bits + label_bits + child_bits
-        uint8_t featureBits = std::max<uint8_t>(1, bits_required(maxFeatureId));
-        uint8_t labelBits = std::max<uint8_t>(1, bits_required(maxLabelId));
-        uint8_t thresholdBits = QuantizationHelper::sanitizeBits(static_cast<int>(config.quantization_coefficient));
-        if (thresholdBits == 0) thresholdBits = 1;
+        // Second pass: convert trees using the calculated bit widths.
+        vector<CompactTree> compact;
+        compact.reserve(config.num_trees);
 
-        // Remaining child bits in 32-bit word
-        int childBitsCalculated = 32 - (1 + thresholdBits + featureBits + labelBits);
-        if (childBitsCalculated <= 0) {
-            std::cout << "❌ Not enough bits for child index in 32-bit layout. (featureBits=" << (int)featureBits
-                    << ", labelBits=" << (int)labelBits << ", thresholdBits=" << (int)thresholdBits << ")\n";
-
-            return false;
-        }
-        uint8_t childBits = static_cast<uint8_t>(childBitsCalculated);
-
-        // Cap childBits to the required number of bits for maxChildIndex
-        uint8_t requiredChildBits = bits_required(maxChildIndex);
-        if (requiredChildBits > childBits) {
-            std::cout << "❌ Not enough bits for child index in 32-bit layout. (requiredChildBits=" << (int)requiredChildBits
-                      << ", availableChildBits=" << (int)childBits << ")\n";
-            return false;
-        } else{
-            childBits = requiredChildBits;
-        }
-
-        // compute starts
-        struct PackedLayout32 {
-            uint8_t threshold_start = 1;
-            uint8_t threshold_bits = 1;
-            uint8_t feature_start = 2;
-            uint8_t feature_bits = 1;
-            uint8_t label_start = 3;
-            uint8_t label_bits = 1;
-            uint8_t child_start = 4;
-            uint8_t child_bits = 1;
-            uint8_t bits_per_node() const { return static_cast<uint8_t>(1 + threshold_bits + feature_bits + label_bits + child_bits); }
-            void update_starts() {
-                feature_start = static_cast<uint8_t>(threshold_start + threshold_bits);
-                label_start = static_cast<uint8_t>(feature_start + feature_bits);
-                child_start = static_cast<uint8_t>(label_start + label_bits);
+        for (uint16_t i = 0; i < config.num_trees; ++i) {
+            CompactTree ct = convert_tree_to_compact(i);
+            if (ct.leaf_nodes.empty() && ct.branch_kind.empty() && !ct.root_is_leaf) {
+                std::cout << "❌ Tree " << i << " conversion failed\n";
+                return false;
             }
-        } layout32;
-        layout32.threshold_bits = thresholdBits;
-        layout32.feature_bits = featureBits;
-        layout32.label_bits = labelBits;
-        layout32.child_bits = childBits;
-        layout32.update_starts();
+            compact.push_back(std::move(ct));
+        }
 
-        // Save calculated layout into config for MCU to use
-        config.threshold_bits = layout32.threshold_bits;
-        config.feature_bits = layout32.feature_bits;
-        config.label_bits = layout32.label_bits;
-        config.child_bits = layout32.child_bits;
-
-        auto mask_for_bits = [](uint8_t bits) -> uint32_t {
-            if (bits >= 32) return 0xFFFFFFFFu; 
-            if (bits == 0) return 0u;
-            return static_cast<uint32_t>(((1u << bits) - 1u));
-        };
-        const uint32_t featureMask = mask_for_bits(layout32.feature_bits);
-        const uint32_t labelMask = mask_for_bits(layout32.label_bits);
-        const uint32_t thresholdMask = mask_for_bits(layout32.threshold_bits);
-        const uint32_t childMask = mask_for_bits(layout32.child_bits);
-
-        if (static_cast<uint64_t>(maxFeatureId) > featureMask || static_cast<uint64_t>(maxLabelId) > labelMask || static_cast<uint64_t>(maxThresholdSlot) > thresholdMask || static_cast<uint64_t>(maxChildIndex) > childMask) {
-            std::cout << "❌ Forest metadata exceeds MCU bit layout."
-                        << " MaxFeature=" << maxFeatureId
-                        << " MaxLabel=" << maxLabelId
-                        << " MaxThresholdSlot=" << maxThresholdSlot
-                        << " MaxChildIndex=" << maxChildIndex << "\n";
+        // Enforce that the compact node payloads fit within 32 bits on ESP32 (size_t is 32-bit there).
+        const uint8_t inBits = res.bits_per_internal_node();
+        const uint8_t mxBits = res.bits_per_mixed_node();
+        const uint8_t lfBits = res.bits_per_leaf_node();
+        if (inBits > 32 || mxBits > 32 || lfBits > 8) {
+            std::cout << "❌ Node layout exceeds MCU limits (internalBits=" << (int)inBits
+                      << ", mixedBits=" << (int)mxBits
+                      << ", leafBits=" << (int)lfBits << ").\n";
+            std::cout << "   Try reducing num_features/num_nodes or quantization_coefficient.\n";
             return false;
         }
 
-        // Write MCU format (32-bit packed nodes)
-        const uint32_t FOREST_MAGIC = 0x464F5253; // "FORS"
+        // Update config layout bits for MCU init.
+        config.threshold_bits = res.threshold_bits;
+        config.feature_bits = res.feature_bits;
+        config.label_bits = res.label_bits;
+        config.child_bits = res.child_bits;
+
+        const uint8_t inBytes = static_cast<uint8_t>((inBits + 7) / 8);
+        const uint8_t mxBytes = static_cast<uint8_t>((mxBits + 7) / 8);
+        const uint8_t lfBytes = static_cast<uint8_t>((lfBits + 7) / 8);
+
+        // Create output directory if needed
+        #ifdef _WIN32
+            _mkdir(folder_path.c_str());
+        #else
+            mkdir(folder_path.c_str(), 0755);
+        #endif
+
         std::string unified_path = folder_path + "/" + model_name + "_forest.bin";
         std::ofstream out(unified_path, std::ios::binary);
         if (!out.is_open()) {
             std::cout << "❌ Failed to create unified forest file: " << unified_path << "\n";
-            std::cout << "❌ MCU export aborted.\n";
             return false;
         }
 
-        out.write(reinterpret_cast<const char*>(&FOREST_MAGIC), sizeof(FOREST_MAGIC));
-        uint8_t bits_per_node = static_cast<uint8_t>(layout32.bits_per_node());
-        if (bits_per_node == 0) bits_per_node = 32;
-        uint8_t bytes_per_node = static_cast<uint8_t>((bits_per_node + 7) / 8);
-        out.write(reinterpret_cast<const char*>(&bits_per_node), sizeof(bits_per_node));
-        uint8_t tree_count_written = 0;
-        out.write(reinterpret_cast<const char*>(&tree_count_written), sizeof(tree_count_written));
+        // Header
+        const uint32_t FOREST_MAGIC = 0x33435246; // "FRC3"
+        write_u32_le(out, FOREST_MAGIC);
+        write_u8(out, 3); // version
+        write_u8(out, static_cast<uint8_t>(config.num_trees));
+        write_u8(out, res.threshold_bits);
+        write_u8(out, res.feature_bits);
+        write_u8(out, res.label_bits);
+        write_u8(out, res.child_bits);
 
-        uint32_t total_nodes_written = 0;
-        for (uint16_t i = 0; i < config.num_trees; ++i) {
-            if (root[i].nodes.empty()) continue;
-            uint32_t node_count = static_cast<uint32_t>(root[i].nodes.size());
+        uint32_t total_branch = 0;
+        uint32_t total_internal = 0;
+        uint32_t total_mixed = 0;
+        uint32_t total_leaf = 0;
+        uint32_t total_kind_bytes = 0;
 
-            uint8_t tree_index = static_cast<uint8_t>(i);
-            out.write(reinterpret_cast<const char*>(&tree_index), sizeof(tree_index));
-            out.write(reinterpret_cast<const char*>(&node_count), sizeof(node_count));
+        for (const auto& ct : compact) {
+            const uint32_t branchCount = static_cast<uint32_t>(ct.branch_kind.size());
+            const uint32_t internalCount = static_cast<uint32_t>(ct.internal_nodes.size());
+            const uint32_t mixedCount = static_cast<uint32_t>(ct.mixed_nodes.size());
+            const uint32_t leafCount = static_cast<uint32_t>(ct.leaf_nodes.size());
+            const uint32_t kindBytes = (branchCount + 7u) / 8u;
 
-            for (const auto& node : root[i].nodes) {
-                uint32_t thresholdSlot = node.getThresholdSlot();
-                uint32_t featureId = node.getFeatureID();
-                uint32_t labelId = node.getLabel();
-                uint32_t leftIndex = node.getLeftChildIndex();
+            write_u8(out, ct.tree_index);
+            write_u8(out, ct.root_is_leaf ? 1u : 0u);
+            write_u32_le(out, ct.root_index);
 
-                if (thresholdSlot > thresholdMask || featureId > featureMask || labelId > labelMask || leftIndex > childMask) {
-                    std::cout << "❌ Node encoding overflow at tree " << static_cast<int>(i)
-                                << ", feature=" << featureId
-                                << ", label=" << labelId
-                                << ", leftIndex=" << leftIndex << "\n";
-                    out.close();
-                    std::remove(unified_path.c_str());
-                    return false;
+            write_u32_le(out, branchCount);
+            write_u32_le(out, internalCount);
+            write_u32_le(out, mixedCount);
+            write_u32_le(out, leafCount);
+
+            write_u8(out, inBits);
+            write_u8(out, mxBits);
+            write_u8(out, lfBits);
+
+            write_u32_le(out, kindBytes);
+            for (uint32_t byteIndex = 0; byteIndex < kindBytes; ++byteIndex) {
+                uint8_t packed = 0;
+                const uint32_t base = byteIndex * 8u;
+                for (uint8_t bit = 0; bit < 8; ++bit) {
+                    const uint32_t idx = base + static_cast<uint32_t>(bit);
+                    if (idx < branchCount) {
+                        packed |= static_cast<uint8_t>((ct.branch_kind[idx] & 1u) << bit);
+                    }
                 }
-
-                uint32_t packed32 = 0u;
-                packed32 |= static_cast<uint32_t>(node.getIsLeaf() ? 1u : 0u);
-                packed32 |= (static_cast<uint32_t>(thresholdSlot) & thresholdMask) << layout32.threshold_start;
-                packed32 |= (static_cast<uint32_t>(featureId) & featureMask) << layout32.feature_start;
-                packed32 |= (static_cast<uint32_t>(labelId) & labelMask) << layout32.label_start;
-                packed32 |= (static_cast<uint32_t>(leftIndex) & childMask) << layout32.child_start;
-
-                out.write(reinterpret_cast<const char*>(&packed32), bytes_per_node);
+                write_u8(out, packed);
             }
 
-            ++tree_count_written;
-            total_nodes_written += node_count;
+            for (uint64_t raw : ct.internal_nodes) {
+                write_le(out, raw, inBytes);
+            }
+            for (uint64_t raw : ct.mixed_nodes) {
+                write_le(out, raw, mxBytes);
+            }
+            for (uint16_t lbl : ct.leaf_nodes) {
+                write_le(out, static_cast<uint64_t>(lbl), lfBytes);
+            }
+
+            total_branch += branchCount;
+            total_internal += internalCount;
+            total_mixed += mixedCount;
+            total_leaf += leafCount;
+            total_kind_bytes += kindBytes;
         }
 
-        // Patch tree_count into header
-        out.seekp(static_cast<std::streamoff>(sizeof(FOREST_MAGIC) + sizeof(bits_per_node)), std::ios::beg);
-        out.write(reinterpret_cast<const char*>(&tree_count_written), sizeof(tree_count_written));
         out.close();
 
-        std::cout << "✅ Saved MCU unified forest: " << (int)tree_count_written << "/" << (int)config.num_trees
-                    << " trees (" << total_nodes_written << " nodes - " << (int)bits_per_node << " bits/node)\n";
         std::ifstream in_size(unified_path, std::ifstream::ate | std::ifstream::binary);
         if (in_size.is_open()) {
             std::streamsize size = in_size.tellg();
             in_size.close();
-            std::cout << "   - MCU Model file size: " << size << " bytes\n";
+            std::cout << "✅ Saved MCU unified forest (FRC3): " << unified_path << "\n";
+            std::cout << "   - Trees: " << config.num_trees
+                      << " | Branch: " << total_branch
+                      << " | Internal: " << total_internal
+                      << " | Mixed: " << total_mixed
+                      << " | Leaf: " << total_leaf << "\n";
+            std::cout << "   - File size: " << size << " bytes\n";
         }
-        size_t model_ram_size = (total_nodes_written * bits_per_node + 7)/ 8; // forest overhead
-        model_ram_size += 25 * config.num_trees; // overhead per tree
-        model_ram_size += 120; // overhead for forest
+
+        // Rough RAM estimate (payload bytes + per-tree overhead like MCU side)
+        size_t payload_bytes = 0;
+        payload_bytes += total_kind_bytes;
+        payload_bytes += static_cast<size_t>(total_internal) * inBytes;
+        payload_bytes += static_cast<size_t>(total_mixed) * mxBytes;
+        payload_bytes += static_cast<size_t>(total_leaf) * lfBytes;
+        size_t model_ram_size = payload_bytes;
+        model_ram_size += 25 * config.num_trees;
+        model_ram_size += 120;
         config.RAM_usage = model_ram_size;
-        std::cout << "   - Model size in RAM: ~" << model_ram_size << " bytes\n";
-        std::cout << "\n✅ Complete! Model files saved to 'trained_model/' directory.\n";
+        std::cout << "   - Node layout bits: t=" << (int)res.threshold_bits
+                  << " f=" << (int)res.feature_bits
+                  << " l=" << (int)res.label_bits
+                  << " c=" << (int)res.child_bits << "\n";
+        std::cout << "   - Compact bits: internal=" << (int)inBits << " mixed=" << (int)mxBits
+                  << " leaf=" << (int)lfBits << "\n";
+        std::cout << "   - Estimated RAM: ~" << model_ram_size << " bytes\n";
+
         saveConfig();
         return true;
     }

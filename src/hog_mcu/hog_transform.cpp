@@ -318,7 +318,7 @@ void HOG_MCU::setConfig(const Config& config) {
 
 bool HOG_MCU::loadConfigFromFile(const char* path) {
     if (!path || path[0] == '\0') {
-        Serial.println("HOG_MCU: Invalid configuration path");
+        RF_DEBUG(0, "HOG_MCU: Invalid configuration path");
         return false;
     }
 
@@ -333,8 +333,7 @@ bool HOG_MCU::loadConfigFromFile(const char* path) {
     }
 
     if (!configFile) {
-        Serial.print("HOG_MCU: Failed to open config file ");
-        Serial.println(path);
+        RF_DEBUG(0, "HOG_MCU: Failed to open config file %s", path);
         return false;
     }
 
@@ -350,7 +349,7 @@ bool HOG_MCU::loadConfigFromFile(const char* path) {
     configFile.close();
 
     if (content.length() == 0) {
-        Serial.println("HOG_MCU: Config file is empty");
+        RF_DEBUG(0, "HOG_MCU: Config file is empty");
         return false;
     }
 
@@ -412,7 +411,7 @@ bool HOG_MCU::loadConfigFromFile(const char* path) {
     }
     if (extractIntValue(content, "feature_length", featureLength)) {
         if (featureLength > 144) {
-            Serial.println("HOG_MCU: Warning - feature length exceeds 144; extra values will be ignored.");
+            RF_DEBUG(0, "HOG_MCU: Warning - feature length exceeds 144; extra values will be ignored.");
         }
     }
 
@@ -427,24 +426,24 @@ bool HOG_MCU::loadConfigFromFile(const char* path) {
         newConfig.hog_img_width <= 0 || newConfig.hog_img_height <= 0 ||
         newConfig.cell_size <= 0 || newConfig.block_size <= 0 ||
         newConfig.block_stride <= 0 || newConfig.nbins <= 0) {
-        Serial.println("HOG_MCU: Invalid parameters in configuration file");
+        RF_DEBUG(0, "HOG_MCU: Invalid parameters in configuration file");
         return false;
     }
 
     if (newConfig.block_size > newConfig.hog_img_width || newConfig.block_size > newConfig.hog_img_height) {
-        Serial.println("HOG_MCU: Block size must fit within HOG image dimensions");
+        RF_DEBUG(0, "HOG_MCU: Block size must fit within HOG image dimensions");
         return false;
     }
 
     if (newConfig.cell_size > newConfig.block_size) {
-        Serial.println("HOG_MCU: Cell size must not exceed block size");
+        RF_DEBUG(0, "HOG_MCU: Cell size must not exceed block size");
         return false;
     }
 
     int blocksX = (newConfig.hog_img_width - newConfig.block_size) / newConfig.block_stride + 1;
     int blocksY = (newConfig.hog_img_height - newConfig.block_size) / newConfig.block_stride + 1;
     if (blocksX <= 0 || blocksY <= 0) {
-        Serial.println("HOG_MCU: Invalid block stride or dimensions in configuration");
+        RF_DEBUG(0, "HOG_MCU: Invalid block stride or dimensions in configuration");
         return false;
     }
 
@@ -453,8 +452,7 @@ bool HOG_MCU::loadConfigFromFile(const char* path) {
     feature_csv_path_ = parsedFeatureCsv;
     feature_file_name_ = parsedFeatureFile;
 
-    Serial.print("HOG_MCU: Loaded configuration from ");
-    Serial.println(requestedPath);
+    RF_DEBUG(1, "HOG_MCU: Loaded configuration from %s", requestedPath.c_str());
 
     return true;
 }
@@ -478,7 +476,7 @@ void HOG_MCU::initializeBuffers() {
     if (buffer_size > 0) {
         processed_image_buffer = new uint8_t[buffer_size];
         if (!processed_image_buffer) {
-            Serial.println("Error: Failed to allocate image processing buffer");
+            RF_DEBUG(0, "Error: Failed to allocate image processing buffer");
         }
         
         // Allocate gradient computation buffers
@@ -500,7 +498,7 @@ void HOG_MCU::initializeBuffers() {
         if (!gradient_x_buffer || !gradient_y_buffer || !magnitude_buffer || 
             !angle_bin_buffer || !block_histogram_buffer || !cell_histogram_buffer ||
             !cell_grid_buffer) {
-            Serial.println("Error: Failed to allocate HOG optimization buffers");
+            RF_DEBUG(0, "Error: Failed to allocate HOG optimization buffers");
             cleanupBuffers();
         }
     }

@@ -1,0 +1,81 @@
+{
+    "data_path": {
+        "value": "../data_quantization/data/result/iot_device_failure_nml.csv",
+        "description": "Path to the normalized cv dataset."
+    },
+    "random_seed": {
+        "value":42,
+        "description": "Random seed for Rf_random."
+    },
+    "num_trees": {
+        "value": 1,
+        "description": "Number of trees in the random forest. default - 20, max - 100."
+    },
+    "split_ratio":{
+        "train_ratio" : 0.8,
+        "test_ratio" : 0.2,
+        "valid_ratio" : 0.0,
+        "description": "Ratios for splitting the dataset into training, testing, and validation sets."
+    },
+    "use_bootstrap": {
+        "value": true,
+        "options": [true, false],
+        "description": "Whether to use bootstrap sampling for trees."
+    },
+    "criterion": {
+        "value": "entropy",
+        "options": ["gini", "entropy"],
+        "description": "Splitting criteria for decision trees."
+    },
+    "min_split": {
+        "value": 4,
+        "status": "disabled",
+        "status_options": ["disabled", "enabled"],
+        "description": "disabled by default. enable to override min_split_range in training process"
+    },
+    "min_leaf": {
+        "value": 2,
+        "status": "disabled",
+        "status_options": ["disabled", "enabled"],
+        "description": "disabled by default. enable to override min_leaf_range in training process. Minimum number of samples required to be at a leaf node."
+    },
+    "max_depth": {
+        "value": 50,
+        "status": "disabled",
+        "status_options": ["disabled", "enabled"],
+        "description": "disabled by default. enable to override max_depth in training process."
+    },
+    "training_score": {
+        "value": "k_fold_score",
+        "options": ["oob_score", "valid_score", "k_fold_score"],
+        "description": "Method for evaluating model performance during training. oob_score: Out-of-bag validation, valid_score: Validation set, k_fold_score: K-fold cross validation"
+    },
+    "metric_score": {
+        "value": "PRECISION",
+        "options": ["ACCURACY", "PRECISION", "RECALL", "F1_SCORE"],
+        "status": "disabled",
+        "status_options": ["disabled", "overwrite", "stacked"],
+        "description": "Training evaluation metrics to optimize during model training",
+        "description_disabled": "Automatic flag selection based on dataset characteristics (imbalance analysis)",
+        "description_overwrite": "User flags completely replace automatic detection",
+        "description_stacked": "User flags are combined with auto-detected flags using bitwise OR"
+    },
+    "k_folds":{
+        "value": 4,
+        "description": "Number of folds for cross-validation when using k_fold_score."
+    },
+    "enable_retrain": {
+        "value": true,
+        "options": [true, false],
+        "description": "Whether to enable retraining of the model with new data."
+    },
+    "enable_auto_config": {
+        "value": false,
+        "options": [true, false],
+        "description": "Whether to automatically configure model parameters based on dataset characteristics."      
+    },
+    "max_samples": {
+        "value": 0,
+        "description": "Max samples in dataset as it grow in esp32 (0 = unlimited). When exceeded, oldest samples are removed (FIFO). "
+    }
+}

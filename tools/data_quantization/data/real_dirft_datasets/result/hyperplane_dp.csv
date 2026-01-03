@@ -1,0 +1,8 @@
+parameter,value
+quantization_coefficient,1
+num_features,56
+num_samples,32
+num_labels,3
+samples_label_0,9
+samples_label_1,10
+samples_label_2,13

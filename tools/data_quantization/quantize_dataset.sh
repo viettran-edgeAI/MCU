@@ -26,7 +26,7 @@ show_usage() {
     echo "Usage: $0 [-c quantization_config.json]"
     echo ""
     echo "Configuration is provided in JSON (default: quantization_config.json in this folder)."
-    echo "Fields: input_path, model_name, header_mode, label_column, max_features, quantization_bits,"
+    echo "Fields: input_path, model_name, HEADER, label_column, max_features, quantization_bits,"
     echo "        remove_outliers, max_samples, run_visualization"
     echo ""
     echo "Options:"
@@ -86,7 +86,7 @@ def emit(val):
 
 emit(get_value(cfg, "input_path", ""))
 emit(get_value(cfg, "model_name", ""))
-emit(str(get_value(cfg, "header_mode", "auto")).lower())
+emit(str(get_value(cfg, "header", "auto")).lower())
 emit(get_value(cfg, "max_features", 1023))
 emit(get_value(cfg, "quantization_bits", 2))
 emit(str(get_value(cfg, "run_visualization", True)).lower())
@@ -96,7 +96,7 @@ PY
 
 CSV_PATH="${CFG[0]}"
 MODEL_NAME="${CFG[1]}"
-HEADER_MODE="${CFG[2]}"
+HEADER="${CFG[2]}"
 MAX_FEATURES="${CFG[3]}"
 QUANT_BITS="${CFG[4]}"
 RUN_VISUALIZATION="${CFG[5]}"
@@ -120,7 +120,7 @@ if [[ -n "$MODEL_NAME" ]]; then
 else
     echo -e "  📛 Model name: ${GREEN}(derived from input)${NC}"
 fi
-echo -e "  📋 Header mode: ${GREEN}${HEADER_MODE:-auto}${NC}"
+echo -e "  📋 Header mode: ${GREEN}${HEADER:-auto}${NC}"
 echo -e "  📊 Max features: ${GREEN}${MAX_FEATURES:-1023}${NC}"
 echo -e "  🧮 Quantization bits: ${GREEN}${QUANT_BITS:-2}${NC}"
 echo -e "  🔁 Max samples (bin): ${GREEN}${MAX_SAMPLES:-0}${NC}"
@@ -142,7 +142,7 @@ if ! ./processing_data -c "$CONFIG_PATH"; then
 fi
 
 # Extract base name for further operations
-if [[ -n "$MODEL_NAME" ]]; then
+if [[ -n "$MODEL_NAME" && "$MODEL_NAME" != "auto" ]]; then
     BASENAME="$MODEL_NAME"
 else
     BASENAME=$(basename "$CSV_PATH" .csv)
@@ -152,10 +152,13 @@ RESULT_DIR="$DIRNAME/result"
 
 if [[ "$RUN_VISUALIZATION" == "true" ]]; then
     echo -e "\n📊 Running visualization..."
-    if python3 quantization_visualizer.py "$BASENAME" >/dev/null 2>&1; then
+    ORIGINAL_CSV="$CSV_PATH"
+    QUANTIZED_CSV="$RESULT_DIR/${BASENAME}_nml.csv"
+    
+    if python3 quantization_visualizer.py "$BASENAME" --original "$ORIGINAL_CSV" --quantized "$QUANTIZED_CSV" >/dev/null 2>&1; then
         :
     else
-        echo -e "${YELLOW}⚠️  Visualization failed (run manually: python3 quantization_visualizer.py $BASENAME)${NC}"
+        echo -e "${YELLOW}⚠️  Visualization failed (run manually: python3 quantization_visualizer.py $BASENAME --original $ORIGINAL_CSV --quantized $QUANTIZED_CSV)${NC}"
     fi
 fi
 

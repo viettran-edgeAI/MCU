@@ -46,7 +46,7 @@ void setup() {
     manage_files();
     delay(500);
     
-    long unsigned start_forest = GET_CURRENT_TIME_IN_MILLISECONDS;
+    long unsigned start_forest = mcu::platform::Rf_get_current_time(mcu::platform::TimeUnit::MILLISECONDS);
     
     // Initialize Random Forest model
     const char* model_name = "run_walk";
@@ -65,7 +65,7 @@ void setup() {
         return;
     }
 
-    long unsigned build_time = GET_CURRENT_TIME_IN_MILLISECONDS;
+    long unsigned build_time = mcu::platform::Rf_get_current_time(mcu::platform::TimeUnit::MILLISECONDS);
     Serial.printf("Model built in %lu ms\n", build_time - start_forest);
     
     // forest.training(2); // limit to 3 epochs
@@ -166,7 +166,7 @@ void setup() {
     int total_logged = forest.get_total_logged_inference();
     Serial.printf("Total Logged Inferences: %d\n", total_logged);
 
-    long unsigned end_forest = GET_CURRENT_TIME_IN_MILLISECONDS;
+    long unsigned end_forest = mcu::platform::Rf_get_current_time(mcu::platform::TimeUnit::MILLISECONDS);
     Serial.println("\n=== Execution Summary ===");
     Serial.printf("Total execution time: %lu ms\n", end_forest - start_forest);
     Serial.println("\n✅ Example completed successfully!\n");

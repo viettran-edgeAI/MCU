@@ -4,14 +4,25 @@ This changelog documents the sequential, technical evolution of the STL_MCU libr
 Entries are grouped: small and close commits are consolidated into date-based releases; large or breaking upgrades are separated as their own releases. Each release lists the high-level changes, followed by technical details and notable commit references (hash prefixes) so you can trace to the exact commit.
 
 ------------------------------------------------------------------------------------
+## [3025-12-31] - MASSIVE UPDATE & optimizations
+- Remove TOP-K screening method (at both PC and MCU versions)
+- Use multi-threading to speed up training process on PC version.
+- Cancel HAT tree technique, 
+- Update quantization layer: The quantization bin can shrink instead of just expand to adapt to the sliding storage window.
+- deploying diverse types of nodes: reduce ~40% model size. (but inference speed reduced ~12%).
+- Fixes the system auto-overwrite error using PSRAM on boards with PSRAM, even when the RF_USE_PSRAM option is disabled.
+- add Rf platform abstraction layer : memory management, timing, debug output... for multi-platform support (desktop, arduino-AVR, arduino-ARM, ESP32, ...).
+
+
 ## [2025-12-24] - BIG update
 - update `quantization layer`:
 	- change file format : add mean , stddev  for each feature. csv -> binary format.
 	- add option: outlier removal using z-score method before quantization.
 	- Auto update when concept drift , allow adapt to gradually changing data streams.
-- Allows adding new layers in the model lifecycle through feedback operations.
+- Allows adding new classes in the model lifecycle through feedback operations.
 - Upgrade Rf_tree : normal `decision trees` -> `Hoeffding adaptive trees`.
 - New core model : `XGBoost model` (along with `Random Forest model` and `Decision Tree` model).
+- speed up training process (on both side) using TOP-K screening method.
 - remove `partial loading mode`.
 - remove `extend_base_data` and add `remove_outliers` in config files.
 - combine `RF_DISABLE_RETRAIN` & `RF_ENABLE_RETRAIN` -> `RF_STATIC_MODEL` across all docs and code.

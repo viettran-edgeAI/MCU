@@ -41,6 +41,8 @@ namespace mcu {
     static constexpr uint16_t     RF_MAX_FEATURES        = 1023;   // maximum number of features (can exceed this limit)
     static constexpr uint32_t     RF_MAX_NODES           = 262144; // Maximum nodes per tree (18 bits)
     static constexpr sample_type  RF_MAX_SAMPLES         = 1048576;// maximum number of samples in a dataset (20 bits)
+    
+    
     inline size_t rf_max_dataset_size() {
         return rf_storage_max_dataset_bytes();
     }
@@ -2012,7 +2014,7 @@ namespace mcu {
             }
 
             // Batch read to reduce file I/O calls
-            const size_t MAX_BATCH_BYTES = 2048; // conservative for MCU
+            const size_t MAX_BATCH_BYTES = 2048; // conservative for mcu
             uint8_t* ioBuf = mem_alloc::allocate<uint8_t>(MAX_BATCH_BYTES);
             if (!ioBuf) {
                 RF_DEBUG(1, "❌ Failed to allocate IO buffer");
@@ -2627,18 +2629,7 @@ namespace mcu {
             return total;
         }
     };
-
-    /*
-    ------------------------------------------------------------------------------------------------------------------------------
-    ------------------------------------------ TRAIN CHUNK ACCESSOR --------------------------------------------------------------
-    ------------------------------------------------------------------------------------------------------------------------------
-    */
     
-    /**
-     * @brief Efficient chunk-based data accessor for training with large datasets
-     * Opens file once, maintains reusable buffers, and provides zero-allocation label/feature access
-     * Features batch-prefetch optimization to reduce I/O overhead by loading multiple consecutive chunks
-     */
     /*
     ------------------------------------------------------------------------------------------------------------------
     ---------------------------------------------------- RF_TREE -----------------------------------------------------
@@ -2887,6 +2878,11 @@ namespace mcu {
         }
     };
 
+    struct Leaf_node {
+        label_type label;
+        Leaf_node() : label(0) {}
+    };
+
     struct Building_node{
         size_t packed_data; 
 
@@ -2957,7 +2953,7 @@ namespace mcu {
         packed_vector<bits_per_node, Internal_node> internal_nodes;
         packed_vector<bits_per_node, Mixed_node> mixed_nodes;
         packed_vector<8, label_type> leaf_nodes;
-        packed_vector<8, uint8_t> branch_kind; // bpv=1; 0=internal, 1=mixed in branch-index space
+        packed_vector<1, uint8_t> branch_kind; // bpv=1; 0=internal, 1=mixed in branch-index space
 
         // Prefix sums over branch_kind words to map branch index -> internal/mixed local index in O(1)
         b_vector<uint16_t, 32> mixed_prefix;
@@ -2977,20 +2973,19 @@ namespace mcu {
 
         explicit Rf_tree(uint8_t idx) : nodes(), internal_nodes(), mixed_nodes(), leaf_nodes(), branch_kind(), mixed_prefix(), resource(nullptr), index(idx), isLoaded(false) {}
 
-                Rf_tree(const Rf_tree& other)
-                        : nodes(other.nodes),
-                            internal_nodes(other.internal_nodes),
-                            mixed_nodes(other.mixed_nodes),
-                            leaf_nodes(other.leaf_nodes),
-                            branch_kind(other.branch_kind),
-                            mixed_prefix(other.mixed_prefix),
-                            resource(other.resource),
-                            root_is_leaf(other.root_is_leaf),
-                            root_index(other.root_index),
-                            depth(other.depth),
-                            index(other.index),
-                            isLoaded(other.isLoaded),
-                            bootstrapIDs(other.bootstrapIDs) {}
+        Rf_tree(const Rf_tree& other) : nodes(other.nodes),
+            internal_nodes(other.internal_nodes),
+            mixed_nodes(other.mixed_nodes),
+            leaf_nodes(other.leaf_nodes),
+            branch_kind(other.branch_kind),
+            mixed_prefix(other.mixed_prefix),
+            resource(other.resource),
+            root_is_leaf(other.root_is_leaf),
+            root_index(other.root_index),
+            depth(other.depth),
+            index(other.index),
+            isLoaded(other.isLoaded),
+            bootstrapIDs(other.bootstrapIDs) {}
 
         Rf_tree& operator=(const Rf_tree& other) {
             if (this != &other) {
@@ -3090,7 +3085,7 @@ namespace mcu {
                 } else {
                     leaf_nodes.clear();
                 }
-                branch_kind.set_bits_per_value(1);
+                // branch_kind.set_bits_per_value(1);
                 branch_kind.clear();
                 mixed_prefix.clear();
 

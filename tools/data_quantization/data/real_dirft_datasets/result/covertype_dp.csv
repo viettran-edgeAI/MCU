@@ -1,0 +1,12 @@
+parameter,value
+quantization_coefficient,3
+num_features,54
+num_samples,581012
+num_labels,7
+samples_label_0,9493
+samples_label_1,2747
+samples_label_2,20510
+samples_label_3,17367
+samples_label_4,211840
+samples_label_5,35754
+samples_label_6,283301

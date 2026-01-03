@@ -6,6 +6,8 @@
  * 
  * Files received:
  * - {model_name}_nml.bin (normalized dataset)
+ * - {model_name}_qtz.bin (quantizer)
+ * - {model_name}_dp.csv  (dataset parameters)
  * - {model_name}_hogcfg.json (HOG configuration, optional)
  * - {model_name}_config.json (model configuration)
  * - {model_name}_forest.bin (unified forest file)
@@ -169,8 +171,12 @@ void listReceivedFiles() {
                 Serial.printf("   📊 %s (%u bytes) - Training Log\n", fileName.c_str(), file.size());
             } else if (fileName.indexOf("_forest") >= 0 && fileName.endsWith(".bin")) {
                 Serial.printf("   🌳 %s (%u bytes) - Unified Forest\n", fileName.c_str(), file.size());
+            } else if (fileName.indexOf("_qtz") >= 0 && fileName.endsWith(".bin")) {
+                Serial.printf("   📉 %s (%u bytes) - Quantizer\n", fileName.c_str(), file.size());
             } else if (fileName.indexOf("_nml") >= 0 && fileName.endsWith(".bin")) {
                 Serial.printf("   📊 %s (%u bytes) - Normalized Dataset\n", fileName.c_str(), file.size());
+            } else if (fileName.indexOf("_dp") >= 0 && fileName.endsWith(".csv")) {
+                Serial.printf("   📦 %s (%u bytes) - Descriptor Payload\n", fileName.c_str(), file.size());
             } else if (fileName.endsWith(".bin")) {
                 Serial.printf("   📄 %s (%u bytes)\n", fileName.c_str(), file.size());
             } else if (fileName.endsWith(".csv")) {
@@ -406,8 +412,12 @@ void handleFileInfo() {
         fileType = "📊 Training Log";
     } else if (strstr(baseFileName, "_forest") && strstr(baseFileName, ".bin")) {
         fileType = "🌳 Unified Forest";
+    } else if (strstr(baseFileName, "_qtz") && strstr(baseFileName, ".bin")) {
+        fileType = "📉 Quantizer";
     } else if (strstr(baseFileName, "_nml") && strstr(baseFileName, ".bin")) {
         fileType = "📊 Normalized Dataset";
+    } else if (strstr(baseFileName, "_dp") && strstr(baseFileName, ".csv")) {
+        fileType = "📦 Descriptor Payload";
     } else if (strstr(baseFileName, ".csv")) {
         fileType = "📊 CSV Data";
     } else if (strstr(baseFileName, ".bin")) {

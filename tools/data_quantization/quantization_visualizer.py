@@ -2,14 +2,7 @@
 """
 Quantization Data Visualizer
 
-T            
-        return features, labels, label_mapping
-    except FileNotFoundError:
-        print(f"Error: File {filepath} not found!")
-        return None, None, None
-    except Exception as e:
-        print(f"Error loading {filepath}: {e}")
-        return None, None, Noneram creates PCA scatter plots to visualize the data dispersion 
+This program creates PCA scatter plots to visualize the data dispersion 
 before and after quantization for classification datasets.
 
 Usage:
@@ -67,10 +60,10 @@ def load_data(filepath):
         return features, labels, label_mapping
     except FileNotFoundError:
         print(f"Error: File {filepath} not found!")
-        return None, None
+        return None, None, None
     except Exception as e:
         print(f"Error loading {filepath}: {e}")
-        return None, None
+        return None, None, None
 
 
 def sample_data_for_visualization(features, labels, max_samples_per_class=50, max_classes=5):
@@ -535,13 +528,15 @@ def get_class_names(model_name, label_mapping=None):
 def main():
     parser = argparse.ArgumentParser(description='Visualize data quantization effects using PCA')
     parser.add_argument('model_name', help='Name of the model/dataset (without .csv extension)')
+    parser.add_argument('--original', help='Path to original CSV file')
+    parser.add_argument('--quantized', help='Path to quantized CSV file')
     args = parser.parse_args()
     
     model_name = args.model_name
     
     # Define file paths
-    original_file = f'data/{model_name}.csv'
-    quantized_file = f'data/result/{model_name}_nml.csv'
+    original_file = args.original if args.original else f'data/{model_name}.csv'
+    quantized_file = args.quantized if args.quantized else f'data/result/{model_name}_nml.csv'
     
     print(f"Loading original data from: {original_file}")
     print(f"Loading quantized data from: {quantized_file}")

@@ -1,4 +1,12 @@
+// This file provides the default/legacy filesystem implementation.
+// When a platform plugin provides its own implementation (e.g., sample_esp32),
+// this file is excluded via RF_PLATFORM_PLUGIN_PROVIDES_FILESYSTEM.
+
 #include "Rf_file_manager.h"
+
+#if defined(RF_PLATFORM_PLUGIN_SAMPLE_ESP32) || defined(RF_PLATFORM_PLUGIN_PROVIDES_FILESYSTEM)
+// Plugin provides filesystem implementation - skip this file
+#else
 
 // Track which storage system is actually active at runtime
 static RfStorageType g_active_storage = RfStorageType::AUTO;
@@ -1719,3 +1727,4 @@ bool deleteDirectoryRecursive(const String& path) {
     dir.close();
     return RF_FS_RMDIR(normalizedPath);
 }
+

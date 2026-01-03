@@ -22,7 +22,7 @@
 
 using namespace mcu;
 
-const RfStorageType STORAGE_MODE = RfStorageType::LITTLEFS;
+const RfStorageType STORAGE_MODE = RfStorageType::SD_MMC;
 
 void setup() {
     Serial.begin(115200);  
@@ -46,7 +46,7 @@ void setup() {
     manage_files();
     delay(500);
     
-    long unsigned start_forest = GET_CURRENT_TIME_IN_MILLISECONDS;
+    long unsigned start_forest = mcu::platform::Rf_get_current_time(mcu::platform::TimeUnit::MILLISECONDS);
     
     // Initialize Random Forest model
     Serial.print("Setting up model 'digit_data'... ");
@@ -59,23 +59,27 @@ void setup() {
     // forest.disable_partial_loading();
     // forest.set_training_score(Rf_training_score::OOB_SCORE);
 
-    // Build and train the model
-    if (!forest.build_model()) {
-        Serial.println("❌ FAILED");
-        return;
-    }
+    // // Build and train the model
+    // if (!forest.build_model()) {
+    //     Serial.println("❌ FAILED");
+    //     return;
+    // }
 
-    long unsigned build_time = GET_CURRENT_TIME_IN_MILLISECONDS;
+
+    long unsigned build_time = mcu::platform::Rf_get_current_time(mcu::platform::TimeUnit::MILLISECONDS);
     Serial.printf("Model built in %lu ms\n", build_time - start_forest);
 
     // forest.training(2); // limit to 3 epochs
 
     // Load trained forest from filesystem
     Serial.print("Loading forest... ");
+    size_t current = ESP.getFreePsram();
+    Serial.printf("before load model: %d\n", current);
     if (!forest.loadForest()) {
         Serial.println("❌ FAILED");
         return;
     }
+    Serial.printf("after load model: %d\n", ESP.getFreePsram());
 
     Serial.printf("bits per node: %d\n", forest.bits_per_node());
     Serial.printf("model size in ram: %d\n", forest.model_size_in_ram());
@@ -168,7 +172,7 @@ void setup() {
     int total_logged = forest.get_total_logged_inference();
     Serial.printf("Total Logged Inferences: %d\n", total_logged);
 
-    long unsigned end_forest = GET_CURRENT_TIME_IN_MILLISECONDS;
+    long unsigned end_forest = mcu::platform::Rf_get_current_time(mcu::platform::TimeUnit::MILLISECONDS);
     Serial.println("\n=== Execution Summary ===");
     Serial.printf("Total execution time: %lu ms\n", end_forest - start_forest);
     Serial.println("\n✅ Example completed successfully!\n");

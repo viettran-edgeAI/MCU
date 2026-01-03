@@ -153,7 +153,7 @@ static QuantizationConfig loadQuantizationConfig(const std::string& configPath) 
     if (extractValue(content, "model_name", raw)) {
         cfg.modelName = trimWhitespace(raw);
     }
-    if (extractValue(content, "header_mode", raw)) {
+    if (extractValue(content, "header", raw)) {
         cfg.headerMode = toLowerCopy(trimWhitespace(raw));
     }
     if (extractValue(content, "max_features", raw)) {
@@ -188,7 +188,11 @@ static QuantizationConfig loadQuantizationConfig(const std::string& configPath) 
         cfg.quantBits = quantization_coefficient;
     }
     if (cfg.labelColumn < 0) {
-        cfg.labelColumn = 0;
+        if(cfg.labelColumn == -1){
+            cfg.labelColumn = -1; // last column
+        }else{
+            cfg.labelColumn = 0;
+        }
     }
 
     return cfg;
@@ -221,48 +225,27 @@ struct FeatureStats {
     bool isDiscrete = false;
 };
 
-// Structure for building QTZ3 format with pattern sharing and optimization
+// Structure for building QTZ4 format (per-feature rules, includes per-feature min/max)
 class Rf_quantizer{
     uint16_t numFeatures = 0;
     uint16_t groupsPerFeature = 0;
     
     // Feature type definitions
-    enum FeatureType { FT_DF = 0, FT_DC = 1, FT_CS = 2, FT_CU = 3 };
-    
-    // Structures for building the quantizer
-    struct SharedPattern {
-        mcu::vector<uint16_t> scaledEdges;
-        uint16_t patternId;
-        
-        SharedPattern() : patternId(0) {} // Default constructor
-
-        SharedPattern(const mcu::vector<uint16_t>& edges, uint16_t id)
-            : scaledEdges(edges), patternId(id) {}
-        
-        std::string getKey() const {
-            std::string key;
-            for (size_t i = 0; i < scaledEdges.size(); ++i) {
-                if (i > 0) key += ":";
-                key += std::to_string(scaledEdges[i]);
-            }
-            return key;
-        }
-    };
+    enum FeatureType : uint8_t { FT_DF = 0, FT_DC = 1, FT_CU = 2 };
     
     struct FeatureInfo {
         FeatureType type;
-        mcu::vector<uint8_t> discreteValues;  // For FT_DC
-        mcu::vector<uint16_t> uniqueEdges;    // For FT_CU 
+        float minValue;
+        float maxValue;
+        mcu::vector<float> discreteValues;    // For FT_DC (sorted unique values)
+        mcu::vector<uint16_t> edgesScaled;    // For FT_CU (scaled edges)
         int64_t baselineScaled;               // Baseline offset (scaled)
         uint64_t scaleFactor;                 // Per-feature scaling factor
-        uint16_t patternId;                   // For FT_CS
         
-        FeatureInfo() : type(FT_DF), baselineScaled(0), scaleFactor(1), patternId(0) {}
+        FeatureInfo() : type(FT_DF), minValue(0.0f), maxValue(0.0f), baselineScaled(0), scaleFactor(1) {}
     };
     
     mcu::vector<FeatureInfo> features;
-    mcu::vector<SharedPattern> sharedPatterns;
-    mcu::unordered_map_s<std::string, uint16_t> patternMap; // key -> patternId
     mcu::vector<mcu::pair<std::string, uint8_t>> labelMapping;
     bool removeOutliers = true; // Whether outlier filtering was applied during quantization
     mcu::vector<float> featureMeans;
@@ -311,10 +294,12 @@ public:
         if (featureIdx < numFeatures) {
             FeatureInfo& info = features[featureIdx];
             info.type = FT_DF;
+            info.minValue = 0.0f;
+            info.maxValue = (groupsPerFeature > 0) ? static_cast<float>(groupsPerFeature - 1) : 0.0f;
             info.baselineScaled = 0;
             info.scaleFactor = 1;
             info.discreteValues.clear();
-            info.uniqueEdges.clear();
+            info.edgesScaled.clear();
         }
     }
     
@@ -323,14 +308,18 @@ public:
         if (featureIdx < numFeatures) {
             FeatureInfo& info = features[featureIdx];
             info.type = FT_DC;
+            info.discreteValues = values;
+            if (!info.discreteValues.empty()) {
+                std::sort(info.discreteValues.begin(), info.discreteValues.end());
+                info.minValue = info.discreteValues.front();
+                info.maxValue = info.discreteValues.back();
+            } else {
+                info.minValue = 0.0f;
+                info.maxValue = 0.0f;
+            }
             info.baselineScaled = 0;
             info.scaleFactor = 1;
-            info.uniqueEdges.clear();
-            info.discreteValues.clear();
-            info.discreteValues.reserve(values.size());
-            for (float val : values) {
-                info.discreteValues.push_back(static_cast<uint8_t>(val));
-            }
+            info.edgesScaled.clear();
         }
     }
     
@@ -340,6 +329,10 @@ public:
 
         FeatureInfo& info = features[featureIdx];
         info.discreteValues.clear();
+        info.edgesScaled.clear();
+        info.type = FT_CU;
+        info.minValue = minValue;
+        info.maxValue = maxValue;
 
         const double baselineValue = static_cast<double>(minValue);
         double range = static_cast<double>(maxValue) - baselineValue;
@@ -366,8 +359,7 @@ public:
         info.baselineScaled = scaleFloatToInt64(baselineValue, scaleValue);
 
         // Create scaled edge representation relative to baseline
-        mcu::vector<uint16_t> scaledEdges;
-        scaledEdges.reserve(edges.size());
+        info.edgesScaled.reserve(edges.size());
         for (float edge : edges) {
             double diff = static_cast<double>(edge) - baselineValue;
             if (diff < 0.0) {
@@ -380,36 +372,7 @@ public:
             if (scaledEdge < 0.0L) {
                 scaledEdge = 0.0L;
             }
-            scaledEdges.push_back(static_cast<uint16_t>(scaledEdge + 0.5L));
-        }
-
-        // Create pattern key
-        std::string key;
-        for (size_t i = 0; i < scaledEdges.size(); ++i) {
-            if (i > 0) key += ":";
-            key += std::to_string(scaledEdges[i]);
-        }
-
-        // Check if pattern already exists
-        auto it = patternMap.find(key);
-        if (it != patternMap.end()) {
-            info.type = FT_CS;
-            info.patternId = it->second;
-            info.uniqueEdges.clear();
-        } else {
-            if (sharedPatterns.size() < 60) {
-                uint16_t patternId = static_cast<uint16_t>(sharedPatterns.size());
-                sharedPatterns.push_back(SharedPattern(scaledEdges, patternId));
-                patternMap[key] = patternId;
-
-                info.type = FT_CS;
-                info.patternId = patternId;
-                info.uniqueEdges.clear();
-            } else {
-                info.type = FT_CU;
-                info.patternId = 0;
-                info.uniqueEdges = scaledEdges;
-            }
+            info.edgesScaled.push_back(static_cast<uint16_t>(scaledEdge + 0.5L));
         }
     }
     
@@ -437,33 +400,32 @@ public:
                 }
                 
             case FT_DC:
-                // Discrete custom values
-                for (uint8_t i = 0; i < info.discreteValues.size(); ++i) {
-                    if (static_cast<uint8_t>(value) == info.discreteValues[i]) {
-                        return i;
-                    }
-                }
-                return 0;
-                
-            case FT_CS:
-                // Continuous shared pattern
-                if (info.patternId < sharedPatterns.size()) {
-                    int64_t scaledValue = scaleFloatToInt64(static_cast<double>(value), info.scaleFactor);
-                    int64_t adjusted = scaledValue - info.baselineScaled;
-                    if (adjusted <= 0) {
+                // Discrete custom values (supports values outside uint8 range)
+                {
+                    const size_t count = info.discreteValues.size();
+                    if (count == 0) {
                         return 0;
                     }
-                    const auto& pattern = sharedPatterns[info.patternId];
-                    const uint32_t limited = static_cast<uint32_t>(std::min<int64_t>(adjusted, std::numeric_limits<uint32_t>::max()));
-                    const uint8_t limit = static_cast<uint8_t>(pattern.scaledEdges.size());
-                    for (uint8_t bin = 0; bin < limit; ++bin) {
-                        if (limited < pattern.scaledEdges[bin]) {
-                            return bin;
+
+                    // Fast-path exact/near match
+                    for (size_t i = 0; i < count; ++i) {
+                        if (std::fabs(info.discreteValues[i] - value) <= 1e-6f) {
+                            return static_cast<uint8_t>(i);
                         }
                     }
-                    return limit;
+
+                    // If unseen (drift), pick nearest known category
+                    size_t bestIdx = 0;
+                    float bestDist = std::fabs(info.discreteValues[0] - value);
+                    for (size_t i = 1; i < count; ++i) {
+                        float d = std::fabs(info.discreteValues[i] - value);
+                        if (d < bestDist) {
+                            bestDist = d;
+                            bestIdx = i;
+                        }
+                    }
+                    return static_cast<uint8_t>(bestIdx);
                 }
-                return 0;
                 
             case FT_CU:
                 // Continuous unique edges
@@ -474,9 +436,9 @@ public:
                         return 0;
                     }
                     const uint32_t limited = static_cast<uint32_t>(std::min<int64_t>(adjusted, std::numeric_limits<uint32_t>::max()));
-                    const uint8_t edgeCount = static_cast<uint8_t>(info.uniqueEdges.size());
+                    const uint8_t edgeCount = static_cast<uint8_t>(info.edgesScaled.size());
                     for (uint8_t bin = 0; bin < edgeCount; ++bin) {
-                        if (limited < info.uniqueEdges[bin]) {
+                        if (limited < info.edgesScaled[bin]) {
                             return bin;
                         }
                     }
@@ -505,8 +467,8 @@ public:
             throw std::runtime_error(std::string("Cannot open quantizer binary file: ") + filename);
         }
 
-        // Write header: magic number "QTZ3" + version
-        const char magic[4] = {'Q', 'T', 'Z', '3'};
+        // Write header: magic number "QTZ4" (per-feature rules + per-feature min/max)
+        const char magic[4] = {'Q', 'T', 'Z', '4'};
         fout.write(magic, 4);
 
         // Write basic parameters
@@ -515,9 +477,6 @@ public:
         
         uint8_t numLabelsU8 = static_cast<uint8_t>(labelMapping.size());
         fout.write(reinterpret_cast<const char*>(&numLabelsU8), sizeof(uint8_t));
-        
-        uint16_t numSharedPatternsU16 = static_cast<uint16_t>(sharedPatterns.size());
-        fout.write(reinterpret_cast<const char*>(&numSharedPatternsU16), sizeof(uint16_t));
         
         // Write outlier filtering flag
         uint8_t outlierFlag = removeOutliers ? 1 : 0;
@@ -541,25 +500,16 @@ public:
             fout.write(mapping.first.c_str(), labelLen);
         }
 
-        // Write shared patterns
-        for (const auto& pattern : sharedPatterns) {
-            uint16_t patternId = pattern.patternId;
-            fout.write(reinterpret_cast<const char*>(&patternId), sizeof(uint16_t));
-            
-            uint16_t edgeCount = static_cast<uint16_t>(pattern.scaledEdges.size());
-            fout.write(reinterpret_cast<const char*>(&edgeCount), sizeof(uint16_t));
-            
-            for (uint16_t edge : pattern.scaledEdges) {
-                fout.write(reinterpret_cast<const char*>(&edge), sizeof(uint16_t));
-            }
-        }
-
         // Write feature definitions
         for (uint16_t i = 0; i < numFeatures; ++i) {
             const FeatureInfo& info = features[i];
             
             uint8_t typeU8 = static_cast<uint8_t>(info.type);
             fout.write(reinterpret_cast<const char*>(&typeU8), sizeof(uint8_t));
+
+            // Store min/max per feature to support drift-aware updates later
+            fout.write(reinterpret_cast<const char*>(&info.minValue), sizeof(float));
+            fout.write(reinterpret_cast<const char*>(&info.maxValue), sizeof(float));
             
             fout.write(reinterpret_cast<const char*>(&info.baselineScaled), sizeof(int64_t));
             fout.write(reinterpret_cast<const char*>(&info.scaleFactor), sizeof(uint64_t));
@@ -573,21 +523,17 @@ public:
                     {
                         uint8_t count = static_cast<uint8_t>(info.discreteValues.size());
                         fout.write(reinterpret_cast<const char*>(&count), sizeof(uint8_t));
-                        for (uint8_t val : info.discreteValues) {
-                            fout.write(reinterpret_cast<const char*>(&val), sizeof(uint8_t));
+                        for (float val : info.discreteValues) {
+                            fout.write(reinterpret_cast<const char*>(&val), sizeof(float));
                         }
                     }
                     break;
                     
-                case FT_CS:
-                    fout.write(reinterpret_cast<const char*>(&info.patternId), sizeof(uint16_t));
-                    break;
-                    
                 case FT_CU:
                     {
-                        uint8_t edgeCount = static_cast<uint8_t>(info.uniqueEdges.size());
+                        uint8_t edgeCount = static_cast<uint8_t>(info.edgesScaled.size());
                         fout.write(reinterpret_cast<const char*>(&edgeCount), sizeof(uint8_t));
-                        for (uint16_t edge : info.uniqueEdges) {
+                        for (uint16_t edge : info.edgesScaled) {
                             fout.write(reinterpret_cast<const char*>(&edge), sizeof(uint16_t));
                         }
                     }
@@ -603,7 +549,7 @@ public:
     uint16_t getGroupsPerFeature() const { return groupsPerFeature; }
     const mcu::vector<mcu::pair<std::string, uint8_t>>& getLabelMapping() const { return labelMapping; }
     
-    // Estimate memory usage for QTZ3 format
+    // Estimate memory usage for QTZ4 format
     size_t estimateQTZ3MemoryUsage() const {
         size_t usage = 0;
         
@@ -624,16 +570,11 @@ public:
             usage += numFeatures * sizeof(float) * 2;
         }
         
-        // Shared patterns
-        for (const auto& pattern : sharedPatterns) {
-            usage += pattern.scaledEdges.size() * sizeof(uint16_t);
-        }
-        
         // Unique edges (estimated)
         size_t uniqueEdgeCount = 0;
         for (const auto& info : features) {
             if (info.type == FT_CU) {
-                uniqueEdgeCount += info.uniqueEdges.size();
+                uniqueEdgeCount += info.edgesScaled.size();
             }
         }
         usage += uniqueEdgeCount * sizeof(uint16_t);
@@ -645,7 +586,10 @@ public:
                 discreteValueCount += info.discreteValues.size();
             }
         }
-        usage += discreteValueCount * sizeof(uint8_t);
+        usage += discreteValueCount * sizeof(float);
+
+        // Per-feature min/max
+        usage += numFeatures * sizeof(float) * 2;
         
         // Label mappings (optional)
         for (const auto& mapping : labelMapping) {
@@ -1127,9 +1071,13 @@ DatasetInfo scanDataset(const char* inputFilePath) {
     
     // Validate label_column_index
     if (label_column_index < 0 || label_column_index >= n_cols) {
-        fin.close();
-        throw std::runtime_error("Label column index " + std::to_string(label_column_index) + 
-                               " is out of range (0-" + std::to_string(n_cols-1) + ")");
+        if(label_column_index == -1){
+            label_column_index = n_cols - 1; // Default to last column
+        }else{
+            fin.close();
+            throw std::runtime_error("Label column index " + std::to_string(label_column_index) + 
+                                   " is out of range (0-" + std::to_string(n_cols-1) + ")");
+        }
     }
     
     info.numFeatures = std::min(n_cols - 1, num_features); // Exclude label column and truncate if needed
@@ -1477,7 +1425,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "Configuration is provided via quantization_config.json with fields:\n";
                 std::cout << "  input_path (string, required)\n";
                 std::cout << "  model_name (string, optional)\n";
-                std::cout << "  header_mode (auto|yes|no, default auto)\n";
+                std::cout << "  header (auto|yes|no, default auto)\n";
                 std::cout << "  label_column (int, default 0)\n";
                 std::cout << "  max_features (1-1023, default 1023)\n";
                 std::cout << "  quantization_bits (1-8, default 2)\n";
@@ -1516,17 +1464,8 @@ int main(int argc, char* argv[]) {
         std::string baseName;
         std::string inputDir = ".";
         
-        if (!modelName.empty()) {
-            // Use the provided model name
-            baseName = modelName;
-            
-            // Extract directory from input file path for output location
-            std::string inputName(inputFile);
-            size_t slash = inputName.find_last_of("/\\");
-            if (slash != std::string::npos) {
-                inputDir = inputName.substr(0, slash);
-            }
-        } else {
+        // extract base name if modelName are empty or "auto"
+        if (modelName.empty() || modelName == "auto") {
             // Extract base name from input file
             std::string inputName(inputFile);
             size_t slash = inputName.find_last_of("/\\");
@@ -1538,6 +1477,16 @@ int main(int argc, char* argv[]) {
             size_t dot = baseName.find_last_of('.');
             if (dot != std::string::npos) {
                 baseName = baseName.substr(0, dot);
+            }
+        } else {
+            // Use the provided model name
+            baseName = modelName;
+            
+            // Extract directory from input file path for output location
+            std::string inputName(inputFile);
+            size_t slash = inputName.find_last_of("/\\");
+            if (slash != std::string::npos) {
+                inputDir = inputName.substr(0, slash);
             }
         }
         

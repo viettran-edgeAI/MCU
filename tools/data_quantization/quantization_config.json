@@ -1,6 +1,6 @@
 {
     "input_path": {
-        "value": "data/iot_device_failure.csv",
+        "value": "data/digit_data.csv",
         "description": "Path to the input CSV dataset file (required)."
     },
     "quantization_bits": {
@@ -8,24 +8,24 @@
         "description": "Quantization coefficient in bits per feature value (1-8). Higher values = more precision but larger file size."
     },
     "model_name": {
-        "value": "",
-        "description": "Model name for output filenames. If empty, extracted from input filename."
+        "value": "auto",
+        "description": "Model name for output filenames. If empty or `auto`, extracted from input filename."
     },
-    "header_mode": {
+    "header": {
         "value": "auto",
         "options": ["auto", "yes", "no"],
         "description": "CSV header handling: 'auto' = detect automatically, 'yes' = skip first line, 'no' = process all lines."
     },
     "label_column": {
         "value": 0,
-        "description": "Column index containing the label (0 = first column)."
+        "description": "Column index containing the label (0 = first column, -1 = last column)."
     },
     "max_features": {
         "value": 1023,
         "description": "Maximum number of features to process (1-1023). Features beyond this limit will be truncated."
     },
     "remove_outliers": {
-        "value": true,
+        "value": false,
         "options": [true, false],
         "description": "Apply Z-score outlier clipping during preprocessing. true = adapts to gradually changing data streams (removes outliers), false = adapts to suddenly fluctuating data streams (keeps all variations)."
     },

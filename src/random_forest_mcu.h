@@ -1526,7 +1526,7 @@ namespace mcu{
          * @param get_original_label: <true> retrieves the original label; <false> for extremely fast prediction without original label retrieval (do it later using get_original_label())
          */
         void predict(const float* features, size_t length, rf_predict_result_t& result, bool get_original_label = true) {
-            uint32_t start = GET_CURRENT_TIME_IN_MICROSECONDS();
+            uint32_t start = mcu::platform::Rf_get_current_time(mcu::platform::TimeUnit::MICROSECONDS);
 
             if (__builtin_expect(length != config.num_features, 0)) {
                 RF_DEBUG_2(0, "❌ Feature length mismatch! Expected: ", config.num_features, ", Given: ", length);
@@ -1537,21 +1537,28 @@ namespace mcu{
                 return;
             }
 
-            // Quantize input features into preallocated buffer (also detect concept drift)
-            uint16_t drift_feature = 0;
-            float drift_value = 0.0f;
-            const bool drift_sample = quantizer.quantizeFeatures(features, quantization_buffer, &drift_feature, &drift_value);
-
-            // perform prediction using the quantized buffer (quantization_buffer -> actual features expected by forest)
-            result.i_label = forest_container.predict_features(quantization_buffer);
-
+            // Quantize input features into preallocated buffer
             if (__builtin_expect(config.enable_retrain, 1)) {
+                // During retraining: detect concept drift and outliers
+                uint16_t drift_feature = 0;
+                float drift_value = 0.0f;
+                const bool drift_sample = quantizer.quantizeFeatures(features, quantization_buffer, &drift_feature, &drift_value);
+                
+                // perform prediction using the quantized buffer
+                result.i_label = forest_container.predict_features(quantization_buffer);
+
+                // Track drift and outliers for retraining
                 Rf_sample sample(quantization_buffer, result.i_label);
                 if(auto* pd = ensure_pending_data()){
                     if(Rf_data* base_handle = ensure_base_data_stub()){
                         pd->add_pending_sample(sample, *base_handle, drift_sample, drift_feature, drift_value);
                     }
                 }
+            } else {
+                // Pure inference mode: skip drift detection and outlier filtering for speed
+                // Call with 4 args (nullptr for drift detection) to use bool overload
+                quantizer.quantizeFeatures(features, quantization_buffer, nullptr, nullptr);
+                result.i_label = forest_container.predict_features(quantization_buffer);
             }
             if (__builtin_expect(get_original_label,1)){
                 const char* labelPtr = nullptr;
@@ -1559,7 +1566,7 @@ namespace mcu{
                 if (!quantizer.getOriginalLabelView(result.i_label, &labelPtr, &labelLen)) {
                     result.label[0] = '\0';
                     result.success = false;
-                    result.prediction_time = GET_CURRENT_TIME_IN_MICROSECONDS() - start;
+                    result.prediction_time = mcu::platform::Rf_get_current_time(mcu::platform::TimeUnit::MICROSECONDS) - start;
                     return;
                 }
 
@@ -1578,7 +1585,7 @@ namespace mcu{
             }
 
             result.success = true;
-            result.prediction_time = GET_CURRENT_TIME_IN_MICROSECONDS() - start;
+            result.prediction_time = mcu::platform::Rf_get_current_time(mcu::platform::TimeUnit::MICROSECONDS) - start;
         }
 
         // get original label from internal normalized label

@@ -121,7 +121,7 @@ The configuration uses a nested JSON format with `value` and `description` field
 - **Default**: Empty (extracted from input filename)
 - **Description**: Model name used for output filenames.
 
-#### `header_mode`
+#### `header`
 - **Type**: string
 - **Options**: `"auto"`, `"yes"`, `"no"`
 - **Default**: `"auto"`

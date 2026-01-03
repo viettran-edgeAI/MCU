@@ -14,157 +14,19 @@
 #include <cassert>
 #include <utility>
 
+// Include unified platform abstraction layer (handles all platform-specific code)
+#include "platform/Rf_platform.h"
+
 #include "Rf_board_config.h"
-#if defined(ESP_PLATFORM) || defined(ARDUINO_ARCH_ESP32)
-#include <esp_heap_caps.h>
-#endif
 #include "hash_kernel.h"
 #include "initializer_list.h"
 
 #define hashers best_hashers_16 // change to best_hashers_8 to save 255 bytes of disk space, but more collisions
 
-// PSRAM availability is configured in board_config.h
-
 namespace mcu {
-    // Memory allocation helpers - automatically use PSRAM when enabled
-    namespace mem_alloc {
-        namespace detail {
-            constexpr uint8_t FLAG_PSRAM = 0x1;
-            constexpr size_t header_payload = sizeof(size_t) + sizeof(uint8_t);
-            constexpr size_t header_padding = (alignof(std::max_align_t) - (header_payload % alignof(std::max_align_t))) % alignof(std::max_align_t);
-
-            struct alignas(std::max_align_t) AllocationHeader {
-                size_t count;
-                uint8_t flags;
-                std::array<uint8_t, header_padding> padding{};
-
-                AllocationHeader(size_t c, uint8_t f) noexcept : count(c), flags(f) {}
-
-                static constexpr size_t stride() noexcept { return sizeof(AllocationHeader); }
-                bool uses_psram() const noexcept { return (flags & FLAG_PSRAM) != 0; }
-            };
-        }
-
-        template<typename T>
-        inline T* allocate(size_t count) {
-            const size_t recorded_count = count;
-            const size_t actual_count = (count == 0) ? 1 : count;
-            if (actual_count == 0) {
-                return nullptr;
-            }
-
-            constexpr size_t stride = detail::AllocationHeader::stride();
-            const size_t alignment = std::max<size_t>(alignof(T), alignof(size_t));
-            const size_t total_bytes = stride + actual_count * sizeof(T) + alignment + sizeof(size_t);
-
-            uint8_t flags = 0;
-            void* raw = nullptr;
-
-            #if RF_PSRAM_AVAILABLE
-                raw = heap_caps_malloc(total_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-                if (raw) {
-                    flags = detail::FLAG_PSRAM;
-                }
-            #endif
-
-            if (!raw) {
-                raw = std::malloc(total_bytes);
-                if (!raw) {
-                    return nullptr;
-                }
-            }
-
-            auto* base = static_cast<uint8_t*>(raw);
-            auto* header [[maybe_unused]] = new(raw) detail::AllocationHeader(recorded_count, flags);
-
-            uint8_t* data_start = base + stride;
-            uintptr_t aligned_addr = (reinterpret_cast<uintptr_t>(data_start) + alignment - 1) & ~(alignment - 1);
-            size_t offset = aligned_addr - reinterpret_cast<uintptr_t>(data_start);
-            while (offset < sizeof(size_t)) {
-                aligned_addr += alignment;
-                offset += alignment;
-            }
-
-            auto* aligned_data = reinterpret_cast<uint8_t*>(aligned_addr);
-            auto* offset_slot = reinterpret_cast<size_t*>(aligned_data) - 1;
-            *offset_slot = offset;
-
-            auto* data = reinterpret_cast<T*>(aligned_data);
-
-            if constexpr (!std::is_trivially_default_constructible_v<T>) {
-                for (size_t i = 0; i < recorded_count; ++i) {
-                    new (data + i) T();
-                }
-            }
-
-            return data;
-        }
-
-        template<typename T>
-        inline void deallocate(T* ptr) {
-            if (!ptr) {
-                return;
-            }
-
-            constexpr size_t stride = detail::AllocationHeader::stride();
-            auto* data_bytes = reinterpret_cast<uint8_t*>(ptr);
-            size_t offset = *(reinterpret_cast<const size_t*>(data_bytes) - 1);
-            auto* raw = data_bytes - offset - stride;
-            auto* header = reinterpret_cast<detail::AllocationHeader*>(raw);
-
-            if constexpr (!std::is_trivially_destructible_v<T>) {
-                for (size_t i = 0; i < header->count; ++i) {
-                    ptr[i].~T();
-                }
-            }
-
-            const bool uses_psram [[maybe_unused]] = header->uses_psram();
-            header->~AllocationHeader();
-
-            #if RF_PSRAM_AVAILABLE
-                if (uses_psram) {
-                    heap_caps_free(raw);
-                    return;
-                }
-            #endif
-
-            std::free(raw);
-        }
-
-        // Get allocation info for debugging
-        inline bool is_psram_ptr(const void* ptr) {
-            #if RF_PSRAM_AVAILABLE
-                if (!ptr) {
-                    return false;
-                }
-                constexpr size_t stride = detail::AllocationHeader::stride();
-                auto* data_bytes = reinterpret_cast<const uint8_t*>(ptr);
-                size_t offset = *(reinterpret_cast<const size_t*>(data_bytes) - 1);
-                auto* raw = data_bytes - offset - stride;
-                auto* header = reinterpret_cast<const detail::AllocationHeader*>(raw);
-                return header->uses_psram();
-            #else
-                (void)ptr;
-                return false;
-            #endif
-        }
-
-        inline size_t get_free_psram() {
-            #if RF_PSRAM_AVAILABLE
-                return heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-            #else
-                return 0;
-            #endif
-        }
-
-        inline size_t get_total_psram() {
-            #if RF_PSRAM_AVAILABLE
-                return heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
-            #else
-                return 0;
-            #endif
-        }
-    }
+    // Memory allocation helpers are now provided by platform/Rf_platform.h
+    // The mem_alloc namespace with backward compatibility is defined there
+    // No need to redefine here - just use the platform layer
 
     template<typename T1, typename T2>
     struct pair {
@@ -3445,9 +3307,14 @@ namespace mcu {
         uint8_t get_bpv() const { return bpv_; }
 
         void set_bpv(uint8_t new_bpv) {
-            if (new_bpv > 0) {
-                bpv_ = new_bpv;
+            if (new_bpv == 0) {
+                return;
             }
+            // On 32-bit systems, we can't support > 32 bits per value with size_t storage                                                      
+            if (new_bpv > WORD_BITS) {
+                return;
+            }
+            bpv_ = new_bpv;
         }
 
     __attribute__((always_inline)) inline void set_unsafe(size_t index, size_t value) {
@@ -3456,18 +3323,34 @@ namespace mcu {
             }
 
             const uint8_t active_bpv = bpv_;
-            const size_t mask = (active_bpv >= WORD_BITS)
-                ? static_cast<size_t>(std::numeric_limits<size_t>::max())
-                : ((static_cast<size_t>(1) << active_bpv) - 1ull);
-            const size_t clamped = static_cast<size_t>(value) & mask;
-
+            // Fast path: if value fits in one word (common case)
             const size_t bitPos = index * static_cast<size_t>(active_bpv);
             const size_t wordIdx = bitPos / WORD_BITS;
+            
             if (wordIdx >= capacity_words_) {
                 return;
             }
 
             size_t bitOff = bitPos % WORD_BITS;
+            
+            // Check if the element is contained within a single word
+            if (bitOff + active_bpv <= WORD_BITS) {
+                const size_t mask = (active_bpv >= WORD_BITS)
+                    ? static_cast<size_t>(std::numeric_limits<size_t>::max())
+                    : ((static_cast<size_t>(1) << active_bpv) - 1ull);
+                const size_t clamped = static_cast<size_t>(value) & mask;
+                
+                word_t& w = data[wordIdx];
+                w = (w & ~(mask << bitOff)) | (clamped << bitOff);
+                return;
+            }
+
+            // Slow path: crosses word boundary
+            const size_t mask = (active_bpv >= WORD_BITS)
+                ? static_cast<size_t>(std::numeric_limits<size_t>::max())
+                : ((static_cast<size_t>(1) << active_bpv) - 1ull);
+            const size_t clamped = static_cast<size_t>(value) & mask;
+
             size_t remaining = active_bpv;
             size_t srcShift = 0;
             size_t wIndex = wordIdx;
@@ -3498,6 +3381,16 @@ namespace mcu {
             }
 
             size_t bitOff = bitPos % WORD_BITS;
+            
+            // Fast path: if value fits in one word
+            if (bitOff + active_bpv <= WORD_BITS) {
+                const size_t mask = (active_bpv >= WORD_BITS)
+                    ? static_cast<size_t>(std::numeric_limits<size_t>::max())
+                    : ((static_cast<size_t>(1) << active_bpv) - 1ull);
+                return (data[wordIdx] >> bitOff) & mask;
+            }
+
+            // Slow path: crosses word boundary
             size_t remaining = active_bpv;
             size_t dstShift = 0;
             size_t value = 0;
@@ -3522,12 +3415,30 @@ namespace mcu {
                 return;
             }
 
+            // Optimization: if bpv matches, we can copy words directly
+            if (bpv_ == src.bpv_) {
+                const size_t bits_needed = element_count * static_cast<size_t>(bpv_);
+                const size_t words_needed = (bits_needed + WORD_BITS - 1) / WORD_BITS;
+                const size_t words_to_copy = std::min(words_needed, std::min(capacity_words_, src.capacity_words_));
+                
+                if (words_to_copy > 0) {
+                    std::memcpy(data, src.data, words_to_copy * sizeof(word_t));
+                }
+                
+                // Zero out the remaining words
+                for (size_t i = words_to_copy; i < capacity_words_; ++i) {
+                    data[i] = 0;
+                }
+                return;
+            }
+
             for (size_t i = 0; i < element_count; ++i) {
                 set_unsafe(i, src.get_unsafe(i));
             }
 
-            const size_t bits_used = element_count * bpv_;
-            const size_t first_unused_word = (bits_used + 31) >> 5;
+            const size_t bits_used = element_count * static_cast<size_t>(bpv_);
+            const size_t word_bits = WORD_BITS;
+            const size_t first_unused_word = (bits_used + word_bits - 1u) / word_bits;
             for (size_t i = first_unused_word; i < capacity_words_; ++i) {
                 data[i] = 0;
             }
@@ -3732,7 +3643,6 @@ namespace mcu {
             size_ = 0;
             capacity_ = target_capacity;
         }
-
     public:
         packed_vector()
             : packed_data(calc_words_for_bpv(1, BitsPerElement)), size_(0), capacity_(1) {}
@@ -3937,6 +3847,9 @@ namespace mcu {
         uint8_t get_bits_per_value() const { return packed_data.get_bpv(); }
 
         void set_bits_per_value(uint8_t bpv) {
+            if (bpv == 0 || bpv > PackedArray<BitsPerElement>::WORD_BITS) {
+                return;
+            }
             if (bpv == packed_data.get_bpv()) {
                 return;
             }
@@ -4060,11 +3973,14 @@ namespace mcu {
         const_iterator cbegin() const { return const_iterator(this, 0); }
         const_iterator cend() const { return const_iterator(this, size_); }
 
-    const word_t* data() const { return packed_data.raw_data(); }
-    word_t* data() { return packed_data.raw_data(); }
-        
-        // Helper methods for optimized range copying
-    const word_t* get_packed_data_words() const { return packed_data.raw_data(); }
+        const word_t* data() const { return packed_data.raw_data(); }
+        word_t* data() { return packed_data.raw_data(); }
+            
+        // Helper methods for optimized range copying and direct storage access
+        const word_t* get_packed_data_words() const { return packed_data.raw_data(); }
+        size_t words() const { return packed_data.words(); }
+        word_t* raw_data() { return packed_data.raw_data(); }
+        const word_t* raw_data() const { return packed_data.raw_data(); }
     };
     
     /*  

@@ -35,7 +35,11 @@ This tool allows pre-training Random Forest models from quantized datasets and f
 
 2. **Compile the program:**
    ```bash
-   g++ -std=c++17 -I../../src -o pre_train random_forest_pc.cpp
+   # Standard compilation
+   g++ -std=c++17 -O2 -I../../src -o pre_train random_forest_pc.cpp
+   
+   # With OpenMP for parallel tree building (recommended for faster training)
+   g++ -std=c++17 -O2 -fopenmp -I../../src -o pre_train random_forest_pc.cpp
    ```
 
 3. **Configure your model:**
@@ -44,10 +48,16 @@ This tool allows pre-training Random Forest models from quantized datasets and f
 4. **Run the training:**
    ```bash
    # Build model only (fast, no grid search)
-   ./pre_train
+   ./pre_train --skip_training 
    
    # Full training with grid search (slower, optimized parameters)
-   ./pre_train -training
+   ./pre_train 
+   
+   # Specify number of threads for parallel tree building (default: using all available threads)
+   ./pre_train -threads 4
+   
+   # View all options
+   ./pre_train --help
    ```
 
 5. **Deploy results:**
@@ -91,24 +101,6 @@ The tool supports two execution modes to accommodate different workflow needs:
 - Saves best-performing model configuration
 - **Slow execution** - can take hours on large datasets
 
-### Command Line Options
-
-| Option | Description |
-|--------|-------------|
-| `-training`, `--training` | Enable training mode with grid search |
-| `-h`, `--help` | Display help message and exit |
-
-**Examples:**
-```bash
-# Show help
-./pre_train --help
-
-# Quick build (default behavior)
-./pre_train
-
-# Full training with optimization
-./pre_train -training
-```
 
 ### Decision Tree Mode
 

@@ -1,0 +1,16 @@
+{
+    "dataset_path": "../data_quantization/data/real_dirft_datasets/result/covertype_nml.csv",
+    "drift_point": 5000,
+    "window_size": 1000,
+    "metric": "auto",
+    "streaming": true,
+    "num_trees": 20,
+    "max_depth": 10,
+    "min_samples_leaf": 5,
+    "min_split": 2,
+    "min_leaf": 1,
+    "quantization_coefficient": 2,
+    "retrain_buffer_size": 10000,
+    "retrain_acc_threshold": 0.5,
+    "retrain_patience": 2000
+}

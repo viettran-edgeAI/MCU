@@ -47,7 +47,7 @@ void setup() {
     manage_files();
     delay(500);
     
-    long unsigned start_forest = GET_CURRENT_TIME_IN_MILLISECONDS;
+    long unsigned start_forest = mcu::platform::Rf_get_current_time(mcu::platform::TimeUnit::MILLISECONDS);
     
     // Initialize Random Forest model
     Serial.print("Loading model 'walker_fall'... ");
@@ -61,18 +61,18 @@ void setup() {
     
     // Optional: Train or build model (commented out for pre-trained model)
     forest.build_model();
-    long unsigned build_time = GET_CURRENT_TIME_IN_MILLISECONDS;
+    long unsigned build_time = mcu::platform::Rf_get_current_time(mcu::platform::TimeUnit::MILLISECONDS);
     Serial.printf("Model built in %lu ms\n", build_time - start_forest);
 
     // forest.training(3);
     
     // Load pre-trained forest from filesystem
-    long unsigned load_start = GET_CURRENT_TIME_IN_MILLISECONDS;
+    long unsigned load_start = mcu::platform::Rf_get_current_time(mcu::platform::TimeUnit::MILLISECONDS);
     if (!forest.loadForest()) {
         Serial.println("❌ FAILED");
         return;
     }
-    long unsigned load_end = GET_CURRENT_TIME_IN_MILLISECONDS;
+    long unsigned load_end = mcu::platform::Rf_get_current_time(mcu::platform::TimeUnit::MILLISECONDS);
     Serial.printf("Forest loaded in %lu ms\n", load_end - load_start);
 
     // Optional: Enable dataset extension for online learning
@@ -147,7 +147,7 @@ void setup() {
     int total_logged = forest.get_total_logged_inference();
     Serial.printf("Total Logged Inferences: %d\n", total_logged);
 
-    long unsigned end_forest = GET_CURRENT_TIME_IN_MILLISECONDS;
+    long unsigned end_forest = mcu::platform::Rf_get_current_time(mcu::platform::TimeUnit::MILLISECONDS);
     Serial.println("\n=== Execution Summary ===");
     Serial.printf("Total execution time: %lu ms\n", end_forest - start_forest);
     Serial.println("\n✅ Example completed successfully!\n");

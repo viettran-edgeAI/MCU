@@ -15,7 +15,7 @@
  * Dataset: Walker fall detection with accelerometer/gyroscope features
  */
 
-#define DEV_STAGE    
+#define EML_DEV_STAGE    
 #define RF_DEBUG_LEVEL 2
 #define RF_USE_PSRAM
 

@@ -270,17 +270,17 @@ Level 3:
 
 ### Debug Helper Macros
 
-#### `RF_DEBUG(level, message, value)`
+#### `eml_debug(level, message, value)`
 Print debug message if current debug level exceeds specified level:
 ```cpp
-RF_DEBUG(1, "Model name: ", model_name);
-RF_DEBUG(2, "⚠️ Warning: low memory");
+eml_debug(1, "Model name: ", model_name);
+eml_debug(2, "⚠️ Warning: low memory");
 ```
 
-#### `RF_DEBUG_2(level, msg1, val1, msg2, val2)`
+#### `eml_debug_2(level, msg1, val1, msg2, val2)`
 Print two value pairs:
 ```cpp
-RF_DEBUG_2(1, "Samples: ", num_samples, " Features: ", num_features);
+eml_debug_2(1, "Samples: ", num_samples, " Features: ", num_features);
 ```
 
 ---
@@ -289,7 +289,7 @@ RF_DEBUG_2(1, "Samples: ", num_samples, " Features: ", num_features);
 
 ### Feature Control
 
-#### `RF_STATIC_MODEL`
+#### `EML_STATIC_MODEL`
 **Purpose:** Completely disable training functionality to save code space (Inference only)  
 **Default:** Not defined (training enabled)  
 **Effect:** If defined, training code is excluded from compilation  
@@ -297,7 +297,7 @@ RF_DEBUG_2(1, "Samples: ", num_samples, " Features: ", num_features);
 
 **Usage for inference-only deployment:**
 ```cpp
-#define RF_STATIC_MODEL
+#define EML_STATIC_MODEL
 #include <random_forest_mcu.h>
 
 void setup() {
@@ -308,7 +308,7 @@ void setup() {
 
 **Conditional compilation:**
 ```cpp
-#ifndef RF_STATIC_MODEL
+#ifndef EML_STATIC_MODEL
   // Training-related code only compiled when enabled
   rf.train();
 #endif
@@ -316,7 +316,7 @@ void setup() {
 
 ### Development Features
 
-#### `DEV_STAGE`
+#### `EML_DEV_STAGE`
 **Purpose:** Enable development and testing features  
 **Default:** Not defined (disabled)  
 **Effects:**
@@ -327,7 +327,7 @@ void setup() {
 
 **Usage:**
 ```cpp
-#define DEV_STAGE
+#define EML_DEV_STAGE
 #include <random_forest_mcu.h>
 
 void setup() {
@@ -338,7 +338,7 @@ void setup() {
 
 #### `ENABLE_TEST_DATA`
 **Purpose:** Enable test data split during training  
-**Auto-set:** 1 if `DEV_STAGE` defined, 0 otherwise  
+**Auto-set:** 1 if `EML_DEV_STAGE` defined, 0 otherwise  
 **Effect:** Allocates data for train/test/validation splits
 
 ---
@@ -470,8 +470,8 @@ These macros help write portable code across different microcontroller platforms
 |-------|---------|---------|--------|------|
 | `RF_USE_PSRAM` | Enable PSRAM usage | Not defined | 0, 1 | Rf_board_config.h |
 | `RF_DEBUG_LEVEL` | Debug verbosity | 1 | 0-3 | Rf_file_manager.h |
-| `RF_STATIC_MODEL` | Disable training | Not defined | defined/not | Rf_components.h |
-| `DEV_STAGE` | Development mode | Not defined | defined/not | Rf_components.h |
+| `EML_STATIC_MODEL` | Disable training | Not defined | defined/not | Rf_components.h |
+| `EML_DEV_STAGE` | Development mode | Not defined | defined/not | Rf_components.h |
 | `USER_CHUNK_SIZE` | USB transfer chunk | Board default | 64-512 | Rf_board_config.h |
 | `SD_CS_PIN` | SD SPI chip select | 5 | Any GPIO | Rf_file_manager.h |
 | `SD_MOSI_PIN` | SD SPI MOSI | 23 | Any GPIO | Rf_file_manager.h |
@@ -488,7 +488,7 @@ These macros help write portable code across different microcontroller platforms
 ### Example 1: Production Inference-Only Deployment
 ```cpp
 // Optimize for minimal code size and maximum speed
-#define RF_STATIC_MODEL      // Exclude training code
+#define EML_STATIC_MODEL      // Exclude training code
 #define RF_USE_PSRAM         // Use external RAM
 #define RF_DEBUG_LEVEL 0     // Silent mode
 #define USER_CHUNK_SIZE 512  // Fast transfers
@@ -511,7 +511,7 @@ void setup() {
 ### Example 2: Development with Full Diagnostics
 ```cpp
 // Maximum debugging and testing features
-#define DEV_STAGE            // Enable test splits
+#define EML_DEV_STAGE            // Enable test splits
 #define RF_USE_PSRAM         // Use external RAM
 #define RF_DEBUG_LEVEL 3     // Maximum verbosity
 #define USER_CHUNK_SIZE 256  // Conservative for stability
@@ -653,7 +653,7 @@ void setup() {
 
 ### Issue: Code size too large
 **Solutions:**
-- Disable training: `#define RF_STATIC_MODEL`
+- Disable training: `#define EML_STATIC_MODEL`
 - Reduce debug level: `#define RF_DEBUG_LEVEL 0`
 - Use release build flags in Arduino IDE
 
@@ -675,7 +675,7 @@ void setup() {
 - PSRAM: Not available
 - USB: Native USB CDC
 - Storage: LittleFS or SD_SPI
-- Note: Limited RAM, use `RF_STATIC_MODEL` for large models
+- Note: Limited RAM, use `EML_STATIC_MODEL` for large models
 
 ### ESP32-C6/H2
 - PSRAM: Not available  

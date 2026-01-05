@@ -52,14 +52,14 @@ inline void rf_debug_print_2(const char* msg1, const T1& obj1, const char* msg2,
 #endif
 }
 
-#define RF_DEBUG(level, ...)                        \
+#define eml_debug(level, ...)                        \
     do{                                              \
         if constexpr (RF_DEBUG_LEVEL > (level)) {     \
             rf_debug_print(__VA_ARGS__);               \
         }                                               \
     }while(0)
 
-#define RF_DEBUG_2(level, msg1, obj1, msg2, obj2)          \
+#define eml_debug_2(level, msg1, obj1, msg2, obj2)          \
     do{                                                     \
         if constexpr (RF_DEBUG_LEVEL > (level)) {            \
             rf_debug_print_2(msg1, obj1, msg2, obj2);         \

@@ -1751,7 +1751,7 @@ public:
         }
 
         if (config.num_labels > 255) {
-            std::cout << "❌ MCU label_type is uint8_t; num_labels=" << config.num_labels << " exceeds 255\n";
+            std::cout << "❌ MCU rf_label_type is uint8_t; num_labels=" << config.num_labels << " exceeds 255\n";
             return false;
         }
 

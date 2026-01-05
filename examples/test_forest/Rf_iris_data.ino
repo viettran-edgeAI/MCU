@@ -14,7 +14,7 @@
  * Dataset: Iris flowers with sepal/petal measurements (length, width)
  */
 
-#define DEV_STAGE    
+#define EML_DEV_STAGE    
 #define RF_DEBUG_LEVEL 2
 #define RF_USE_PSRAM
 

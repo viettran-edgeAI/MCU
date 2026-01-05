@@ -15,45 +15,52 @@
 #include <limits>
 
 
-#define GET_CURRENT_TIME_IN_MICROSECONDS() micros() // current time in microseconds
-#define GET_CURRENT_TIME_IN_MILLISECONDS millis()// current time in milliseconds
-#define GET_CURRENT_TIME() millis()
-
-#ifdef DEV_STAGE
+#ifdef EML_DEV_STAGE
     #define ENABLE_TEST_DATA 1
 #else
     #define ENABLE_TEST_DATA 0
 #endif
 
-// RF_STATIC_MODEL: If defined, training code is excluded (inference only)
+// EML_STATIC_MODEL: If defined, training code is excluded (inference only)
 
 namespace mcu {
 
-    using label_type    = uint8_t;  // type for label related operations
-    using sample_type   = uint32_t; // type for sample related operations
-    using node_type     = size_t; // type for tree node related operations
-    using sampleID_set  = ID_vector<sample_type>;       // set of unique sample IDs
+    using rf_label_type    = uint8_t;  // type for label related operations
+    using rf_sample_type   = uint32_t; // type for sample related operations
+    using rf_node_type     = size_t; // type for tree node related operations
+    using sampleID_set     = ID_vector<rf_sample_type>;       // set of unique sample IDs
 
-    static constexpr uint8_t      RF_MAX_LABEL_LENGTH    = 32;     // max label length
-    static constexpr uint8_t      RF_PATH_BUFFER         = 64;     // buffer for file_path(limit to 2 level of file)
-    static constexpr uint8_t      RF_MAX_TREES           = 100;    // maximum number of trees in a forest
-    static constexpr label_type   RF_MAX_LABELS          = 255;    // maximum number of unique labels supported 
-    static constexpr uint16_t     RF_MAX_FEATURES        = 1023;   // maximum number of features (can exceed this limit)
-    static constexpr uint32_t     RF_MAX_NODES           = 262144; // Maximum nodes per tree (18 bits)
-    static constexpr sample_type  RF_MAX_SAMPLES         = 1048576;// maximum number of samples in a dataset (20 bits)
+    static constexpr uint8_t         RF_MAX_LABEL_LENGTH    = 32;     // max label length
+    static constexpr uint8_t         RF_PATH_BUFFER         = 64;     // buffer for file_path(limit to 2 level of file)
+    static constexpr uint8_t         RF_MAX_TREES           = 100;    // maximum number of trees in a forest
+    static constexpr rf_label_type   RF_MAX_LABELS          = 255;    // maximum number of unique labels supported 
+    static constexpr uint16_t        RF_MAX_FEATURES        = 1023;   // maximum number of features (can exceed this limit)
+    static constexpr uint32_t        RF_MAX_NODES           = 262144; // Maximum nodes per tree (18 bits)
+    static constexpr rf_sample_type  RF_MAX_SAMPLES         = 1048576;// maximum number of samples in a dataset (20 bits)
     
-    
+    typedef enum TimeUnit : uint8_t {
+        MICROSECONDS = 0,
+        MILLISECONDS = 1,
+        NANOSECONDS  = 2
+    } TimeUnit;
+
+    long unsigned eml_time_now(TimeUnit unit = TimeUnit::MILLISECONDS){
+        return (unit == TimeUnit::MICROSECONDS) ? static_cast<long unsigned>(micros())
+                                                : static_cast<long unsigned>(millis());
+    }
+
+
     inline size_t rf_max_dataset_size() {
         return rf_storage_max_dataset_bytes();
     }
 
-    // define error label base on label_type
+    // define error label base on rf_label_type
     template<typename T>
     struct Rf_err_label {
         static constexpr T value = static_cast<T>(~static_cast<T>(0));
     };
 
-    static constexpr label_type RF_ERROR_LABEL = Rf_err_label<label_type>::value; 
+    static constexpr rf_label_type RF_ERROR_LABEL = Rf_err_label<rf_label_type>::value; 
 
     /*
     NOTE : Forest file components (with each model)
@@ -165,25 +172,25 @@ namespace mcu {
             if (!RF_FS_EXISTS(filepath)) {
                 build_file_path(filepath, "_nml.csv");
                 if (RF_FS_EXISTS(filepath)) {
-                    RF_DEBUG(1, "🔄 Found csv dataset, need to be converted to binary format before use.");
+                    eml_debug(1, "🔄 Found csv dataset, need to be converted to binary format before use.");
                     flags |= static_cast<Rf_base_flags>(BASE_DATA_IS_CSV);
                 }else{
-                    RF_DEBUG(0, "❌ No base data file found: ", filepath);
+                    eml_debug(0, "❌ No base data file found: ", filepath);
                     this->model_name[0] = '\0';
                     return;
                 }
             } else {
-                RF_DEBUG(1, "✅ Found base data file: ", filepath);
+                eml_debug(1, "✅ Found base data file: ", filepath);
                 flags |= static_cast<Rf_base_flags>(BASE_DATA_EXIST);
             }
 
             // check : quantizer file exists
             build_file_path(filepath, "_qtz.bin");
             if (RF_FS_EXISTS(filepath)) {
-                RF_DEBUG(1, "✅ Found quantizer file: ", filepath);
+                eml_debug(1, "✅ Found quantizer file: ", filepath);
                 flags |= static_cast<Rf_base_flags>(CTG_FILE_EXIST);
             } else {
-                RF_DEBUG(0, "❌ No quantizer file found: ", filepath);
+                eml_debug(0, "❌ No quantizer file found: ", filepath);
                 this->model_name[0] = '\0';
                 return;
             }
@@ -191,65 +198,65 @@ namespace mcu {
             // check : dp file exists
             build_file_path(filepath, "_dp.csv");
             if (RF_FS_EXISTS(filepath)) {
-                RF_DEBUG(1, "✅ Found data_params file: ", filepath);
+                eml_debug(1, "✅ Found data_params file: ", filepath);
                 flags |= static_cast<Rf_base_flags>(DP_FILE_EXIST);
             } else {
-                RF_DEBUG(1, "⚠️ No data_params file found: ", filepath);
-                RF_DEBUG(1, "🔂 Dataset will be scanned, which may take time...🕒");
+                eml_debug(1, "⚠️ No data_params file found: ", filepath);
+                eml_debug(1, "🔂 Dataset will be scanned, which may take time...🕒");
             }
 
             // check : config file exists
             build_file_path(filepath, "_config.json");
             if (RF_FS_EXISTS(filepath)) {
-                RF_DEBUG(1, "✅ Found config file: ", filepath);
+                eml_debug(1, "✅ Found config file: ", filepath);
                 flags |= static_cast<Rf_base_flags>(CONFIG_FILE_EXIST);
             } else {
-                RF_DEBUG(1, "⚠️ No config file found: ", filepath);
-                RF_DEBUG(1, "🔂 Switching to manual configuration");
+                eml_debug(1, "⚠️ No config file found: ", filepath);
+                eml_debug(1, "🔂 Switching to manual configuration");
             }
             
             // check : forest file exists (unified form)
             build_file_path(filepath, "_forest.bin");
             if (RF_FS_EXISTS(filepath)) {
-                RF_DEBUG(1, "✅ Found unified forest model file: ", filepath);
+                eml_debug(1, "✅ Found unified forest model file: ", filepath);
                 flags |= static_cast<Rf_base_flags>(UNIFIED_FOREST_EXIST);
             } else {
-                RF_DEBUG(2, "⚠️ No unified forest model file found");
+                eml_debug(2, "⚠️ No unified forest model file found");
             }
 
             // check : node predictor file exists
             build_file_path(filepath, "_npd.bin");
             if (RF_FS_EXISTS(filepath)) {
-                RF_DEBUG(1, "✅ Found node predictor file: ", filepath);
+                eml_debug(1, "✅ Found node predictor file: ", filepath);
                 flags |= static_cast<Rf_base_flags>(NODE_PRED_FILE_EXIST);
             } else {
-                RF_DEBUG(2, "⚠️ No node predictor file found: ", filepath);
-                RF_DEBUG(2, "🔂 Switching to use default node_predictor");
+                eml_debug(2, "⚠️ No node predictor file found: ", filepath);
+                eml_debug(2, "🔂 Switching to use default node_predictor");
             }
 
             // able to inference : forest file + quantizer
             if ((flags & UNIFIED_FOREST_EXIST) && (flags & CTG_FILE_EXIST)) {
                 flags |= static_cast<Rf_base_flags>(ABLE_TO_INFERENCE);
-                RF_DEBUG(1, "✅ Model is ready for inference.");
+                eml_debug(1, "✅ Model is ready for inference.");
             } else {
-                RF_DEBUG(0, "⚠️ Model is NOT ready for inference.");
+                eml_debug(0, "⚠️ Model is NOT ready for inference.");
             }
 
             // able to re-training : base data + quantizer 
             if ((flags & BASE_DATA_EXIST) && (flags & CTG_FILE_EXIST)) {
                 flags |= static_cast<Rf_base_flags>(ABLE_TO_TRAINING);
-                RF_DEBUG(1, "✅ Model is ready for re-training.");
+                eml_debug(1, "✅ Model is ready for re-training.");
             } else {
-                RF_DEBUG(0, "⚠️ Model is NOT ready for re-training.");
+                eml_debug(0, "⚠️ Model is NOT ready for re-training.");
             }
             flags |= static_cast<Rf_base_flags>(SCANNED);
         }
         
     public:
         void init(const char* name) {
-            RF_DEBUG(1, "🔧 Initializing model resource manager");
+            eml_debug(1, "🔧 Initializing model resource manager");
             if (!name || strlen(name) == 0) {
-                RF_DEBUG(0, "❌ Model name is empty. The process is aborted.");
+                eml_debug(0, "❌ Model name is empty. The process is aborted.");
                 return;
             }
             strncpy(this->model_name, name, RF_PATH_BUFFER - 1);
@@ -258,9 +265,9 @@ namespace mcu {
         }
 
         void update_resource_status() {
-            RF_DEBUG(1, "🔄 Updating model resource status");
+            eml_debug(1, "🔄 Updating model resource status");
             if (this->model_name[0] == '\0') {
-                RF_DEBUG(0, "❌ Model name is empty. Cannot update resource status.");
+                eml_debug(0, "❌ Model name is empty. Cannot update resource status.");
                 return;
             }
             flags = 0; 
@@ -493,13 +500,13 @@ namespace mcu {
         pair<uint16_t, uint16_t> max_depth_range; 
 
         // Dataset parameters 
-        sample_type num_samples;
-        sample_type max_samples = 0; // Maximum samples allowed (0 = unlimited). When exceeded, oldest samples are removed
+        rf_sample_type num_samples;
+        rf_sample_type max_samples = 0; // Maximum samples allowed (0 = unlimited). When exceeded, oldest samples are removed
         uint16_t num_features;
-        label_type  num_labels;
+        rf_label_type  num_labels;
         uint8_t  quantization_coefficient; // Bits per feature value (1-8)
         float lowest_distribution; 
-        b_vector<sample_type,8> samples_per_label; // index = label, value = count
+        b_vector<rf_sample_type,8> samples_per_label; // index = label, value = count
 
         // MCU node layout bits (loaded from PC-trained model config)
         uint8_t threshold_bits = 0;
@@ -553,11 +560,11 @@ namespace mcu {
         bool scan_base_data(){
             char base_file_path[RF_PATH_BUFFER];
             base_ptr->get_base_data_path(base_file_path);
-            RF_DEBUG(1, "📊 Scanning base data: ", base_file_path);
+            eml_debug(1, "📊 Scanning base data: ", base_file_path);
 
             File file = RF_FS_OPEN(base_file_path, RF_FILE_READ);
             if (!file) {
-                RF_DEBUG(0, "❌ Failed to open base data file for scanning: ", base_file_path);
+                eml_debug(0, "❌ Failed to open base data file for scanning: ", base_file_path);
                 return false;
             }
 
@@ -567,7 +574,7 @@ namespace mcu {
             
             if(file.read((uint8_t*)&numSamples, sizeof(numSamples)) != sizeof(numSamples) ||
                file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
-                RF_DEBUG(0, "❌ Failed to read dataset header during scan", base_file_path);
+                eml_debug(0, "❌ Failed to read dataset header during scan", base_file_path);
                 file.close();
                 return false;
             }
@@ -581,14 +588,14 @@ namespace mcu {
             const uint16_t packedFeatureBytes = (totalBits + 7) / 8; // Round up to nearest byte
 
             // Track unique labels and their counts
-            unordered_map_s<label_type, sample_type> label_counts;
-            label_type max_label = 0;
+            unordered_map_s<rf_label_type, rf_sample_type> label_counts;
+            rf_label_type max_label = 0;
 
             // Scan through all samples to collect label statistics
-            for(sample_type i = 0; i < numSamples; i++) {
-                label_type label;
+            for(rf_sample_type i = 0; i < numSamples; i++) {
+                rf_label_type label;
                 if(file.read(&label, sizeof(label)) != sizeof(label)) {
-                    RF_DEBUG_2(0, "❌ Failed to read label of sample", i, ": ", base_file_path);
+                    eml_debug_2(0, "❌ Failed to read label of sample", i, ": ", base_file_path);
                     file.close();
                     return false;
                 }
@@ -607,7 +614,7 @@ namespace mcu {
 
                 // Skip packed features for this sample
                 if(file.seek(file.position() + packedFeatureBytes) == false) {
-                    RF_DEBUG_2(0, "❌ Failed to skip features of sample", i, ": ", base_file_path);
+                    eml_debug_2(0, "❌ Failed to skip features of sample", i, ": ", base_file_path);
                     file.close();
                     return false;
                 }
@@ -627,14 +634,14 @@ namespace mcu {
                 samples_per_label[pair.first] = pair.second;
             }
 
-            RF_DEBUG(1, "✅ Base data scan complete.");
-            RF_DEBUG(1, "   📊 Samples: ", num_samples);
-            RF_DEBUG(1, "   🔢 Features: ", num_features);
-            RF_DEBUG(1, "   🏷️ Labels: ", num_labels);
-            RF_DEBUG(1, "   📈 Samples per label: ");
+            eml_debug(1, "✅ Base data scan complete.");
+            eml_debug(1, "   📊 Samples: ", num_samples);
+            eml_debug(1, "   🔢 Features: ", num_features);
+            eml_debug(1, "   🏷️ Labels: ", num_labels);
+            eml_debug(1, "   📈 Samples per label: ");
             for (size_t i = 0; i < samples_per_label.size(); i++) {
                 if(samples_per_label[i] > 0) {
-                    RF_DEBUG_2(1, "   Lable ", i, ": ", samples_per_label[i]);
+                    eml_debug_2(1, "   Lable ", i, ": ", samples_per_label[i]);
                 }
             }
             return true;
@@ -691,21 +698,21 @@ namespace mcu {
 
             if (min_split == 0 || force) {
                 min_split = min_minSplit;
-                RF_DEBUG_2(1, "Setting minSplit to ", min_split, " (auto)", "");
+                eml_debug_2(1, "Setting minSplit to ", min_split, " (auto)", "");
             }
             if (min_leaf == 0 || force) {
                 min_leaf = min_minLeaf;
-                RF_DEBUG_2(1, "Setting minLeaf to ", min_leaf, " (auto)", "");
+                eml_debug_2(1, "Setting minLeaf to ", min_leaf, " (auto)", "");
             }
 
             if (max_depth == 0 || force) {
                 max_depth = max_maxDepth;
-                RF_DEBUG_2(1, "Setting maxDepth to ", max_depth, " (auto)", "");
+                eml_debug_2(1, "Setting maxDepth to ", max_depth, " (auto)", "");
             } 
             
-            RF_DEBUG_2(1, "⚙️ Setting minSplit range: ", min_minSplit, "to ", max_minSplit);
-            RF_DEBUG_2(1, "⚙️ Setting minLeaf range: ", min_minLeaf, "to ", max_minLeaf);
-            RF_DEBUG_2(1, "⚙️ Setting maxDepth range: ", min_maxDepth, "to ", max_maxDepth);
+            eml_debug_2(1, "⚙️ Setting minSplit range: ", min_minSplit, "to ", max_minSplit);
+            eml_debug_2(1, "⚙️ Setting minLeaf range: ", min_minLeaf, "to ", max_minLeaf);
+            eml_debug_2(1, "⚙️ Setting maxDepth range: ", min_maxDepth, "to ", max_maxDepth);
 
             min_split_range = make_pair(min_minSplit, max_minSplit);
             min_leaf_range = make_pair(min_minLeaf, max_minLeaf);
@@ -743,15 +750,15 @@ namespace mcu {
                 float thr = base * sample_factor * imbalance_factor * feature_factor;
                 impurity_threshold = max(0.002f, min(0.2f, thr));
             }
-            RF_DEBUG(1, "⚙️ Setting impurity_threshold to ", impurity_threshold);
+            eml_debug(1, "⚙️ Setting impurity_threshold to ", impurity_threshold);
         }
         
         // setup config manually (when no config file)
         void auto_config(){
             // set metric_score based on dataset balance
             if(samples_per_label.size() > 0){
-                sample_type minorityCount = num_samples;
-                sample_type majorityCount = 0;
+                rf_sample_type minorityCount = num_samples;
+                rf_sample_type majorityCount = 0;
 
                 for (auto& count : samples_per_label) {
                     if (count > majorityCount) {
@@ -766,20 +773,20 @@ namespace mcu {
 
                 if (maxImbalanceRatio > 10.0f) {
                     metric_score = Rf_metric_scores::RECALL;
-                    RF_DEBUG_2(1, "⚠️ Highly imbalanced dataset: ", maxImbalanceRatio, "Setting metric_score to RECALL.", "");
+                    eml_debug_2(1, "⚠️ Highly imbalanced dataset: ", maxImbalanceRatio, "Setting metric_score to RECALL.", "");
                 } else if (maxImbalanceRatio > 3.0f) {
                     metric_score = Rf_metric_scores::F1_SCORE;
-                    RF_DEBUG_2(1, "⚠️ Moderately imbalanced dataset: ", maxImbalanceRatio, "Setting metric_score to F1_SCORE.", "");
+                    eml_debug_2(1, "⚠️ Moderately imbalanced dataset: ", maxImbalanceRatio, "Setting metric_score to F1_SCORE.", "");
                 } else if (maxImbalanceRatio > 1.5f) {
                     metric_score = Rf_metric_scores::PRECISION;
-                    RF_DEBUG_2(1, "⚠️ Slightly imbalanced dataset: ", maxImbalanceRatio, "Setting metric_score to PRECISION.", "");
+                    eml_debug_2(1, "⚠️ Slightly imbalanced dataset: ", maxImbalanceRatio, "Setting metric_score to PRECISION.", "");
                 } else {
                     metric_score = Rf_metric_scores::ACCURACY;
-                    RF_DEBUG_2(1, "✅ Balanced dataset (ratio: ", maxImbalanceRatio, "). Setting metric_score to ACCURACY.", "");
+                    eml_debug_2(1, "✅ Balanced dataset (ratio: ", maxImbalanceRatio, "). Setting metric_score to ACCURACY.", "");
                 }
             }
 
-            sample_type avg_samples_per_label = num_samples / max(1, static_cast<int>(num_labels));
+            rf_sample_type avg_samples_per_label = num_samples / max(1, static_cast<int>(num_labels));
         
             // set training_score method
             if (avg_samples_per_label < 200){
@@ -799,12 +806,12 @@ namespace mcu {
             char path[RF_PATH_BUFFER];
             base_ptr->get_dp_path(path);
             if (strlen(path) < 1) { 
-                RF_DEBUG(0, "❌ load dp file failed: ", "dp path is empty");
+                eml_debug(0, "❌ load dp file failed: ", "dp path is empty");
                 return false; 
             }
             File file = RF_FS_OPEN(path, RF_FILE_READ);
             if (!file) {
-                RF_DEBUG(0, "❌ Failed to open data_params file for reading", path);
+                eml_debug(0, "❌ Failed to open data_params file for reading", path);
                 return false;
             }
 
@@ -812,11 +819,11 @@ namespace mcu {
             file.readStringUntil('\n');
 
             // Initialize variables with defaults
-            sample_type numSamples = 0;
+            rf_sample_type numSamples = 0;
             uint16_t numFeatures = 0;
-            label_type numLabels = 0;
+            rf_label_type numLabels = 0;
             uint8_t quantCoeff = 2;  // Default 2 bits
-            unordered_map_s<label_type, sample_type> labelCounts; // label -> count
+            unordered_map_s<rf_label_type, rf_sample_type> labelCounts; // label -> count
 
             // Parse parameters from CSV
             while (file.available()) {
@@ -860,7 +867,7 @@ namespace mcu {
             // Initialize samples_per_label vector with the parsed label counts
             samples_per_label.clear();
             samples_per_label.resize(numLabels, 0);
-            for (label_type i = 0; i < numLabels; i++) {
+            for (rf_label_type i = 0; i < numLabels; i++) {
                 if (labelCounts.find(i) != labelCounts.end()) {
                     samples_per_label[i] = labelCounts[i];
                 }
@@ -868,10 +875,10 @@ namespace mcu {
 
             // Validate loaded parameters
             if (num_features == 0 || num_samples == 0 || num_labels == 0) {
-                RF_DEBUG(0, "❌ Invalid dataset parameters in dp file", path);
+                eml_debug(0, "❌ Invalid dataset parameters in dp file", path);
                 return false;
             }
-            if (! validateSamplesPerLabel()) RF_DEBUG(1, "⚠️ samples_per_label data inconsistency detected");
+            if (! validateSamplesPerLabel()) eml_debug(1, "⚠️ samples_per_label data inconsistency detected");
             return true;
         }
         
@@ -882,13 +889,13 @@ namespace mcu {
             if (path[0] == '\0') return false;
             File file = RF_FS_OPEN(path, RF_FILE_WRITE);
             if (!file) {
-                RF_DEBUG(0, "❌ Failed to open data_params file for writing", path);
+                eml_debug(0, "❌ Failed to open data_params file for writing", path);
                 return false;
             }
             file.println("parameter,value");
             file.printf("quantization_coefficient,%u\n", quantization_coefficient);
             
-            label_type max_value = (quantization_coefficient >= 8) ? RF_ERROR_LABEL : ((1u << quantization_coefficient) - 1);
+            rf_label_type max_value = (quantization_coefficient >= 8) ? RF_ERROR_LABEL : ((1u << quantization_coefficient) - 1);
             uint8_t features_per_byte = (quantization_coefficient == 0) ? 0 : (8 / quantization_coefficient);
             
             file.printf("max_feature_value,%u\n", max_value);
@@ -899,13 +906,13 @@ namespace mcu {
             file.printf("num_labels,%u\n", num_labels);
         
             // Write actual label counts from samples_per_label vector
-            for (label_type i = 0; i < samples_per_label.size(); i++) {
+            for (rf_label_type i = 0; i < samples_per_label.size(); i++) {
                 file.printf("samples_label_%u,%u\n", i, samples_per_label[i]);
             }
             
             file.close();   
             base_ptr->set_dp_status(true);
-            RF_DEBUG(1, "✅ Dataset parameters saved: ", path);
+            eml_debug(1, "✅ Dataset parameters saved: ", path);
             return true;
         }
 
@@ -914,7 +921,7 @@ namespace mcu {
         bool loadConfig() {
             if (isLoaded) return true;
             if (!has_base()) {
-                RF_DEBUG(0, "❌ Base pointer is null or base not ready", "load config");
+                eml_debug(0, "❌ Base pointer is null or base not ready", "load config");
                 return false;
             }
 
@@ -922,20 +929,20 @@ namespace mcu {
             bool dp_ok =  false;
             if(base_ptr->dp_file_exists()){
                 if(!loadDpFile()){
-                    RF_DEBUG(1, "⚠️ Cannot load dataset parameters from file, trying to scan base data");
+                    eml_debug(1, "⚠️ Cannot load dataset parameters from file, trying to scan base data");
                     if (scan_base_data()){         // try to scan manually 
-                        RF_DEBUG(1, "✅ Base data scanned successfully");
+                        eml_debug(1, "✅ Base data scanned successfully");
                         dp_ok = true;
                     }
                 }else dp_ok = true;
             }else{
                 if(scan_base_data()){
-                    RF_DEBUG(2, "✅ Base data scanned successfully");
+                    eml_debug(2, "✅ Base data scanned successfully");
                     dp_ok = true;
                 }
             }
             if(!dp_ok){
-                RF_DEBUG(1, "❌ Cannot load dataset parameters for configuration");
+                eml_debug(1, "❌ Cannot load dataset parameters for configuration");
                 return false;
             }
             // caculate lowest distribution 
@@ -961,17 +968,17 @@ namespace mcu {
                     validate_ratios();
                     generate_ranges();
                 } else {
-                    RF_DEBUG(1, "⚠️ Failed to open config file: ", file_path);
+                    eml_debug(1, "⚠️ Failed to open config file: ", file_path);
                     enable_auto_config = true; // Fallback to auto-config
                 }
             }else{
-                RF_DEBUG(1, "⚠️ No config file found, proceeding with auto-configuration");
+                eml_debug(1, "⚠️ No config file found, proceeding with auto-configuration");
                 enable_auto_config = true; // Default to auto-config if no file
             }
             
             // Now decide loading strategy based on enable_auto_config
             if(enable_auto_config){
-                RF_DEBUG(1, "🔧 Auto-config enabled: generating settings from dataset parameters");
+                eml_debug(1, "🔧 Auto-config enabled: generating settings from dataset parameters");
                 auto_config();
             } 
             if constexpr (RF_DEBUG_LEVEL >1) print_config();
@@ -982,7 +989,7 @@ namespace mcu {
         // Save configuration to JSON file 
         bool releaseConfig() {
             if (!isLoaded || !has_base()){
-                RF_DEBUG(0, "❌ Save config failed: Config not loaded or base not ready");
+                eml_debug(0, "❌ Save config failed: Config not loaded or base not ready");
                 return false;
             }
             char file_path[RF_PATH_BUFFER];
@@ -1003,7 +1010,7 @@ namespace mcu {
 
             File file = RF_FS_OPEN(file_path, RF_FILE_WRITE);
             if (!file) {
-                RF_DEBUG(0, "❌ Failed to create config file: ", file_path);
+                eml_debug(0, "❌ Failed to create config file: ", file_path);
                 return false;
             }
 
@@ -1048,7 +1055,7 @@ namespace mcu {
             releaseDpFile();
             isLoaded = false;
             base_ptr->set_config_status(true);
-            RF_DEBUG(1, "✅ Configuration saved to: ", file_path);
+            eml_debug(1, "✅ Configuration saved to: ", file_path);
             return true;
         }
 
@@ -1216,8 +1223,8 @@ namespace mcu {
             if (samples_per_label.size() != num_labels) {
                 return false;
             }
-            sample_type totalSamples = 0;
-            for (sample_type count : samples_per_label) {
+            rf_sample_type totalSamples = 0;
+            for (rf_sample_type count : samples_per_label) {
                 totalSamples += count;
             }
             return totalSamples == num_samples;
@@ -1225,8 +1232,8 @@ namespace mcu {
         
         // make sure train, test and valid ratios valid and optimal 
         void validate_ratios(){
-            // sample_type avg_samples_per_label = num_samples / max(1, static_cast<int>(num_labels));
-            sample_type rarest_class = RF_MAX_SAMPLES;
+            // rf_sample_type avg_samples_per_label = num_samples / max(1, static_cast<int>(num_labels));
+            rf_sample_type rarest_class = RF_MAX_SAMPLES;
             for(auto & count : samples_per_label){
                 if (count < rarest_class){
                     rarest_class = count;
@@ -1251,8 +1258,7 @@ namespace mcu {
             if (training_score != VALID_SCORE){
                 train_ratio += valid_ratio;
                 valid_ratio = 0.0f;
-            }
-            else {
+            } else {
                 if (valid_ratio < 0.1f){
                     if(rarest_class > 750)      valid_ratio = 0.1f;
                     else if(rarest_class > 150) valid_ratio = 0.15f;
@@ -1263,6 +1269,13 @@ namespace mcu {
             if (!ENABLE_TEST_DATA){
                 train_ratio += test_ratio;
                 test_ratio = 0.0f;
+            }else{
+                if (test_ratio < 0.1f){
+                    if(rarest_class > 750)      test_ratio = 0.1f;
+                    else if(rarest_class > 150) test_ratio = 0.15f;
+                    else                        test_ratio = 0.2f;
+                    train_ratio -= test_ratio;
+                }
             }
             // ensure ratios sum to 1.0
             float total_ratio = train_ratio + test_ratio + valid_ratio;
@@ -1270,42 +1283,48 @@ namespace mcu {
                 train_ratio /= total_ratio;
                 test_ratio /= total_ratio;
                 valid_ratio /= total_ratio;
+            }else{
+                if(total_ratio < 1.0f){
+                    train_ratio *= (1.0f / total_ratio);
+                    test_ratio *= (1.0f / total_ratio);
+                    valid_ratio *= (1.0f / total_ratio);
+                }
             }
         }
             
         void print_config() const {
-            RF_DEBUG(1, "🛠️ Model configuration: ");
-            RF_DEBUG(1, "   - Trees: ", num_trees);
-            RF_DEBUG(1, "   - Random seed: ", random_seed);
-            RF_DEBUG(1, "   - max_depth: ", max_depth);
-            RF_DEBUG(1, "   - min_split: ", min_split);
-            RF_DEBUG(1, "   - min_leaf: ", min_leaf);
-            RF_DEBUG(1, "   - train_ratio: ", train_ratio);
-            RF_DEBUG(1, "   - test_ratio: ", test_ratio);
-            RF_DEBUG(1, "   - valid_ratio: ", valid_ratio);
-            RF_DEBUG(1, "   - use_bootstrap: ", use_boostrap ? "true" : "false");
-            RF_DEBUG(1, "   - bootstrap_ratio: ", boostrap_ratio);
-            RF_DEBUG(1, "   - criterion: ", use_gini ? "gini" : "entropy");
-            RF_DEBUG(1, "   - k_folds: ", k_folds);
-            RF_DEBUG(1, "   - impurity_threshold: ", impurity_threshold);
-            RF_DEBUG(1, "   - threshold_bits: ", threshold_bits);
-            RF_DEBUG(1, "   - feature_bits: ", feature_bits);
-            RF_DEBUG(1, "   - label_bits: ", label_bits);
-            RF_DEBUG(1, "   - child_bits: ", child_bits);
-            RF_DEBUG(1, "   - training_score: ", getTrainingScoreString(training_score).c_str());
-            RF_DEBUG(1, "   - metric_score: ", getFlagString(metric_score).c_str());
-            RF_DEBUG(1, "   - enable_retrain: ", enable_retrain ? "true" : "false");
-            RF_DEBUG(1, "   - enable_auto_config: ", enable_auto_config ? "true" : "false");
+            eml_debug(1, "🛠️ Model configuration: ");
+            eml_debug(1, "   - Trees: ", num_trees);
+            eml_debug(1, "   - Random seed: ", random_seed);
+            eml_debug(1, "   - max_depth: ", max_depth);
+            eml_debug(1, "   - min_split: ", min_split);
+            eml_debug(1, "   - min_leaf: ", min_leaf);
+            eml_debug(1, "   - train_ratio: ", train_ratio);
+            eml_debug(1, "   - test_ratio: ", test_ratio);
+            eml_debug(1, "   - valid_ratio: ", valid_ratio);
+            eml_debug(1, "   - use_bootstrap: ", use_boostrap ? "true" : "false");
+            eml_debug(1, "   - bootstrap_ratio: ", boostrap_ratio);
+            eml_debug(1, "   - criterion: ", use_gini ? "gini" : "entropy");
+            eml_debug(1, "   - k_folds: ", k_folds);
+            eml_debug(1, "   - impurity_threshold: ", impurity_threshold);
+            eml_debug(1, "   - threshold_bits: ", threshold_bits);
+            eml_debug(1, "   - feature_bits: ", feature_bits);
+            eml_debug(1, "   - label_bits: ", label_bits);
+            eml_debug(1, "   - child_bits: ", child_bits);
+            eml_debug(1, "   - training_score: ", getTrainingScoreString(training_score).c_str());
+            eml_debug(1, "   - metric_score: ", getFlagString(metric_score).c_str());
+            eml_debug(1, "   - enable_retrain: ", enable_retrain ? "true" : "false");
+            eml_debug(1, "   - enable_auto_config: ", enable_auto_config ? "true" : "false");
 
-            RF_DEBUG(1, "📊 Dataset Parameters: ");
-            RF_DEBUG(1, "   - Samples: ", num_samples);
-            RF_DEBUG(1, "   - Features: ", num_features);
-            RF_DEBUG(1, "   - Labels: ", num_labels);
-            RF_DEBUG(1, "   - Samples per label: ");
+            eml_debug(1, "📊 Dataset Parameters: ");
+            eml_debug(1, "   - Samples: ", num_samples);
+            eml_debug(1, "   - Features: ", num_features);
+            eml_debug(1, "   - Labels: ", num_labels);
+            eml_debug(1, "   - Samples per label: ");
 
             for (size_t i = 0; i < samples_per_label.size(); i++) {
                 if(samples_per_label[i] > 0) {
-                    RF_DEBUG_2(1, "   🏷️ Label ", i, ": ", samples_per_label[i]);
+                    eml_debug_2(1, "   🏷️ Label ", i, ": ", samples_per_label[i]);
                 }
             }
         }
@@ -1313,7 +1332,7 @@ namespace mcu {
         size_t memory_usage() const {
             size_t total = sizeof(Rf_config);
             total += 4;   
-            total += samples_per_label.size() * sizeof(sample_type); 
+            total += samples_per_label.size() * sizeof(rf_sample_type); 
             return total;
         }
         
@@ -1329,24 +1348,24 @@ namespace mcu {
     // single data sample structure
     struct Rf_sample{
         packed_vector<8> features;          // features stored 
-        label_type label;                   // label of the sample 
+        rf_label_type label;                   // label of the sample 
 
         Rf_sample() : features(), label(0) {}
         
         // construct from parent packed_vector in Rf_data
         template<uint8_t bpv>
-        Rf_sample(label_type label, const packed_vector<bpv>& source, size_t start, size_t end){
+        Rf_sample(rf_label_type label, const packed_vector<bpv>& source, size_t start, size_t end){
             this->label = label;
             features = packed_vector<8>(source, start, end);
         }
         
         template<uint8_t bpv>
-        Rf_sample(const packed_vector<bpv>& features, label_type label) : features(features), label(label) {}
+        Rf_sample(const packed_vector<bpv>& features, rf_label_type label) : features(features), label(label) {}
     };
 
     // Record of a detected concept-drift sample (value exceeded current per-feature min/max).
     struct Rf_drift_sample {
-        sample_type pending_index = 0; // index inside pending_samples
+        rf_sample_type pending_index = 0; // index inside pending_samples
         uint16_t feature_index = 0;
         float value = 0.0f;
     };
@@ -1428,7 +1447,7 @@ namespace mcu {
         vector<packed_vector<8>> sampleChunks;  // Multiple chunks of packed features (up to 8 bits per value)
         packed_vector<8> allLabels;                  // Labels storage 
         uint16_t bitsPerSample;                    // Number of bits per sample (numFeatures * quantization_coefficient)
-        sample_type samplesEachChunk;                  // Maximum samples per chunk
+        rf_sample_type samplesEachChunk;                  // Maximum samples per chunk
         size_t size_;  
         uint8_t quantization_coefficient;              // Bits per feature value (1-8)
         char file_path[RF_PATH_BUFFER] = {0};          // dataset file_path 
@@ -1436,7 +1455,7 @@ namespace mcu {
         // Pending quantizer update mapping (concept drift): applied on next RAM load.
         Rf_quantizer_update_filter quantizer_update_filter;
 
-        uint8_t num_labels_2_bpv(label_type num_labels) {
+        uint8_t num_labels_2_bpv(rf_label_type num_labels) {
             if (num_labels <= 2) return 1;
             else if (num_labels <= 4) return 2;
             else if (num_labels <= 16) return 4;
@@ -1461,7 +1480,7 @@ namespace mcu {
             uint8_t label_bpv = num_labels_2_bpv(config.num_labels);
             allLabels.set_bits_per_value(label_bpv);
             updateSamplesEachChunk();
-            RF_DEBUG_2(1, "ℹ️ Rf_data initialized (", samplesEachChunk, "samples/chunk): ", file_path);
+            eml_debug_2(1, "ℹ️ Rf_data initialized (", samplesEachChunk, "samples/chunk): ", file_path);
             isLoaded = false;
             size_ = config.num_samples;
             sampleChunks.clear();
@@ -1586,11 +1605,11 @@ namespace mcu {
         // Helper method to reconstruct Rf_sample from chunked packed storage
         Rf_sample getSample(size_t sampleIndex) const {
             if (!isLoaded) {
-                RF_DEBUG(2, "❌ Rf_data not loaded. Call loadData() first.");
+                eml_debug(2, "❌ Rf_data not loaded. Call loadData() first.");
                 return Rf_sample();
             }
             if(sampleIndex >= size_){
-                RF_DEBUG_2(2, "❌ Sample index out of bounds: ", sampleIndex, "size: ", size_);
+                eml_debug_2(2, "❌ Sample index out of bounds: ", sampleIndex, "size: ", size_);
                 return Rf_sample();
             }
             pair<size_t, size_t> location = getChunkLocation(sampleIndex);
@@ -1606,7 +1625,7 @@ namespace mcu {
         // Helper method to store Rf_sample in chunked packed storage
         bool storeSample(const Rf_sample& sample, size_t sampleIndex) {
             if (!isProperlyInitialized()) {
-                RF_DEBUG(2, "❌ Store sample failed: Rf_data not properly initialized.");
+                eml_debug(2, "❌ Store sample failed: Rf_data not properly initialized.");
                 return false;
             }
             
@@ -1665,7 +1684,7 @@ namespace mcu {
             
             File file = RF_FS_OPEN(csvfile_path, RF_FILE_READ);
             if (!file) {
-                RF_DEBUG(0, "❌ Failed to open CSV file for reading: ", csvfile_path);
+                eml_debug(0, "❌ Failed to open CSV file for reading: ", csvfile_path);
                 return false;
             }
 
@@ -1674,7 +1693,7 @@ namespace mcu {
                 String line = file.readStringUntil('\n');
                 line.trim();
                 if (line.length() == 0) {
-                    RF_DEBUG(0, "❌ CSV file is empty or missing header: ", csvfile_path);
+                    eml_debug(0, "❌ CSV file is empty or missing header: ", csvfile_path);
                     file.close();
                     return false;
                 }
@@ -1693,16 +1712,16 @@ namespace mcu {
                 // Validate that the provided numFeatures matches the initialized bitsPerSample
                 uint16_t expectedFeatures = bitsPerSample / quantization_coefficient;
                 if (numFeatures != expectedFeatures) {
-                    RF_DEBUG_2(0, "❌ Feature count mismatch: expected ", expectedFeatures, ", found ", numFeatures);   
+                    eml_debug_2(0, "❌ Feature count mismatch: expected ", expectedFeatures, ", found ", numFeatures);   
                     file.close();
                     return false;
                 }
             }
             
-            sample_type linesProcessed = 0;
-            sample_type emptyLines = 0;
-            sample_type validSamples = 0;
-            sample_type invalidSamples = 0;
+            rf_sample_type linesProcessed = 0;
+            rf_sample_type emptyLines = 0;
+            rf_sample_type validSamples = 0;
+            rf_sample_type invalidSamples = 0;
             
             // Pre-allocate for efficiency
             allLabels.reserve(1000); // Initial capacity
@@ -1721,14 +1740,14 @@ namespace mcu {
                 s.features.clear();
                 s.features.reserve(numFeatures);
 
-                label_type fieldIdx = 0;
+                rf_label_type fieldIdx = 0;
                 int start = 0;
                 while (start < line.length()) {
                     int comma = line.indexOf(',', start);
                     if (comma < 0) comma = line.length();
 
                     String tok = line.substring(start, comma);
-                    label_type v = (label_type)tok.toInt();
+                    rf_label_type v = (rf_label_type)tok.toInt();
 
                     if (fieldIdx == 0) {
                         s.label = v;
@@ -1742,13 +1761,13 @@ namespace mcu {
                 
                 // Validate the sample
                 if (fieldIdx != numFeatures + 1) {
-                    RF_DEBUG_2(2, "❌ Invalid field count in line ", linesProcessed, ": expected ", numFeatures + 1);
+                    eml_debug_2(2, "❌ Invalid field count in line ", linesProcessed, ": expected ", numFeatures + 1);
                     invalidSamples++;
                     continue;
                 }
                 
                 if (s.features.size() != numFeatures) {
-                    RF_DEBUG_2(2, "❌ Feature count mismatch in line ", linesProcessed, ": expected ", numFeatures);
+                    eml_debug_2(2, "❌ Feature count mismatch in line ", linesProcessed, ": expected ", numFeatures);
                     invalidSamples++;
                     continue;
                 }
@@ -1760,19 +1779,19 @@ namespace mcu {
                 validSamples++;
                 
                 if (validSamples >= RF_MAX_SAMPLES) {
-                    RF_DEBUG(1, "⚠️ Reached maximum sample limit");
+                    eml_debug(1, "⚠️ Reached maximum sample limit");
                     break;
                 }
             }
             size_ = validSamples;
             
-            RF_DEBUG(1, "📋 CSV Processing Results: ");
-            RF_DEBUG(1, "   Lines processed: ", linesProcessed);
-            RF_DEBUG(1, "   Empty lines: ", emptyLines);
-            RF_DEBUG(1, "   Valid samples: ", validSamples);
-            RF_DEBUG(1, "   Invalid samples: ", invalidSamples);
-            RF_DEBUG(1, "   Total samples in memory: ", size_);
-            RF_DEBUG(1, "   Chunks used: ", sampleChunks.size());
+            eml_debug(1, "📋 CSV Processing Results: ");
+            eml_debug(1, "   Lines processed: ", linesProcessed);
+            eml_debug(1, "   Empty lines: ", emptyLines);
+            eml_debug(1, "   Valid samples: ", validSamples);
+            eml_debug(1, "   Invalid samples: ", invalidSamples);
+            eml_debug(1, "   Total samples in memory: ", size_);
+            eml_debug(1, "   Chunks used: ", sampleChunks.size());
             
             allLabels.fit();
             for (auto& chunk : sampleChunks) {
@@ -1781,7 +1800,7 @@ namespace mcu {
             file.close();
             isLoaded = true;
             RF_FS_REMOVE(csvfile_path);
-            RF_DEBUG(1, "✅ CSV data loaded and file removed: ", csvfile_path);
+            eml_debug(1, "✅ CSV data loaded and file removed: ", csvfile_path);
             return true;
         }
 
@@ -1798,7 +1817,7 @@ namespace mcu {
             return bitsPerSample / quantization_coefficient;
         }
 
-        sample_type samplesPerChunk() const {
+        rf_sample_type samplesPerChunk() const {
             return samplesEachChunk;
         }
 
@@ -1820,7 +1839,7 @@ namespace mcu {
         // Fast accessors for training-time hot paths (avoid reconstructing Rf_sample)
         inline uint16_t num_features() const { return bitsPerSample / quantization_coefficient; }
 
-        inline label_type getLabel(size_t sampleIndex) const {
+        inline rf_label_type getLabel(size_t sampleIndex) const {
             if (sampleIndex >= size_) return 0;
             return allLabels[sampleIndex];
         }
@@ -1843,19 +1862,19 @@ namespace mcu {
         // Reserve space for a specified number of samples
         void reserve(size_t numSamples) {
             if (!isProperlyInitialized()) {
-                RF_DEBUG(1, "❌ Cannot reserve space: Rf_data not properly initialized", file_path);
+                eml_debug(1, "❌ Cannot reserve space: Rf_data not properly initialized", file_path);
                 return;
             }
             allLabels.reserve(numSamples);
             ensureChunkCapacity(numSamples);
-            RF_DEBUG_2(2, "📦 Reserved space for", numSamples, "samples, used chunks: ", sampleChunks.size());
+            eml_debug_2(2, "📦 Reserved space for", numSamples, "samples, used chunks: ", sampleChunks.size());
         }
 
         bool convertCSVtoBinary(const char* csvfile_path, uint16_t numFeatures = 0) {
-            RF_DEBUG(1, "🔄 Converting CSV to binary format from: ", csvfile_path);
+            eml_debug(1, "🔄 Converting CSV to binary format from: ", csvfile_path);
             if(!loadCSVData(csvfile_path, numFeatures)) return false;
             if(!releaseData(false)) return false; 
-            RF_DEBUG(1, "✅ CSV converted to binary and saved: ", file_path);
+            eml_debug(1, "✅ CSV converted to binary and saved: ", file_path);
             return true;
         }
 
@@ -1868,17 +1887,17 @@ namespace mcu {
             if(!isLoaded) return false;
             
             if(!reuse){
-                RF_DEBUG(1, "💾 Saving data to file system and clearing from RAM...");
+                eml_debug(1, "💾 Saving data to file system and clearing from RAM...");
                 // Remove any existing file
                 if (RF_FS_EXISTS(file_path)) {
                     RF_FS_REMOVE(file_path);
                 }
                 File file = RF_FS_OPEN(file_path, RF_FILE_WRITE);
                 if (!file) {
-                    RF_DEBUG(0, "❌ Failed to open binary file for writing: ", file_path);
+                    eml_debug(0, "❌ Failed to open binary file for writing: ", file_path);
                     return false;
                 }
-                RF_DEBUG(2, "📂 Saving data to: ", file_path);
+                eml_debug(2, "📂 Saving data to: ", file_path);
 
                 // Write binary header
                 uint32_t numSamples = size_;
@@ -1892,23 +1911,23 @@ namespace mcu {
                 uint16_t packedFeatureBytes = (totalBits + 7) / 8; // Round up to nearest byte
                 
                 // Record size = label (1 byte) + packed features
-                uint16_t recordSize = sizeof(label_type) + packedFeatureBytes;
+                uint16_t recordSize = sizeof(rf_label_type) + packedFeatureBytes;
                 
                 // Use a heap-allocated write buffer to batch multiple samples (512 bytes to save heap)
                 static constexpr size_t WRITE_BUFFER_SIZE = 512;
                 uint8_t* writeBuffer = (uint8_t*)malloc(WRITE_BUFFER_SIZE);
                 if (!writeBuffer) {
-                    RF_DEBUG(0, "❌ Failed to allocate write buffer");
+                    eml_debug(0, "❌ Failed to allocate write buffer");
                     file.close();
                     return false;
                 }
                 size_t bufferPos = 0;
                 
                 // Calculate how many complete samples fit in buffer
-                sample_type samplesPerBuffer = WRITE_BUFFER_SIZE / recordSize;
+                rf_sample_type samplesPerBuffer = WRITE_BUFFER_SIZE / recordSize;
                 if (samplesPerBuffer == 0) samplesPerBuffer = 1; // At least one sample per write
                 
-                for (sample_type i = 0; i < size_; i++) {
+                for (rf_sample_type i = 0; i < size_; i++) {
                     // Reconstruct sample from chunked packed storage
                     Rf_sample s = getSample(i);
                     
@@ -1956,18 +1975,18 @@ namespace mcu {
             allLabels.clear();
             allLabels.fit();
             isLoaded = false;
-            RF_DEBUG_2(1, "✅ Data saved(", size_, "samples) to: ", file_path); 
+            eml_debug_2(1, "✅ Data saved(", size_, "samples) to: ", file_path); 
             return true;
         }
 
         // Load data using sequential indices from file system in binary format
         bool loadData(bool re_use = true) {
             if(isLoaded || !isProperlyInitialized()) return false;
-            RF_DEBUG(1, "📂 Loading data from: ", file_path);
+            eml_debug(1, "📂 Loading data from: ", file_path);
             
             File file = RF_FS_OPEN(file_path, RF_FILE_READ);
             if (!file) {
-                RF_DEBUG(0, "❌ Failed to open data file: ", file_path);
+                eml_debug(0, "❌ Failed to open data file: ", file_path);
                 if(RF_FS_EXISTS(file_path)) {
                     RF_FS_REMOVE(file_path);
                 }
@@ -1980,13 +1999,13 @@ namespace mcu {
             
             if(file.read((uint8_t*)&numSamples, sizeof(numSamples)) != sizeof(numSamples) ||
             file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
-                RF_DEBUG(0, "❌ Failed to read data header: ", file_path);
+                eml_debug(0, "❌ Failed to read data header: ", file_path);
                 file.close();
                 return false;
             }
 
             if(numFeatures * quantization_coefficient != bitsPerSample) {
-                RF_DEBUG_2(0, "❌ Feature count mismatch: expected ", bitsPerSample / quantization_coefficient, ",found ", numFeatures);
+                eml_debug_2(0, "❌ Feature count mismatch: expected ", bitsPerSample / quantization_coefficient, ",found ", numFeatures);
                 file.close();
                 return false;
             }
@@ -2017,7 +2036,7 @@ namespace mcu {
             const size_t MAX_BATCH_BYTES = 2048; // conservative for mcu
             uint8_t* ioBuf = mem_alloc::allocate<uint8_t>(MAX_BATCH_BYTES);
             if (!ioBuf) {
-                RF_DEBUG(1, "❌ Failed to allocate IO buffer");
+                eml_debug(1, "❌ Failed to allocate IO buffer");
                 file.close();
                 return false;
             }
@@ -2037,7 +2056,7 @@ namespace mcu {
                     while (bytesRead < bytesToRead) {
                         int r = file.read(ioBuf + bytesRead, bytesToRead - bytesRead);
                         if (r <= 0) {
-                            RF_DEBUG(0, "❌ Read batch failed: ", file_path);
+                            eml_debug(0, "❌ Read batch failed: ", file_path);
                             if (ioBuf) mem_alloc::deallocate(ioBuf);
                             file.close();
                             return false;
@@ -2083,21 +2102,21 @@ namespace mcu {
                             
                             size_t elemIndex = startElementIndex + j;
                             if (elemIndex >= sampleChunks[chunkIndex].size()) {
-                                RF_DEBUG_2(0, "❌ Index out of bounds: elemIndex=", elemIndex, ", size=", sampleChunks[chunkIndex].size());
+                                eml_debug_2(0, "❌ Index out of bounds: elemIndex=", elemIndex, ", size=", sampleChunks[chunkIndex].size());
                             }
                             sampleChunks[chunkIndex].set_unsafe(elemIndex, fv);
                         }
                     }
                 } else {
                     if (!fallback_yet) {
-                        RF_DEBUG(2, "⚠️ IO buffer allocation failed, falling back to per-sample read");
+                        eml_debug(2, "⚠️ IO buffer allocation failed, falling back to per-sample read");
                         fallback_yet = true;
                     }
                     // Fallback: per-sample small buffer
                     batchSamples = 1;
                     uint8_t lbl;
                     if (file.read(&lbl, sizeof(lbl)) != sizeof(lbl)) {
-                        RF_DEBUG_2(0, "❌ Read label failed at sample: ", processed, ": ", file_path);
+                        eml_debug_2(0, "❌ Read label failed at sample: ", processed, ": ", file_path);
                         if (ioBuf) mem_alloc::deallocate(ioBuf);
                         file.close();
                         return false;
@@ -2105,7 +2124,7 @@ namespace mcu {
                     allLabels.push_back(lbl);
                     uint8_t packed[packedFeatureBytes] = {0};
                     if (file.read(packed, packedFeatureBytes) != packedFeatureBytes) {
-                        RF_DEBUG_2(0, "❌ Read features failed at sample: ", processed, ": ", file_path);
+                        eml_debug_2(0, "❌ Read features failed at sample: ", processed, ": ", file_path);
                         if (ioBuf) mem_alloc::deallocate(ioBuf);
                         file.close();
                         return false;
@@ -2156,7 +2175,7 @@ namespace mcu {
             if (quantizer_update_filter.active() &&
                 quantizer_update_filter.numFeatures() == numFeatures &&
                 quantizer_update_filter.groupsPerFeature() == (1u << quantization_coefficient)) {
-                RF_DEBUG(1, "🔁 Applying quantizer update filter to loaded data");
+                eml_debug(1, "🔁 Applying quantizer update filter to loaded data");
                 (void)apply_update_filter_inplace(quantizer_update_filter);
                 // One-shot application completed.
                 quantizer_update_filter.clear();
@@ -2164,10 +2183,10 @@ namespace mcu {
             isLoaded = true;
             file.close();
             if(!re_use) {
-                RF_DEBUG(1, "♻️ Single-load mode: removing file after loading: ", file_path);
+                eml_debug(1, "♻️ Single-load mode: removing file after loading: ", file_path);
                 RF_FS_REMOVE(file_path); // Remove file after loading in single mode
             }
-            RF_DEBUG_2(1, "✅ Data loaded(", sampleChunks.size(), "chunks): ", file_path);
+            eml_debug_2(1, "✅ Data loaded(", sampleChunks.size(), "chunks): ", file_path);
             return true;
         }
 
@@ -2181,13 +2200,13 @@ namespace mcu {
         bool loadData(Rf_data& source, const sampleID_set& sample_IDs, bool save_ram = true) {
             // Only the source must exist on file system; destination can be an in-memory buffer
             if (!RF_FS_EXISTS(source.file_path)) {
-                RF_DEBUG(0, "❌ Source file does not exist: ", source.file_path);
+                eml_debug(0, "❌ Source file does not exist: ", source.file_path);
                 return false;
             }
 
             File file = RF_FS_OPEN(source.file_path, RF_FILE_READ);
             if (!file) {
-                RF_DEBUG(0, "❌ Failed to open source file: ", source.file_path);
+                eml_debug(0, "❌ Failed to open source file: ", source.file_path);
                 return false;
             }
             bool pre_loaded = source.isLoaded;
@@ -2204,7 +2223,7 @@ namespace mcu {
             
             if(file.read((uint8_t*)&numSamples, sizeof(numSamples)) != sizeof(numSamples) ||
             file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
-                RF_DEBUG(0, "❌ Failed to read source header: ", source.file_path);
+                eml_debug(0, "❌ Failed to read source header: ", source.file_path);
                 file.close();
                 return false;
             }
@@ -2225,13 +2244,13 @@ namespace mcu {
             size_t numRequestedSamples = sample_IDs.size();
             allLabels.reserve(numRequestedSamples);
             
-            RF_DEBUG_2(2, "📦 Loading ", numRequestedSamples, "samples from source: ", source.file_path);
+            eml_debug_2(2, "📦 Loading ", numRequestedSamples, "samples from source: ", source.file_path);
             
             size_t addedSamples = 0;
             // Since sample_IDs are sorted in ascending order, we can read efficiently
-            for(sample_type sampleIdx : sample_IDs) {
+            for(rf_sample_type sampleIdx : sample_IDs) {
                 if(sampleIdx >= numSamples) {
-                    RF_DEBUG_2(2, "⚠️ Sample ID ", sampleIdx, "exceeds source sample count ", numSamples);
+                    eml_debug_2(2, "⚠️ Sample ID ", sampleIdx, "exceeds source sample count ", numSamples);
                     continue;
                 }
                 
@@ -2241,7 +2260,7 @@ namespace mcu {
                 
                 // Seek to the sample position
                 if (!file.seek(sampleFilePos)) {
-                    RF_DEBUG_2(2, "⚠️ Failed to seek to sample ", sampleIdx, "position ", sampleFilePos);
+                    eml_debug_2(2, "⚠️ Failed to seek to sample ", sampleIdx, "position ", sampleFilePos);
                     continue;
                 }
                 
@@ -2249,7 +2268,7 @@ namespace mcu {
                 
                 // Read label
                 if(file.read(&s.label, sizeof(s.label)) != sizeof(s.label)) {
-                    RF_DEBUG(2, "⚠️ Failed to read label for sample ", sampleIdx);
+                    eml_debug(2, "⚠️ Failed to read label for sample ", sampleIdx);
                     continue;
                 }
                 
@@ -2259,7 +2278,7 @@ namespace mcu {
                 
                 uint8_t packedBuffer[packedFeatureBytes];
                 if(file.read(packedBuffer, packedFeatureBytes) != packedFeatureBytes) {
-                    RF_DEBUG(2, "⚠️ Failed to read features for sample ", sampleIdx);
+                    eml_debug(2, "⚠️ Failed to read features for sample ", sampleIdx);
                     continue;
                 }
                 
@@ -2304,7 +2323,7 @@ namespace mcu {
             if(pre_loaded && save_ram) {
                 source.loadData();
             }
-            RF_DEBUG_2(2, "✅ Loaded ", addedSamples, "samples from source: ", source.file_path);
+            eml_debug_2(2, "✅ Loaded ", addedSamples, "samples from source: ", source.file_path);
             return true;
         }
         
@@ -2316,20 +2335,20 @@ namespace mcu {
          * @note: this function will call loadData(source, chunkIDs) internally.
          */
         bool loadChunk(Rf_data& source, size_t chunkIndex, bool save_ram = true) {
-            RF_DEBUG_2(2, "📂 Loading chunk ", chunkIndex, "from source: ", source.file_path);
+            eml_debug_2(2, "📂 Loading chunk ", chunkIndex, "from source: ", source.file_path);
             if(chunkIndex >= source.total_chunks()) {
-                RF_DEBUG_2(2, "❌ Chunk index ", chunkIndex, "out of bounds : total chunks=", source.total_chunks());
+                eml_debug_2(2, "❌ Chunk index ", chunkIndex, "out of bounds : total chunks=", source.total_chunks());
                 return false; 
             }
             bool pre_loaded = source.isLoaded;
 
-            sample_type startSample = chunkIndex * source.samplesEachChunk;
-            sample_type endSample = startSample + source.samplesEachChunk;
+            rf_sample_type startSample = chunkIndex * source.samplesEachChunk;
+            rf_sample_type endSample = startSample + source.samplesEachChunk;
             if(endSample > source.size()) {
                 endSample = source.size();
             }
             if(startSample >= endSample) {
-                RF_DEBUG_2(2, "❌ Invalid chunk range: start ", startSample, ", end ", endSample);
+                eml_debug_2(2, "❌ Invalid chunk range: start ", startSample, ", end ", endSample);
                 return false;
             }
             sampleID_set chunkIDs(startSample, endSample - 1);
@@ -2357,16 +2376,16 @@ namespace mcu {
                         
                         if (headerValid) {
                             if (!cloneFile(other.file_path, file_path)) {
-                                RF_DEBUG(0, "❌ Failed to clone source file: ", other.file_path);
+                                eml_debug(0, "❌ Failed to clone source file: ", other.file_path);
                             }
                         } else {
-                            RF_DEBUG(0, "❌ Source file has invalid header: ", other.file_path);
+                            eml_debug(0, "❌ Source file has invalid header: ", other.file_path);
                         }
                     } else {
-                        RF_DEBUG(0, "❌ Cannot open source file: ", other.file_path);
+                        eml_debug(0, "❌ Cannot open source file: ", other.file_path);
                     }
                 } else {
-                    RF_DEBUG(0, "❌ Source file does not exist: ", other.file_path);
+                    eml_debug(0, "❌ Source file does not exist: ", other.file_path);
                 }
                 bitsPerSample = other.bitsPerSample;
                 samplesEachChunk = other.samplesEachChunk;
@@ -2393,7 +2412,7 @@ namespace mcu {
             // Then remove the file system file if one was specified
             if (RF_FS_EXISTS(file_path)) {
                 RF_FS_REMOVE(file_path);
-                RF_DEBUG(1, "🗑️ Deleted file: ", file_path);
+                eml_debug(1, "🗑️ Deleted file: ", file_path);
             }
         }
 
@@ -2405,26 +2424,26 @@ namespace mcu {
          * @return : deleted labels
          * @note Directly writes to file system file to save RAM. File must exist and be properly initialized.
          */
-        vector<label_type> addNewData(const vector<Rf_sample>& samples, sample_type max_samples = 0) {
-            vector<label_type> deletedLabels;
+        vector<rf_label_type> addNewData(const vector<Rf_sample>& samples, rf_sample_type max_samples = 0) {
+            vector<rf_label_type> deletedLabels;
 
             if (!isProperlyInitialized()) {
-                RF_DEBUG(0, "❌ Rf_data not properly initialized. Cannot add new data.");
+                eml_debug(0, "❌ Rf_data not properly initialized. Cannot add new data.");
                 return deletedLabels;
             }
             if (!RF_FS_EXISTS(file_path)) {
-                RF_DEBUG(0, "⚠️ File does not exist for adding new data: ", file_path);
+                eml_debug(0, "⚠️ File does not exist for adding new data: ", file_path);
                 return deletedLabels;
             }
             if (samples.size() == 0) {
-                RF_DEBUG(1, "⚠️ No samples to add");
+                eml_debug(1, "⚠️ No samples to add");
                 return deletedLabels;
             }
 
             // Read current file header to get existing info
             File file = RF_FS_OPEN(file_path, RF_FILE_READ);
             if (!file) {
-                RF_DEBUG(0, "❌ Failed to open file for adding new data: ", file_path);
+                eml_debug(0, "❌ Failed to open file for adding new data: ", file_path);
                 return deletedLabels;
             }
 
@@ -2433,7 +2452,7 @@ namespace mcu {
             
             if (file.read((uint8_t*)&currentNumSamples, sizeof(currentNumSamples)) != sizeof(currentNumSamples) ||
                 file.read((uint8_t*)&numFeatures, sizeof(numFeatures)) != sizeof(numFeatures)) {
-                RF_DEBUG(0, "❌ Failed to read file header: ", file_path);
+                eml_debug(0, "❌ Failed to read file header: ", file_path);
                 file.close();
                 return deletedLabels;
             }
@@ -2441,7 +2460,7 @@ namespace mcu {
 
             // Validate feature count compatibility
             if (samples.size() > 0 && samples[0].features.size() != numFeatures) {
-                RF_DEBUG_2(0, "❌ Feature count mismatch: expected ", numFeatures, ", found ", samples[0].features.size());
+                eml_debug_2(0, "❌ Feature count mismatch: expected ", numFeatures, ", found ", samples[0].features.size());
                 return deletedLabels;
             }
 
@@ -2459,16 +2478,16 @@ namespace mcu {
             
             // Apply max_samples limit if specified
             if (max_samples > 0 && newNumSamples > max_samples) {
-                RF_DEBUG_2(1, "📊 Applying max_samples limit: ", max_samples, " (current: ", currentNumSamples);
+                eml_debug_2(1, "📊 Applying max_samples limit: ", max_samples, " (current: ", currentNumSamples);
                 // Calculate how many oldest samples to remove
-                sample_type samples_to_remove = newNumSamples - max_samples;
+                rf_sample_type samples_to_remove = newNumSamples - max_samples;
                 newNumSamples = max_samples;
                 
                 // Read labels of samples that will be removed (oldest samples at the beginning)
                 File readFile = RF_FS_OPEN(file_path, RF_FILE_READ);
                 if (readFile) {
                     readFile.seek(headerSize); // Skip to data section
-                    for (sample_type i = 0; i < samples_to_remove && i < currentNumSamples; i++) {
+                    for (rf_sample_type i = 0; i < samples_to_remove && i < currentNumSamples; i++) {
                         uint8_t label;
                         if (readFile.read(&label, sizeof(label)) == sizeof(label)) {
                             deletedLabels.push_back(label);
@@ -2482,14 +2501,14 @@ namespace mcu {
                 // Shift remaining samples to the beginning (remove oldest)
                 // This is done by reading samples after the removed ones and writing them at the beginning
                 if (samples_to_remove < currentNumSamples) {
-                    sample_type samples_to_keep = currentNumSamples - samples_to_remove;
+                    rf_sample_type samples_to_keep = currentNumSamples - samples_to_remove;
                     b_vector<uint8_t> temp_buffer;
                     temp_buffer.reserve(sampleDataSize);
                     
                     File shiftFile = RF_FS_OPEN(file_path, "r+");
                     if (shiftFile) {
                         // Read and shift each sample
-                        for (sample_type i = 0; i < samples_to_keep; i++) {
+                        for (rf_sample_type i = 0; i < samples_to_keep; i++) {
                             size_t read_pos = headerSize + (samples_to_remove + i) * sampleDataSize;
                             size_t write_pos = headerSize + i * sampleDataSize;
                             
@@ -2510,14 +2529,14 @@ namespace mcu {
                     }
                     
                     currentNumSamples = samples_to_keep;
-                    RF_DEBUG_2(1, "♻️  Removed ", samples_to_remove, " oldest samples, kept ", samples_to_keep);
+                    eml_debug_2(1, "♻️  Removed ", samples_to_remove, " oldest samples, kept ", samples_to_keep);
                 }
             }
             
             // Check RF_MAX_SAMPLES limit
             if (newNumSamples > RF_MAX_SAMPLES) {
                 size_t maxAddable = RF_MAX_SAMPLES - currentNumSamples;
-                RF_DEBUG(2, "⚠️ Reaching maximum sample limit, limiting to ", maxAddable);
+                eml_debug(2, "⚠️ Reaching maximum sample limit, limiting to ", maxAddable);
                 newNumSamples = RF_MAX_SAMPLES;
             }
             
@@ -2525,7 +2544,7 @@ namespace mcu {
             const size_t datasetLimit = rf_max_dataset_size();
             if (newFileSize > datasetLimit) {
                 size_t maxSamplesBySize = (datasetLimit - headerSize) / sampleDataSize;
-                RF_DEBUG(2, "⚠️ Limiting samples by file size to ", maxSamplesBySize);
+                eml_debug(2, "⚠️ Limiting samples by file size to ", maxSamplesBySize);
                 newNumSamples = maxSamplesBySize;
             }
             
@@ -2534,13 +2553,13 @@ namespace mcu {
             // Calculate actual number of samples to write
             uint32_t samplesToWrite = (newNumSamples - currentNumSamples);
 
-            RF_DEBUG_2(1, "📝 Adding ", samplesToWrite, "samples to ", file_path);
-            RF_DEBUG_2(2, "📊 Dataset info: current=", currentNumSamples, ", new_total=", newNumSamples);
+            eml_debug_2(1, "📝 Adding ", samplesToWrite, "samples to ", file_path);
+            eml_debug_2(2, "📊 Dataset info: current=", currentNumSamples, ", new_total=", newNumSamples);
 
             // Open file for writing (r+ mode to update existing file)
             file = RF_FS_OPEN(file_path, "r+");
             if (!file) {
-                RF_DEBUG(0, "❌ Failed to open file for writing: ", file_path);
+                eml_debug(0, "❌ Failed to open file for writing: ", file_path);
                 return deletedLabels;
             }
 
@@ -2551,7 +2570,7 @@ namespace mcu {
 
             // Seek to write position
             if (!file.seek(writePosition)) {
-                RF_DEBUG_2(0, "❌ Failed seek to write position ", writePosition, ": ", file_path);
+                eml_debug_2(0, "❌ Failed seek to write position ", writePosition, ": ", file_path);
                 file.close();
                 return deletedLabels;
             }
@@ -2563,13 +2582,13 @@ namespace mcu {
                 
                 // Validate sample feature count
                 if (sample.features.size() != numFeatures) {
-                    RF_DEBUG_2(2, "⚠️ Skipping sample ", i, " due to feature count mismatch: ", file_path);
+                    eml_debug_2(2, "⚠️ Skipping sample ", i, " due to feature count mismatch: ", file_path);
                     continue;
                 }
 
                 // Write label
                 if (file.write(&sample.label, sizeof(sample.label)) != sizeof(sample.label)) {
-                    RF_DEBUG_2(0, "❌ Write label failed at sample ", i, ": ", file_path);
+                    eml_debug_2(0, "❌ Write label failed at sample ", i, ": ", file_path);
                     break;
                 }
 
@@ -2599,7 +2618,7 @@ namespace mcu {
                 }
                 
                 if (file.write(packedBuffer, packedFeatureBytes) != packedFeatureBytes) {
-                    RF_DEBUG_2(0, "❌ Write features failed at sample ", i, ": ", file_path);
+                    eml_debug_2(0, "❌ Write features failed at sample ", i, ": ", file_path);
                     break;
                 }
                 
@@ -2611,17 +2630,17 @@ namespace mcu {
             // Update internal size if data is loaded in memory
             if (isLoaded) {
                 size_ = newNumSamples;
-                RF_DEBUG(1, "ℹ️ Data is loaded in memory. Consider reloading for consistency.");
+                eml_debug(1, "ℹ️ Data is loaded in memory. Consider reloading for consistency.");
             }
 
-            RF_DEBUG_2(1, "✅ Successfully wrote ", written, "samples to: ", file_path);
+            eml_debug_2(1, "✅ Successfully wrote ", written, "samples to: ", file_path);
             
             return deletedLabels;
         }
 
         size_t memory_usage() const {
             size_t total = sizeof(Rf_data);
-            total += allLabels.capacity() * sizeof(label_type);
+            total += allLabels.capacity() * sizeof(rf_label_type);
             for (const auto& chunk : sampleChunks) {
                 total += sizeof(packed_vector<8>);
                 total += chunk.capacity() * sizeof(uint8_t); // stored in bytes regardless of bpv
@@ -2738,7 +2757,7 @@ namespace mcu {
             return (1 << label_bits);
         }
 
-        inline node_type max_nodes() const {
+        inline rf_node_type max_nodes() const {
             if (child_bits >= 64) return RF_MAX_NODES;
             if (child_bits >= 32) return RF_MAX_NODES;
             uint32_t mn = 1u << child_bits;
@@ -2768,12 +2787,12 @@ namespace mcu {
             return (packed_data >> layout.first) & ((1u << layout.second) - 1u);
         }
 
-        inline node_type getLeftChildIndex(const node_resource& res) const noexcept {
+        inline rf_node_type getLeftChildIndex(const node_resource& res) const noexcept {
             const auto& layout = res.in_left_child_layout;
             return (packed_data >> layout.first) & ((static_cast<size_t>(1) << layout.second) - 1u);
         }
 
-        inline node_type getRightChildIndex(const node_resource& res) const noexcept {
+        inline rf_node_type getRightChildIndex(const node_resource& res) const noexcept {
             (void)res;
             // Breadth-first property: right = left + 1 when both children are in the same vector space
             return getLeftChildIndex(res) + 1;
@@ -2801,7 +2820,7 @@ namespace mcu {
             packed_data |= (static_cast<size_t>(featureID) & ((static_cast<size_t>(1) << layout.second) - 1u)) << layout.first;
         }
 
-        inline void setLeftChildIndex(node_type index, const node_resource& res) noexcept {
+        inline void setLeftChildIndex(rf_node_type index, const node_resource& res) noexcept {
             const auto& layout = res.in_left_child_layout;
             const size_t mask = (((static_cast<size_t>(1) << layout.second) - 1u) << layout.first);
             packed_data &= ~mask;
@@ -2831,12 +2850,12 @@ namespace mcu {
             return (packed_data >> layout.first) & ((1u << layout.second) - 1u);
         }
 
-        inline node_type getLeftChildIndex(const node_resource& res) const noexcept {
+        inline rf_node_type getLeftChildIndex(const node_resource& res) const noexcept {
             const auto& layout = res.mx_left_child_layout;
             return (packed_data >> layout.first) & ((static_cast<size_t>(1) << layout.second) - 1u);
         }
 
-        inline node_type getRightChildIndex(const node_resource& res) const noexcept {
+        inline rf_node_type getRightChildIndex(const node_resource& res) const noexcept {
             const auto& layout = res.mx_right_child_layout;
             return (packed_data >> layout.first) & ((static_cast<size_t>(1) << layout.second) - 1u);
         }
@@ -2863,14 +2882,14 @@ namespace mcu {
             packed_data |= (static_cast<size_t>(featureID) & ((static_cast<size_t>(1) << layout.second) - 1u)) << layout.first;
         }
 
-        inline void setLeftChildIndex(node_type index, const node_resource& res) noexcept {
+        inline void setLeftChildIndex(rf_node_type index, const node_resource& res) noexcept {
             const auto& layout = res.mx_left_child_layout;
             const size_t mask = (((static_cast<size_t>(1) << layout.second) - 1u) << layout.first);
             packed_data &= ~mask;
             packed_data |= (static_cast<size_t>(index) & ((static_cast<size_t>(1) << layout.second) - 1u)) << layout.first;
         }
 
-        inline void setRightChildIndex(node_type index, const node_resource& res) noexcept {
+        inline void setRightChildIndex(rf_node_type index, const node_resource& res) noexcept {
             const auto& layout = res.mx_right_child_layout;
             const size_t mask = (((static_cast<size_t>(1) << layout.second) - 1u) << layout.first);
             packed_data &= ~mask;
@@ -2879,7 +2898,7 @@ namespace mcu {
     };
 
     struct Leaf_node {
-        label_type label;
+        rf_label_type label;
         Leaf_node() : label(0) {}
     };
 
@@ -2902,14 +2921,14 @@ namespace mcu {
             return (packed_data >> layout.first) & ((1u << layout.second) - 1u);  
         }
         
-        inline label_type getLabel(const pair<uint8_t, uint8_t>& layout) const noexcept{
+        inline rf_label_type getLabel(const pair<uint8_t, uint8_t>& layout) const noexcept{
             return (packed_data >> layout.first) & ((1u << layout.second) - 1u);  
         }
-        inline node_type getLeftChildIndex(const pair<uint8_t, uint8_t>& layout) const noexcept{
+        inline rf_node_type getLeftChildIndex(const pair<uint8_t, uint8_t>& layout) const noexcept{
             return (packed_data >> layout.first) & ((1u << layout.second) - 1u);  
         }
         
-        inline node_type getRightChildIndex(const pair<uint8_t, uint8_t>& layout) const noexcept{
+        inline rf_node_type getRightChildIndex(const pair<uint8_t, uint8_t>& layout) const noexcept{
             return getLeftChildIndex(layout) + 1;  // Breadth-first property: right = left + 1
         }
         
@@ -2931,12 +2950,12 @@ namespace mcu {
             packed_data &= ~mask; // Clear featureID bits
             packed_data |= (featureID & ((1u << layout.second) - 1u)) << layout.first; // Set featureID bits
         }
-        inline void setLabel(label_type label, const pair<uint8_t, uint8_t>& layout) noexcept{
+        inline void setLabel(rf_label_type label, const pair<uint8_t, uint8_t>& layout) noexcept{
             const uint32_t mask = (((1u << layout.second) - 1u) << layout.first);
             packed_data &= ~mask; // Clear label bits
             packed_data |= (label & ((1u << layout.second) - 1u)) << layout.first; // Set label bits
         }
-        inline void setLeftChildIndex(node_type index, const pair<uint8_t, uint8_t>& layout) noexcept{
+        inline void setLeftChildIndex(rf_node_type index, const pair<uint8_t, uint8_t>& layout) noexcept{
             const uint32_t mask = (((1u << layout.second) - 1u) << layout.first);
             packed_data &= ~mask; // Clear left child index bits
             packed_data |= (index & ((1u << layout.second) - 1u)) << layout.first; // Set left child index bits
@@ -2952,7 +2971,7 @@ namespace mcu {
         // Compact inference-time representation.
         packed_vector<bits_per_node, Internal_node> internal_nodes;
         packed_vector<bits_per_node, Mixed_node> mixed_nodes;
-        packed_vector<8, label_type> leaf_nodes;
+        packed_vector<8, rf_label_type> leaf_nodes;
         packed_vector<1, uint8_t> branch_kind; // bpv=1; 0=internal, 1=mixed in branch-index space
 
         // Prefix sums over branch_kind words to map branch index -> internal/mixed local index in O(1)
@@ -2962,12 +2981,12 @@ namespace mcu {
 
         // Root reference in compact form
         bool root_is_leaf = false;
-        node_type root_index = 0; // leaf index if root_is_leaf, else branch index
+        rf_node_type root_index = 0; // leaf index if root_is_leaf, else branch index
 
         uint16_t depth;
         uint8_t index;
         bool isLoaded;
-        ID_vector<sample_type, 3> bootstrapIDs;
+        ID_vector<rf_sample_type, 3> bootstrapIDs;
 
         Rf_tree() : nodes(), internal_nodes(), mixed_nodes(), leaf_nodes(), branch_kind(), mixed_prefix(), resource(nullptr), index(255), isLoaded(false) {}
 
@@ -3100,24 +3119,24 @@ namespace mcu {
             }
         }
 
-        node_type countNodes() const {
+        rf_node_type countNodes() const {
             // Prefer compact representation if present.
             const size_t compact_total = internal_nodes.size() + mixed_nodes.size() + leaf_nodes.size();
             if (compact_total > 0) {
-                return static_cast<node_type>(compact_total);
+                return static_cast<rf_node_type>(compact_total);
             }
-            return static_cast<node_type>(nodes.size());
+            return static_cast<rf_node_type>(nodes.size());
         }
 
         size_t memory_usage() const {
             return nodes.memory_usage() + sizeof(*this);
         }
 
-        node_type countLeafNodes() const {
+        rf_node_type countLeafNodes() const {
             if (leaf_nodes.size() > 0) {
-                return static_cast<node_type>(leaf_nodes.size());
+                return static_cast<rf_node_type>(leaf_nodes.size());
             }
-            node_type leafCount = 0;
+            rf_node_type leafCount = 0;
             for (size_t i = 0; i < nodes.size(); ++i) {
                 if (nodes.get(i).getIsLeaf()) {
                     ++leafCount;
@@ -3157,22 +3176,22 @@ namespace mcu {
             const auto& childLayout = resource->get_Building_node_left_child_layout();
             const auto& thresholdLayout = resource->get_Building_node_threshold_layout();
 
-            const node_type nodeCount = static_cast<node_type>(nodes.size());
+            const rf_node_type nodeCount = static_cast<rf_node_type>(nodes.size());
             if (nodeCount == 0) {
                 return false;
             }
 
             // Map old indices -> leaf index / branch index (branch index is in old-order filtering)
-            vector<node_type> old_to_leaf;
-            vector<node_type> old_to_branch;
-            old_to_leaf.resize(nodeCount, static_cast<node_type>(0xFFFFFFFFu));
-            old_to_branch.resize(nodeCount, static_cast<node_type>(0xFFFFFFFFu));
+            vector<rf_node_type> old_to_leaf;
+            vector<rf_node_type> old_to_branch;
+            old_to_leaf.resize(nodeCount, static_cast<rf_node_type>(0xFFFFFFFFu));
+            old_to_branch.resize(nodeCount, static_cast<rf_node_type>(0xFFFFFFFFu));
 
-            node_type branchCount = 0;
-            for (node_type i = 0; i < nodeCount; ++i) {
+            rf_node_type branchCount = 0;
+            for (rf_node_type i = 0; i < nodeCount; ++i) {
                 const Building_node n = nodes.get(i);
                 if (n.getIsLeaf()) {
-                    old_to_leaf[i] = static_cast<node_type>(leaf_nodes.size());
+                    old_to_leaf[i] = static_cast<rf_node_type>(leaf_nodes.size());
                     leaf_nodes.push_back(n.getLabel(labelLayout));
                 } else {
                     old_to_branch[i] = branchCount;
@@ -3186,14 +3205,14 @@ namespace mcu {
             root_index = root_is_leaf ? old_to_leaf[0] : old_to_branch[0];
 
             // Build branch nodes in old-order filtering; branch_kind indicates which compact vector to use.
-            for (node_type i = 0; i < nodeCount; ++i) {
+            for (rf_node_type i = 0; i < nodeCount; ++i) {
                 const Building_node n = nodes.get(i);
                 if (n.getIsLeaf()) {
                     continue;
                 }
-                const node_type bidx = old_to_branch[i];
-                const node_type left_old = n.getLeftChildIndex(childLayout);
-                const node_type right_old = static_cast<node_type>(left_old + 1);
+                const rf_node_type bidx = old_to_branch[i];
+                const rf_node_type left_old = n.getLeftChildIndex(childLayout);
+                const rf_node_type right_old = static_cast<rf_node_type>(left_old + 1);
                 if (left_old >= nodeCount || right_old >= nodeCount) {
                     return false;
                 }
@@ -3210,7 +3229,7 @@ namespace mcu {
                     inode.setChildrenAreLeaf(left_leaf);
                     inode.setThresholdSlot(threshold, *resource);
                     inode.setFeatureID(featureID, *resource);
-                    const node_type left_new = left_leaf ? old_to_leaf[left_old] : old_to_branch[left_old];
+                    const rf_node_type left_new = left_leaf ? old_to_leaf[left_old] : old_to_branch[left_old];
                     inode.setLeftChildIndex(left_new, *resource);
 
                     // Append internal node and mark kind=0
@@ -3222,8 +3241,8 @@ namespace mcu {
                     mnode.setLeftIsLeaf(left_leaf);
                     mnode.setThresholdSlot(threshold, *resource);
                     mnode.setFeatureID(featureID, *resource);
-                    const node_type left_new = left_leaf ? old_to_leaf[left_old] : old_to_branch[left_old];
-                    const node_type right_new = right_leaf ? old_to_leaf[right_old] : old_to_branch[right_old];
+                    const rf_node_type left_new = left_leaf ? old_to_leaf[left_old] : old_to_branch[left_old];
+                    const rf_node_type right_new = right_leaf ? old_to_leaf[right_old] : old_to_branch[right_old];
                     mnode.setLeftChildIndex(left_new, *resource);
                     mnode.setRightChildIndex(right_new, *resource);
 
@@ -3258,23 +3277,23 @@ namespace mcu {
                     // In compact mode nodes may be empty; allow save if compact buffers exist.
                     const bool hasCompact = (internal_nodes.size() + mixed_nodes.size() + leaf_nodes.size()) > 0;
                     if (!hasCompact) {
-                        RF_DEBUG(0, "❌ save tree failed, invalid tree index: ", index);
+                        eml_debug(0, "❌ save tree failed, invalid tree index: ", index);
                         return false;
                     }
                 }
                 if (path == nullptr || strlen(path) == 0) {
-                    RF_DEBUG(0, "❌ save tree failed, invalid path: ", path);
+                    eml_debug(0, "❌ save tree failed, invalid path: ", path);
                     return false;
                 }
                 if (RF_FS_EXISTS(path)) {
                     if (!RF_FS_REMOVE(path)) {
-                        RF_DEBUG(0, "❌ Failed to remove existing tree file: ", path);
+                        eml_debug(0, "❌ Failed to remove existing tree file: ", path);
                         return false;
                     }
                 }
                 File file = RF_FS_OPEN(path, FILE_WRITE);
                 if (!file) {
-                    RF_DEBUG(0, "❌ Failed to open tree file for writing: ", path);
+                    eml_debug(0, "❌ Failed to open tree file for writing: ", path);
                     return false;
                 }
 
@@ -3283,7 +3302,7 @@ namespace mcu {
                     (void)convert_to_compact();
                 }
                 if (!resource) {
-                    RF_DEBUG(0, "❌ save tree failed: node_resource not set");
+                    eml_debug(0, "❌ save tree failed: node_resource not set");
                     file.close();
                     return false;
                 }
@@ -3352,19 +3371,19 @@ namespace mcu {
 
                 // Internal nodes
                 for (uint32_t i = 0; i < internalCount; ++i) {
-                    const Internal_node n = internal_nodes.get(static_cast<node_type>(i));
+                    const Internal_node n = internal_nodes.get(static_cast<rf_node_type>(i));
                     write_le(static_cast<uint64_t>(n.packed_data), inBytes);
                 }
 
                 // Mixed nodes
                 for (uint32_t i = 0; i < mixedCount; ++i) {
-                    const Mixed_node n = mixed_nodes.get(static_cast<node_type>(i));
+                    const Mixed_node n = mixed_nodes.get(static_cast<rf_node_type>(i));
                     write_le(static_cast<uint64_t>(n.packed_data), mxBytes);
                 }
 
                 // Leaf nodes (labels)
                 for (uint32_t i = 0; i < leafCount; ++i) {
-                    const label_type lbl = leaf_nodes.get(static_cast<node_type>(i));
+                    const rf_label_type lbl = leaf_nodes.get(static_cast<rf_node_type>(i));
                     write_le(static_cast<uint64_t>(lbl), lfBytes);
                 }
                 file.close();
@@ -3382,7 +3401,7 @@ namespace mcu {
             mixed_prefix.clear();
             mixed_prefix.fit();
             isLoaded = false;
-            RF_DEBUG(2, "✅ Tree saved to file system: ", index);
+            eml_debug(2, "✅ Tree saved to file system: ", index);
             return true;
         }
 
@@ -3392,20 +3411,20 @@ namespace mcu {
             }
 
             if (index >= RF_MAX_TREES) {
-                RF_DEBUG(0, "❌ Invalid tree index: ", index);
+                eml_debug(0, "❌ Invalid tree index: ", index);
                 return false;
             }
             if (path == nullptr || strlen(path) == 0) {
-                RF_DEBUG(0, "❌ Invalid path for loading tree: ", path);
+                eml_debug(0, "❌ Invalid path for loading tree: ", path);
                 return false;
             }
             if (!RF_FS_EXISTS(path)) {
-                RF_DEBUG(0, "❌ Tree file does not exist: ", path);
+                eml_debug(0, "❌ Tree file does not exist: ", path);
                 return false;
             }
             File file = RF_FS_OPEN(path, RF_FILE_READ);
             if (!file) {
-                RF_DEBUG(2, "❌ Failed to open tree file: ", path);
+                eml_debug(2, "❌ Failed to open tree file: ", path);
                 return false;
             }
 
@@ -3416,7 +3435,7 @@ namespace mcu {
             }
 
             if (magic != 0x33524354) { // "TRC3"
-                RF_DEBUG(0, "❌ Invalid tree file format (expected TRC3): ", path);
+                eml_debug(0, "❌ Invalid tree file format (expected TRC3): ", path);
                 file.close();
                 return false;
             }
@@ -3467,7 +3486,7 @@ namespace mcu {
                     file.close();
                     return false;
                 }
-                root_index = static_cast<node_type>(rootIndexU32);
+                root_index = static_cast<rf_node_type>(rootIndexU32);
 
                 uint32_t branchCountU32 = 0, internalCountU32 = 0, mixedCountU32 = 0, leafCountU32 = 0;
                 if (!read_u32(branchCountU32) || !read_u32(internalCountU32) || !read_u32(mixedCountU32) || !read_u32(leafCountU32)) {
@@ -3503,7 +3522,7 @@ namespace mcu {
                     return false;
                 }
 
-                branch_kind.resize(static_cast<node_type>(branchCountU32), 0);
+                branch_kind.resize(static_cast<rf_node_type>(branchCountU32), 0);
                 for (uint32_t byteIndex = 0; byteIndex < kindBytes; ++byteIndex) {
                     uint8_t in = 0;
                     if (file.read(reinterpret_cast<uint8_t*>(&in), 1) != 1) {
@@ -3514,12 +3533,12 @@ namespace mcu {
                     for (uint8_t bit = 0; bit < 8; ++bit) {
                         const uint32_t i = base + static_cast<uint32_t>(bit);
                         if (i < branchCountU32) {
-                            branch_kind.set(static_cast<node_type>(i), static_cast<uint8_t>((in >> bit) & 1u));
+                            branch_kind.set(static_cast<rf_node_type>(i), static_cast<uint8_t>((in >> bit) & 1u));
                         }
                     }
                 }
 
-                internal_nodes.reserve(static_cast<node_type>(internalCountU32));
+                internal_nodes.reserve(static_cast<rf_node_type>(internalCountU32));
                 for (uint32_t i = 0; i < internalCountU32; ++i) {
                     uint64_t raw = 0;
                     if (!read_le(raw, inBytes)) {
@@ -3531,7 +3550,7 @@ namespace mcu {
                     internal_nodes.push_back(n);
                 }
 
-                mixed_nodes.reserve(static_cast<node_type>(mixedCountU32));
+                mixed_nodes.reserve(static_cast<rf_node_type>(mixedCountU32));
                 for (uint32_t i = 0; i < mixedCountU32; ++i) {
                     uint64_t raw = 0;
                     if (!read_le(raw, mxBytes)) {
@@ -3543,14 +3562,14 @@ namespace mcu {
                     mixed_nodes.push_back(n);
                 }
 
-                leaf_nodes.reserve(static_cast<node_type>(leafCountU32));
+                leaf_nodes.reserve(static_cast<rf_node_type>(leafCountU32));
                 for (uint32_t i = 0; i < leafCountU32; ++i) {
                     uint64_t raw = 0;
                     if (!read_le(raw, lfBytes)) {
                         file.close();
                         return false;
                     }
-                    leaf_nodes.push_back(static_cast<label_type>(raw));
+                    leaf_nodes.push_back(static_cast<rf_label_type>(raw));
                 }
 
                 file.close();
@@ -3559,7 +3578,7 @@ namespace mcu {
             }
 
             if (!re_use) {
-                RF_DEBUG(2, "♻️ Single-load mode: removing tree file after loading; ", path);
+                eml_debug(2, "♻️ Single-load mode: removing tree file after loading; ", path);
                 RF_FS_REMOVE(path);
             }
             return true;
@@ -3576,18 +3595,18 @@ namespace mcu {
             uint32_t magic = 0x42544944; // "BTID"
             file.write((uint8_t*)&magic, 4);
             
-            sample_type min_id = bootstrapIDs.minID();
-            sample_type max_id = bootstrapIDs.maxID();
+            rf_sample_type min_id = bootstrapIDs.minID();
+            rf_sample_type max_id = bootstrapIDs.maxID();
             uint32_t size = bootstrapIDs.size();
             
-            file.write((uint8_t*)&min_id, sizeof(sample_type));
-            file.write((uint8_t*)&max_id, sizeof(sample_type));
+            file.write((uint8_t*)&min_id, sizeof(rf_sample_type));
+            file.write((uint8_t*)&max_id, sizeof(rf_sample_type));
             file.write((uint8_t*)&size, sizeof(uint32_t));
 
-            for (sample_type id = min_id; id <= max_id; ++id) {
+            for (rf_sample_type id = min_id; id <= max_id; ++id) {
                 uint32_t c = bootstrapIDs.count(id);
                 if (c > 0) {
-                    file.write((uint8_t*)&id, sizeof(sample_type));
+                    file.write((uint8_t*)&id, sizeof(rf_sample_type));
                     file.write((uint8_t*)&c, sizeof(uint32_t));
                 }
             }
@@ -3608,18 +3627,18 @@ namespace mcu {
                 return false;
             }
             
-            sample_type min_id, max_id;
+            rf_sample_type min_id, max_id;
             uint32_t size;
-            file.read((uint8_t*)&min_id, sizeof(sample_type));
-            file.read((uint8_t*)&max_id, sizeof(sample_type));
+            file.read((uint8_t*)&min_id, sizeof(rf_sample_type));
+            file.read((uint8_t*)&max_id, sizeof(rf_sample_type));
             file.read((uint8_t*)&size, sizeof(uint32_t));
             
             bootstrapIDs.set_ID_range(min_id, max_id);
             
             while (file.available()) {
-                sample_type id;
+                rf_sample_type id;
                 uint32_t c;
-                if (file.read((uint8_t*)&id, sizeof(sample_type)) != sizeof(sample_type)) break;
+                if (file.read((uint8_t*)&id, sizeof(rf_sample_type)) != sizeof(rf_sample_type)) break;
                 if (file.read((uint8_t*)&c, sizeof(uint32_t)) != sizeof(uint32_t)) break;
                 for (uint32_t i = 0; i < c; ++i) {
                     bootstrapIDs.push_back(id);
@@ -3629,7 +3648,7 @@ namespace mcu {
             return true;
         }
 
-        __attribute__((always_inline)) inline label_type predict_features(
+        __attribute__((always_inline)) inline rf_label_type predict_features(
             const packed_vector<8>& packed_features) const {
             // Early exit for empty tree
             if (__builtin_expect(!resource || leaf_nodes.size() == 0, 0)) {
@@ -3644,9 +3663,9 @@ namespace mcu {
             // Cache resource reference to avoid repeated pointer dereference
             const node_resource& res = *resource;
             
-            node_type currentBranch = root_index;
-            const node_type branchCount = static_cast<node_type>(branch_kind.size());
-            const node_type leafCount = static_cast<node_type>(leaf_nodes.size());
+            rf_node_type currentBranch = root_index;
+            const rf_node_type branchCount = static_cast<rf_node_type>(branch_kind.size());
+            const rf_node_type leafCount = static_cast<rf_node_type>(leaf_nodes.size());
             
             uint16_t maxDepth = 100;
             while (__builtin_expect(maxDepth-- > 0, 1)) {
@@ -3657,15 +3676,15 @@ namespace mcu {
                 const uint8_t kind = branch_kind.get(currentBranch);
                 if (__builtin_expect(kind == 0, 1)) {
                     // Internal node (common case)
-                    const node_type mixedBefore = rank_mixed(currentBranch);
-                    const node_type internalIndex = currentBranch - mixedBefore;
+                    const rf_node_type mixedBefore = rank_mixed(currentBranch);
+                    const rf_node_type internalIndex = currentBranch - mixedBefore;
                     const Internal_node node = internal_nodes.get(internalIndex);
                     
                     const uint16_t featureID = node.getFeatureID(res);
                     const uint16_t featureValue = static_cast<uint16_t>(packed_features[featureID]);
                     const uint16_t threshold = node.getThresholdSlot(res);
-                    const node_type left = node.getLeftChildIndex(res);
-                    const node_type chosen = (featureValue <= threshold) ? left : (left + 1);
+                    const rf_node_type left = node.getLeftChildIndex(res);
+                    const rf_node_type chosen = (featureValue <= threshold) ? left : (left + 1);
                     
                     if (__builtin_expect(node.childrenAreLeaf(), 0)) {
                         return (chosen < leafCount) ? leaf_nodes.get(chosen) : RF_ERROR_LABEL;
@@ -3673,7 +3692,7 @@ namespace mcu {
                     currentBranch = chosen;
                 } else {
                     // Mixed node (less common)
-                    const node_type mixedIndex = rank_mixed(currentBranch);
+                    const rf_node_type mixedIndex = rank_mixed(currentBranch);
                     const Mixed_node node = mixed_nodes.get(mixedIndex);
                     
                     const uint16_t featureID = node.getFeatureID(res);
@@ -3683,13 +3702,13 @@ namespace mcu {
                     const bool leftIsLeaf = node.leftIsLeaf();
                     
                     if (goLeft) {
-                        const node_type idx = node.getLeftChildIndex(res);
+                        const rf_node_type idx = node.getLeftChildIndex(res);
                         if (leftIsLeaf) {
                             return (idx < leafCount) ? leaf_nodes.get(idx) : RF_ERROR_LABEL;
                         }
                         currentBranch = idx;
                     } else {
-                        const node_type idx = node.getRightChildIndex(res);
+                        const rf_node_type idx = node.getRightChildIndex(res);
                         if (!leftIsLeaf) {
                             return (idx < leafCount) ? leaf_nodes.get(idx) : RF_ERROR_LABEL;
                         }
@@ -3734,7 +3753,7 @@ namespace mcu {
             if (rmf && index < RF_MAX_TREES) {
                 if (RF_FS_EXISTS(path)) {
                     RF_FS_REMOVE(path);
-                    RF_DEBUG(2, "🗑️ Tree file removed: ", path);
+                    eml_debug(2, "🗑️ Tree file removed: ", path);
                 }
             }
             index = 255;
@@ -3762,7 +3781,7 @@ namespace mcu {
         }
 
         // Rank query: number of mixed nodes before branchIndex
-        inline node_type rank_mixed(node_type branchIndex) const {
+        inline rf_node_type rank_mixed(rf_node_type branchIndex) const {
             // Number of mixed nodes strictly before branchIndex
             const size_t WORD_BITS = sizeof(size_t) * 8;
             const size_t wi = static_cast<size_t>(branchIndex) / WORD_BITS;
@@ -3790,7 +3809,7 @@ namespace mcu {
             } else {
                 pc = static_cast<uint16_t>(__builtin_popcount(static_cast<unsigned int>(word)));
             }
-            return static_cast<node_type>(base + pc);
+            return static_cast<rf_node_type>(base + pc);
         }
 
         inline uint8_t desired_bits_per_node() const noexcept {
@@ -3831,14 +3850,14 @@ namespace mcu {
     private:
         uint16_t numFeatures = 0;
         uint16_t groupsPerFeature = 0;
-        label_type numLabels = 0;
+        rf_label_type numLabels = 0;
         uint8_t quantization_coefficient = 2; // Bits per feature value (1-8)
         bool isLoaded = false;
         float outlierZThreshold = 3.0f; // Z-score threshold for outlier detection
         bool removeOutliers = true; // Whether to apply outlier filtering before quantization
         const Rf_base* base_ptr = nullptr;
         
-    #ifndef RF_STATIC_MODEL
+    #ifndef EML_STATIC_MODEL
         // Statistics for outlier filtering (computed during training)
         vector<float> featureMeans;
         vector<float> featureStdDevs;
@@ -3884,7 +3903,7 @@ namespace mcu {
             return static_cast<int64_t>(scaled);
         }
 
-        bool storeLabel(label_type id, const char* label) {
+        bool storeLabel(rf_label_type id, const char* label) {
             if (label == nullptr || id >= RF_MAX_LABELS) {
                 return false;
             }
@@ -3907,7 +3926,7 @@ namespace mcu {
             }
 
             if (labelStorage.size() + len + 1 > 0xFFFF) {
-                RF_DEBUG(0, "❌ Label storage overflow");
+                eml_debug(0, "❌ Label storage overflow");
                 return false;
             }
 
@@ -3931,7 +3950,7 @@ namespace mcu {
         // Quantize with drift signal: return value may be <0 or >=groupsPerFeature to indicate out-of-range.
         __attribute__((always_inline)) inline int16_t quantizeValueSignal(uint16_t featureIdx, float value) const {
             // Apply outlier filtering if enabled and statistics are available
-#ifndef RF_STATIC_MODEL
+#ifndef EML_STATIC_MODEL
             if (removeOutliers && featureIdx < featureMeans.size() && featureIdx < featureStdDevs.size()) {
                 const float mean = featureMeans[featureIdx];
                 const float stdDev = featureStdDevs[featureIdx];
@@ -4057,7 +4076,7 @@ namespace mcu {
             return quantization_coefficient;
         }
 
-        label_type getNumLabels() const {
+        rf_label_type getNumLabels() const {
             return numLabels;
         }
 
@@ -4081,7 +4100,7 @@ namespace mcu {
             labelOffsets.reserve(num_labels);
             labelStorage.reserve(num_labels * 8); // Heuristic: 8 chars per label
 
-#ifndef RF_STATIC_MODEL
+#ifndef EML_STATIC_MODEL
             featureMeans.reserve(num_features);
             featureStdDevs.reserve(num_features);
 #endif
@@ -4094,20 +4113,20 @@ namespace mcu {
                 return true;
             }
             if (!has_base()) {
-                RF_DEBUG(0, "❌ Load Quantizer failed: data pointer not ready");
+                eml_debug(0, "❌ Load Quantizer failed: data pointer not ready");
                 return false;
             }
 
             char file_path[RF_PATH_BUFFER];
             base_ptr->get_qtz_path(file_path);
             if (!RF_FS_EXISTS(file_path)) {
-                RF_DEBUG(0, "❌ Quantizer binary file not found: ", file_path);
+                eml_debug(0, "❌ Quantizer binary file not found: ", file_path);
                 return false;
             }
 
             File file = RF_FS_OPEN(file_path, "r");
             if (!file) {
-                RF_DEBUG(0, "❌ Failed to open Quantizer binary file: ", file_path);
+                eml_debug(0, "❌ Failed to open Quantizer binary file: ", file_path);
                 return false;
             }
 
@@ -4132,7 +4151,7 @@ namespace mcu {
                 labelOffsets.clear();
                 labelLengths.clear();
                 labelStorage.clear();
-#ifndef RF_STATIC_MODEL
+#ifndef EML_STATIC_MODEL
                 featureMeans.clear();
                 featureStdDevs.clear();
 #endif
@@ -4143,21 +4162,21 @@ namespace mcu {
             // Read magic number
             char magic[4];
             if (file.readBytes(magic, 4) != 4 || memcmp(magic, "QTZ4", 4) != 0) {
-                RF_DEBUG(0, "❌ Invalid quantizer binary magic number");
+                eml_debug(0, "❌ Invalid quantizer binary magic number");
                 file.close();
                 return false;
             }
 
             // Read basic parameters
             if (file.readBytes(reinterpret_cast<char*>(&numFeatures), sizeof(uint16_t)) != sizeof(uint16_t)) {
-                RF_DEBUG(0, "❌ Failed to read numFeatures");
+                eml_debug(0, "❌ Failed to read numFeatures");
                 file.close();
                 resetData();
                 return false;
             }
 
             if (file.readBytes(reinterpret_cast<char*>(&groupsPerFeature), sizeof(uint16_t)) != sizeof(uint16_t)) {
-                RF_DEBUG(0, "❌ Failed to read groupsPerFeature");
+                eml_debug(0, "❌ Failed to read groupsPerFeature");
                 file.close();
                 resetData();
                 return false;
@@ -4165,7 +4184,7 @@ namespace mcu {
 
             uint8_t labelCount;
             if (file.readBytes(reinterpret_cast<char*>(&labelCount), sizeof(uint8_t)) != sizeof(uint8_t)) {
-                RF_DEBUG(0, "❌ Failed to read label count");
+                eml_debug(0, "❌ Failed to read label count");
                 file.close();
                 resetData();
                 return false;
@@ -4176,7 +4195,7 @@ namespace mcu {
             // Read outlier filtering flag
             uint8_t outlierFlag;
             if (file.readBytes(reinterpret_cast<char*>(&outlierFlag), sizeof(uint8_t)) != sizeof(uint8_t)) {
-                RF_DEBUG(0, "❌ Failed to read outlier flag");
+                eml_debug(0, "❌ Failed to read outlier flag");
                 file.close();
                 resetData();
                 return false;
@@ -4185,7 +4204,7 @@ namespace mcu {
 
             // Read outlier statistics if enabled
             if (removeOutliers) {
-#ifndef RF_STATIC_MODEL
+#ifndef EML_STATIC_MODEL
                 featureMeans.reserve(numFeatures);
                 featureStdDevs.reserve(numFeatures);
 #endif
@@ -4193,12 +4212,12 @@ namespace mcu {
                     float mean, stdDev;
                     if (file.readBytes(reinterpret_cast<char*>(&mean), sizeof(float)) != sizeof(float) ||
                         file.readBytes(reinterpret_cast<char*>(&stdDev), sizeof(float)) != sizeof(float)) {
-                        RF_DEBUG(0, "❌ Failed to read outlier statistics");
+                        eml_debug(0, "❌ Failed to read outlier statistics");
                         file.close();
                         resetData();
                         return false;
                     }
-#ifndef RF_STATIC_MODEL
+#ifndef EML_STATIC_MODEL
                     featureMeans.push_back(mean);
                     featureStdDevs.push_back(stdDev);
 #endif
@@ -4207,7 +4226,7 @@ namespace mcu {
 
             // Calculate quantization_coefficient from groupsPerFeature
             if (groupsPerFeature == 0) {
-                RF_DEBUG(0, "❌ Invalid groupsPerFeature value");
+                eml_debug(0, "❌ Invalid groupsPerFeature value");
                 file.close();
                 resetData();
                 return false;
@@ -4240,7 +4259,7 @@ namespace mcu {
             for (uint8_t i = 0; i < labelCount; ++i) {
                 uint8_t labelId;
                 if (file.readBytes(reinterpret_cast<char*>(&labelId), sizeof(uint8_t)) != sizeof(uint8_t)) {
-                    RF_DEBUG(0, "❌ Failed to read label ID");
+                    eml_debug(0, "❌ Failed to read label ID");
                     file.close();
                     resetData();
                     return false;
@@ -4248,7 +4267,7 @@ namespace mcu {
 
                 uint8_t labelLen;
                 if (file.readBytes(reinterpret_cast<char*>(&labelLen), sizeof(uint8_t)) != sizeof(uint8_t)) {
-                    RF_DEBUG(0, "❌ Failed to read label length");
+                    eml_debug(0, "❌ Failed to read label length");
                     file.close();
                     resetData();
                     return false;
@@ -4257,14 +4276,14 @@ namespace mcu {
                 char labelBuffer[256];
                 if (labelLen > 0) {
                     if (file.readBytes(labelBuffer, labelLen) != labelLen) {
-                        RF_DEBUG(0, "❌ Failed to read label text");
+                        eml_debug(0, "❌ Failed to read label text");
                         file.close();
                         resetData();
                         return false;
                     }
                     labelBuffer[labelLen] = '\0';
                     if (!storeLabel(labelId, labelBuffer)) {
-                        RF_DEBUG(0, "❌ Failed to store label");
+                        eml_debug(0, "❌ Failed to store label");
                         file.close();
                         resetData();
                         return false;
@@ -4276,7 +4295,7 @@ namespace mcu {
             for (uint16_t i = 0; i < numFeatures; ++i) {
                 uint8_t typeU8;
                 if (file.readBytes(reinterpret_cast<char*>(&typeU8), sizeof(uint8_t)) != sizeof(uint8_t)) {
-                    RF_DEBUG(0, "❌ Failed to read feature type");
+                    eml_debug(0, "❌ Failed to read feature type");
                     file.close();
                     resetData();
                     return false;
@@ -4286,7 +4305,7 @@ namespace mcu {
                 float maxValue;
                 if (file.readBytes(reinterpret_cast<char*>(&minValue), sizeof(float)) != sizeof(float) ||
                     file.readBytes(reinterpret_cast<char*>(&maxValue), sizeof(float)) != sizeof(float)) {
-                    RF_DEBUG(0, "❌ Failed to read feature min/max");
+                    eml_debug(0, "❌ Failed to read feature min/max");
                     file.close();
                     resetData();
                     return false;
@@ -4294,7 +4313,7 @@ namespace mcu {
 
                 int64_t baselineValueScaled;
                 if (file.readBytes(reinterpret_cast<char*>(&baselineValueScaled), sizeof(int64_t)) != sizeof(int64_t)) {
-                    RF_DEBUG(0, "❌ Failed to read baseline");
+                    eml_debug(0, "❌ Failed to read baseline");
                     file.close();
                     resetData();
                     return false;
@@ -4302,7 +4321,7 @@ namespace mcu {
 
                 uint64_t scaleValue;
                 if (file.readBytes(reinterpret_cast<char*>(&scaleValue), sizeof(uint64_t)) != sizeof(uint64_t)) {
-                    RF_DEBUG(0, "❌ Failed to read scale");
+                    eml_debug(0, "❌ Failed to read scale");
                     file.close();
                     resetData();
                     return false;
@@ -4329,7 +4348,7 @@ namespace mcu {
                         {
                             uint8_t count;
                             if (file.readBytes(reinterpret_cast<char*>(&count), sizeof(uint8_t)) != sizeof(uint8_t)) {
-                                RF_DEBUG(0, "❌ Failed to read DC count");
+                                eml_debug(0, "❌ Failed to read DC count");
                                 file.close();
                                 resetData();
                                 return false;
@@ -4339,7 +4358,7 @@ namespace mcu {
                             for (uint8_t j = 0; j < count; ++j) {
                                 float val;
                                 if (file.readBytes(reinterpret_cast<char*>(&val), sizeof(float)) != sizeof(float)) {
-                                    RF_DEBUG(0, "❌ Failed to read DC value");
+                                    eml_debug(0, "❌ Failed to read DC value");
                                     file.close();
                                     resetData();
                                     return false;
@@ -4357,7 +4376,7 @@ namespace mcu {
                         {
                             uint8_t edgeCount;
                             if (file.readBytes(reinterpret_cast<char*>(&edgeCount), sizeof(uint8_t)) != sizeof(uint8_t)) {
-                                RF_DEBUG(0, "❌ Failed to read CU edge count");
+                                eml_debug(0, "❌ Failed to read CU edge count");
                                 file.close();
                                 resetData();
                                 return false;
@@ -4367,7 +4386,7 @@ namespace mcu {
                             for (uint8_t j = 0; j < edgeCount; ++j) {
                                 uint16_t edge;
                                 if (file.readBytes(reinterpret_cast<char*>(&edge), sizeof(uint16_t)) != sizeof(uint16_t)) {
-                                    RF_DEBUG(0, "❌ Failed to read CU edge");
+                                    eml_debug(0, "❌ Failed to read CU edge");
                                     file.close();
                                     resetData();
                                     return false;
@@ -4383,7 +4402,7 @@ namespace mcu {
                         break;
 
                     default:
-                        RF_DEBUG(0, "❌ Unknown feature type");
+                        eml_debug(0, "❌ Unknown feature type");
                         file.close();
                         resetData();
                         return false;
@@ -4393,9 +4412,9 @@ namespace mcu {
 
             file.close();
             isLoaded = true;
-            RF_DEBUG(1, "✅ Quantizer binary loaded successfully! : ", file_path);
-            RF_DEBUG_2(2, "📊 Features: ", numFeatures, ", Groups: ", groupsPerFeature);
-            RF_DEBUG_2(2, "   Labels: ", numLabels, ", Outlier filtering: ", removeOutliers ? "enabled" : "disabled");
+            eml_debug(1, "✅ Quantizer binary loaded successfully! : ", file_path);
+            eml_debug_2(2, "📊 Features: ", numFeatures, ", Groups: ", groupsPerFeature);
+            eml_debug_2(2, "   Labels: ", numLabels, ", Outlier filtering: ", removeOutliers ? "enabled" : "disabled");
             return true;
         }
 
@@ -4436,7 +4455,7 @@ namespace mcu {
             labelLengths.fit();
             labelStorage.fit();
             
-#ifndef RF_STATIC_MODEL
+#ifndef EML_STATIC_MODEL
             featureMeans.clear();
             featureStdDevs.clear();
             featureMeans.fit();
@@ -4444,7 +4463,7 @@ namespace mcu {
 #endif
             isLoaded = false;
 
-            RF_DEBUG(2, "🧹 Quantizer data released from memory");
+            eml_debug(2, "🧹 Quantizer data released from memory");
         }
 
         // Core categorization function: write directly to pre-allocated buffer.
@@ -4691,8 +4710,8 @@ namespace mcu {
 
                 // Histogram current quantized bins for this feature.
                 std::fill(counts.begin(), counts.end(), 0);
-                const sample_type n = loaded_train_data.size();
-                for (sample_type si = 0; si < n; ++si) {
+                const rf_sample_type n = loaded_train_data.size();
+                for (rf_sample_type si = 0; si < n; ++si) {
                     const uint16_t v = loaded_train_data.getFeature(si, f);
                     if (v < gpf) {
                         counts[v]++;
@@ -4844,7 +4863,7 @@ namespace mcu {
             usage += labelOffsets.memory_usage();
             usage += labelLengths.memory_usage();
             usage += labelStorage.memory_usage();
-#ifndef RF_STATIC_MODEL
+#ifndef EML_STATIC_MODEL
             usage += featureMeans.memory_usage();
             usage += featureStdDevs.memory_usage();
 #endif
@@ -4855,7 +4874,7 @@ namespace mcu {
         // Getters}
         bool loaded() const { return isLoaded; }
         
-#ifndef RF_STATIC_MODEL
+#ifndef EML_STATIC_MODEL
         // Set outlier filtering statistics (for retraining scenarios)
         void setOutlierStatistics(const float* means, const float* stdDevs, uint16_t count) {
             if (!means || !stdDevs || count != numFeatures) {
@@ -4869,7 +4888,7 @@ namespace mcu {
                 featureMeans.push_back(means[i]);
                 featureStdDevs.push_back(stdDevs[i]);
             }
-            // RF_DEBUG_2(2, "📊 Outlier statistics loaded for ", count, " features");
+            // eml_debug_2(2, "📊 Outlier statistics loaded for ", count, " features");
         }
 
         bool set_outliner_zscore_filtering(float zscore_threshold) {
@@ -4890,7 +4909,7 @@ namespace mcu {
         }
 #endif
 
-        const char* getOriginalLabelPtr(label_type normalizedLabel) const {
+        const char* getOriginalLabelPtr(rf_label_type normalizedLabel) const {
             if (normalizedLabel >= labelOffsets.size()) {
                 return nullptr;
             }
@@ -4901,7 +4920,7 @@ namespace mcu {
             return &labelStorage[offset];
         }
 
-        bool getOriginalLabelView(label_type normalizedLabel, const char** outData, uint16_t* outLength = nullptr) const {
+        bool getOriginalLabelView(rf_label_type normalizedLabel, const char** outData, uint16_t* outLength = nullptr) const {
             if (!outData || normalizedLabel >= RF_MAX_LABELS) {
                 return false;
             }
@@ -4929,7 +4948,7 @@ namespace mcu {
             return true;
         }
 
-        bool getOriginalLabel(label_type normalizedLabel, char* buffer, size_t bufferSize) const {
+        bool getOriginalLabel(rf_label_type normalizedLabel, char* buffer, size_t bufferSize) const {
             if (!buffer || bufferSize == 0 || normalizedLabel >= RF_MAX_LABELS) {
                 return false;
             }
@@ -4954,11 +4973,11 @@ namespace mcu {
         }
 
         // mapping from original label to normalized label 
-        label_type getNormalizedLabel(const char* originalLabel) const {
+        rf_label_type getNormalizedLabel(const char* originalLabel) const {
             if (!originalLabel || originalLabel[0] == '\0') {
                 return RF_ERROR_LABEL;
             }
-            for (label_type i = 0; i < labelOffsets.size(); ++i) {
+            for (rf_label_type i = 0; i < labelOffsets.size(); ++i) {
                 uint16_t offset = labelOffsets[i];
                 if (offset == UINT16_MAX || offset >= labelStorage.size()) {
                     continue;
@@ -4978,24 +4997,24 @@ namespace mcu {
         }
 
         // Add a new label to the quantizer
-        label_type addNewLabel(const char* label) {
+        rf_label_type addNewLabel(const char* label) {
             if (!label || label[0] == '\0') {
                 return RF_ERROR_LABEL;
             }
             // Check if label already exists
-            label_type existing = getNormalizedLabel(label);
+            rf_label_type existing = getNormalizedLabel(label);
             if (existing != RF_ERROR_LABEL) {
                 return existing;
             }
             
             if (numLabels >= RF_MAX_LABELS) {
-                RF_DEBUG(0, "❌ Max labels reached, cannot add new label: ", label);
+                eml_debug(0, "❌ Max labels reached, cannot add new label: ", label);
                 return RF_ERROR_LABEL;
             }
             
-            label_type newId = numLabels;
+            rf_label_type newId = numLabels;
             if (storeLabel(newId, label)) {
-                // RF_DEBUG_2(1, "🆕 Added new label: ", label, " (ID: ", newId, ")");
+                // eml_debug_2(1, "🆕 Added new label: ", label, " (ID: ", newId, ")");
                 return newId;
             }
             return RF_ERROR_LABEL;
@@ -5106,16 +5125,16 @@ namespace mcu {
                     float ratio = static_cast<float>(current_samples) / static_cast<float>(trained_sample_count);
                     if (ratio > 1.75f || ratio < 0.5f) {
                         if (!dataset_drift_emitted) {
-                            RF_DEBUG_2(1, "⚠️ Node predictor dataset drift detected. Trained on ", trained_sample_count, ", current samples: ", current_samples);
-                            RF_DEBUG(1, "   Recommendation: retrain node predictor to refresh coefficients.");
+                            eml_debug_2(1, "⚠️ Node predictor dataset drift detected. Trained on ", trained_sample_count, ", current samples: ", current_samples);
+                            eml_debug(1, "   Recommendation: retrain node predictor to refresh coefficients.");
                             dataset_drift_emitted = true;
                         }
                         return manual_estimate(data);
                     }
 
                     if ((ratio > 1.05f || ratio < 0.95f) && !dataset_warning_emitted) {
-                        RF_DEBUG(1, "ℹ️ Adjusting node estimate for sample count change.");
-                        RF_DEBUG_2(1, "   factor: ", ratio, "", "");
+                        eml_debug(1, "ℹ️ Adjusting node estimate for sample count change.");
+                        eml_debug_2(1, "   factor: ", ratio, "", "");
                         dataset_warning_emitted = true;
                     }
 
@@ -5145,7 +5164,7 @@ namespace mcu {
         }
 
         Rf_node_predictor(Rf_base* base) : base_ptr(base), is_trained(false), accuracy(0), peak_percent(0) {
-            RF_DEBUG(2, "🔧 Initializing node predictor");
+            eml_debug(2, "🔧 Initializing node predictor");
             for (int i = 0; i < 4; i++) {
                 coefficients[i] = 0.0f;
             }
@@ -5192,30 +5211,30 @@ namespace mcu {
         // Load trained model from file system (updated format without version)
         bool loadPredictor() {
             if (!has_base()){
-                RF_DEBUG(0, "❌ Load Predictor failed: base pointer not ready");
+                eml_debug(0, "❌ Load Predictor failed: base pointer not ready");
                 return false;
             }
             char file_path[RF_PATH_BUFFER];
             base_ptr->get_node_pred_path(file_path);
-            RF_DEBUG(2, "🔍 Loading node predictor from file: ", file_path);
+            eml_debug(2, "🔍 Loading node predictor from file: ", file_path);
             if(is_trained) return true;
             dataset_warning_emitted = false;
             dataset_drift_emitted = false;
             if (!RF_FS_EXISTS(file_path)) {
-                RF_DEBUG(1, "⚠️  No predictor file found, using default predictor.");
+                eml_debug(1, "⚠️  No predictor file found, using default predictor.");
                 return false;
             }
             
             File file = RF_FS_OPEN(file_path, RF_FILE_READ);
             if (!file) {
-                RF_DEBUG(0, "❌ Failed to open predictor file: ", file_path);
+                eml_debug(0, "❌ Failed to open predictor file: ", file_path);
                 return false;
             }
             
             // Read and verify magic number
             uint32_t magic;
             if (file.read((uint8_t*)&magic, sizeof(magic)) != sizeof(magic) || magic != 0x4E4F4445) {
-                RF_DEBUG(0, "❌ Invalid predictor file format: ", file_path);
+                eml_debug(0, "❌ Invalid predictor file format: ", file_path);
                 file.close();
                 return false;
             }
@@ -5223,43 +5242,43 @@ namespace mcu {
             // Read training status (but don't use it to set is_trained - that's set after successful loading)
             bool file_is_trained;
             if (file.read((uint8_t*)&file_is_trained, sizeof(file_is_trained)) != sizeof(file_is_trained)) {
-                RF_DEBUG(0, "❌ Failed to read training status");
+                eml_debug(0, "❌ Failed to read training status");
                 file.close();
                 return false;
             }
             
             // Read accuracy and peak_percent
             if (file.read((uint8_t*)&accuracy, sizeof(accuracy)) != sizeof(accuracy)) {
-                RF_DEBUG(2, "⚠️ Failed to read accuracy, using manual estimate node.");
+                eml_debug(2, "⚠️ Failed to read accuracy, using manual estimate node.");
             }
             
             if (file.read((uint8_t*)&peak_percent, sizeof(peak_percent)) != sizeof(peak_percent)) {
-                RF_DEBUG(2, "⚠️ Failed to read peak_percent, using manual estimate node.");
+                eml_debug(2, "⚠️ Failed to read peak_percent, using manual estimate node.");
             }
             
             // Read number of coefficients
             uint8_t num_coefficients;
             if (file.read((uint8_t*)&num_coefficients, sizeof(num_coefficients)) != sizeof(num_coefficients)) {
-                RF_DEBUG(0, "❌ Failed to read coefficient count");
+                eml_debug(0, "❌ Failed to read coefficient count");
                 file.close();
                 return false;
             }
 
             if (num_coefficients == 3) {
                 if (file.read((uint8_t*)coefficients, sizeof(float) * 3) != sizeof(float) * 3) {
-                    RF_DEBUG(0, "❌ Failed to read legacy coefficients");
+                    eml_debug(0, "❌ Failed to read legacy coefficients");
                     file.close();
                     return false;
                 }
                 coefficients[3] = 0.0f; // Legacy files omitted depth coefficient
             } else if (num_coefficients == 4) {
                 if (file.read((uint8_t*)coefficients, sizeof(float) * 4) != sizeof(float) * 4) {
-                    RF_DEBUG(0, "❌ Failed to read coefficients");
+                    eml_debug(0, "❌ Failed to read coefficients");
                     file.close();
                     return false;
                 }
             } else {
-                RF_DEBUG_2(2, "❌ Unsupported coefficient count: ", num_coefficients, "", "");
+                eml_debug_2(2, "❌ Unsupported coefficient count: ", num_coefficients, "", "");
                 file.close();
                 return false;
             }
@@ -5279,22 +5298,22 @@ namespace mcu {
                 is_trained = true;
                 if (peak_percent == 0) {
                     peak_percent = 30; // Use reasonable default for binary trees
-                    RF_DEBUG(2, "⚠️  Fixed peak_percent from 0% to 30%");
+                    eml_debug(2, "⚠️  Fixed peak_percent from 0% to 30%");
                 }
-                RF_DEBUG(1, "✅ Node predictor loaded : ", file_path);
-                RF_DEBUG(2, "bias: ", this->coefficients[0]);
-                RF_DEBUG(2, "min_split effect: ", this->coefficients[1]);
-                RF_DEBUG(2, "min_leaf effect: ", this->coefficients[2]);
-                RF_DEBUG(2, "accuracy: ", accuracy);
+                eml_debug(1, "✅ Node predictor loaded : ", file_path);
+                eml_debug(2, "bias: ", this->coefficients[0]);
+                eml_debug(2, "min_split effect: ", this->coefficients[1]);
+                eml_debug(2, "min_leaf effect: ", this->coefficients[2]);
+                eml_debug(2, "accuracy: ", accuracy);
                 dataset_warning_emitted = false;
                 dataset_drift_emitted = false;
                 if (trained_sample_count == 0) {
-                    RF_DEBUG(2, "ℹ️ Predictor file missing sample count metadata (legacy format).");
+                    eml_debug(2, "ℹ️ Predictor file missing sample count metadata (legacy format).");
                 } else {
-                    RF_DEBUG_2(2, "   Predictor trained on samples: ", trained_sample_count, "", "");
+                    eml_debug_2(2, "   Predictor trained on samples: ", trained_sample_count, "", "");
                 }
             } else {
-                RF_DEBUG(1, "⚠️  Predictor file exists but is not trained, using default predictor.");
+                eml_debug(1, "⚠️  Predictor file exists but is not trained, using default predictor.");
                 is_trained = false;
                 trained_sample_count = 0;
                 dataset_warning_emitted = false;
@@ -5306,11 +5325,11 @@ namespace mcu {
         // Save trained predictor to file system
         bool releasePredictor() {
             if (!has_base()){
-                RF_DEBUG(0, "❌ Release Predictor failed: base pointer not ready");
+                eml_debug(0, "❌ Release Predictor failed: base pointer not ready");
                 return false;
             }
             if (!is_trained) {
-                RF_DEBUG(1, "❌ Predictor is not trained, cannot save.");
+                eml_debug(1, "❌ Predictor is not trained, cannot save.");
                 return false;
             }
             char file_path[RF_PATH_BUFFER];
@@ -5319,7 +5338,7 @@ namespace mcu {
 
             File file = RF_FS_OPEN(file_path, FILE_WRITE);
             if (!file) {
-                RF_DEBUG(0, "❌ Failed to create predictor file: ", file_path);
+                eml_debug(0, "❌ Failed to create predictor file: ", file_path);
                 return false;
             }
             
@@ -5351,7 +5370,7 @@ namespace mcu {
             file.close();
             dataset_warning_emitted = false;
             dataset_drift_emitted = false;
-            RF_DEBUG(1, "✅ Node predictor saved: ", file_path);
+            eml_debug(1, "✅ Node predictor saved: ", file_path);
             return true;
         }
         
@@ -5359,7 +5378,7 @@ namespace mcu {
         void add_new_samples(uint8_t min_split, uint8_t min_leaf, uint16_t max_depth, uint32_t total_nodes) {
             if (min_split == 0 || min_leaf == 0) return; // invalid sample
             if (buffer.size() >= 100) {
-                RF_DEBUG(2, "⚠️ Node_pred buffer full, consider retraining soon.");
+                eml_debug(2, "⚠️ Node_pred buffer full, consider retraining soon.");
                 return;
             }
             buffer.push_back(node_data(min_split, min_leaf, max_depth, total_nodes));
@@ -5367,7 +5386,7 @@ namespace mcu {
         // Retrain the predictor using data from rf_tree_log.csv (synchronized with PC version)
         bool re_train(bool save_after_retrain = true) {
             if (!has_base()){
-                RF_DEBUG(0, "❌ Base pointer is null, cannot retrain predictor.");
+                eml_debug(0, "❌ Base pointer is null, cannot retrain predictor.");
                 return false;
             }
             if(buffer.size() > 0){
@@ -5377,19 +5396,19 @@ namespace mcu {
             buffer.fit();
 
             if(!can_retrain()) {
-                RF_DEBUG(2, "❌ No training data available for retraining.");
+                eml_debug(2, "❌ No training data available for retraining.");
                 return false;
             }
 
             char node_predictor_log[RF_PATH_BUFFER];
             base_ptr->get_node_log_path(node_predictor_log);
-            RF_DEBUG(2, "🔂 Starting retraining of node predictor...");
+            eml_debug(2, "🔂 Starting retraining of node predictor...");
             File file = RF_FS_OPEN(node_predictor_log, RF_FILE_READ);
             if (!file) {
-                RF_DEBUG(1, "❌ Failed to open node_predictor log file: ", node_predictor_log);
+                eml_debug(1, "❌ Failed to open node_predictor log file: ", node_predictor_log);
                 return false;
             }
-            RF_DEBUG(2, "🔄 Retraining node predictor from CSV data...");
+            eml_debug(2, "🔄 Retraining node predictor from CSV data...");
             
             b_vector<node_data> training_data;
             training_data.reserve(50); // Reserve space for training samples
@@ -5597,8 +5616,8 @@ namespace mcu {
             }
             dataset_warning_emitted = false;
             dataset_drift_emitted = false;
-            RF_DEBUG(2, "✅ Node predictor retraining complete!");
-            RF_DEBUG_2(2, "   Accuracy: ", accuracy, "%, Peak (%): ", peak_percent);
+            eml_debug(2, "✅ Node predictor retraining complete!");
+            eml_debug_2(2, "   Accuracy: ", accuracy, "%, Peak (%): ", peak_percent);
             if(save_after_retrain) {
                 releasePredictor(); // Save the new predictor
             }
@@ -5616,7 +5635,7 @@ namespace mcu {
             uint16_t estimate = static_cast<uint16_t>(raw_est * 100 / acc);
             uint16_t safe_estimate;
             if(config_ptr->num_samples < 2024) safe_estimate = 512;
-            else safe_estimate = max(static_cast<sample_type>((config_ptr->num_samples / config_ptr->min_leaf)), RF_MAX_NODES);
+            else safe_estimate = max(static_cast<rf_sample_type>((config_ptr->num_samples / config_ptr->min_leaf)), RF_MAX_NODES);
             return estimate < RF_MAX_NODES ? estimate : safe_estimate;       
         }
 
@@ -5637,7 +5656,7 @@ namespace mcu {
                 est_nodes = est_nodes * config.k_folds / (config.k_folds + 1);
             }
             est_nodes = static_cast<uint16_t>(est_nodes * peak_percent / 100);
-            uint16_t max_peak_theory = max(static_cast<sample_type>((config_ptr->num_samples / config_ptr->min_leaf)), RF_MAX_NODES) * 0.3; // 30% of theoretical max nodes
+            uint16_t max_peak_theory = max(static_cast<rf_sample_type>((config_ptr->num_samples / config_ptr->min_leaf)), RF_MAX_NODES) * 0.3; // 30% of theoretical max nodes
             uint16_t min_peak_theory = 30;
             if (est_nodes > max_peak_theory) return max_peak_theory;
             if (est_nodes < min_peak_theory) return min_peak_theory;
@@ -5646,7 +5665,7 @@ namespace mcu {
 
         void flush_buffer() {
             if (!has_base()){
-                RF_DEBUG(0, "❌Failed to flush_buffer : base pointer is null");
+                eml_debug(0, "❌Failed to flush_buffer : base pointer is null");
                 return;
             }
             char node_predictor_log[RF_PATH_BUFFER];
@@ -5708,13 +5727,13 @@ namespace mcu {
 
         bool can_retrain() const {
             if (!has_base()) {
-                RF_DEBUG(0, "❌ can_retrain check failed: base pointer not ready");
+                eml_debug(0, "❌ can_retrain check failed: base pointer not ready");
                 return false;
             }
             char node_predictor_log[RF_PATH_BUFFER];
             base_ptr->get_node_log_path(node_predictor_log);
             if (!RF_FS_EXISTS(node_predictor_log)) {
-                RF_DEBUG(2, "❌ No log file found for retraining.");
+                eml_debug(2, "❌ No log file found for retraining.");
                 return false;
             }
             File file = RF_FS_OPEN(node_predictor_log, RF_FILE_READ);
@@ -5731,7 +5750,7 @@ namespace mcu {
             }
             if (file) file.close();
             if(!result){
-                RF_DEBUG(2, "❌ Not enough data for retraining (need > 3 samples).");
+                eml_debug(2, "❌ Not enough data for retraining (need > 3 samples).");
             }
             return result;
         }
@@ -5916,33 +5935,33 @@ namespace mcu {
 
     class Rf_matrix_score{
         // Confusion matrix components
-        b_vector<sample_type, 8> tp;
-        b_vector<sample_type, 8> fp;
-        b_vector<sample_type, 8> fn;
+        b_vector<rf_sample_type, 8> tp;
+        b_vector<rf_sample_type, 8> fp;
+        b_vector<rf_sample_type, 8> fn;
 
-        sample_type total_predict = 0;
-        sample_type correct_predict = 0;
-        label_type num_labels;
+        rf_sample_type total_predict = 0;
+        rf_sample_type correct_predict = 0;
+        rf_label_type num_labels;
         uint8_t metric_score;
 
         public:
         // Constructor
-        Rf_matrix_score(label_type num_labels, uint8_t metric_score) 
+        Rf_matrix_score(rf_label_type num_labels, uint8_t metric_score) 
             : num_labels(num_labels), metric_score(metric_score) {
             // Ensure vectors have logical length == num_labels and are zeroed
             tp.clear(); fp.clear(); fn.clear();
             tp.reserve(num_labels); fp.reserve(num_labels); fn.reserve(num_labels);
-            for (label_type i = 0; i < num_labels; ++i) { tp.push_back(0); fp.push_back(0); fn.push_back(0); }
+            for (rf_label_type i = 0; i < num_labels; ++i) { tp.push_back(0); fp.push_back(0); fn.push_back(0); }
             total_predict = 0;
             correct_predict = 0;
         }
         
-        void init(label_type num_labels, uint8_t metric_score) {
+        void init(rf_label_type num_labels, uint8_t metric_score) {
             this->num_labels = num_labels;
             this->metric_score = metric_score;
             tp.clear(); fp.clear(); fn.clear();
             tp.reserve(num_labels); fp.reserve(num_labels); fn.reserve(num_labels);
-            for (label_type i = 0; i < num_labels; ++i) { tp.push_back(0); fp.push_back(0); fn.push_back(0); }
+            for (rf_label_type i = 0; i < num_labels; ++i) { tp.push_back(0); fp.push_back(0); fn.push_back(0); }
             total_predict = 0;
             correct_predict = 0;
         }
@@ -5953,18 +5972,18 @@ namespace mcu {
             correct_predict = 0;
             // Reset existing buffers safely; ensure length matches num_labels
             if (tp.size() != num_labels) {
-                tp.clear(); tp.reserve(num_labels); for (label_type i = 0; i < num_labels; ++i) tp.push_back(0);
+                tp.clear(); tp.reserve(num_labels); for (rf_label_type i = 0; i < num_labels; ++i) tp.push_back(0);
             } else { tp.fill(0); }
             if (fp.size() != num_labels) {
-                fp.clear(); fp.reserve(num_labels); for (label_type i = 0; i < num_labels; ++i) fp.push_back(0);
+                fp.clear(); fp.reserve(num_labels); for (rf_label_type i = 0; i < num_labels; ++i) fp.push_back(0);
             } else { fp.fill(0); }
             if (fn.size() != num_labels) {
-                fn.clear(); fn.reserve(num_labels); for (label_type i = 0; i < num_labels; ++i) fn.push_back(0);
+                fn.clear(); fn.reserve(num_labels); for (rf_label_type i = 0; i < num_labels; ++i) fn.push_back(0);
             } else { fn.fill(0); }
         }
 
         // Update confusion matrix with a prediction
-        void update_prediction(label_type actual_label, label_type predicted_label) {
+        void update_prediction(rf_label_type actual_label, rf_label_type predicted_label) {
             if(actual_label >= num_labels || predicted_label >= num_labels) return;
             
             total_predict++;
@@ -5978,10 +5997,10 @@ namespace mcu {
         }
 
         // Get precision for all labels
-        b_vector<pair<label_type, float>> get_precisions() {
-            b_vector<pair<label_type, float>> precisions;
+        b_vector<pair<rf_label_type, float>> get_precisions() {
+            b_vector<pair<rf_label_type, float>> precisions;
             precisions.reserve(num_labels);
-            for(label_type label = 0; label < num_labels; label++) {
+            for(rf_label_type label = 0; label < num_labels; label++) {
                 float prec = (tp[label] + fp[label] == 0) ? 0.0f : 
                             static_cast<float>(tp[label]) / (tp[label] + fp[label]);
                 precisions.push_back(make_pair(label, prec));
@@ -5990,10 +6009,10 @@ namespace mcu {
         }
 
         // Get recall for all labels
-        b_vector<pair<label_type, float>> get_recalls() {
-            b_vector<pair<label_type, float>> recalls;
+        b_vector<pair<rf_label_type, float>> get_recalls() {
+            b_vector<pair<rf_label_type, float>> recalls;
             recalls.reserve(num_labels);
-            for(label_type label = 0; label < num_labels; label++) {
+            for(rf_label_type label = 0; label < num_labels; label++) {
                 float rec = (tp[label] + fn[label] == 0) ? 0.0f : 
                         static_cast<float>(tp[label]) / (tp[label] + fn[label]);
                 recalls.push_back(make_pair(label, rec));
@@ -6002,10 +6021,10 @@ namespace mcu {
         }
 
         // Get F1 scores for all labels
-        b_vector<pair<label_type, float>> get_f1_scores() {
-            b_vector<pair<label_type, float>> f1s;
+        b_vector<pair<rf_label_type, float>> get_f1_scores() {
+            b_vector<pair<rf_label_type, float>> f1s;
             f1s.reserve(num_labels);
-            for(label_type label = 0; label < num_labels; label++) {
+            for(rf_label_type label = 0; label < num_labels; label++) {
                 float prec = (tp[label] + fp[label] == 0) ? 0.0f : 
                             static_cast<float>(tp[label]) / (tp[label] + fp[label]);
                 float rec = (tp[label] + fn[label] == 0) ? 0.0f : 
@@ -6017,12 +6036,12 @@ namespace mcu {
         }
 
         // Get accuracy for all labels (overall accuracy for multi-class)
-        b_vector<pair<label_type, float>> get_accuracies() {
-            b_vector<pair<label_type, float>> accuracies;
+        b_vector<pair<rf_label_type, float>> get_accuracies() {
+            b_vector<pair<rf_label_type, float>> accuracies;
             accuracies.reserve(num_labels);
             float overall_accuracy = (total_predict == 0) ? 0.0f : 
                                     static_cast<float>(correct_predict) / total_predict;
-            for(label_type label = 0; label < num_labels; label++) {
+            for(rf_label_type label = 0; label < num_labels; label++) {
                 accuracies.push_back(make_pair(label, overall_accuracy));
             }
             return accuracies;
@@ -6031,7 +6050,7 @@ namespace mcu {
         // Calculate combined score based on training flags
         float calculate_score() {
             if(total_predict == 0) {
-                RF_DEBUG(1, "❌ No valid predictions found!");
+                eml_debug(1, "❌ No valid predictions found!");
                 return 0.0f;
             }
 
@@ -6041,7 +6060,7 @@ namespace mcu {
             // Calculate accuracy
             if(metric_score & 0x01) { // ACCURACY 
                 float accuracy = static_cast<float>(correct_predict) / total_predict;
-                RF_DEBUG(2, "Accuracy: ", accuracy);
+                eml_debug(2, "Accuracy: ", accuracy);
                 combined_result += accuracy;
                 numFlags++;
             }
@@ -6049,9 +6068,9 @@ namespace mcu {
             // Calculate precision
             if(metric_score & 0x02) { // PRECISION 
                 float total_precision = 0.0f;
-                label_type valid_labels = 0;
+                rf_label_type valid_labels = 0;
                 
-                for(label_type label = 0; label < num_labels; label++) {
+                for(rf_label_type label = 0; label < num_labels; label++) {
                     if(tp[label] + fp[label] > 0) {
                         total_precision += static_cast<float>(tp[label]) / (tp[label] + fp[label]);
                         valid_labels++;
@@ -6059,7 +6078,7 @@ namespace mcu {
                 }
                 
                 float precision = valid_labels > 0 ? total_precision / valid_labels : 0.0f;
-                RF_DEBUG(2, "Precision: ", precision);
+                eml_debug(2, "Precision: ", precision);
                 combined_result += precision;
                 numFlags++;
             }
@@ -6067,9 +6086,9 @@ namespace mcu {
             // Calculate recall
             if(metric_score & 0x04) { // RECALL 
                 float total_recall = 0.0f;
-                label_type valid_labels = 0;
+                rf_label_type valid_labels = 0;
                 
-                for(label_type label = 0; label < num_labels; label++) {
+                for(rf_label_type label = 0; label < num_labels; label++) {
                     if(tp[label] + fn[label] > 0) {
                         total_recall += static_cast<float>(tp[label]) / (tp[label] + fn[label]);
                         valid_labels++;
@@ -6077,7 +6096,7 @@ namespace mcu {
                 }
                 
                 float recall = valid_labels > 0 ? total_recall / valid_labels : 0.0f;
-                RF_DEBUG(2, "Recall: ", recall);
+                eml_debug(2, "Recall: ", recall);
                 combined_result += recall;
                 numFlags++;
             }
@@ -6085,9 +6104,9 @@ namespace mcu {
             // Calculate F1-Score
             if(metric_score & 0x08) { // F1_SCORE 
                 float total_f1 = 0.0f;
-                label_type valid_labels = 0;
+                rf_label_type valid_labels = 0;
                 
-                for(label_type label = 0; label < num_labels; label++) {
+                for(rf_label_type label = 0; label < num_labels; label++) {
                     if(tp[label] + fp[label] > 0 && tp[label] + fn[label] > 0) {
                         float precision = static_cast<float>(tp[label]) / (tp[label] + fp[label]);
                         float recall = static_cast<float>(tp[label]) / (tp[label] + fn[label]);
@@ -6100,7 +6119,7 @@ namespace mcu {
                 }
                 
                 float f1_score = valid_labels > 0 ? total_f1 / valid_labels : 0.0f;
-                RF_DEBUG(2, "F1-Score: ", f1_score);
+                eml_debug(2, "F1-Score: ", f1_score);
                 combined_result += f1_score;
                 numFlags++;
             }
@@ -6126,13 +6145,13 @@ namespace mcu {
     */
 
     struct NodeToBuild {
-        sample_type begin;   // inclusive
-        sample_type end;     // exclusive
-        node_type nodeIndex;
+        rf_sample_type begin;   // inclusive
+        rf_sample_type end;     // exclusive
+        rf_node_type nodeIndex;
         uint16_t depth;
         
         NodeToBuild() : begin(0), end(0), nodeIndex(0), depth(0) {}
-        NodeToBuild(node_type idx, sample_type b, sample_type e, uint16_t d) 
+        NodeToBuild(rf_node_type idx, rf_sample_type b, rf_sample_type e, uint16_t d) 
             : nodeIndex(idx), begin(b), end(e), depth(d) {}
     };
 
@@ -6148,10 +6167,10 @@ namespace mcu {
             vector<Rf_tree> trees;        // stores tree slots and manages file system file_paths
             node_resource resources;
             size_t   total_depths;       // store total depth of all trees
-            node_type   total_nodes;        // store total nodes of all trees
-            node_type   total_leaves;       // store total leaves of all trees
+            rf_node_type   total_nodes;        // store total nodes of all trees
+            rf_node_type   total_leaves;       // store total leaves of all trees
             vector<NodeToBuild> queue_nodes; // Queue for breadth-first tree building
-            unordered_map_s<label_type, sample_type> predictClass; // Map to count predictions per class during inference
+            unordered_map_s<rf_label_type, rf_sample_type> predictClass; // Map to count predictions per class during inference
             bool is_unified = true;  // Default to unified form (used at the end of training and inference)
 
             inline bool has_base() const { 
@@ -6198,13 +6217,13 @@ namespace mcu {
             }
 
         public:
-            void calculate_layout(label_type num_label, uint16_t num_feature, node_type max_node){
-                const node_type fallback_node_index = 8191;  // safety fallback 13 bits 
+            void calculate_layout(rf_label_type num_label, uint16_t num_feature, rf_node_type max_node){
+                const rf_node_type fallback_node_index = 8191;  // safety fallback 13 bits 
 
-                const label_type max_label_id   = (num_label  > 0) ? static_cast<label_type>(num_label  - 1) : 0;
+                const rf_label_type max_label_id   = (num_label  > 0) ? static_cast<rf_label_type>(num_label  - 1) : 0;
                 const uint32_t max_feature_id = (num_feature > 0) ? static_cast<uint32_t>(num_feature - 1) : 0;
 
-                node_type max_node_index = (max_node   > 0) ? static_cast<uint32_t>(max_node   - 1) : 0;
+                rf_node_type max_node_index = (max_node   > 0) ? static_cast<uint32_t>(max_node   - 1) : 0;
                 if (max_node_index > fallback_node_index) {
                     max_node_index = fallback_node_index;
                 }
@@ -6254,7 +6273,7 @@ namespace mcu {
                 }
 
                 if (config_ptr && threshold_bits < config_ptr->quantization_coefficient) {
-                    RF_DEBUG_2(2, "⚙️ Adjusted threshold bits from ", static_cast<int>(config_ptr->quantization_coefficient),
+                    eml_debug_2(2, "⚙️ Adjusted threshold bits from ", static_cast<int>(config_ptr->quantization_coefficient),
                              " to ", static_cast<int>(threshold_bits));
                 }
 
@@ -6274,11 +6293,11 @@ namespace mcu {
                     }
                 }
 
-                RF_DEBUG(1, "📐 Calculated node resources :");
-                RF_DEBUG(1, "   - Threshold bits : ", static_cast<int>(threshold_bits));
-                RF_DEBUG(1, "   - Feature bits   : ", static_cast<int>(feature_bits));
-                RF_DEBUG(1, "   - Label bits     : ", static_cast<int>(label_bits));
-                RF_DEBUG(1, "   - Child index bits: ", static_cast<int>(child_index_bits));
+                eml_debug(1, "📐 Calculated node resources :");
+                eml_debug(1, "   - Threshold bits : ", static_cast<int>(threshold_bits));
+                eml_debug(1, "   - Feature bits   : ", static_cast<int>(feature_bits));
+                eml_debug(1, "   - Label bits     : ", static_cast<int>(label_bits));
+                eml_debug(1, "   - Child index bits: ", static_cast<int>(child_index_bits));
 
                 resources.set_bits(feature_bits, label_bits, child_index_bits, threshold_bits);
             }
@@ -6296,18 +6315,18 @@ namespace mcu {
                 node_pred_ptr = node_pred;
                 if (!config_ptr) {
                     trees.clear();
-                    RF_DEBUG(0, "❌ Cannot initialize tree container: config pointer is null.");
+                    eml_debug(0, "❌ Cannot initialize tree container: config pointer is null.");
                     return false;
                 }
                 
                 // Check if layout bits are provided in config 
                 if (config_ptr->threshold_bits > 0 && config_ptr->feature_bits > 0 && 
                     config_ptr->label_bits > 0 && config_ptr->child_bits > 0) {
-                    RF_DEBUG(2, "📐 Setting node layout from config file");
+                    eml_debug(2, "📐 Setting node layout from config file");
                     resources.set_bits(config_ptr->feature_bits, config_ptr->label_bits,
                                        config_ptr->child_bits, config_ptr->threshold_bits);
                 } else {
-                    RF_DEBUG(0, "❌ Cannot initialize tree container: layout bits missing in config.");
+                    eml_debug(0, "❌ Cannot initialize tree container: layout bits missing in config.");
                     return false; 
                 }
 
@@ -6333,9 +6352,9 @@ namespace mcu {
 
             // Clear all trees, old forest file and reset state to individual form (ready for rebuilding)
             void clearForest() {
-                RF_DEBUG(1, "🧹 Clearing forest..");
+                eml_debug(1, "🧹 Clearing forest..");
                 if(!has_base()) {
-                    RF_DEBUG(0, "❌ Cannot clear forest: base or config pointer is null.");
+                    eml_debug(0, "❌ Cannot clear forest: base or config pointer is null.");
                     return;
                 }
                 for (size_t i = 0; i < trees.size(); i++) {
@@ -6350,7 +6369,7 @@ namespace mcu {
                     if (node_pred_ptr && node_pred_ptr->is_trained) {
                         est_nodes = node_pred_ptr->estimate_nodes(*config_ptr);
                     } else {
-                        RF_DEBUG(2, "⚠️ Node predictor not available or not trained, using safe default for layout calculation.");
+                        eml_debug(2, "⚠️ Node predictor not available or not trained, using safe default for layout calculation.");
                         est_nodes = static_cast<uint16_t>(2046); // Safe default when predictor not available/trained
                     }
                     calculate_layout(config_ptr->num_labels, config_ptr->num_features, est_nodes);
@@ -6362,7 +6381,7 @@ namespace mcu {
                 base_ptr->get_forest_path(oldForestFile);
                 if(RF_FS_EXISTS(oldForestFile)) {
                     RF_FS_REMOVE(oldForestFile);
-                    RF_DEBUG(2, "🗑️ Removed old forest file: ", oldForestFile);
+                    eml_debug(2, "🗑️ Removed old forest file: ", oldForestFile);
                 }
                 is_unified = false; // Now in individual form
                 total_depths = 0;
@@ -6371,7 +6390,7 @@ namespace mcu {
             }
             
             bool add_tree(Rf_tree&& tree){
-                if(!tree.isLoaded) RF_DEBUG(2, "🟡 Warning: Adding an unloaded tree to the container.");
+                if(!tree.isLoaded) eml_debug(2, "🟡 Warning: Adding an unloaded tree to the container.");
                 if(tree.index != 255 && tree.index < config_ptr->num_trees) {
                     uint8_t index = tree.index;
                     ensure_tree_slot(index);
@@ -6388,22 +6407,22 @@ namespace mcu {
                     tree.set_resource(&resources);
                     tree.releaseTree(tree_path_buffer); // Release tree nodes from memory after adding to container
                     trees[tree.index] = std::move(tree);
-                    RF_DEBUG_2(1, "🌲 Added tree index: ", index, "- nodes: ", n);
+                    eml_debug_2(1, "🌲 Added tree index: ", index, "- nodes: ", n);
                     // slot.set_layout(&layout);
                 } else {
-                    RF_DEBUG(0, "❌ Invalid tree index: ",tree.index);
+                    eml_debug(0, "❌ Invalid tree index: ",tree.index);
                     return false;
                 }
                 return true;
             }
 
-            label_type predict_features(const packed_vector<8>& features) {
+            rf_label_type predict_features(const packed_vector<8>& features) {
                 if(__builtin_expect(trees.empty() || !is_loaded, 0)) {
-                    RF_DEBUG(2, "❌ Forest not loaded or empty, cannot predict.");
+                    eml_debug(2, "❌ Forest not loaded or empty, cannot predict.");
                     return RF_ERROR_LABEL; // Unknown class
                 }
                 
-                const label_type numLabels = config_ptr->num_labels;
+                const rf_label_type numLabels = config_ptr->num_labels;
                 
                 // Use stack array only for small label sets to avoid stack overflow
                 // For larger label sets, use heap-allocated map
@@ -6413,7 +6432,7 @@ namespace mcu {
                     
                     const uint8_t numTrees = trees.size();
                     for(uint8_t t = 0; t < numTrees; ++t) {
-                        label_type predict = trees[t].predict_features(features);
+                        rf_label_type predict = trees[t].predict_features(features);
                         if(__builtin_expect(predict < numLabels, 1)) {
                             votes[predict]++;
                         }
@@ -6435,7 +6454,7 @@ namespace mcu {
                     
                     const uint8_t numTrees = trees.size();
                     for(uint8_t t = 0; t < numTrees; ++t) {
-                        label_type predict = trees[t].predict_features(features);
+                        rf_label_type predict = trees[t].predict_features(features);
                         if(__builtin_expect(predict < numLabels, 1)) {
                             predictClass[predict]++;
                         }
@@ -6491,16 +6510,16 @@ namespace mcu {
             // Forest loading functionality - dispatcher based on is_unified flag
             bool loadForest() {
                 if (is_loaded) {
-                    RF_DEBUG(2, "✅ Forest already loaded, skipping load.");
+                    eml_debug(2, "✅ Forest already loaded, skipping load.");
                     return true;
                 }
                 if(!has_base()) {
-                    RF_DEBUG(0, "❌ Base pointer is null", "load forest");
+                    eml_debug(0, "❌ Base pointer is null", "load forest");
                     return false;
                 }
                 // Ensure container is properly sized before loading
                 if(trees.size() != config_ptr->num_trees) {
-                    RF_DEBUG_2(2, "🔧 Adjusting container size from", trees.size(), "to", config_ptr->num_trees);
+                    eml_debug_2(2, "🔧 Adjusting container size from", trees.size(), "to", config_ptr->num_trees);
                     if(config_ptr->num_trees > 0) {
                         ensure_tree_slot(static_cast<uint8_t>(config_ptr->num_trees - 1));
                     } else {
@@ -6510,7 +6529,7 @@ namespace mcu {
                 // Memory safety check
                 size_t freeMemory = Rf_memory_status().first;
                 if(freeMemory < config_ptr->estimatedRAM + 8000) {
-                    RF_DEBUG_2(1, "❌ Insufficient memory to load forest (need", 
+                    eml_debug_2(1, "❌ Insufficient memory to load forest (need", 
                                 config_ptr->estimatedRAM + 8000, "bytes, have", freeMemory);
                     return false;
                 }
@@ -6538,7 +6557,7 @@ namespace mcu {
                 }
                 
                 if(loadedTrees != config_ptr->num_trees) {
-                    RF_DEBUG_2(1, "❌ Loaded trees mismatch: ", loadedTrees, "expected: ", config_ptr->num_trees);
+                    eml_debug_2(1, "❌ Loaded trees mismatch: ", loadedTrees, "expected: ", config_ptr->num_trees);
                     is_loaded = false;
                     return false;
                 }
@@ -6552,27 +6571,27 @@ namespace mcu {
                 char unifiedfile_path[RF_PATH_BUFFER];
                 base_ptr->get_forest_path(unifiedfile_path);
                 if(unifiedfile_path[0] == '\0' || !RF_FS_EXISTS(unifiedfile_path)) {
-                    RF_DEBUG(0, "❌ Unified forest file not found: ", unifiedfile_path);
+                    eml_debug(0, "❌ Unified forest file not found: ", unifiedfile_path);
                     return false;
                 }
                 
                 // Load from unified file (optimized format)
                 File file = RF_FS_OPEN(unifiedfile_path, RF_FILE_READ);
                 if (!file) {
-                    RF_DEBUG(0, "❌ Failed to open unified forest file: ", unifiedfile_path);
+                    eml_debug(0, "❌ Failed to open unified forest file: ", unifiedfile_path);
                     return false;
                 }
                 
                 // Read forest header with error checking
                 uint32_t magic;
                 if(file.read((uint8_t*)&magic, sizeof(magic)) != sizeof(magic)) {
-                    RF_DEBUG(0, "❌ Failed to read magic number from: ", unifiedfile_path);
+                    eml_debug(0, "❌ Failed to read magic number from: ", unifiedfile_path);
                     file.close();
                     return false;
                 }
                 
                 if (magic != 0x33435246) { // "FRC3"
-                    RF_DEBUG(0, "❌ Invalid forest file format (expected FRC3): ", unifiedfile_path);
+                    eml_debug(0, "❌ Invalid forest file format (expected FRC3): ", unifiedfile_path);
                     file.close();
                     return false;
                 }
@@ -6605,7 +6624,7 @@ namespace mcu {
                         return false;
                     }
                     if (treeCount != config_ptr->num_trees) {
-                        RF_DEBUG_2(1, "⚠️ Tree count mismatch in unified file: ", treeCount, "expected: ", config_ptr->num_trees);
+                        eml_debug_2(1, "⚠️ Tree count mismatch in unified file: ", treeCount, "expected: ", config_ptr->num_trees);
                         file.close();
                         return false;
                     }
@@ -6621,7 +6640,7 @@ namespace mcu {
                     }
                     resources.set_bits(fBits, lBits, cBits, tBits);
 
-                    RF_DEBUG(1, "📁 Loading from unified compact forest file", unifiedfile_path);
+                    eml_debug(1, "📁 Loading from unified compact forest file", unifiedfile_path);
 
                     uint8_t successfullyLoaded = 0;
                     for (uint8_t i = 0; i < treeCount; ++i) {
@@ -6642,7 +6661,7 @@ namespace mcu {
                         if (!read_u32(rootIndexU32)) {
                             break;
                         }
-                        tree.root_index = static_cast<node_type>(rootIndexU32);
+                        tree.root_index = static_cast<rf_node_type>(rootIndexU32);
 
                         uint32_t branchCountU32 = 0, internalCountU32 = 0, mixedCountU32 = 0, leafCountU32 = 0;
                         if (!read_u32(branchCountU32) || !read_u32(internalCountU32) || !read_u32(mixedCountU32) || !read_u32(leafCountU32)) {
@@ -6674,7 +6693,7 @@ namespace mcu {
                         if (!read_u32(kindBytes)) {
                             break;
                         }
-                        tree.branch_kind.resize(static_cast<node_type>(branchCountU32), 0);
+                        tree.branch_kind.resize(static_cast<rf_node_type>(branchCountU32), 0);
                         for (uint32_t byteIndex = 0; byteIndex < kindBytes; ++byteIndex) {
                             uint8_t in = 0;
                             if (file.read(reinterpret_cast<uint8_t*>(&in), 1) != 1) {
@@ -6684,12 +6703,12 @@ namespace mcu {
                             for (uint8_t bit = 0; bit < 8; ++bit) {
                                 const uint32_t idx = base + static_cast<uint32_t>(bit);
                                 if (idx < branchCountU32) {
-                                    tree.branch_kind.set(static_cast<node_type>(idx), static_cast<uint8_t>((in >> bit) & 1u));
+                                    tree.branch_kind.set(static_cast<rf_node_type>(idx), static_cast<uint8_t>((in >> bit) & 1u));
                                 }
                             }
                         }
 
-                        tree.internal_nodes.reserve(static_cast<node_type>(internalCountU32));
+                        tree.internal_nodes.reserve(static_cast<rf_node_type>(internalCountU32));
                         for (uint32_t k = 0; k < internalCountU32; ++k) {
                             uint64_t raw = 0;
                             if (!read_le(raw, inBytes)) {
@@ -6700,7 +6719,7 @@ namespace mcu {
                             tree.internal_nodes.push_back(n);
                         }
 
-                        tree.mixed_nodes.reserve(static_cast<node_type>(mixedCountU32));
+                        tree.mixed_nodes.reserve(static_cast<rf_node_type>(mixedCountU32));
                         for (uint32_t k = 0; k < mixedCountU32; ++k) {
                             uint64_t raw = 0;
                             if (!read_le(raw, mxBytes)) {
@@ -6711,13 +6730,13 @@ namespace mcu {
                             tree.mixed_nodes.push_back(n);
                         }
 
-                        tree.leaf_nodes.reserve(static_cast<node_type>(leafCountU32));
+                        tree.leaf_nodes.reserve(static_cast<rf_node_type>(leafCountU32));
                         for (uint32_t k = 0; k < leafCountU32; ++k) {
                             uint64_t raw = 0;
                             if (!read_le(raw, lfBytes)) {
                                 break;
                             }
-                            tree.leaf_nodes.push_back(static_cast<label_type>(raw));
+                            tree.leaf_nodes.push_back(static_cast<rf_label_type>(raw));
                         }
 
                         tree.isLoaded = true;
@@ -6734,7 +6753,7 @@ namespace mcu {
 
             // Load forest from individual tree files (used during training)
             bool loadForestIndividual() {
-                RF_DEBUG(1, "📁 Loading from individual tree files...");
+                eml_debug(1, "📁 Loading from individual tree files...");
                 
                 char model_name[RF_PATH_BUFFER];
                 base_ptr->get_model_name(model_name, RF_PATH_BUFFER);
@@ -6749,7 +6768,7 @@ namespace mcu {
                             tree.loadTree(tree_path_buffer);
                             if(tree.isLoaded) successfullyLoaded++;
                         } catch (...) {
-                            RF_DEBUG(1, "❌ Exception loading tree: ", tree.index);
+                            eml_debug(1, "❌ Exception loading tree: ", tree.index);
                             tree.isLoaded = false;
                         }
                     }
@@ -6761,12 +6780,12 @@ namespace mcu {
             // Release forest to unified format (single file containing all trees)
             bool releaseForest() {
                 if(!is_loaded || trees.empty()) {
-                    RF_DEBUG(2, "✅ Forest is not loaded in memory, nothing to release.");
+                    eml_debug(2, "✅ Forest is not loaded in memory, nothing to release.");
                     return true; // Nothing to do
                 }    
                 // Count loaded trees
                 uint8_t loadedCount = 0;
-                node_type totalNodes = 0;
+                rf_node_type totalNodes = 0;
                 for(auto& tree : trees) {
                     if (tree.isLoaded && (tree.leaf_nodes.size() > 0 || tree.branch_kind.size() > 0 || !tree.nodes.empty())) {
                         loadedCount++;
@@ -6775,7 +6794,7 @@ namespace mcu {
                 }
                 
                 if(loadedCount == 0) {
-                    RF_DEBUG(1, "❌ No loaded trees to release");
+                    eml_debug(1, "❌ No loaded trees to release");
                     is_loaded = false;
                     return false;
                 }
@@ -6792,7 +6811,7 @@ namespace mcu {
                 size_t estimatedSize = static_cast<size_t>(totalNodes / 2) * estInBytes + static_cast<size_t>(totalNodes / 2) * estLeafBytes + 256;
                 
                 if(freeFS < estimatedSize) {
-                    RF_DEBUG_2(1, "❌ Insufficient file system space to release forest (need ~", 
+                    eml_debug_2(1, "❌ Insufficient file system space to release forest (need ~", 
                                 estimatedSize, "bytes, have", freeFS);
                     return false;
                 }
@@ -6801,21 +6820,21 @@ namespace mcu {
                 char unifiedfile_path[RF_PATH_BUFFER];
                 base_ptr->get_forest_path(unifiedfile_path);
                 if(unifiedfile_path[0] == '\0') {
-                    RF_DEBUG(0, "❌ Cannot release forest: no base reference for file management");
+                    eml_debug(0, "❌ Cannot release forest: no base reference for file management");
                     return false;
                 }
                 
-                unsigned long fileStart = GET_CURRENT_TIME_IN_MILLISECONDS;
+                unsigned long fileStart = eml_time_now(MILLISECONDS);
                 File file = RF_FS_OPEN(unifiedfile_path, FILE_WRITE);
                 if (!file) {
-                    RF_DEBUG(0, "❌ Failed to create unified forest file: ", unifiedfile_path);
+                    eml_debug(0, "❌ Failed to create unified forest file: ", unifiedfile_path);
                     return false;
                 }
                 
                 // Write forest header: FRC3 (portable)
                 uint32_t magic = 0x33435246; // 'F''R''C''3'
                 if(file.write((uint8_t*)&magic, sizeof(magic)) != sizeof(magic)) {
-                    RF_DEBUG(0, "❌ Failed to write magic number to: ", unifiedfile_path);
+                    eml_debug(0, "❌ Failed to write magic number to: ", unifiedfile_path);
                     file.close();
                     RF_FS_REMOVE(unifiedfile_path);
                     return false;
@@ -6839,7 +6858,7 @@ namespace mcu {
                 };
 
                 if(file.write((uint8_t*)&loadedCount, sizeof(loadedCount)) != sizeof(loadedCount)) {
-                    RF_DEBUG(0, "❌ Failed to write tree count to: ", unifiedfile_path);
+                    eml_debug(0, "❌ Failed to write tree count to: ", unifiedfile_path);
                     file.close();
                     RF_FS_REMOVE(unifiedfile_path);
                     return false;
@@ -6863,7 +6882,7 @@ namespace mcu {
                         }
                         // Write tree header
                         if(file.write((uint8_t*)&tree.index, sizeof(tree.index)) != sizeof(tree.index)) {
-                            RF_DEBUG(1, "❌ Failed to write tree index: ", tree.index);
+                            eml_debug(1, "❌ Failed to write tree index: ", tree.index);
                             break;
                         }
 
@@ -6906,17 +6925,17 @@ namespace mcu {
                         totalBytes += kindBytes;
 
                         for (uint32_t i = 0; i < internalCount; ++i) {
-                            const Internal_node n = tree.internal_nodes.get(static_cast<node_type>(i));
+                            const Internal_node n = tree.internal_nodes.get(static_cast<rf_node_type>(i));
                             write_le(static_cast<uint64_t>(n.packed_data), inBytes);
                             totalBytes += inBytes;
                         }
                         for (uint32_t i = 0; i < mixedCount; ++i) {
-                            const Mixed_node n = tree.mixed_nodes.get(static_cast<node_type>(i));
+                            const Mixed_node n = tree.mixed_nodes.get(static_cast<rf_node_type>(i));
                             write_le(static_cast<uint64_t>(n.packed_data), mxBytes);
                             totalBytes += mxBytes;
                         }
                         for (uint32_t i = 0; i < leafCount; ++i) {
-                            const label_type lbl = tree.leaf_nodes.get(static_cast<node_type>(i));
+                            const rf_label_type lbl = tree.leaf_nodes.get(static_cast<rf_node_type>(i));
                             write_le(static_cast<uint64_t>(lbl), lfBytes);
                             totalBytes += lfBytes;
                         }
@@ -6928,7 +6947,7 @@ namespace mcu {
                 
                 // Verify file was written correctly
                 if(savedCount != loadedCount) {
-                    RF_DEBUG_2(1, "❌ Save incomplete: ", savedCount, "/", loadedCount);
+                    eml_debug_2(1, "❌ Save incomplete: ", savedCount, "/", loadedCount);
                     RF_FS_REMOVE(unifiedfile_path);
                     return false;
                 }
@@ -6946,7 +6965,7 @@ namespace mcu {
                 is_loaded = false;
                 is_unified = true; // forest always in unified form after first time release
                 
-                RF_DEBUG_2(1, "✅ Released ", clearedCount, "trees to unified format: ", unifiedfile_path);
+                eml_debug_2(1, "✅ Released ", clearedCount, "trees to unified format: ", unifiedfile_path);
                 return true;
             }
 
@@ -7058,7 +7077,7 @@ namespace mcu {
             return rf_storage_max_infer_log_bytes();
         }
         vector<Rf_sample> pending_samples; // buffer for pending samples
-        vector<label_type> actual_labels; // true labels of the samples
+        vector<rf_label_type> actual_labels; // true labels of the samples
         vector<Rf_drift_sample> drift_samples; // concept-drift samples recorded during inference
         uint16_t max_pending_samples; // max number of pending samples in buffer
 
@@ -7104,7 +7123,7 @@ namespace mcu {
             pending_samples.push_back(sample);
             if (drift_sample) {
                 Rf_drift_sample ds;
-                ds.pending_index = static_cast<sample_type>(pending_samples.size() - 1);
+                ds.pending_index = static_cast<rf_sample_type>(pending_samples.size() - 1);
                 ds.feature_index = drift_feature;
                 ds.value = drift_value;
                 drift_samples.push_back(ds);
@@ -7125,8 +7144,8 @@ namespace mcu {
             }
         }
 
-        void add_actual_label(label_type true_label){
-            uint16_t ignore_index = (GET_CURRENT_TIME_IN_MILLISECONDS - last_time_received_actual_label) / max_wait_time;
+        void add_actual_label(rf_label_type true_label){
+            uint16_t ignore_index = (eml_time_now(MILLISECONDS) - last_time_received_actual_label) / max_wait_time;
             if(!first_label_received){
                 ignore_index = 0;
                 first_label_received = true;
@@ -7137,10 +7156,10 @@ namespace mcu {
             if(actual_labels.size() >= pending_samples.size()) return;
 
             actual_labels.push_back(true_label);
-            last_time_received_actual_label = GET_CURRENT_TIME_IN_MILLISECONDS;
+            last_time_received_actual_label = eml_time_now(MILLISECONDS);
         }
 
-        void set_max_pending_samples(sample_type max_samples){
+        void set_max_pending_samples(rf_sample_type max_samples){
             max_pending_samples = max_samples;
         }
 
@@ -7151,17 +7170,17 @@ namespace mcu {
         // write valid samples to base_data file
         bool write_to_base_data(Rf_data& base_data){
             if(pending_samples.empty()) {
-                RF_DEBUG(1, "⚠️ No pending samples to write to base data");
+                eml_debug(1, "⚠️ No pending samples to write to base data");
                 return false;
             }
             if (!ptr_ready()) {
-                RF_DEBUG(1, "❌ Cannot write to base data: data pointers not ready");
+                eml_debug(1, "❌ Cannot write to base data: data pointers not ready");
                 return false;
             }
             // first scan 
-            sample_type valid_samples_count = 0;
+            rf_sample_type valid_samples_count = 0;
             b_vector<Rf_sample> valid_samples;
-            for(sample_type i = 0; i < pending_samples.size() && i < actual_labels.size(); i++) {
+            for(rf_sample_type i = 0; i < pending_samples.size() && i < actual_labels.size(); i++) {
                 if(actual_labels[i] < RF_ERROR_LABEL) { // Valid actual label provided
                     valid_samples_count++;
                     Rf_sample sample(pending_samples[i].features, actual_labels[i]);
@@ -7183,7 +7202,7 @@ namespace mcu {
             if(config_ptr->num_samples > RF_MAX_SAMPLES) 
                 config_ptr->num_samples = RF_MAX_SAMPLES;
 
-            for(sample_type i = 0; i < pending_samples.size() && i < actual_labels.size(); i++) {
+            for(rf_sample_type i = 0; i < pending_samples.size() && i < actual_labels.size(); i++) {
                 if(actual_labels[i] < RF_ERROR_LABEL) { // Valid actual label provided
                     config_ptr->samples_per_label[actual_labels[i]]++;
                 }
@@ -7196,7 +7215,7 @@ namespace mcu {
             }
             char data_path[RF_PATH_BUFFER];
             base_ptr->get_base_data_path(data_path);
-            RF_DEBUG_2(1, "✅ Added", valid_samples_count, "new samples to base data", data_path);
+            eml_debug_2(1, "✅ Added", valid_samples_count, "new samples to base data", data_path);
             return true;
         }
 
@@ -7204,13 +7223,13 @@ namespace mcu {
         bool write_to_infer_log(){
             if(pending_samples.empty()) return false;
             if(!ptr_ready()){
-                RF_DEBUG(1, "❌ Cannot write to inference log: data pointers not ready");
+                eml_debug(1, "❌ Cannot write to inference log: data pointers not ready");
                 return false;
             };
             char infer_log_path[RF_PATH_BUFFER];
             base_ptr->get_infer_log_path(infer_log_path);
             if(infer_log_path[0] == '\0') {
-                RF_DEBUG(1, "❌ Cannot write to inference log: no base reference for file management");
+                eml_debug(1, "❌ Cannot write to inference log: no base reference for file management");
                 return false;
             }
             bool file_exists = RF_FS_EXISTS(infer_log_path);
@@ -7233,7 +7252,7 @@ namespace mcu {
             
             File file = RF_FS_OPEN(infer_log_path, file_exists ? FILE_APPEND : FILE_WRITE);
             if(!file) {
-                RF_DEBUG(1, "❌ Failed to open inference log file: ", infer_log_path);
+                eml_debug(1, "❌ Failed to open inference log file: ", infer_log_path);
                 return false;
             }
             
@@ -7243,27 +7262,27 @@ namespace mcu {
                 uint8_t magic_bytes[4] = {0x49, 0x4E, 0x46, 0x4C};
                 size_t written = file.write(magic_bytes, 4);
                 if(written != 4) {
-                    RF_DEBUG(1, "❌ Failed to write magic number to inference log");
+                    eml_debug(1, "❌ Failed to write magic number to inference log");
                 }
                 
                 // Write initial prediction count (4 bytes)
                 uint32_t initial_count = 0;
                 written = file.write((uint8_t*)&initial_count, 4);
                 if(written != 4) {
-                    RF_DEBUG(1, "❌ Failed to write initial prediction count to inference log");
+                    eml_debug(1, "❌ Failed to write initial prediction count to inference log");
                 }
                 
                 file.flush();
             }
             
             // Collect and write prediction pairs for valid samples
-            b_vector<label_type> prediction_pairs;
+            b_vector<rf_label_type> prediction_pairs;
             uint32_t new_predictions = 0;
             
-            for(sample_type i = 0; i < pending_samples.size() && i < actual_labels.size(); i++) {
+            for(rf_sample_type i = 0; i < pending_samples.size() && i < actual_labels.size(); i++) {
                 if(actual_labels[i] != RF_ERROR_LABEL) { // Valid actual label provided
-                    label_type predicted_label = pending_samples[i].label;
-                    label_type actual_label = actual_labels[i];
+                    rf_label_type predicted_label = pending_samples[i].label;
+                    rf_label_type actual_label = actual_labels[i];
                     
                     // Write predicted_label followed by actual_label
                     prediction_pairs.push_back(predicted_label);
@@ -7276,7 +7295,7 @@ namespace mcu {
                 // Write prediction pairs to end of file
                 size_t written = file.write(prediction_pairs.data(), prediction_pairs.size());
                 if(written != prediction_pairs.size()) {
-                    RF_DEBUG_2(1, "❌ Failed to write all prediction pairs to inference log: ", 
+                    eml_debug_2(1, "❌ Failed to write all prediction pairs to inference log: ", 
                                  written, "/", prediction_pairs.size());
                 }
                 
@@ -7302,7 +7321,7 @@ namespace mcu {
                         write_file.flush();
                         write_file.close();
 
-                        RF_DEBUG_2(1, "✅ Added", new_predictions, "prediction pairs to log: ", updated_count);
+                        eml_debug_2(1, "✅ Added", new_predictions, "prediction pairs to log: ", updated_count);
                     }
                 }
             } else {
@@ -7381,13 +7400,13 @@ namespace mcu {
                magic_bytes[0] != 0x49 || magic_bytes[1] != 0x4E || 
                magic_bytes[2] != 0x46 || magic_bytes[3] != 0x4C) {
                 file.close();
-                RF_DEBUG(1, "❌ Invalid magic number in infer log file: ", infer_log_path);
+                eml_debug(1, "❌ Invalid magic number in infer log file: ", infer_log_path);
                 return false;
             }
             
             if(file.read((uint8_t*)&total_predictions, 4) != 4) {
                 file.close();
-                RF_DEBUG(1, "❌ Failed to read prediction count from infer log file: ", infer_log_path);
+                eml_debug(1, "❌ Failed to read prediction count from infer log file: ", infer_log_path);
                 return false;
             }
             
@@ -7418,14 +7437,14 @@ namespace mcu {
             file.close();
             
             if(bytes_read != remaining_data_size) {
-                RF_DEBUG(1, "❌ Failed to read remaining data from infer log file: ", infer_log_path);
+                eml_debug(1, "❌ Failed to read remaining data from infer log file: ", infer_log_path);
                 return false;
             }
             
             // Rewrite file with header and trimmed data
             file = RF_FS_OPEN(infer_log_path, FILE_WRITE);
             if(!file) {
-                RF_DEBUG(1, "❌ Failed to reopen log file for writing: ", infer_log_path);
+                eml_debug(1, "❌ Failed to reopen log file for writing: ", infer_log_path);
                 return false;
             }
             
@@ -7478,9 +7497,9 @@ namespace mcu {
         }
         
         void init(Rf_base* base, bool keep_old_file = false){
-            RF_DEBUG(2, "🔧 Initializing logger");
+            eml_debug(2, "🔧 Initializing logger");
             time_anchors.clear();
-            starting_time = GET_CURRENT_TIME_IN_MILLISECONDS;
+            starting_time = eml_time_now(MILLISECONDS);
             drop_anchor(); // initial anchor at index 0
 
             lowest_ram = UINT32_MAX;
@@ -7490,7 +7509,7 @@ namespace mcu {
             base->get_memory_log_path(this->memory_log_path);
 
             if(time_log_path[0] == '\0' || memory_log_path[0] == '\0'){
-                RF_DEBUG(1, "❌ Cannot init logger: log file paths not set correctly");
+                eml_debug(1, "❌ Cannot init logger: log file paths not set correctly");
                 return;
             }
 
@@ -7540,7 +7559,7 @@ namespace mcu {
 
             // Log to file with timestamp
             if(log) {        
-                log_time = (GET_CURRENT_TIME_IN_MILLISECONDS - starting_time)/1000.0f; 
+                log_time = (eml_time_now(MILLISECONDS) - starting_time)/1000.0f; 
                 File logFile = RF_FS_OPEN(memory_log_path, FILE_APPEND);
                 if (logFile) {
                     logFile.printf("%.2f,\t%u,\t%u,\t%llu",
@@ -7551,7 +7570,7 @@ namespace mcu {
                         logFile.println();
                     }
                     logFile.close();
-                } else RF_DEBUG(1, "❌ Failed to open memory log file for appending: ", memory_log_path);
+                } else eml_debug(1, "❌ Failed to open memory log file for appending: ", memory_log_path);
             }
         }
 
@@ -7562,7 +7581,7 @@ namespace mcu {
         
         uint16_t drop_anchor(){
             time_anchor anchor;
-            anchor.anchor_time = GET_CURRENT_TIME_IN_MILLISECONDS;
+            anchor.anchor_time = eml_time_now(MILLISECONDS);
             anchor.index = time_anchors.size();
             time_anchors.push_back(anchor);
             return anchor.index;
@@ -7606,10 +7625,10 @@ namespace mcu {
                 }
                 logFile.close();
             }else{
-                RF_DEBUG(1, "❌ Failed to open time log file: ", time_log_path);
+                eml_debug(1, "❌ Failed to open time log file: ", time_log_path);
             }
 
-            time_anchors[end_anchor_idex].anchor_time = GET_CURRENT_TIME_IN_MILLISECONDS; // reset end anchor to current time
+            time_anchors[end_anchor_idex].anchor_time = eml_time_now(MILLISECONDS); // reset end anchor to current time
             return (long unsigned)elapsed;
         }
     
@@ -7623,7 +7642,7 @@ namespace mcu {
          */
         long unsigned t_log(const char* msg, size_t begin_anchor_index, const char* unit = "ms"){
             time_anchor end_anchor;
-            end_anchor.anchor_time = GET_CURRENT_TIME_IN_MILLISECONDS;
+            end_anchor.anchor_time = eml_time_now(MILLISECONDS);
             end_anchor.index = time_anchors.size();
             time_anchors.push_back(end_anchor);
             return t_log(msg, begin_anchor_index, end_anchor.index, unit);
@@ -7636,7 +7655,7 @@ namespace mcu {
          * @note : this action will NOT create a new anchor
          */
         long unsigned t_log(const char* msg){
-            long unsigned current_time = GET_CURRENT_TIME_IN_MILLISECONDS - starting_time;
+            long unsigned current_time = eml_time_now(MILLISECONDS) - starting_time;
 
             // Log to file with timestamp
             File logFile = RF_FS_OPEN(time_log_path, FILE_APPEND);
@@ -7648,7 +7667,7 @@ namespace mcu {
                 }
                 logFile.close();
             }else{
-                RF_DEBUG(1, "❌ Failed to open time log file: ", time_log_path);
+                eml_debug(1, "❌ Failed to open time log file: ", time_log_path);
             }
             return current_time;
         }
@@ -7656,22 +7675,22 @@ namespace mcu {
         // print out memory_log file to // Serial
         void print_m_log(){
             if(memory_log_path[0] == '\0'){
-                RF_DEBUG(1, "❌ Cannot print memory log: log file path not set correctly");
+                eml_debug(1, "❌ Cannot print memory log: log file path not set correctly");
                 return;
             }
             if(!RF_FS_EXISTS(memory_log_path)){
-                RF_DEBUG(1, "❌ Cannot print memory log: log file does not exist");
+                eml_debug(1, "❌ Cannot print memory log: log file does not exist");
                 return;
             }
             File file = RF_FS_OPEN(memory_log_path, RF_FILE_READ);
             if(!file){
-                RF_DEBUG(1, "❌ Cannot open memory log file for reading: ", memory_log_path);
+                eml_debug(1, "❌ Cannot open memory log file for reading: ", memory_log_path);
                 return;
             }
             String line;
             while(file.available()){
                 line = file.readStringUntil('\n');
-                RF_DEBUG(0, line.c_str());
+                eml_debug(0, line.c_str());
             }
             file.close();
         }
@@ -7679,22 +7698,22 @@ namespace mcu {
         // print out time_log file to // Serial
         void print_t_log(){
             if(time_log_path[0] == '\0'){
-                RF_DEBUG(1, "❌ Cannot print time log: log file path not set correctly");
+                eml_debug(1, "❌ Cannot print time log: log file path not set correctly");
                 return;
             }
             if(!RF_FS_EXISTS(time_log_path)){
-                RF_DEBUG(1, "❌ Cannot print time log: log file does not exist");
+                eml_debug(1, "❌ Cannot print time log: log file does not exist");
                 return;
             }
             File file = RF_FS_OPEN(time_log_path, RF_FILE_READ);
             if(!file){
-                RF_DEBUG(1, "❌ Cannot open time log file for reading: ", time_log_path);
+                eml_debug(1, "❌ Cannot open time log file for reading: ", time_log_path);
                 return;
             }
             String line;
             while(file.available()){
                 line = file.readStringUntil('\n');
-                RF_DEBUG(0, line.c_str());
+                eml_debug(0, line.c_str());
             }
             file.close();
         }

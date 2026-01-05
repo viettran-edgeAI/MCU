@@ -14,7 +14,7 @@
  * Dataset: Handwritten digits with normalized pixel/feature values
  */
 
-#define DEV_STAGE    
+#define EML_DEV_STAGE    
 #define RF_DEBUG_LEVEL 2
 #define RF_USE_PSRAM
 
@@ -64,7 +64,7 @@ void setup() {
     //     return;
     // }
 
-    // long unsigned build_time = GET_CURRENT_TIME_IN_MILLISECONDS;
+    // long unsigned build_time = rf_time_now(MILLISECONDS);
     // Serial.printf("Model built in %lu ms\n", build_time - start_forest);
 
     // forest.training(2); // limit to 3 epochs

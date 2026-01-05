@@ -1,4 +1,4 @@
-#define DEV_STAGE
+#define EML_DEV_STAGE
 #define RF_DEBUG_LEVEL 2
 #define RF_USE_PSRAM
 
@@ -679,7 +679,7 @@ void retrainTask(void* parameter) {
 
     float accuracy = -1.0f;
     if (forest.build_model()) {
-#ifndef RF_STATIC_MODEL
+#ifndef EML_STATIC_MODEL
         accuracy = forest.best_training_score();
 #endif
         success = forest.loadForest();

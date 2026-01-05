@@ -63,7 +63,7 @@ This section will go over how trees are built and modeled in this algorithm:
 
 ![tree_buliding](./imgs/tree_building.jpg)
 
-- The original dataset (base_dataset) will be split into train_data, test_data(optinal) and validation_data (optinal). in default (oob_score, DEV_STAGE = 0), train_data = base_dataset.
+- The original dataset (base_dataset) will be split into train_data, test_data(optinal) and validation_data (optinal). in default (oob_score, EML_DEV_STAGE = 0), train_data = base_dataset.
 - train_data will be split into multiple subb_datasets using bootstrap sampling method. Each sub_dataset will be used to build a decision tree.
 - Each sub_dataset has the same size as train_data. This is excessive with both the limited RAM and storage on the microcontroller. So the sub_dataset is essentially a set of IDs that map to train_data samples.
 - The trees are built breadth-first. (for minimizing tree node layout size)
@@ -154,10 +154,10 @@ Before including the library, you can configure various aspects of the Random Fo
 Common configuration macros:
 
 ```cpp
-#define DEV_STAGE              // Enable development features and detailed logging
+#define EML_DEV_STAGE              // Enable development features and detailed logging
 #define RF_DEBUG_LEVEL 1       // Set debug verbosity (0-3)
 #define RF_USE_PSRAM           // Enable PSRAM support for larger models
-#define RF_STATIC_MODEL        // Disable on-device training (inference only)
+#define EML_STATIC_MODEL        // Disable on-device training (inference only)
 
 #include "random_forest_mcu.h"
 ```
@@ -411,7 +411,7 @@ Performs prediction on input features.
 typedef struct rf_predict_result_t {
     size_t prediction_time;     // Inference time in microseconds
     char label[RF_MAX_LABEL_LENGTH];  // Predicted label string
-    label_type i_label;         // Internal label ID
+    rf_label_type i_label;         // Internal label ID
     bool success;               // Whether prediction succeeded
 } rf_predict_result_t;
 ```
@@ -559,7 +559,7 @@ Returns the best evaluation score achieved during last training session.
 | `able_to_inference()` | `bool` | Check if model is ready for predictions |
 | `get_quantization_coefficient()` | `uint8_t` | Get bits per feature value |
 | `get_model_name(char*, size_t)` | `void` | Retrieve model name |
-| `get_label_view(label_type, const char**, uint16_t*)` | `bool` | Get string view of label |
+| `get_label_view(rf_label_type, const char**, uint16_t*)` | `bool` | Get string view of label |
 | `get_all_original_labels()` | `vector<String>` | Get all label strings |
 | `total_nodes()` | `size_t` | Total nodes in forest |
 | `total_leaves()` | `size_t` | Total leaf nodes |
@@ -581,7 +581,7 @@ Serial.printf("Logged inferences: %zu\n", forest.get_total_logged_inference());
 
 ### 9. Development Stage APIs
 
-Available only when `DEV_STAGE` is defined:
+Available only when `EML_DEV_STAGE` is defined:
 
 | API | Description |
 |-----|-------------|
@@ -598,7 +598,7 @@ Available only when `DEV_STAGE` is defined:
 ### 10. Complete Workflow Example
 
 ```cpp
-#define DEV_STAGE
+#define EML_DEV_STAGE
 #define RF_DEBUG_LEVEL 2
 #define RF_USE_PSRAM
 

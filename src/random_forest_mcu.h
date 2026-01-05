@@ -9,15 +9,15 @@ namespace mcu{
     typedef struct rf_predict_result_t {
         size_t prediction_time;
         char label[RF_MAX_LABEL_LENGTH] = {'\0'};
-        label_type i_label = RF_ERROR_LABEL;
+        rf_label_type i_label = RF_ERROR_LABEL;
         bool success = false;
     } rf_predict_result_t;
 
     class RandomForest{
         template<uint8_t bits>
-        using TreeSampleIDs = ID_vector<sample_type,bits>;
+        using TreeSampleIDs = ID_vector<rf_sample_type,bits>;
 
-    #ifndef RF_STATIC_MODEL
+    #ifndef EML_STATIC_MODEL
         struct TrainingContext {
             Rf_data base_data;
             Rf_data train_data;
@@ -47,7 +47,7 @@ namespace mcu{
         packed_vector<8> quantization_buffer;
         mutable char path_buffer[RF_PATH_BUFFER] = {'\0'};
 
-    #ifndef RF_STATIC_MODEL
+    #ifndef EML_STATIC_MODEL
         inline TrainingContext* ensure_training_context(){
             if(!training_ctx){
                 release_base_data_stub();
@@ -81,7 +81,7 @@ namespace mcu{
         }
 
         inline Rf_data* ensure_base_data_stub(){
-    #ifndef RF_STATIC_MODEL
+    #ifndef EML_STATIC_MODEL
             if(training_ctx){
                 if(training_ctx->base_data.isProperlyInitialized()){
                     return &training_ctx->base_data;
@@ -119,9 +119,9 @@ namespace mcu{
             UBaseType_t stackRemaining = uxTaskGetStackHighWaterMark(NULL);
             size_t stackBytes = stackRemaining * sizeof(StackType_t);
             if(stackBytes < 2048) {
-                RF_DEBUG_2(0, "⚠️ WARNING: Low stack space (", stackBytes, "bytes", ". May cause crash!");
-                RF_DEBUG(0, "   Solution: Increase CONFIG_ARDUINO_LOOP_STACK_SIZE to 16384");
-                RF_DEBUG(0, "   See docs/ESP32_Stack_Fix.md for details");
+                eml_debug_2(0, "⚠️ WARNING: Low stack space (", stackBytes, "bytes", ". May cause crash!");
+                eml_debug(0, "   Solution: Increase CONFIG_ARDUINO_LOOP_STACK_SIZE to 16384");
+                eml_debug(0, "   See docs/ESP32_Stack_Fix.md for details");
             }
         #endif
             // initial components and load resources
@@ -140,7 +140,7 @@ namespace mcu{
             // Synchronize quantization_coefficient from quantizer to config if not already set
             if (quantizer.loaded() && config.quantization_coefficient != quantizer.getQuantizationCoefficient()) {
                 config.quantization_coefficient = quantizer.getQuantizationCoefficient();
-                RF_DEBUG(1, "✅ Synchronized quantization_coefficient: ", config.quantization_coefficient);
+                eml_debug(1, "✅ Synchronized quantization_coefficient: ", config.quantization_coefficient);
             }
 
             if(config.enable_retrain){
@@ -163,7 +163,7 @@ namespace mcu{
         }
 
         bool begin_training_session(){
-#ifndef RF_STATIC_MODEL
+#ifndef EML_STATIC_MODEL
             auto ctx = ensure_training_context();
             ctx->data_prepared = false;
             return true;
@@ -173,7 +173,7 @@ namespace mcu{
         }
 
         void end_training_session(){
-#ifndef RF_STATIC_MODEL
+#ifndef EML_STATIC_MODEL
             cleanup_training_data();
             destroy_training_context();
 #endif
@@ -182,12 +182,12 @@ namespace mcu{
 
         
         void cleanup_training_data(){
-#ifndef RF_STATIC_MODEL
+#ifndef EML_STATIC_MODEL
             if(!training_ctx){
                 return;
             }
 
-            RF_DEBUG(0, "🧹 Cleaning up training session... ");
+            eml_debug(0, "🧹 Cleaning up training session... ");
 
             // remove copy of base data
             base.get_temp_base_data_path(path_buffer);
@@ -220,19 +220,19 @@ namespace mcu{
         }
 
         bool build_model(){
-#ifndef RF_STATIC_MODEL
+#ifndef EML_STATIC_MODEL
             if(!config.enable_retrain){
-                RF_DEBUG(0, "❌ Retraining mode not enabled");
+                eml_debug(0, "❌ Retraining mode not enabled");
                 return false;
             }
-            RF_DEBUG(0, "🌲 Building model... ");
+            eml_debug(0, "🌲 Building model... ");
             if(!base.able_to_training()){
-                RF_DEBUG(0, "❌ Model not set for training");
+                eml_debug(0, "❌ Model not set for training");
                 return false;
             }
 
             if(!begin_training_session()){
-                RF_DEBUG(0, "❌ Unable to allocate training context");
+                eml_debug(0, "❌ Unable to allocate training context");
                 return false;
             }
 
@@ -240,7 +240,7 @@ namespace mcu{
             base.get_infer_log_path(path_buffer);
             if(RF_FS_EXISTS(path_buffer)) {
                 RF_FS_REMOVE(path_buffer);
-                RF_DEBUG(1, "🧹 Cleared inference log file");
+                eml_debug(1, "🧹 Cleared inference log file");
             }
 
             bool success = true;
@@ -259,7 +259,7 @@ namespace mcu{
 
                 // build forest
                 if(!build_forest()){
-                    RF_DEBUG(0, "❌ Error building forest");
+                    eml_debug(0, "❌ Error building forest");
                     success = false;
                 }
             } while(false);
@@ -271,20 +271,20 @@ namespace mcu{
                 config.feature_bits = res->feature_bits;
                 config.label_bits = res->label_bits;
                 config.child_bits = res->child_bits;
-        #ifdef DEV_STAGE
+        #ifdef EML_DEV_STAGE
                 model_report();
         #endif
             }
             end_training_session();
             return success;
 #else
-            RF_DEBUG(0, "❌ Training disabled (RF_STATIC_MODEL = 1)");
+            eml_debug(0, "❌ Training disabled (EML_STATIC_MODEL = 1)");
             return false;
 #endif
         }
 
     private:
-#ifndef RF_STATIC_MODEL
+#ifndef EML_STATIC_MODEL
         bool build_forest(){
             auto* ctx = training_ctx;
             if(!ctx){
@@ -301,16 +301,16 @@ namespace mcu{
             auto& queue_nodes = forest_container.getQueueNodes();
             queue_nodes.clear();
             queue_nodes.reserve(peak_nodes); // Conservative estimate
-            RF_DEBUG(1, "🌳 Estimated nodes per tree: ", estimated_nodes);
-            RF_DEBUG(2, "🌳 Peak queue size: ", peak_nodes);
+            eml_debug(1, "🌳 Estimated nodes per tree: ", estimated_nodes);
+            eml_debug(2, "🌳 Peak queue size: ", peak_nodes);
 
             uint16_t max_nodes = 0;
             
             // Standard path: load full train_data into RAM
-            RF_DEBUG(1, "💾 Using standard mode (full dataset in RAM)");
+            eml_debug(1, "💾 Using standard mode (full dataset in RAM)");
             
             if(!ctx->train_data.loadData()){
-                RF_DEBUG(0, "❌ Error loading training data");
+                eml_debug(0, "❌ Error loading training data");
                 return false;
             }
             logger.m_log("load train_data");
@@ -354,11 +354,11 @@ namespace mcu{
             node_pred.add_new_samples(config.min_split, config.min_leaf,config.max_depth, max_nodes);
             config.estimatedRAM = forest_container.size_in_ram();
 
-            RF_DEBUG_2(0, "🌲 Forest built successfully: ", forest_container.get_total_nodes(), "nodes","");
-            RF_DEBUG_2(1, "Min split: ", config.min_split, "- Min leaf: ", config.min_leaf);
+            eml_debug_2(0, "🌲 Forest built successfully: ", forest_container.get_total_nodes(), "nodes","");
+            eml_debug_2(1, "Min split: ", config.min_split, "- Min leaf: ", config.min_leaf);
             size_t end = logger.drop_anchor();
             long unsigned dur = logger.t_log("forest building time", start, end, "s");
-            RF_DEBUG_2(1, "⏱️  Forest building time: ", dur, "s","");
+            eml_debug_2(1, "⏱️  Forest building time: ", dur, "s","");
             return true;
         }
         
@@ -374,7 +374,7 @@ namespace mcu{
             base.get_temp_base_data_path(cpy_data_path);
             cloneFile(path_buffer, cpy_data_path);
             if(!ctx->base_data.init(cpy_data_path, config)){
-                RF_DEBUG(0, "❌ Error initializing base data");
+                eml_debug(0, "❌ Error initializing base data");
                 return false;
             }
 
@@ -413,20 +413,20 @@ namespace mcu{
                 return false;
             }
             size_t start = logger.drop_anchor();
-            RF_DEBUG(0, "🔀 stratified splitting data...");
+            eml_debug(0, "🔀 stratified splitting data...");
             if(dest.empty() || source.size() == 0) {
-                RF_DEBUG(0, "❌ Error: No data to split or destination is empty.");
+                eml_debug(0, "❌ Error: No data to split or destination is empty.");
                 return false;
             } 
             float total_ratio = 0.0f;
             for(auto& d : dest) {
                 if(d.first <= 0.0f || d.first > 1.0f) {
-                    RF_DEBUG_2(0, "❌ Error: Invalid ratio: ", d.first, ". Must be in (0.0, 1.0].","");
+                    eml_debug_2(0, "❌ Error: Invalid ratio: ", d.first, ". Must be in (0.0, 1.0].","");
                     return false;
                 }
                 total_ratio += d.first;
                 if(total_ratio > 1.0f) {
-                    RF_DEBUG(0, "❌ Error: Total split ratios exceed 1.0: ", total_ratio);
+                    eml_debug(0, "❌ Error: Total split ratios exceed 1.0: ", total_ratio);
                     return false;
                 }
             }
@@ -434,10 +434,10 @@ namespace mcu{
             size_t maxID = source.size();
             
             // Group sample indices by label for stratified split
-            unordered_map_s<label_type, vector<sample_type>> label_indices;
+            unordered_map_s<rf_label_type, vector<rf_sample_type>> label_indices;
             label_indices.reserve(config.num_labels);
-            for (sample_type id = 0; id < maxID; id++) {
-                label_type label = source.getLabel(id);
+            for (rf_sample_type id = 0; id < maxID; id++) {
+                rf_label_type label = source.getLabel(id);
                 label_indices[label].push_back(id);
             }
             
@@ -446,7 +446,7 @@ namespace mcu{
                 auto& indices = kv.second;
                 for (size_t i = indices.size() - 1; i > 0; i--) {
                     size_t j = ctx->random_generator.bounded(static_cast<uint32_t>(i + 1));
-                    sample_type tmp = indices[i];
+                    rf_sample_type tmp = indices[i];
                     indices[i] = indices[j];
                     indices[j] = tmp;
                 }
@@ -487,7 +487,7 @@ namespace mcu{
             size_t end = logger.drop_anchor();
             logger.m_log("split data");
             long unsigned dur = logger.t_log("split time", start, end, "s");
-            RF_DEBUG_2(1, "⏱️  Data splitting time: ", dur, "s","");
+            eml_debug_2(1, "⏱️  Data splitting time: ", dur, "s","");
             return true;
         }
         
@@ -497,21 +497,21 @@ namespace mcu{
                 return;
             }
             size_t start = logger.drop_anchor();
-            RF_DEBUG(1, "🔀 Cloning data for each tree...");
-            sample_type numSample = ctx->train_data.size();
-            sample_type numSubSample;
+            eml_debug(1, "🔀 Cloning data for each tree...");
+            rf_sample_type numSample = ctx->train_data.size();
+            rf_sample_type numSubSample;
             if(config.use_boostrap) {
                 numSubSample = numSample; // Bootstrap sampling with replacement
-                RF_DEBUG(2, "Using bootstrap, allowing duplicate sample IDs");
+                eml_debug(2, "Using bootstrap, allowing duplicate sample IDs");
             } else {
                 // Sub-sampling without replacement
-                numSubSample = static_cast<sample_type>(numSample * config.boostrap_ratio); 
-                RF_DEBUG(2, "No bootstrap, unique sample IDs only");
+                numSubSample = static_cast<rf_sample_type>(numSample * config.boostrap_ratio); 
+                eml_debug(2, "No bootstrap, unique sample IDs only");
             }
 
             // Track hashes of each tree dataset to avoid duplicates across trees
             unordered_set_s<uint64_t> seen_hashes;
-            RF_DEBUG(1, "Creating dataset for trees..."); 
+            eml_debug(1, "Creating dataset for trees..."); 
             seen_hashes.reserve(config.num_trees * 2);
 
             for (uint8_t i = 0; i < config.num_trees; i++) {
@@ -524,17 +524,17 @@ namespace mcu{
 
                     if (config.use_boostrap) {
                         // Bootstrap sampling: allow duplicates
-                        for (sample_type j = 0; j < numSubSample; ++j) {
-                            sample_type idx = static_cast<sample_type>(tree_rng.bounded(numSample));
+                        for (rf_sample_type j = 0; j < numSubSample; ++j) {
+                            rf_sample_type idx = static_cast<rf_sample_type>(tree_rng.bounded(numSample));
                             tree.bootstrapIDs.push_back(idx);
                         }
                     } else {
                         // Sample without replacement using partial Fisher-Yates
-                        vector<sample_type> arr(numSample);
-                        for (sample_type t = 0; t < numSample; ++t) arr[t] = t;
-                        for (sample_type t = 0; t < numSubSample; ++t) {
-                            sample_type j = static_cast<sample_type>(t + tree_rng.bounded(numSample - t));
-                            sample_type tmp = arr[t];
+                        vector<rf_sample_type> arr(numSample);
+                        for (rf_sample_type t = 0; t < numSample; ++t) arr[t] = t;
+                        for (rf_sample_type t = 0; t < numSubSample; ++t) {
+                            rf_sample_type j = static_cast<rf_sample_type>(t + tree_rng.bounded(numSample - t));
+                            rf_sample_type tmp = arr[t];
                             arr[t] = arr[j];
                             arr[j] = tmp;
                             tree.bootstrapIDs.push_back(arr[t]);
@@ -552,15 +552,15 @@ namespace mcu{
                         tree.bootstrapIDs.clear();
 
                         // Re-add samples with slight modifications
-                        for (sample_type k = 0; k < min(5, (int)temp_vec.size()); ++k) {
-                            sample_type original_id = k < temp_vec.size() ? k : 0;
-                            sample_type modified_id = static_cast<sample_type>((original_id + k + i) % numSample);
+                        for (rf_sample_type k = 0; k < min(5, (int)temp_vec.size()); ++k) {
+                            rf_sample_type original_id = k < temp_vec.size() ? k : 0;
+                            rf_sample_type modified_id = static_cast<rf_sample_type>((original_id + k + i) % numSample);
                             tree.bootstrapIDs.push_back(modified_id);
                         }
 
                         // Add remaining samples from original
-                        for (sample_type k = 5; k < min(numSubSample, (sample_type)temp_vec.size()); ++k) {
-                            sample_type id = k % numSample;
+                        for (rf_sample_type k = 5; k < min(numSubSample, (rf_sample_type)temp_vec.size()); ++k) {
+                            rf_sample_type id = k % numSample;
                             tree.bootstrapIDs.push_back(id);
                         }
 
@@ -583,8 +583,8 @@ namespace mcu{
             logger.m_log("clones data");  
             size_t end = logger.drop_anchor();
             long unsigned dur = logger.t_log("clones data time", start, end, "ms");
-            RF_DEBUG_2(1, "🎉 Created ", config.num_trees, "datasets for trees","");
-            RF_DEBUG_2(1, "⏱️  Created datasets time: ", dur, "ms","");
+            eml_debug_2(1, "🎉 Created ", config.num_trees, "datasets for trees","");
+            eml_debug_2(1, "⏱️  Created datasets time: ", dur, "ms","");
         }  
         
         typedef struct SplitInfo {
@@ -592,46 +592,46 @@ namespace mcu{
             uint16_t featureID = 0;
             uint16_t thresholdValue = 0; // Actual threshold value for splitting
             uint16_t thresholdSlot = 0;   // Slot index into quantized threshold cache
-            sample_type leftCount = 0;
-            sample_type rightCount = 0;
+            rf_sample_type leftCount = 0;
+            rf_sample_type rightCount = 0;
         } SplitInfo;
 
         struct NodeStats {
-            b_vector<sample_type, 16> labelCounts; 
-            sample_type totalSamples;
-            label_type majorityLabel;
+            b_vector<rf_sample_type, 16> labelCounts; 
+            rf_sample_type totalSamples;
+            rf_label_type majorityLabel;
             bool pure;
             
-            NodeStats(label_type numLabels) : totalSamples(0), majorityLabel(0), pure(true) {
-                labelCounts.resize(numLabels, static_cast<sample_type>(0));
+            NodeStats(rf_label_type numLabels) : totalSamples(0), majorityLabel(0), pure(true) {
+                labelCounts.resize(numLabels, static_cast<rf_sample_type>(0));
             }
 
-            void resetCounts(label_type numLabels) {
+            void resetCounts(rf_label_type numLabels) {
                 if (labelCounts.size() < static_cast<size_t>(numLabels)) {
-                    labelCounts.resize(numLabels, static_cast<sample_type>(0));
+                    labelCounts.resize(numLabels, static_cast<rf_sample_type>(0));
                 } else {
-                    for (label_type i = 0; i < numLabels; ++i) {
+                    for (rf_label_type i = 0; i < numLabels; ++i) {
                         labelCounts[i] = 0;
                     }
                 }
             }
             
             // analyze a slice [begin,end) over a shared indices array (standard path with loaded data)
-            void analyzeSamples(const vector<sample_type>& indices, sample_type begin, sample_type end,
-                                    label_type numLabels, const Rf_data& data) {
+            void analyzeSamples(const vector<rf_sample_type>& indices, rf_sample_type begin, rf_sample_type end,
+                                    rf_label_type numLabels, const Rf_data& data) {
                 totalSamples = (begin < end) ? (end - begin) : 0;
-                sample_type maxCount = 0;
+                rf_sample_type maxCount = 0;
                 pure = true;
                 bool hasLabel = false;
-                label_type firstLabel = 0;
+                rf_label_type firstLabel = 0;
                 
                 resetCounts(numLabels);
-                for (sample_type k = begin; k < end; ++k) {
-                    sample_type sampleID = indices[k];
+                for (rf_sample_type k = begin; k < end; ++k) {
+                    rf_sample_type sampleID = indices[k];
                     if (sampleID >= data.size()) {
                         continue;
                     }
-                    label_type label = data.getLabel(sampleID);
+                    rf_label_type label = data.getLabel(sampleID);
                     if (label >= numLabels || label >= RF_MAX_LABELS) {
                         continue;
                     }
@@ -706,14 +706,14 @@ namespace mcu{
             return selected;
         }
 
-        SplitInfo findBestSplit(const vector<sample_type>& indices, sample_type begin, sample_type end,
-                    const b_vector<uint16_t>& selectedFeatures, bool use_Gini, label_type numLabels) {
+        SplitInfo findBestSplit(const vector<rf_sample_type>& indices, rf_sample_type begin, rf_sample_type end,
+                    const b_vector<uint16_t>& selectedFeatures, bool use_Gini, rf_label_type numLabels) {
             SplitInfo bestSplit;
             auto* ctx = training_ctx;
             if(!ctx){
                 return bestSplit;
             }
-            sample_type totalSamples = (begin < end) ? (end - begin) : 0;
+            rf_sample_type totalSamples = (begin < end) ? (end - begin) : 0;
             if (totalSamples < 2) return bestSplit;
 
             // Get quantization info
@@ -727,11 +727,11 @@ namespace mcu{
             const uint16_t maxFeatureValue = static_cast<uint16_t>((1u << quant_bits) - 1u);
 
             // Base label counts
-            b_vector<sample_type, 16> baseLabelCounts(numLabels, 0);
-            for (sample_type k = begin; k < end; ++k) {
-                sample_type sid = indices[k];
+            b_vector<rf_sample_type, 16> baseLabelCounts(numLabels, 0);
+            for (rf_sample_type k = begin; k < end; ++k) {
+                rf_sample_type sid = indices[k];
                 if (sid < ctx->train_data.size()) {
-                    label_type lbl = ctx->train_data.getLabel(sid);
+                    rf_label_type lbl = ctx->train_data.getLabel(sid);
                     if (lbl < numLabels) baseLabelCounts[lbl]++;
                 }
             }
@@ -739,7 +739,7 @@ namespace mcu{
             float baseImpurity;
             if (use_Gini) {
                 baseImpurity = 1.0f;
-                for (label_type i = 0; i < numLabels; i++) {
+                for (rf_label_type i = 0; i < numLabels; i++) {
                     if (baseLabelCounts[i] > 0) {
                         float p = static_cast<float>(baseLabelCounts[i]) / totalSamples;
                         baseImpurity -= p * p;
@@ -747,7 +747,7 @@ namespace mcu{
                 }
             } else {
                 baseImpurity = 0.0f;
-                for (label_type i = 0; i < numLabels; i++) {
+                for (rf_label_type i = 0; i < numLabels; i++) {
                     if (baseLabelCounts[i] > 0) {
                         float p = static_cast<float>(baseLabelCounts[i]) / totalSamples;
                         baseImpurity -= p * log2f(p);
@@ -757,7 +757,7 @@ namespace mcu{
 
             // Pre-allocate count arrays (for up to 256 unique values)
             const uint16_t numPossibleValues = maxFeatureValue + 1;
-            b_vector<sample_type, 16> counts;
+            b_vector<rf_sample_type, 16> counts;
             counts.resize(numPossibleValues * numLabels, 0);
             
             // Fast path for 1-bit quantization (only 2 values: 0 and 1)
@@ -767,10 +767,10 @@ namespace mcu{
                     for (size_t i = 0; i < counts.size(); i++) counts[i] = 0;
                     
                     // Collect counts for value 0 and value 1
-                    for (sample_type k = begin; k < end; ++k) {
-                        sample_type sid = indices[k];
+                    for (rf_sample_type k = begin; k < end; ++k) {
+                        rf_sample_type sid = indices[k];
                         if (sid < ctx->train_data.size()) {
-                            label_type lbl = ctx->train_data.getLabel(sid);
+                            rf_label_type lbl = ctx->train_data.getLabel(sid);
                             if (lbl < numLabels) {
                                 uint16_t fv = ctx->train_data.getFeature(sid, featureID);
                                 if (fv <= 1) {
@@ -782,10 +782,10 @@ namespace mcu{
                     
                     // Single threshold: 0 (left) vs 1 (right)
                     uint32_t leftTotal = 0, rightTotal = 0;
-                    b_vector<sample_type, 16> leftCounts(numLabels, 0), rightCounts(numLabels, 0);
+                    b_vector<rf_sample_type, 16> leftCounts(numLabels, 0), rightCounts(numLabels, 0);
                     
                     // Left side: value == 0
-                    for (label_type label = 0; label < numLabels; label++) {
+                    for (rf_label_type label = 0; label < numLabels; label++) {
                         leftCounts[label] = counts[label];  // value 0
                         leftTotal += leftCounts[label];
                         rightCounts[label] = counts[numLabels + label];  // value 1
@@ -798,12 +798,12 @@ namespace mcu{
                     float leftImpurity = 0.0f, rightImpurity = 0.0f;
                     if (use_Gini) {
                         leftImpurity = 1.0f; rightImpurity = 1.0f;
-                        for (label_type i = 0; i < numLabels; i++) {
+                        for (rf_label_type i = 0; i < numLabels; i++) {
                             if (leftCounts[i] > 0) { float p = static_cast<float>(leftCounts[i]) / leftTotal; leftImpurity -= p * p; }
                             if (rightCounts[i] > 0) { float p = static_cast<float>(rightCounts[i]) / rightTotal; rightImpurity -= p * p; }
                         }
                     } else {
-                        for (label_type i = 0; i < numLabels; i++) {
+                        for (rf_label_type i = 0; i < numLabels; i++) {
                             if (leftCounts[i] > 0) { float p = static_cast<float>(leftCounts[i]) / leftTotal; leftImpurity -= p * log2f(p); }
                             if (rightCounts[i] > 0) { float p = static_cast<float>(rightCounts[i]) / rightTotal; rightImpurity -= p * log2f(p); }
                         }
@@ -829,10 +829,10 @@ namespace mcu{
                     for (size_t i = 0; i < counts.size(); i++) counts[i] = 0;
 
                     // Collect feature value distributions
-                    for (sample_type k = begin; k < end; ++k) {
-                        sample_type sid = indices[k];
+                    for (rf_sample_type k = begin; k < end; ++k) {
+                        rf_sample_type sid = indices[k];
                         if (sid < ctx->train_data.size()) {
-                            label_type lbl = ctx->train_data.getLabel(sid);
+                            rf_label_type lbl = ctx->train_data.getLabel(sid);
                             if (lbl < numLabels) {
                                 uint16_t fv = ctx->train_data.getFeature(sid, featureID);
                                 if (fv <= maxFeatureValue) {
@@ -847,12 +847,12 @@ namespace mcu{
                         const uint16_t threshold = (slot > maxFeatureValue) ? maxFeatureValue : slot;
                         
                         uint32_t leftTotal = 0, rightTotal = 0;
-                        b_vector<sample_type, 16> leftCounts(numLabels, 0), rightCounts(numLabels, 0);
+                        b_vector<rf_sample_type, 16> leftCounts(numLabels, 0), rightCounts(numLabels, 0);
                         
                         // Split samples based on threshold
                         for (uint16_t value = 0; value <= maxFeatureValue; value++) {
-                            for (label_type label = 0; label < numLabels; label++) {
-                                sample_type count = counts[value * numLabels + label];
+                            for (rf_label_type label = 0; label < numLabels; label++) {
+                                rf_sample_type count = counts[value * numLabels + label];
                                 if (value <= threshold) {
                                     leftCounts[label] += count;
                                     leftTotal += count;
@@ -868,12 +868,12 @@ namespace mcu{
                         float leftImpurity = 0.0f, rightImpurity = 0.0f;
                         if (use_Gini) {
                             leftImpurity = 1.0f; rightImpurity = 1.0f;
-                            for (label_type i = 0; i < numLabels; i++) {
+                            for (rf_label_type i = 0; i < numLabels; i++) {
                                 if (leftCounts[i] > 0) { float p = static_cast<float>(leftCounts[i]) / leftTotal; leftImpurity -= p * p; }
                             if (rightCounts[i] > 0) { float p = static_cast<float>(rightCounts[i]) / rightTotal; rightImpurity -= p * p; }
                         }
                     } else {
-                        for (label_type i = 0; i < numLabels; i++) {
+                        for (rf_label_type i = 0; i < numLabels; i++) {
                             if (leftCounts[i] > 0) { float p = static_cast<float>(leftCounts[i]) / leftTotal; leftImpurity -= p * log2f(p); }
                             if (rightCounts[i] > 0) { float p = static_cast<float>(rightCounts[i]) / rightTotal; rightImpurity -= p * log2f(p); }
                         }
@@ -906,11 +906,11 @@ namespace mcu{
             }
 
             if (!tree.resource) {
-                RF_DEBUG(0, "❌ Tree resource not set");
+                eml_debug(0, "❌ Tree resource not set");
                 return;
             }
             const node_resource& res = *tree.resource;
-            RF_DEBUG(1, "🌳 Building tree... ");
+            eml_debug(1, "🌳 Building tree... ");
 
             size_t reservedCapacity = tree.nodes.capacity();
             if (tree.nodes.get_bits_per_value() != res.bits_per_building_node()) {
@@ -923,7 +923,7 @@ namespace mcu{
             }
 
             if (sampleIDs.empty()) {
-                RF_DEBUG(1, "⚠️ Warning: sub_data is empty. Ignoring.. !");
+                eml_debug(1, "⚠️ Warning: sub_data is empty. Ignoring.. !");
                 return;
             }
 
@@ -935,7 +935,7 @@ namespace mcu{
             rootNode.setLeftChildIndex(0, res.get_Building_node_left_child_layout());
             tree.nodes.push_back(rootNode);
 
-            vector<sample_type> indices;
+            vector<rf_sample_type> indices;
             indices.reserve(sampleIDs.size());
             for (const auto& sid : sampleIDs) {
                 indices.push_back(sid);
@@ -943,7 +943,7 @@ namespace mcu{
             uint16_t depth = 0;
             // Serial.println("here 0");
 
-            queue_nodes.push_back(NodeToBuild(0, 0, static_cast<sample_type>(indices.size()), 0));
+            queue_nodes.push_back(NodeToBuild(0, 0, static_cast<rf_sample_type>(indices.size()), 0));
             // Serial.println("here 1");
             while (!queue_nodes.empty()) {
                 NodeToBuild current = std::move(queue_nodes.front());
@@ -953,8 +953,8 @@ namespace mcu{
                 stats.analyzeSamples(indices, current.begin, current.end, config.num_labels, ctx->train_data);
 
                 if(current.nodeIndex >= res.max_nodes()){
-                    RF_DEBUG(2, "⚠️ Warning: Exceeded maximum node limit. Forcing leaf node 🌿.");
-                    label_type leafLabel = stats.majorityLabel;
+                    eml_debug(2, "⚠️ Warning: Exceeded maximum node limit. Forcing leaf node 🌿.");
+                    rf_label_type leafLabel = stats.majorityLabel;
                     Building_node nodeValue = tree.nodes.get(current.nodeIndex);
                     nodeValue.setIsLeaf(true);
                     nodeValue.setLabel(leafLabel, res.get_Building_node_label_layout());
@@ -964,7 +964,7 @@ namespace mcu{
                 }
 
                 bool shouldBeLeaf = false;
-                label_type leafLabel = stats.majorityLabel;
+                rf_label_type leafLabel = stats.majorityLabel;
 
                 if (stats.isPure() && stats.totalSamples > 0) {
                     shouldBeLeaf = true;
@@ -1029,26 +1029,26 @@ namespace mcu{
                 splitNode.setIsLeaf(false);
                 tree.nodes.set(current.nodeIndex, splitNode);
 
-                sample_type iLeft = current.begin;
-                for (sample_type k = current.begin; k < current.end; ++k) {
-                    sample_type sid = indices[k];
+                rf_sample_type iLeft = current.begin;
+                for (rf_sample_type k = current.begin; k < current.end; ++k) {
+                    rf_sample_type sid = indices[k];
                     if (sid < ctx->train_data.size() &&
                         ctx->train_data.getFeature(sid, bestSplit.featureID) <= bestSplit.thresholdValue) {
                         if (k != iLeft) {
-                            sample_type tmp = indices[iLeft];
+                            rf_sample_type tmp = indices[iLeft];
                             indices[iLeft] = indices[k];
                             indices[k] = tmp;
                         }
                         ++iLeft;
                     }
                 }
-                sample_type leftBegin = current.begin;
-                sample_type leftEnd = iLeft;
-                sample_type rightBegin = iLeft;
-                sample_type rightEnd = current.end;
+                rf_sample_type leftBegin = current.begin;
+                rf_sample_type leftEnd = iLeft;
+                rf_sample_type rightBegin = iLeft;
+                rf_sample_type rightEnd = current.end;
 
-                node_type leftChildIndex = tree.nodes.size();
-                node_type rightChildIndex = static_cast<node_type>(leftChildIndex + 1);
+                rf_node_type leftChildIndex = tree.nodes.size();
+                rf_node_type rightChildIndex = static_cast<rf_node_type>(leftChildIndex + 1);
 
                 Building_node parentNode = tree.nodes.get(current.nodeIndex);
                 parentNode.setLeftChildIndex(leftChildIndex, res.get_Building_node_left_child_layout());
@@ -1098,7 +1098,7 @@ namespace mcu{
         // Helper function: evaluate the entire forest using OOB (Out-of-Bag) score
         // Iterates over all samples in training data and evaluates using trees that didn't see each sample
         float get_oob_score(){
-            RF_DEBUG(1, "Getting OOB score..");
+            eml_debug(1, "Getting OOB score..");
 
             auto* ctx = training_ctx;
             if(!ctx){
@@ -1106,7 +1106,7 @@ namespace mcu{
             }
 
             // Load all bootstrap IDs into a DataList vector
-            vector<ID_vector<sample_type, 3>> dataList(config.num_trees);
+            vector<ID_vector<rf_sample_type, 3>> dataList(config.num_trees);
             for(uint8_t i = 0; i < config.num_trees; i++){
                 Rf_tree tree(i);
                 char btid_path[RF_PATH_BUFFER];
@@ -1119,7 +1119,7 @@ namespace mcu{
 
             // Check if we have trained trees and data
             if(dataList.empty()){
-                RF_DEBUG(0, "❌ No sub_data for validation");
+                eml_debug(0, "❌ No sub_data for validation");
                 return 0.0f;
             }
 
@@ -1129,7 +1129,7 @@ namespace mcu{
             // Pre-allocate evaluation resources
             Rf_data train_samples_buffer;
             b_vector<uint8_t, 20> activeTrees;
-            unordered_map_s<label_type, uint8_t> oobPredictClass;
+            unordered_map_s<rf_label_type, uint8_t> oobPredictClass;
 
             activeTrees.reserve(config.num_trees);
             oobPredictClass.reserve(config.num_labels);
@@ -1139,7 +1139,7 @@ namespace mcu{
 
             // Load forest into memory for evaluation
             if(!forest_container.loadForest()){
-                RF_DEBUG(0,"❌ Failed to load forest for OOB evaluation!");
+                eml_debug(0,"❌ Failed to load forest for OOB evaluation!");
                 return 0.0f;
             }
             logger.m_log("get OOB score");
@@ -1153,14 +1153,14 @@ namespace mcu{
                 }
                 
                 // Process each sample in the chunk
-                for(sample_type idx = 0; idx < train_samples_buffer.size(); idx++){
+                for(rf_sample_type idx = 0; idx < train_samples_buffer.size(); idx++){
                     const Rf_sample& sample = train_samples_buffer[idx];
-                    sample_type sampleID = chunk_index * buffer_chunk + idx;
-                    label_type actualLabel = sample.label;
+                    rf_sample_type sampleID = chunk_index * buffer_chunk + idx;
+                    rf_label_type actualLabel = sample.label;
 
                     // Find trees that didn't use this sample (OOB trees)
                     activeTrees.clear();
-                    auto contains_in_tree = [&](uint8_t treeIdx, sample_type sid) -> bool {
+                    auto contains_in_tree = [&](uint8_t treeIdx, rf_sample_type sid) -> bool {
                         return dataList[treeIdx].contains(sid);
                     };
 
@@ -1177,11 +1177,11 @@ namespace mcu{
                     
                     // Get OOB predictions
                     oobPredictClass.clear();
-                    sample_type oobTotalPredict = 0;
+                    rf_sample_type oobTotalPredict = 0;
 
                     for(const uint8_t& treeIdx : activeTrees){
                         if(treeIdx < forest_container.size()){
-                            label_type predict = forest_container[treeIdx].predict_features(sample.features);
+                            rf_label_type predict = forest_container[treeIdx].predict_features(sample.features);
                             if(predict < config.num_labels){
                                 oobPredictClass[predict]++;
                                 oobTotalPredict++;
@@ -1192,7 +1192,7 @@ namespace mcu{
                     if(oobTotalPredict == 0) continue;
 
                     // Find majority vote
-                    label_type oobPredictedLabel = RF_ERROR_LABEL;
+                    rf_label_type oobPredictedLabel = RF_ERROR_LABEL;
                     uint16_t maxVotes = 0;
                     for(const auto& predict : oobPredictClass){
                         if(predict.second > maxVotes){
@@ -1221,38 +1221,38 @@ namespace mcu{
         // Helper function: evaluate the entire forest using validation score
         // Evaluates using validation dataset if available
         float get_valid_score(){
-            RF_DEBUG(1, "Get validation score... ");
+            eml_debug(1, "Get validation score... ");
             auto* ctx = training_ctx;
             if(!ctx){
                 return 0.0f;
             }
             if(!config.use_validation()){
-                RF_DEBUG(1, "❌ Validation not enabled in config");
+                eml_debug(1, "❌ Validation not enabled in config");
                 return 0.0f;
             }
 
             if(!forest_container.loadForest()){
-                RF_DEBUG(0,"❌ Failed to load forest for validation evaluation!");
+                eml_debug(0,"❌ Failed to load forest for validation evaluation!");
                 return 0.0f;
             }
             if(!ctx->validation_data.loadData()){
-                RF_DEBUG(0,"❌ Failed to load validation data for evaluation!");
+                eml_debug(0,"❌ Failed to load validation data for evaluation!");
                 forest_container.releaseForest();
                 return 0.0f;
             }
             // Initialize matrix score calculator for validation
             Rf_matrix_score valid_scorer(config.num_labels, static_cast<uint8_t>(config.metric_score));
 
-            for(sample_type i = 0; i < ctx->validation_data.size(); i++){
+            for(rf_sample_type i = 0; i < ctx->validation_data.size(); i++){
                 const Rf_sample& sample = ctx->validation_data[i];
-                label_type actualLabel = sample.label;
+                rf_label_type actualLabel = sample.label;
 
-                unordered_map_s<label_type, uint8_t> validPredictClass;
-                sample_type validTotalPredict = 0;
+                unordered_map_s<rf_label_type, uint8_t> validPredictClass;
+                rf_sample_type validTotalPredict = 0;
 
                 // Use all trees for validation prediction
                 for(uint8_t t = 0; t < config.num_trees && t < forest_container.size(); t++){
-                    label_type predict = forest_container[t].predict_features(sample.features);
+                    rf_label_type predict = forest_container[t].predict_features(sample.features);
                     if(predict < config.num_labels){
                         validPredictClass[predict]++;
                         validTotalPredict++;
@@ -1262,7 +1262,7 @@ namespace mcu{
                 if(validTotalPredict == 0) continue;
 
                 // Find majority vote
-                label_type validPredictedLabel = RF_ERROR_LABEL;
+                rf_label_type validPredictedLabel = RF_ERROR_LABEL;
                 uint8_t maxVotes = 0;
                 for(const auto& predict : validPredictClass){
                     if(predict.second > maxVotes){
@@ -1285,25 +1285,25 @@ namespace mcu{
         // Performs k-fold cross validation on train_data
         // train_data -> base_data, fold_train_data ~ train_data, fold_valid_data ~ validation_data
         float get_cross_validation_score(){
-            RF_DEBUG(1, "Get k-fold cross validation score... ");
+            eml_debug(1, "Get k-fold cross validation score... ");
             auto* ctx = training_ctx;
             if(!ctx){
                 return 0.0f;
             }
 
             if(config.k_folds < 2 || config.k_folds > 10){
-                RF_DEBUG(0, "❌ Invalid k_folds value! Must be between 2 and 10.");
+                eml_debug(0, "❌ Invalid k_folds value! Must be between 2 and 10.");
                 return 0.0f;
             }
 
-            sample_type totalSamples = ctx->base_data.size();
+            rf_sample_type totalSamples = ctx->base_data.size();
             if(totalSamples < config.k_folds * config.num_labels * 2){
-                RF_DEBUG(0, "❌ Not enough samples for k-fold cross validation!");
+                eml_debug(0, "❌ Not enough samples for k-fold cross validation!");
                 return 0.0f;
             }
             Rf_matrix_score scorer(config.num_labels, config.metric_score);
 
-            sample_type foldSize = totalSamples / config.k_folds;
+            rf_sample_type foldSize = totalSamples / config.k_folds;
             float k_fold_score = 0.0f;
             logger.m_log("Perform k-fold");
             // Perform k-fold cross validation
@@ -1330,10 +1330,10 @@ namespace mcu{
                 logger.m_log("fold evaluation");
 
                 // Process all samples
-                for(sample_type i = 0; i < ctx->validation_data.size(); i++){
+                for(rf_sample_type i = 0; i < ctx->validation_data.size(); i++){
                     const Rf_sample& sample = ctx->validation_data[i];
-                    label_type actual = sample.label;
-                    label_type pred = forest_container.predict_features(sample.features);
+                    rf_label_type actual = sample.label;
+                    rf_label_type pred = forest_container.predict_features(sample.features);
                 
                     if(actual < config.num_labels && pred < config.num_labels) {
                         scorer.update_prediction(actual, pred);
@@ -1377,14 +1377,14 @@ namespace mcu{
 
         // Memory-Efficient Grid Search Training Function
         void training(int epochs = 99999) {
-#ifndef RF_STATIC_MODEL
+#ifndef EML_STATIC_MODEL
             if(!base.able_to_training()){
-                RF_DEBUG(0, "❌ Model not set for training");
+                eml_debug(0, "❌ Model not set for training");
                 return;
             }
 
             if(!begin_training_session()){
-                RF_DEBUG(0, "❌ Unable to allocate training context");
+                eml_debug(0, "❌ Unable to allocate training context");
                 return;
             }
 
@@ -1402,7 +1402,7 @@ namespace mcu{
             training_ctx->build_model = false;
 
             size_t start = logger.drop_anchor();
-            RF_DEBUG(0, "🌲 Starting training...");
+            eml_debug(0, "🌲 Starting training...");
             uint8_t min_ms = config.min_split_range.first;
             uint8_t max_ms = config.min_split_range.second;
             uint8_t min_ml = config.min_leaf_range.first;
@@ -1411,7 +1411,7 @@ namespace mcu{
             int split_steps = (max_ms >= min_ms) ? ((max_ms - min_ms) / 2 + 1) : 1;
             int leaf_steps = (max_ml >= min_ml) ? (max_ml - min_ml + 1) : 1;
             int total_combinations = split_steps * leaf_steps;
-            RF_DEBUG_2(1, "🔍 Hyperparameter tuning over ", total_combinations, "combinations","");
+            eml_debug_2(1, "🔍 Hyperparameter tuning over ", total_combinations, "combinations","");
             int best_min_split = config.min_split;
             int best_min_leaf = config.min_leaf;
 
@@ -1441,11 +1441,11 @@ namespace mcu{
                         build_forest();
                         score = get_training_evaluation_index();
                     }
-                    RF_DEBUG_2(1, "Min_split: ", min_split, ", Min_leaf: ", min_leaf);
-                    RF_DEBUG(1, " => Score: ", score);
-                    RF_DEBUG(1, "best_score: ", best_score);
+                    eml_debug_2(1, "Min_split: ", min_split, ", Min_leaf: ", min_leaf);
+                    eml_debug(1, " => Score: ", score);
+                    eml_debug(1, "best_score: ", best_score);
                     if(score >= 0.0f && score > best_score){
-                        RF_DEBUG(1, "🎉 New best score found!");
+                        eml_debug(1, "🎉 New best score found!");
                         best_score = score;
                         best_min_split = min_split;
                         best_min_leaf = min_leaf;
@@ -1479,22 +1479,22 @@ namespace mcu{
                 build_forest();
                 forest_container.releaseForest();
             }
-            RF_DEBUG(0,"🌲 Training complete.");
-            RF_DEBUG_2(0, "Best parameters: min_split=", best_min_split, ", min_leaf=", best_min_leaf);
-            RF_DEBUG(0, "Best score: ", best_score);
+            eml_debug(0,"🌲 Training complete.");
+            eml_debug_2(0, "Best parameters: min_split=", best_min_split, ", min_leaf=", best_min_leaf);
+            eml_debug(0, "Best score: ", best_score);
 
             size_t end = logger.drop_anchor();
             long unsigned dur = logger.t_log("total training time", start, end, "s");
-            RF_DEBUG_2(0, "⏱️ Total training time: ", dur / 1000.0f, " seconds","");
+            eml_debug_2(0, "⏱️ Total training time: ", dur / 1000.0f, " seconds","");
 
-        #ifdef DEV_STAGE
+        #ifdef EML_DEV_STAGE
             model_report();
             // visual_result();
         #endif
             end_training_session();
 #else
             (void)epochs;
-            RF_DEBUG(0, "❌ Training disabled (RF_STATIC_MODEL = 1)");
+            eml_debug(0, "❌ Training disabled (EML_STATIC_MODEL = 1)");
 #endif
         }
 
@@ -1526,10 +1526,9 @@ namespace mcu{
          * @param get_original_label: <true> retrieves the original label; <false> for extremely fast prediction without original label retrieval (do it later using get_original_label())
          */
         void predict(const float* features, size_t length, rf_predict_result_t& result, bool get_original_label = true) {
-            uint32_t start = mcu::platform::Rf_get_current_time(mcu::platform::TimeUnit::MICROSECONDS);
-
+            uint32_t start = eml_time_now(MICROSECONDS);
             if (__builtin_expect(length != config.num_features, 0)) {
-                RF_DEBUG_2(0, "❌ Feature length mismatch! Expected: ", config.num_features, ", Given: ", length);
+                eml_debug_2(0, "❌ Feature length mismatch! Expected: ", config.num_features, ", Given: ", length);
                 result.label[0] = '\0';
                 result.i_label = RF_ERROR_LABEL;
                 result.success = false;
@@ -1566,7 +1565,7 @@ namespace mcu{
                 if (!quantizer.getOriginalLabelView(result.i_label, &labelPtr, &labelLen)) {
                     result.label[0] = '\0';
                     result.success = false;
-                    result.prediction_time = mcu::platform::Rf_get_current_time(mcu::platform::TimeUnit::MICROSECONDS) - start;
+                    result.prediction_time = eml_time_now(MICROSECONDS) - start;
                     return;
                 }
 
@@ -1585,11 +1584,11 @@ namespace mcu{
             }
 
             result.success = true;
-            result.prediction_time = mcu::platform::Rf_get_current_time(mcu::platform::TimeUnit::MICROSECONDS) - start;
+            result.prediction_time = eml_time_now(MICROSECONDS)  - start;
         }
 
         // get original label from internal normalized label
-        bool get_original_label(label_type i_label, char* out_label, size_t out_label_size){
+        bool get_original_label(rf_label_type i_label, char* out_label, size_t out_label_size){
             const char* labelPtr = nullptr;
             uint16_t labelLen = 0;
             if (!quantizer.getOriginalLabelView(i_label, &labelPtr, &labelLen)) {
@@ -1639,7 +1638,7 @@ namespace mcu{
             if (!label) {
                 return;
             }
-            label_type i_label = quantizer.getNormalizedLabel(label);
+            rf_label_type i_label = quantizer.getNormalizedLabel(label);
 
             // Handle new label if allowed
             if (i_label == RF_ERROR_LABEL && config.allow_new_labels) {
@@ -1660,7 +1659,7 @@ namespace mcu{
             if(i_label < config.num_labels){
                 pd->add_actual_label(i_label);
             } else {
-                RF_DEBUG(1, "❌ Unknown label: ", label);
+                eml_debug(1, "❌ Unknown label: ", label);
             }
         }
 
@@ -1819,7 +1818,7 @@ namespace mcu{
                     }
                 }
             } else {
-                RF_DEBUG(0, "❌ Invalid criterion! Use 'gini' or 'entropy'.");
+                eml_debug(0, "❌ Invalid criterion! Use 'gini' or 'entropy'.");
             }
         }
 
@@ -1871,7 +1870,7 @@ namespace mcu{
         // set random seed, default is 37
         void set_random_seed(uint32_t seed) {
             config.random_seed = seed;
-#ifndef RF_STATIC_MODEL
+#ifndef EML_STATIC_MODEL
             if(training_ctx){
                 training_ctx->random_generator.seed(seed);
             }
@@ -1914,26 +1913,26 @@ namespace mcu{
 
         // set Z-score in outliner filtering
         bool set_outliner_zscore(float zscore) {
-    #ifndef RF_STATIC_MODEL
+    #ifndef EML_STATIC_MODEL
             if(quantizer.set_outliner_zscore_filtering(zscore)){
                 return true;
             }
     #endif
-            RF_DEBUG(1, "❌ Failed to set outliner z-score filtering");
+            eml_debug(1, "❌ Failed to set outliner z-score filtering");
             return false;
         }
 
         // disable outliner filtering
         // this action will remove outliner filtering from quantizer
         void disable_outliner_filtering() {
-    #ifndef RF_STATIC_MODEL
+    #ifndef EML_STATIC_MODEL
             quantizer.disable_outliner_zscore_filtering();
     #endif
         }
 
         // enable outliner filtering
         void enable_outliner_filtering() {
-    #ifndef RF_STATIC_MODEL
+    #ifndef EML_STATIC_MODEL
             quantizer.enable_outliner_zscore_filtering();
     #endif
         }
@@ -1958,12 +1957,12 @@ namespace mcu{
         float get_last_n_inference_score(size_t num_inference, uint8_t flag) {
             base.get_infer_log_path(path_buffer);
             if(!RF_FS_EXISTS(path_buffer)) {
-                RF_DEBUG(0, "❌ Inference log file does not exist: ", path_buffer);
+                eml_debug(0, "❌ Inference log file does not exist: ", path_buffer);
                 return 0.0f;
             }
             File file = RF_FS_OPEN(path_buffer, RF_FILE_READ);
             if(!file || !file.available()) {
-                RF_DEBUG(0, "❌ Failed to open inference log file or file is empty: ", path_buffer );
+                eml_debug(0, "❌ Failed to open inference log file or file is empty: ", path_buffer );
                 return 0.0f;
             }
             // Read and verify header - new format: magic (4) + prediction_count (4)
@@ -1971,25 +1970,25 @@ namespace mcu{
             uint32_t prediction_count;
             
             if(file.read(magic_bytes, 4) != 4) {
-                RF_DEBUG(0, "❌ Failed to read magic number from inference log: ", path_buffer);
+                eml_debug(0, "❌ Failed to read magic number from inference log: ", path_buffer);
                 file.close();
                 return 0.0f;
             }
             
             if(file.read((uint8_t*)&prediction_count, 4) != 4) {
-                RF_DEBUG(0, "❌ Failed to read prediction count from inference log: ", path_buffer);
+                eml_debug(0, "❌ Failed to read prediction count from inference log: ", path_buffer);
                 file.close();
                 return 0.0f;
             }
             if(magic_bytes[0] != 0x49 || magic_bytes[1] != 0x4E || 
             magic_bytes[2] != 0x46 || magic_bytes[3] != 0x4C) {
-                RF_DEBUG(0, "❌ Invalid magic number: ", path_buffer);
+                eml_debug(0, "❌ Invalid magic number: ", path_buffer);
                 file.close();
                 return 0.0f;
             }
             
             if(prediction_count == 0) {
-                RF_DEBUG(0, "⚠️ No predictions recorded in inference log.");
+                eml_debug(0, "⚠️ No predictions recorded in inference log.");
                 file.close();
                 return 0.0f;
             }
@@ -1999,15 +1998,15 @@ namespace mcu{
             
             // Read prediction pairs: alternating predicted_label, actual_label
             for(uint32_t i = 0; i < prediction_count && i < num_inference; i++) {
-                label_type predicted_label, actual_label;
+                rf_label_type predicted_label, actual_label;
                 
                 if(file.read(&predicted_label, 1) != 1) {
-                    RF_DEBUG(1, "❌ Failed to read predicted label at prediction: ", i);
+                    eml_debug(1, "❌ Failed to read predicted label at prediction: ", i);
                     break;
                 }
                 
                 if(file.read(&actual_label, 1) != 1) {
-                    RF_DEBUG(1, "❌ Failed to read actual label at prediction: ", i);
+                    eml_debug(1, "❌ Failed to read actual label at prediction: ", i);
                     break;
                 }
                 
@@ -2038,7 +2037,7 @@ namespace mcu{
         float get_practical_inference_score(uint8_t flag) {
             size_t total_logged = get_total_logged_inference();
             if(total_logged == 0) {
-                RF_DEBUG(0, "⚠️ No logged inferences found for practical score calculation", "");
+                eml_debug(0, "⚠️ No logged inferences found for practical score calculation", "");
                 return 0.0f;
             }
             return get_last_n_inference_score(total_logged, flag);
@@ -2062,7 +2061,7 @@ namespace mcu{
         }
 
         // get original label view from internal normalized label
-        bool get_label_view(label_type normalizedLabel, const char** outLabel, uint16_t* outLength = nullptr) const {
+        bool get_label_view(rf_label_type normalizedLabel, const char** outLabel, uint16_t* outLength = nullptr) const {
             return quantizer.getOriginalLabelView(normalizedLabel, outLabel, outLength);
         }
 
@@ -2070,7 +2069,7 @@ namespace mcu{
         // get all original labels as Arduino String vector
         vector<String> get_all_original_labels() const {
             vector<String> labels;
-            for(label_type i = 0; i < config.num_labels; i++) {
+            for(rf_label_type i = 0; i < config.num_labels; i++) {
                 const char* labelPtr = nullptr;
                 uint16_t labelLen = 0;
                 if (quantizer.getOriginalLabelView(i, &labelPtr, &labelLen)) {
@@ -2085,7 +2084,7 @@ namespace mcu{
         // get all original labels as std::string vector
         vector<std::string> get_all_original_labels() const {
             vector<std::string> labels;
-            for(label_type i = 0; i < config.num_labels; i++) {
+            for(rf_label_type i = 0; i < config.num_labels; i++) {
                 const char* labelPtr = nullptr;
                 uint16_t labelLen = 0;
                 if (quantizer.getOriginalLabelView(i, &labelPtr, &labelLen)) {
@@ -2098,7 +2097,7 @@ namespace mcu{
         }
     #endif
     
-    #ifdef DEV_STAGE
+    #ifdef EML_DEV_STAGE
         // get lowest RAM usage recorded during model buliding / training 
         size_t lowest_ram() const {
             return logger.lowest_ram;
@@ -2157,12 +2156,12 @@ namespace mcu{
         size_t get_total_logged_inference() const {
             base.get_infer_log_path(path_buffer);
             if(!RF_FS_EXISTS(path_buffer)) {
-                RF_DEBUG(0, "❌ Inference log file does not exist: ", path_buffer);
+                eml_debug(0, "❌ Inference log file does not exist: ", path_buffer);
                 return 0;
             }   
             File file = RF_FS_OPEN(path_buffer, RF_FILE_READ);
             if(!file) {
-                RF_DEBUG(0, "❌ Failed to open inference log file: ", path_buffer);
+                eml_debug(0, "❌ Failed to open inference log file: ", path_buffer);
                 return 0;
             }
             
@@ -2188,23 +2187,23 @@ namespace mcu{
         } 
 
         // methods for development stage - detailed metrics
-    #ifdef DEV_STAGE
+    #ifdef EML_DEV_STAGE
         // New combined prediction metrics function
-        b_vector<b_vector<pair<label_type, float>>> predict(Rf_data& data) {
+        b_vector<b_vector<pair<rf_label_type, float>>> predict(Rf_data& data) {
             size_t start = logger.drop_anchor();
-            RF_DEBUG(1, "📊 Starting prediction on dataset...");
+            eml_debug(1, "📊 Starting prediction on dataset...");
             
             bool pre_load_data = true;
             if(!data.isLoaded){
-                RF_DEBUG(1, "📂 Loading test data...");
+                eml_debug(1, "📂 Loading test data...");
                 data.loadData();
                 pre_load_data = false;
-                RF_DEBUG_2(1, "✅ Test data loaded: ", data.size(), "samples","");
+                eml_debug_2(1, "✅ Test data loaded: ", data.size(), "samples","");
             }
             
-            RF_DEBUG(1, "🌲 Loading forest for evaluation...");
+            eml_debug(1, "🌲 Loading forest for evaluation...");
             forest_container.loadForest();
-            RF_DEBUG(1, "✅ Forest loaded for evaluation");
+            eml_debug(1, "✅ Forest loaded for evaluation");
 
             // Initialize matrix score calculator
             Rf_matrix_score scorer(config.num_labels, 0xFF); // Use all flags for detailed metrics
@@ -2212,11 +2211,11 @@ namespace mcu{
             // Pre-allocate reusable sample buffer to avoid repeated allocations
             Rf_sample sample_buffer;
             
-            for (sample_type i = 0; i < data.size(); i++) {
+            for (rf_sample_type i = 0; i < data.size(); i++) {
                 // Retrieve sample efficiently
                 sample_buffer = data[i];
-                label_type actual = sample_buffer.label;
-                label_type pred = forest_container.predict_features(sample_buffer.features);
+                rf_label_type actual = sample_buffer.label;
+                rf_label_type pred = forest_container.predict_features(sample_buffer.features);
                 
                 // Update metrics using matrix scorer
                 if(actual < config.num_labels && pred < config.num_labels) {
@@ -2224,79 +2223,79 @@ namespace mcu{
                 }
                 // base.log_inference(actual == pred);
             }
-            RF_DEBUG_2(1, "✅ Processed all ", data.size(), "samples","");
+            eml_debug_2(1, "✅ Processed all ", data.size(), "samples","");
             
             // Build result vectors using matrix scorer
-            RF_DEBUG(1, "📈 Computing metrics...");
-            b_vector<b_vector<pair<label_type, float>>> result;
+            eml_debug(1, "📈 Computing metrics...");
+            b_vector<b_vector<pair<rf_label_type, float>>> result;
             result.push_back(scorer.get_precisions());  // 0: precisions
-            RF_DEBUG(2, "   Precisions computed");
+            eml_debug(2, "   Precisions computed");
             result.push_back(scorer.get_recalls());     // 1: recalls
-            RF_DEBUG(2, "   Recalls computed");
+            eml_debug(2, "   Recalls computed");
             result.push_back(scorer.get_f1_scores());   // 2: F1 scores
-            RF_DEBUG(2, "   F1 scores computed");
+            eml_debug(2, "   F1 scores computed");
             result.push_back(scorer.get_accuracies());  // 3: accuracies
-            RF_DEBUG(2, "   Accuracies computed");
+            eml_debug(2, "   Accuracies computed");
 
             if(!pre_load_data) data.releaseData();
             forest_container.releaseForest();
             
             size_t end = logger.drop_anchor();
             long unsigned dur = logger.t_log("data prediction time", start, end, "ms");
-            RF_DEBUG_2(1, "⏱️ Data prediction time: ", dur, "ms","");
+            eml_debug_2(1, "⏱️ Data prediction time: ", dur, "ms","");
             
             return result;
         }
 
         // print metrix score on test set
         void model_report() {
-#ifndef RF_STATIC_MODEL
+#ifndef EML_STATIC_MODEL
             auto* ctx = training_ctx;
             if (!ctx || config.test_ratio == 0.0f || ctx->test_data.size() == 0) {
-                RF_DEBUG(0, "❌ No test set available for evaluation!", "");
+                eml_debug(0, "❌ No test set available for evaluation!", "");
                 return;
             }
             auto result = predict(ctx->test_data);
-            RF_DEBUG(0, "Precision in test set:");
-            b_vector<pair<label_type, float>> precision = result[0];
+            eml_debug(0, "Precision in test set:");
+            b_vector<pair<rf_label_type, float>> precision = result[0];
             for (const auto& p : precision) {
-                RF_DEBUG_2(0, "Label: ", p.first, "- ", p.second);
+                eml_debug_2(0, "Label: ", p.first, "- ", p.second);
             }
             float avgPrecision = 0.0f;
             for (const auto& p : precision) {
                 avgPrecision += p.second;
             }
             avgPrecision /= precision.size();
-            RF_DEBUG(0, "Avg: ", avgPrecision);
+            eml_debug(0, "Avg: ", avgPrecision);
 
             // Calculate Recall
-            RF_DEBUG(0, "Recall in test set:");
-            b_vector<pair<label_type, float>> recall = result[1];
+            eml_debug(0, "Recall in test set:");
+            b_vector<pair<rf_label_type, float>> recall = result[1];
             for (const auto& r : recall) {
-                RF_DEBUG_2(0, "Label: ", r.first, "- ", r.second);
+                eml_debug_2(0, "Label: ", r.first, "- ", r.second);
             }
             float avgRecall = 0.0f;
             for (const auto& r : recall) {
                 avgRecall += r.second;
             }
             avgRecall /= recall.size();
-            RF_DEBUG(0, "Avg: ", avgRecall);
+            eml_debug(0, "Avg: ", avgRecall);
 
             // Calculate F1 Score
-            RF_DEBUG(0, "F1 Score in test set:");
-            b_vector<pair<label_type, float>> f1_scores = result[2];
+            eml_debug(0, "F1 Score in test set:");
+            b_vector<pair<rf_label_type, float>> f1_scores = result[2];
             for (const auto& f1 : f1_scores) {
-                RF_DEBUG_2(0, "Label: ", f1.first, "- ", f1.second);
+                eml_debug_2(0, "Label: ", f1.first, "- ", f1.second);
             }
             float avgF1 = 0.0f;
             for (const auto& f1 : f1_scores) {
                 avgF1 += f1.second;
             }
             avgF1 /= f1_scores.size();
-            RF_DEBUG(0, "Avg: ", avgF1);
+            eml_debug(0, "Avg: ", avgF1);
 
             // Calculate Overall Accuracy
-            b_vector<pair<label_type, float>> accuracies = result[3];
+            b_vector<pair<rf_label_type, float>> accuracies = result[3];
             float avgAccuracy = 0.0f;
             for (const auto& acc : accuracies) {
                 avgAccuracy += acc.second;
@@ -2329,16 +2328,16 @@ namespace mcu{
             }
 
             base.get_infer_log_path(path_buffer);
-            RF_DEBUG(0, "📊 FINAL SUMMARY:", "");
-            RF_DEBUG(0, "Dataset: ", path_buffer);
-            RF_DEBUG(0, "Average Precision: ", avgPrecision);
-            RF_DEBUG(0, "Average Recall: ", avgRecall);
-            RF_DEBUG(0, "Average F1-Score: ", avgF1);
-            RF_DEBUG(0, "Accuracy: ", avgAccuracy);
-            RF_DEBUG(0, "Result Score: ", config.result_score);
-            RF_DEBUG(0, "Lowest RAM: ", logger.lowest_ram);
+            eml_debug(0, "📊 FINAL SUMMARY:", "");
+            eml_debug(0, "Dataset: ", path_buffer);
+            eml_debug(0, "Average Precision: ", avgPrecision);
+            eml_debug(0, "Average Recall: ", avgRecall);
+            eml_debug(0, "Average F1-Score: ", avgF1);
+            eml_debug(0, "Accuracy: ", avgAccuracy);
+            eml_debug(0, "Result Score: ", config.result_score);
+            eml_debug(0, "Lowest RAM: ", logger.lowest_ram);
 #else
-            RF_DEBUG(0, "❌ Training disabled (RF_STATIC_MODEL = 1)");
+            eml_debug(0, "❌ Training disabled (EML_STATIC_MODEL = 1)");
 #endif
         }
 
@@ -2350,10 +2349,10 @@ namespace mcu{
             forest_container.loadForest();
 
             // Process all samples
-            for (sample_type i = 0; i < data.size(); i++) {
+            for (rf_sample_type i = 0; i < data.size(); i++) {
                 const Rf_sample& sample = data[i];
-                label_type actual = sample.label;
-                label_type pred = forest_container.predict_features(sample.features);
+                rf_label_type actual = sample.label;
+                rf_label_type pred = forest_container.predict_features(sample.features);
                 
                 if(actual < config.num_labels && pred < config.num_labels) {
                     scorer.update_prediction(actual, pred);
@@ -2373,10 +2372,10 @@ namespace mcu{
             forest_container.loadForest();
 
             // Process all samples
-            for (sample_type i = 0; i < data.size(); i++) {
+            for (rf_sample_type i = 0; i < data.size(); i++) {
                 const Rf_sample& sample = data[i];
-                label_type actual = sample.label;
-                label_type pred = forest_container.predict_features(sample.features);
+                rf_label_type actual = sample.label;
+                rf_label_type pred = forest_container.predict_features(sample.features);
                 
                 if(actual < config.num_labels && pred < config.num_labels) {
                     scorer.update_prediction(actual, pred);
@@ -2396,10 +2395,10 @@ namespace mcu{
             forest_container.loadForest();
 
             // Process all samples
-            for (sample_type i = 0; i < data.size(); i++) {
+            for (rf_sample_type i = 0; i < data.size(); i++) {
                 const Rf_sample& sample = data[i];
-                label_type actual = sample.label;
-                label_type pred = forest_container.predict_features(sample.features);
+                rf_label_type actual = sample.label;
+                rf_label_type pred = forest_container.predict_features(sample.features);
                 
                 if(actual < config.num_labels && pred < config.num_labels) {
                     scorer.update_prediction(actual, pred);
@@ -2419,10 +2418,10 @@ namespace mcu{
             forest_container.loadForest();
 
             // Process all samples
-            for (sample_type i = 0; i < data.size(); i++) {
+            for (rf_sample_type i = 0; i < data.size(); i++) {
                 const Rf_sample& sample = data[i];
-                label_type actual = sample.label;
-                label_type pred = forest_container.predict_features(sample.features);
+                rf_label_type actual = sample.label;
+                rf_label_type pred = forest_container.predict_features(sample.features);
                 
                 if(actual < config.num_labels && pred < config.num_labels) {
                     scorer.update_prediction(actual, pred);
@@ -2437,25 +2436,25 @@ namespace mcu{
         
         // printout predicted & actual label for each sample in test set
         void visual_result() {
-#ifndef RF_STATIC_MODEL
+#ifndef EML_STATIC_MODEL
             auto* ctx = training_ctx;
             if(!ctx){
-                RF_DEBUG(0, "❌ No training context available for visual_result!", "");
+                eml_debug(0, "❌ No training context available for visual_result!", "");
                 return;
             }
             forest_container.loadForest();
             ctx->test_data.loadData(); 
 
-            RF_DEBUG(0, "Predicted, Actual");
-            for (sample_type i = 0; i < ctx->test_data.size(); i++) {
+            eml_debug(0, "Predicted, Actual");
+            for (rf_sample_type i = 0; i < ctx->test_data.size(); i++) {
                 const Rf_sample& sample = ctx->test_data[i];
-                label_type pred = forest_container.predict_features(sample.features);
-                RF_DEBUG_2(0, String(pred).c_str(), ", ", String(sample.label).c_str(), "");
+                rf_label_type pred = forest_container.predict_features(sample.features);
+                eml_debug_2(0, String(pred).c_str(), ", ", String(sample.label).c_str(), "");
             }
             ctx->test_data.releaseData(true); 
             forest_container.releaseForest(); 
 #else
-            RF_DEBUG(0, "❌ Training disabled (RF_STATIC_MODEL = 1)");
+            eml_debug(0, "❌ Training disabled (EML_STATIC_MODEL = 1)");
 #endif
         }
     #endif

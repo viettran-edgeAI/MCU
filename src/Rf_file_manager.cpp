@@ -1,12 +1,4 @@
-// This file provides the default/legacy filesystem implementation.
-// When a platform plugin provides its own implementation (e.g., sample_esp32),
-// this file is excluded via RF_PLATFORM_PLUGIN_PROVIDES_FILESYSTEM.
-
 #include "Rf_file_manager.h"
-
-#if defined(RF_PLATFORM_PLUGIN_SAMPLE_ESP32) || defined(RF_PLATFORM_PLUGIN_PROVIDES_FILESYSTEM)
-// Plugin provides filesystem implementation - skip this file
-#else
 
 // Track which storage system is actually active at runtime
 static RfStorageType g_active_storage = RfStorageType::AUTO;
@@ -66,19 +58,19 @@ namespace {
 
     bool fallback_to_flash(RfStorageType previous) {
         if (previous == RfStorageType::FLASH) {
-            RF_DEBUG(0, "↩️ Retaining LittleFS storage");
+            eml_debug(0, "↩️ Retaining LittleFS storage");
             g_active_storage = RfStorageType::FLASH;
             return true;
         }
 
-        RF_DEBUG(0, "↩️ Switching to LittleFS fallback storage");
+        eml_debug(0, "↩️ Switching to LittleFS fallback storage");
         if (LittleFS.begin(true)) {
             g_active_storage = RfStorageType::FLASH;
-            RF_DEBUG(0, "✅ LittleFS fallback mounted successfully");
+            eml_debug(0, "✅ LittleFS fallback mounted successfully");
             return true;
         }
 
-        RF_DEBUG(0, "❌ LittleFS fallback mount failed!" );
+        eml_debug(0, "❌ LittleFS fallback mount failed!" );
         g_active_storage = previous;
         return false;
     }
@@ -93,11 +85,11 @@ bool rf_storage_begin(RfStorageType type) {
         {
 #if RF_HAS_FATFS
             if (!FFat.begin(RF_FATFS_FORMAT_IF_FAIL)) {
-                RF_DEBUG(0, RF_FATFS_FORMAT_IF_FAIL ? "❌ FATFS mount failed (format attempted)." : "❌ FATFS Mount Failed!");
+                eml_debug(0, RF_FATFS_FORMAT_IF_FAIL ? "❌ FATFS mount failed (format attempted)." : "❌ FATFS Mount Failed!");
                 return fallback_to_flash(previous);
             }
 
-            RF_DEBUG(1, "✅ FATFS initialized successfully");
+            eml_debug(1, "✅ FATFS initialized successfully");
 
             if (RF_DEBUG_LEVEL >= 1) {
                 uint64_t totalBytes = FFat.totalBytes();
@@ -105,13 +97,13 @@ bool rf_storage_begin(RfStorageType type) {
                 char buffer[128];
                 snprintf(buffer, sizeof(buffer), "📊 FATFS Size: %llu bytes, Used: %llu bytes", 
                          (unsigned long long)totalBytes, (unsigned long long)usedBytes);
-                RF_DEBUG(0, "", buffer);
+                eml_debug(0, "", buffer);
             }
 
             g_active_storage = RfStorageType::FATFS;
             return true;
 #else
-            RF_DEBUG(0, "❌ FATFS not available on this platform");
+            eml_debug(0, "❌ FATFS not available on this platform");
             return fallback_to_flash(previous);
 #endif
         }
@@ -121,18 +113,18 @@ bool rf_storage_begin(RfStorageType type) {
             SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
 
             if (!SD.begin(SD_CS_PIN)) {
-                RF_DEBUG(0, "❌ SD Card Mount Failed!");
+                eml_debug(0, "❌ SD Card Mount Failed!");
                 return fallback_to_flash(previous);
             }
 
             uint8_t cardType = SD.cardType();
             if (cardType == CARD_NONE) {
-                RF_DEBUG(0, "❌ No SD card attached!");
+                eml_debug(0, "❌ No SD card attached!");
                 SD.end();
                 return fallback_to_flash(previous);
             }
 
-            RF_DEBUG(1, "✅ SD Card initialized successfully");
+            eml_debug(1, "✅ SD Card initialized successfully");
 
             if (RF_DEBUG_LEVEL >= 1) {
                 const char* cardTypeStr = "UNKNOWN";
@@ -143,7 +135,7 @@ bool rf_storage_begin(RfStorageType type) {
                 uint64_t cardSize = SD.cardSize() / (1024 * 1024);
                 char buffer[128];
                 snprintf(buffer, sizeof(buffer), "📊 SD Card Type: %s, Size: %llu MB", cardTypeStr, cardSize);
-                RF_DEBUG(0, "", buffer);
+                eml_debug(0, "", buffer);
             }
 
             g_active_storage = selected;
@@ -157,18 +149,18 @@ bool rf_storage_begin(RfStorageType type) {
             const bool use1bit = (selected == RfStorageType::SD_MMC_1BIT);
             bool mounted = SD_MMC.begin(RF_SDMMC_MOUNTPOINT, use1bit, RF_SDMMC_FORMAT_IF_FAIL);
             if (!mounted) {
-                RF_DEBUG(0, RF_SDMMC_FORMAT_IF_FAIL ? "❌ SD_MMC mount failed (format attempted)." : "❌ SD_MMC Mount Failed!");
+                eml_debug(0, RF_SDMMC_FORMAT_IF_FAIL ? "❌ SD_MMC mount failed (format attempted)." : "❌ SD_MMC Mount Failed!");
                 return fallback_to_flash(previous);
             }
 
             uint8_t cardType = SD_MMC.cardType();
             if (cardType == CARD_NONE) {
-                RF_DEBUG(0, "❌ No SD card attached!");
+                eml_debug(0, "❌ No SD card attached!");
                 SD_MMC.end();
                 return fallback_to_flash(previous);
             }
 
-            RF_DEBUG(1, "✅ SD_MMC initialized successfully");
+            eml_debug(1, "✅ SD_MMC initialized successfully");
 
             if (RF_DEBUG_LEVEL >= 1) {
                 const char* cardTypeStr = "UNKNOWN";
@@ -179,15 +171,15 @@ bool rf_storage_begin(RfStorageType type) {
                 uint64_t cardSize = SD_MMC.cardSize() / (1024 * 1024);
                 char buffer[128];
                 snprintf(buffer, sizeof(buffer), "📊 SD_MMC Type: %s, Size: %llu MB", cardTypeStr, cardSize);
-                RF_DEBUG(0, "", buffer);
+                eml_debug(0, "", buffer);
 
-                RF_DEBUG(0, use1bit ? "ℹ️ SD_MMC running in 1-bit mode" : "ℹ️ SD_MMC running in 4-bit mode");
+                eml_debug(0, use1bit ? "ℹ️ SD_MMC running in 1-bit mode" : "ℹ️ SD_MMC running in 4-bit mode");
             }
 
             g_active_storage = selected;
             return true;
 #else
-            RF_DEBUG(0, "❌ SD_MMC not available on this platform");
+            eml_debug(0, "❌ SD_MMC not available on this platform");
         return fallback_to_flash(previous);
 #endif
         }
@@ -196,11 +188,11 @@ bool rf_storage_begin(RfStorageType type) {
         default:
         {
             if (!LittleFS.begin(true)) {
-                RF_DEBUG(0, "❌ LittleFS Mount Failed!");
+                eml_debug(0, "❌ LittleFS Mount Failed!");
                 g_active_storage = previous;
                 return false;
             }
-            RF_DEBUG(1, "✅ LittleFS initialized successfully");
+            eml_debug(1, "✅ LittleFS initialized successfully");
             g_active_storage = RfStorageType::FLASH;
             return true;
         }
@@ -218,23 +210,23 @@ void rf_storage_end() {
         case RfStorageType::FATFS:
 #if RF_HAS_FATFS
             FFat.end();
-            RF_DEBUG(1, "✅ FATFS unmounted");
+            eml_debug(1, "✅ FATFS unmounted");
 #endif
             break;
         case RfStorageType::SD_SPI:
             SD.end();
-            RF_DEBUG(1, "✅ SD Card unmounted");
+            eml_debug(1, "✅ SD Card unmounted");
             break;
         case RfStorageType::SD_MMC_1BIT:
         case RfStorageType::SD_MMC_4BIT:
 #if RF_HAS_SDMMC
             SD_MMC.end();
-            RF_DEBUG(1, "✅ SD_MMC unmounted");
+            eml_debug(1, "✅ SD_MMC unmounted");
 #endif
             break;
         case RfStorageType::FLASH:
             LittleFS.end();
-            RF_DEBUG(1, "✅ LittleFS unmounted");
+            eml_debug(1, "✅ LittleFS unmounted");
             break;
         default:
             break;
@@ -521,7 +513,7 @@ String normalizePath(const String& input, const String& currentDir) {
 
 bool cloneFile(const String& src, const String& dest) {
     if(RF_FS_EXISTS(src) == false) {
-        RF_DEBUG(0, "❌ Source file does not exist: ", src);
+        eml_debug(0, "❌ Source file does not exist: ", src);
         return false;
     }
 
@@ -537,18 +529,18 @@ bool cloneFile(const String& src, const String& dest) {
         } else {
             actualDest = src + "_cpy";
         }
-        RF_DEBUG(0, "🔄 Auto-generated destination: ", actualDest);
+        eml_debug(0, "🔄 Auto-generated destination: ", actualDest);
     }
 
     File sourceFile = RF_FS_OPEN(src, RF_FILE_READ);
     if (!sourceFile) {
-        RF_DEBUG(0, "❌ Failed to open source file: ", src);
+        eml_debug(0, "❌ Failed to open source file: ", src);
         return false;
     }
 
     File destFile = RF_FS_OPEN(actualDest, RF_FILE_WRITE);
     if (!destFile) {
-        RF_DEBUG(0, "❌ Failed to create destination file: ", actualDest);
+        eml_debug(0, "❌ Failed to create destination file: ", actualDest);
         sourceFile.close();
         return false;
     }
@@ -578,7 +570,7 @@ bool cloneFile(const String& src, const String& dest) {
     sourceFile.close();
     destFile.close();
 
-    RF_DEBUG_2(0, "✅ File cloned from ", src, "➝ ", actualDest);
+    eml_debug_2(0, "✅ File cloned from ", src, "➝ ", actualDest);
     return true;
 }
 
@@ -598,22 +590,22 @@ bool cloneFile(const String& src) {
 bool renameFile(const String& oldPath, const String& newPath) {
     // Check if source file exists
     if (!RF_FS_EXISTS(oldPath)) {
-        RF_DEBUG(0, "❌ Source file does not exist: ", oldPath);
+        eml_debug(0, "❌ Source file does not exist: ", oldPath);
         return false;
     }
 
     // Check if destination already exists
     if (RF_FS_EXISTS(newPath)) {
-        RF_DEBUG(0, "❌ Destination file already exists: ", newPath);
+        eml_debug(0, "❌ Destination file already exists: ", newPath);
         return false;
     }
 
     // Perform the rename operation
     if (RF_FS_RENAME(oldPath, newPath)) {
-        RF_DEBUG_2(0, "✅ File renamed from ", oldPath, "➝ ", newPath);
+        eml_debug_2(0, "✅ File renamed from ", oldPath, "➝ ", newPath);
         return true;
     } else {
-        RF_DEBUG_2(0, "❌ Failed to rename file from ", oldPath, "to ", newPath);
+        eml_debug_2(0, "❌ Failed to rename file from ", oldPath, "to ", newPath);
         return false;
     }
 }
@@ -626,10 +618,10 @@ bool renameFile(const char* oldPath, const char* newPath) {
 void printFile(String filename) {
     File file = RF_FS_OPEN(filename.c_str(), RF_FILE_READ);
     if (!file) {
-        RF_DEBUG(0, "❌ Failed to open file: ", filename);
+        eml_debug(0, "❌ Failed to open file: ", filename);
         return;
     }
-    RF_DEBUG(0, "📄 Printing file: ", filename);
+    eml_debug(0, "📄 Printing file: ", filename);
 
     // Get file extension to determine file type
     String filenameLower = filename;
@@ -641,8 +633,8 @@ void printFile(String filename) {
     if (!isTextFile) {
         // Handle binary files - just show basic info
         uint64_t fileSize = file.size();;
-        RF_DEBUG(0, "📊 Binary file size (bytes): ", fileSize);
-        RF_DEBUG(0, "⚠️ Binary content not displayed");
+        eml_debug(0, "📊 Binary file size (bytes): ", fileSize);
+        eml_debug(0, "⚠️ Binary content not displayed");
         file.close();
         return;
     }
@@ -656,7 +648,7 @@ void printFile(String filename) {
         line.trim();
         if (line.length() == 0) continue;
 
-        RF_DEBUG(0, "", line);
+        eml_debug(0, "", line);
         ++rowCount;
 
         // Only count columns for CSV files
@@ -672,11 +664,11 @@ void printFile(String filename) {
 
     file.close();
 
-    RF_DEBUG(0, "📊 Summary:");
-    RF_DEBUG(0, "🧾 Lines: ", rowCount);
+    eml_debug(0, "📊 Summary:");
+    eml_debug(0, "🧾 Lines: ", rowCount);
 
     if (isCSV) {
-        RF_DEBUG(0, "📐 Columns: ", columnCount);
+        eml_debug(0, "📐 Columns: ", columnCount);
     }
 }
 
@@ -685,7 +677,7 @@ void manage_files() {
     if (!RF_FS_BEGIN(rf_current_storage())) {
         char buffer[64];
         snprintf(buffer, sizeof(buffer), "❌ %s Mount Failed!", rf_storage_type());
-        RF_DEBUG(0, "", buffer);
+        eml_debug(0, "", buffer);
         return;
     }
 
@@ -694,12 +686,12 @@ void manage_files() {
     while (true) {
         char header[64];
         snprintf(header, sizeof(header), "\n====== 📂 %s File Manager ======", rf_storage_type());
-        RF_DEBUG(0, "", header);
-        RF_DEBUG(0, "📍 Current Directory: ", currentDir);
+        eml_debug(0, "", header);
+        eml_debug(0, "📍 Current Directory: ", currentDir);
         
         File dir = RF_FS_OPEN(currentDir, RF_FILE_READ);
         if (!dir || !dir.isDirectory()) {
-            RF_DEBUG(0, "❌ Failed to open directory: ", currentDir);
+            eml_debug(0, "❌ Failed to open directory: ", currentDir);
             currentDir = "/";  // Reset to root
             continue;
         }
@@ -712,7 +704,7 @@ void manage_files() {
         int fileCount = 0;
         int folderCount = 0;
 
-        RF_DEBUG_2(0, "📦 Free Space: ", 
+        eml_debug_2(0, "📦 Free Space: ", 
                     RF_TOTAL_BYTES() - RF_USED_BYTES(), "/", RF_TOTAL_BYTES());
 
         // List directories first, then files
@@ -750,14 +742,14 @@ void manage_files() {
                 folderList[folderCount] = fullPath;
                 char buffer[64];
                 snprintf(buffer, sizeof(buffer), "📁 %2d: %s/", folderCount + 1, displayName.c_str());
-                RF_DEBUG(0, "", buffer);
+                eml_debug(0, "", buffer);
                 folderCount++;
             } else {
                 fileList[fileCount] = fullPath;
                 uint64_t fileSize = entry.size();
                 char buffer[80];
                 snprintf(buffer, sizeof(buffer), "📄 %2d: %-30s (%llu bytes)", fileCount + 1, displayName.c_str(), (unsigned long long)fileSize);
-                RF_DEBUG(0, "", buffer);
+                eml_debug(0, "", buffer);
                 fileCount++;
             }
             
@@ -767,21 +759,21 @@ void manage_files() {
         dir.close();
 
         if (fileCount == 0 && folderCount == 0) {
-            RF_DEBUG(0, "⚠️ Directory is empty.");
+            eml_debug(0, "⚠️ Directory is empty.");
         }
 
-        RF_DEBUG(0, "\n📋 Operations:");
+        eml_debug(0, "\n📋 Operations:");
         if (currentDir != "/") {
-            RF_DEBUG(0, "..: ⬆️  Go to parent directory");
+            eml_debug(0, "..: ⬆️  Go to parent directory");
         }
-        RF_DEBUG(0, "g: 📂 Go into folder (1-", String(folderCount) + ")");
-        RF_DEBUG(0, "a: 📄 Print file content");
-        RF_DEBUG(0, "b: 📋 Clone file");
-        RF_DEBUG(0, "c: ✏️  Rename file");
-        RF_DEBUG(0, "d: 🗑️  Delete file/folder");
-        RF_DEBUG(0, "e: ➕ Add new file");
-        RF_DEBUG(0, "f: 🔐 Delete non-empty directory");
-        RF_DEBUG(0, "Type operation letter, or 'exit' to quit:");
+        eml_debug(0, "g: 📂 Go into folder (1-", String(folderCount) + ")");
+        eml_debug(0, "a: 📄 Print file content");
+        eml_debug(0, "b: 📋 Clone file");
+        eml_debug(0, "c: ✏️  Rename file");
+        eml_debug(0, "d: 🗑️  Delete file/folder");
+        eml_debug(0, "e: ➕ Add new file");
+        eml_debug(0, "f: 🔐 Delete non-empty directory");
+        eml_debug(0, "Type operation letter, or 'exit' to quit:");
 
         String rawOperation = "";
         String operation = "";
@@ -796,16 +788,16 @@ void manage_files() {
         }
 
         if (operation.equals("exit")) {
-            RF_DEBUG(0, "🔚 Exiting file manager.");
+            eml_debug(0, "🔚 Exiting file manager.");
             break;
         }
 
         if (rawOperation.equalsIgnoreCase("f")) {
-            RF_DEBUG(0, "\n========== 🔐 DELETE NON-EMPTY DIRECTORY ==========");
+            eml_debug(0, "\n========== 🔐 DELETE NON-EMPTY DIRECTORY ==========");
             while (true) {
                 File refreshDir = RF_FS_OPEN(currentDir, RF_FILE_READ);
                 if (!refreshDir || !refreshDir.isDirectory()) {
-                    RF_DEBUG(0, "❌ Failed to inspect current directory!");
+                    eml_debug(0, "❌ Failed to inspect current directory!");
                     break;
                 }
 
@@ -835,20 +827,20 @@ void manage_files() {
                 refreshDir.close();
 
                 if (recursiveFolderCount == 0) {
-                    RF_DEBUG(0, "⚠️ No folders to delete.");
+                    eml_debug(0, "⚠️ No folders to delete.");
                     break;
                 }
 
-                RF_DEBUG(0, "\n📂 Available folders:");
+                eml_debug(0, "\n📂 Available folders:");
                 for (int i = 0; i < recursiveFolderCount; i++) {
                     int lastSlash = recursiveFolderList[i].lastIndexOf('/');
                     String displayName = (lastSlash >= 0) ? recursiveFolderList[i].substring(lastSlash + 1) : recursiveFolderList[i];
                     char buffer[80];
                     snprintf(buffer, sizeof(buffer), "  F%d: %s/", i + 1, displayName.c_str());
-                    RF_DEBUG(0, "", buffer);
+                    eml_debug(0, "", buffer);
                 }
 
-                RF_DEBUG(0, "\nEnter folder number to delete recursively, or 'end' to return:");
+                eml_debug(0, "\nEnter folder number to delete recursively, or 'end' to return:");
                 String folderInput = "";
                 while (folderInput.length() == 0) {
                     if (RF_INPUT_AVAILABLE()) {
@@ -859,20 +851,20 @@ void manage_files() {
                 }
 
                 if (folderInput.equalsIgnoreCase("end")) {
-                    RF_DEBUG(0, "🔙 Returning to main menu...");
+                    eml_debug(0, "🔙 Returning to main menu...");
                     break;
                 }
 
                 int folderIdx = folderInput.toInt();
                 if (folderIdx < 1 || folderIdx > recursiveFolderCount) {
-                    RF_DEBUG(0, "⚠️ Invalid folder number.");
+                    eml_debug(0, "⚠️ Invalid folder number.");
                     continue;
                 }
 
                 String targetFolder = recursiveFolderList[folderIdx - 1];
                 char confirmPrompt[128];
                 snprintf(confirmPrompt, sizeof(confirmPrompt), "Type 'DELETE' to remove %s (all contents will be lost):", targetFolder.c_str());
-                RF_DEBUG(0, "", confirmPrompt);
+                eml_debug(0, "", confirmPrompt);
 
                 String confirm = "";
                 while (confirm.length() == 0) {
@@ -884,19 +876,19 @@ void manage_files() {
                 }
 
                 if (!confirm.equals("DELETE")) {
-                    RF_DEBUG(0, "❎ Cancellation received. Directory not deleted.");
+                    eml_debug(0, "❎ Cancellation received. Directory not deleted.");
                     continue;
                 }
 
-                RF_DEBUG(0, "🗑️ Deleting directory recursively...");
+                eml_debug(0, "🗑️ Deleting directory recursively...");
                 if (deleteDirectoryRecursive(targetFolder)) {
                     char result[128];
                     snprintf(result, sizeof(result), "✅ Removed directory: %s", targetFolder.c_str());
-                    RF_DEBUG(0, "", result);
+                    eml_debug(0, "", result);
                 } else {
                     char result[128];
                     snprintf(result, sizeof(result), "❌ Failed to remove directory: %s", targetFolder.c_str());
-                    RF_DEBUG(0, "", result);
+                    eml_debug(0, "", result);
                 }
                 delay(100);
             }
@@ -914,9 +906,9 @@ void manage_files() {
                 }
                 char buffer[128];
                 snprintf(buffer, sizeof(buffer), "⬆️ Moving to parent: %s", currentDir.c_str());
-                RF_DEBUG(0, "", buffer);
+                eml_debug(0, "", buffer);
             } else {
-                RF_DEBUG(0, "⚠️ Already at root directory.");
+                eml_debug(0, "⚠️ Already at root directory.");
             }
             continue;
         }
@@ -924,13 +916,13 @@ void manage_files() {
         // Go into folder
         if (operation.equals("g")) {
             if (folderCount == 0) {
-                RF_DEBUG(0, "⚠️ No folders in current directory.");
+                eml_debug(0, "⚠️ No folders in current directory.");
                 continue;
             }
             
             char buffer[64];
             snprintf(buffer, sizeof(buffer), "Enter folder number (1-%d): ", folderCount);
-            RF_DEBUG(0, "", buffer);
+            eml_debug(0, "", buffer);
             String input = "";
             while (input.length() == 0) {
                 if (RF_INPUT_AVAILABLE()) {
@@ -956,24 +948,24 @@ void manage_files() {
                 
                 char msg[128];
                 snprintf(msg, sizeof(msg), "📂 Entering folder: %s", currentDir.c_str());
-                RF_DEBUG(0, "", msg);
+                eml_debug(0, "", msg);
             } else {
-                RF_DEBUG(0, "⚠️ Invalid folder number.");
+                eml_debug(0, "⚠️ Invalid folder number.");
             }
             continue;
         }
 
         if (operation.equals("a")) {
             // Print file operation - isolated space
-            RF_DEBUG(0, "\n========== 📄 PRINT FILE MODE ==========");
+            eml_debug(0, "\n========== 📄 PRINT FILE MODE ==========");
             while (true) {
-                RF_DEBUG(0, "\n📂 Available files:");
+                eml_debug(0, "\n📂 Available files:");
                 for (int i = 0; i < fileCount; i++) {
                     char buffer[80];
                     snprintf(buffer, sizeof(buffer), "%2d: %s", i + 1, fileList[i].c_str());
-                    RF_DEBUG(0, "", buffer);
+                    eml_debug(0, "", buffer);
                 }
-                RF_DEBUG(0, "\nEnter file number to print, or 'end' to return to main menu:");
+                eml_debug(0, "\nEnter file number to print, or 'end' to return to main menu:");
                 
                 String input = "";
                 while (input.length() == 0) {
@@ -985,7 +977,7 @@ void manage_files() {
                 }
                 
                 if (input.equalsIgnoreCase("end")) {
-                    RF_DEBUG(0, "🔙 Returning to main menu...");
+                    eml_debug(0, "🔙 Returning to main menu...");
                     break;
                 }
                 
@@ -993,21 +985,21 @@ void manage_files() {
                 if (index >= 1 && index <= fileCount) {
                     printFile(fileList[index - 1]);
                 } else {
-                    RF_DEBUG(0, "⚠️ Invalid file number.");
+                    eml_debug(0, "⚠️ Invalid file number.");
                 }
             }
         }
         else if (operation.equals("b")) {
             // Clone file operation - isolated space
-            RF_DEBUG(0, "\n========== 📋 CLONE FILE MODE ==========");
+            eml_debug(0, "\n========== 📋 CLONE FILE MODE ==========");
             while (true) {
-                RF_DEBUG(0, "\n📂 Available files:");
+                eml_debug(0, "\n📂 Available files:");
                 for (int i = 0; i < fileCount; i++) {
                     char buffer[80];
                     snprintf(buffer, sizeof(buffer), "%2d: %s", i + 1, fileList[i].c_str());
-                    RF_DEBUG(0, "", buffer);
+                    eml_debug(0, "", buffer);
                 }
-                RF_DEBUG(0, "\nEnter source file number to clone, or 'end' to return to main menu:");
+                eml_debug(0, "\nEnter source file number to clone, or 'end' to return to main menu:");
                 
                 String input = "";
                 while (input.length() == 0) {
@@ -1019,13 +1011,13 @@ void manage_files() {
                 }
                 
                 if (input.equalsIgnoreCase("end")) {
-                    RF_DEBUG(0, "🔙 Returning to main menu...");
+                    eml_debug(0, "🔙 Returning to main menu...");
                     break;
                 }
                 
                 int index = input.toInt();
                 if (index >= 1 && index <= fileCount) {
-                    RF_DEBUG(0, "Enter destination filename or path (or press Enter for auto-name):");
+                    eml_debug(0, "Enter destination filename or path (or press Enter for auto-name):");
                     String dest = "";
                     while (dest.length() == 0) {
                         if (RF_INPUT_AVAILABLE()) {
@@ -1042,21 +1034,21 @@ void manage_files() {
                     cloneFile(fileList[index - 1], dest);
                     delay(100); // Short delay to avoid flooding the output
                 } else {
-                    RF_DEBUG(0, "⚠️ Invalid file number.");
+                    eml_debug(0, "⚠️ Invalid file number.");
                 }
             }
         }
         else if (operation.equals("c")) {
             // Rename file operation - isolated space
-            RF_DEBUG(0, "\n========== ✏️ RENAME FILE MODE ==========");
+            eml_debug(0, "\n========== ✏️ RENAME FILE MODE ==========");
             while (true) {
-                RF_DEBUG(0, "\n📂 Available files:");
+                eml_debug(0, "\n📂 Available files:");
                 for (int i = 0; i < fileCount; i++) {
                     char buffer[80];
                     snprintf(buffer, sizeof(buffer), "%2d: %s", i + 1, fileList[i].c_str());
-                    RF_DEBUG(0, "", buffer);
+                    eml_debug(0, "", buffer);
                 }
-                RF_DEBUG(0, "\nEnter file number to rename, or 'end' to return to main menu:");
+                eml_debug(0, "\nEnter file number to rename, or 'end' to return to main menu:");
                 
                 String input = "";
                 while (input.length() == 0) {
@@ -1068,13 +1060,13 @@ void manage_files() {
                 }
                 
                 if (input.equalsIgnoreCase("end")) {
-                    RF_DEBUG(0, "🔙 Returning to main menu...");
+                    eml_debug(0, "🔙 Returning to main menu...");
                     break;
                 }
                 
                 int index = input.toInt();
                 if (index >= 1 && index <= fileCount) {
-                    RF_DEBUG(0, "Enter new filename or path:");
+                    eml_debug(0, "Enter new filename or path:");
                     String newPath = "";
                     while (newPath.length() == 0) {
                         if (RF_INPUT_AVAILABLE()) {
@@ -1087,24 +1079,24 @@ void manage_files() {
                         // Normalize the path
                         newPath = normalizePath(newPath, currentDir);
                         if (renameFile(fileList[index - 1], newPath)) {
-                            RF_DEBUG(0, "✅ File renamed successfully! You can rename more files or type 'end' to exit.");
+                            eml_debug(0, "✅ File renamed successfully! You can rename more files or type 'end' to exit.");
                             // Update the specific file in the list for immediate reflection
                             fileList[index - 1] = newPath;
                         }
                     }
                 } else {
-                    RF_DEBUG(0, "⚠️ Invalid file number.");
+                    eml_debug(0, "⚠️ Invalid file number.");
                 }
             }
         }
         else if (operation.equals("d")) {
             // Delete file/folder operation - isolated space with multiple item support
-            RF_DEBUG(0, "\n========== 🗑️ DELETE MODE ==========");
+            eml_debug(0, "\n========== 🗑️ DELETE MODE ==========");
             while (true) {
                 // Refresh file and folder list each time to show current state
                 File refreshDir = RF_FS_OPEN(currentDir, RF_FILE_READ);
                 if (!refreshDir || !refreshDir.isDirectory()) {
-                    RF_DEBUG(0, "❌ Failed to refresh directory!");
+                    eml_debug(0, "❌ Failed to refresh directory!");
                     break;
                 }
                 
@@ -1155,43 +1147,43 @@ void manage_files() {
                 }
                 refreshDir.close();
                 
-                RF_DEBUG(0, "\n📂 Available folders:");
+                eml_debug(0, "\n📂 Available folders:");
                 if (refreshFolderCount == 0) {
-                    RF_DEBUG(0, "  (none)");
+                    eml_debug(0, "  (none)");
                 } else {
                     for (int i = 0; i < refreshFolderCount; i++) {
                         int lastSlash = refreshFolderList[i].lastIndexOf('/');
                         String displayName = (lastSlash >= 0) ? refreshFolderList[i].substring(lastSlash + 1) : refreshFolderList[i];
                         char buffer[80];
                         snprintf(buffer, sizeof(buffer), "  F%d: %s/", i + 1, displayName.c_str());
-                        RF_DEBUG(0, "", buffer);
+                        eml_debug(0, "", buffer);
                     }
                 }
                 
-                RF_DEBUG(0, "\n📄 Available files:");
+                eml_debug(0, "\n📄 Available files:");
                 if (refreshFileCount == 0) {
-                    RF_DEBUG(0, "  (none)");
+                    eml_debug(0, "  (none)");
                 } else {
                     for (int i = 0; i < refreshFileCount; i++) {
                         int lastSlash = refreshFileList[i].lastIndexOf('/');
                         String displayName = (lastSlash >= 0) ? refreshFileList[i].substring(lastSlash + 1) : refreshFileList[i];
                         char buffer[80];
                         snprintf(buffer, sizeof(buffer), "  %d: %s", i + 1, displayName.c_str());
-                        RF_DEBUG(0, "", buffer);
+                        eml_debug(0, "", buffer);
                     }
                 }
                 
                 if (refreshFileCount == 0 && refreshFolderCount == 0) {
-                    RF_DEBUG(0, "⚠️ No files or folders to delete. Returning to main menu...");
+                    eml_debug(0, "⚠️ No files or folders to delete. Returning to main menu...");
                     break;
                 }
                 
-                RF_DEBUG(0, "\nEnter item(s) to delete:");
-                RF_DEBUG(0, "  - Single file: '3'");
-                RF_DEBUG(0, "  - Single folder: 'F1'");
-                RF_DEBUG(0, "  - Multiple items: '1 3 5 F2' or '1,3,5,F2'");
-                RF_DEBUG(0, "  - 'all' to delete everything");
-                RF_DEBUG(0, "  - 'end' to return:");
+                eml_debug(0, "\nEnter item(s) to delete:");
+                eml_debug(0, "  - Single file: '3'");
+                eml_debug(0, "  - Single folder: 'F1'");
+                eml_debug(0, "  - Multiple items: '1 3 5 F2' or '1,3,5,F2'");
+                eml_debug(0, "  - 'all' to delete everything");
+                eml_debug(0, "  - 'end' to return:");
                 
                 String input = "";
                 while (input.length() == 0) {
@@ -1203,13 +1195,13 @@ void manage_files() {
                 }
                 
                 if (input.equalsIgnoreCase("end")) {
-                    RF_DEBUG(0, "🔙 Returning to main menu...");
+                    eml_debug(0, "🔙 Returning to main menu...");
                     break;
                 }
                 
                 if (input.equalsIgnoreCase("all")) {
-                    RF_DEBUG(0, "⚠️ WARNING: This will delete ALL files and folders in current directory!");
-                    RF_DEBUG(0, "Type 'CONFIRM' to proceed or anything else to cancel:");
+                    eml_debug(0, "⚠️ WARNING: This will delete ALL files and folders in current directory!");
+                    eml_debug(0, "Type 'CONFIRM' to proceed or anything else to cancel:");
                     String confirm = "";
                     while (confirm.length() == 0) {
                         if (RF_INPUT_AVAILABLE()) {
@@ -1219,18 +1211,18 @@ void manage_files() {
                         delay(10);
                     }
                     if (confirm.equals("CONFIRM")) {
-                        RF_DEBUG(0, "🗑️ Deleting all items...");
+                        eml_debug(0, "🗑️ Deleting all items...");
                         
                         // Delete all files first
                         for (int i = 0; i < refreshFileCount; i++) {
                             if (RF_FS_REMOVE(refreshFileList[i])) {
                                 char buffer[128];
                                 snprintf(buffer, sizeof(buffer), "✅ Deleted file: %s", refreshFileList[i].c_str());
-                                RF_DEBUG(0, "", buffer);
+                                eml_debug(0, "", buffer);
                             } else {
                                 char buffer[128];
                                 snprintf(buffer, sizeof(buffer), "❌ Failed to delete file: %s", refreshFileList[i].c_str());
-                                RF_DEBUG(0, "", buffer);
+                                eml_debug(0, "", buffer);
                             }
                             delay(50);
                         }
@@ -1240,18 +1232,18 @@ void manage_files() {
                             if (RF_FS_RMDIR(refreshFolderList[i])) {
                                 char buffer[128];
                                 snprintf(buffer, sizeof(buffer), "✅ Deleted folder: %s", refreshFolderList[i].c_str());
-                                RF_DEBUG(0, "", buffer);
+                                eml_debug(0, "", buffer);
                             } else {
                                 char buffer[128];
                                 snprintf(buffer, sizeof(buffer), "❌ Failed to delete folder (may not be empty): %s", refreshFolderList[i].c_str());
-                                RF_DEBUG(0, "", buffer);
+                                eml_debug(0, "", buffer);
                             }
                             delay(50);
                         }
                         
-                        RF_DEBUG(0, "✅ Cleanup complete!");
+                        eml_debug(0, "✅ Cleanup complete!");
                     } else {
-                        RF_DEBUG(0, "❎ Delete all operation canceled.");
+                        eml_debug(0, "❎ Delete all operation canceled.");
                     }
                     continue;
                 }
@@ -1290,14 +1282,14 @@ void manage_files() {
                             if (folderIdx >= 1 && folderIdx <= refreshFolderCount) {
                                 itemCount++;
                             } else {
-                                RF_DEBUG(0, "⚠️ Invalid folder number: ", token);
+                                eml_debug(0, "⚠️ Invalid folder number: ", token);
                             }
                         } else {
                             int fileIdx = token.toInt();
                             if (fileIdx >= 1 && fileIdx <= refreshFileCount) {
                                 itemCount++;
                             } else {
-                                RF_DEBUG(0, "⚠️ Invalid file number: ", token);
+                                eml_debug(0, "⚠️ Invalid file number: ", token);
                             }
                         }
                     }
@@ -1306,14 +1298,14 @@ void manage_files() {
                 }
                 
                 if (itemCount == 0) {
-                    RF_DEBUG(0, "⚠️ No valid items to delete.");
+                    eml_debug(0, "⚠️ No valid items to delete.");
                     continue;
                 }
                 
                 // Second pass: show items and confirm
                 char summaryBuffer[64];
                 snprintf(summaryBuffer, sizeof(summaryBuffer), "\n📋 Items to delete (%d):", itemCount);
-                RF_DEBUG(0, "", summaryBuffer);
+                eml_debug(0, "", summaryBuffer);
                 startPos = 0;
                 while (startPos < input.length()) {
                     // Skip whitespace
@@ -1340,7 +1332,7 @@ void manage_files() {
                                 String displayName = (lastSlash >= 0) ? refreshFolderList[folderIdx - 1].substring(lastSlash + 1) : refreshFolderList[folderIdx - 1];
                                 char buffer[80];
                                 snprintf(buffer, sizeof(buffer), "  F%d: %s/", folderIdx, displayName.c_str());
-                                RF_DEBUG(0, "", buffer);
+                                eml_debug(0, "", buffer);
                             }
                         } else {
                             int fileIdx = token.toInt();
@@ -1349,7 +1341,7 @@ void manage_files() {
                                 String displayName = (lastSlash >= 0) ? refreshFileList[fileIdx - 1].substring(lastSlash + 1) : refreshFileList[fileIdx - 1];
                                 char buffer[80];
                                 snprintf(buffer, sizeof(buffer), "  %d: %s", fileIdx, displayName.c_str());
-                                RF_DEBUG(0, "", buffer);
+                                eml_debug(0, "", buffer);
                             }
                         }
                     }
@@ -1357,7 +1349,7 @@ void manage_files() {
                     startPos = endPos + 1;
                 }
                 
-                RF_DEBUG(0, "\nType 'OK' to confirm deletion:");
+                eml_debug(0, "\nType 'OK' to confirm deletion:");
                 String confirm = "";
                 while (confirm.length() == 0) {
                     if (RF_INPUT_AVAILABLE()) {
@@ -1368,7 +1360,7 @@ void manage_files() {
                 }
                 
                 if (confirm.equalsIgnoreCase("OK")) {
-                    RF_DEBUG(0, "🗑️ Deleting items...");
+                    eml_debug(0, "🗑️ Deleting items...");
                     int successCount = 0;
                     int failCount = 0;
                     
@@ -1398,12 +1390,12 @@ void manage_files() {
                                     if (RF_FS_RMDIR(refreshFolderList[folderIdx - 1])) {
                                         char buffer[128];
                                         snprintf(buffer, sizeof(buffer), "✅ Deleted folder: %s", refreshFolderList[folderIdx - 1].c_str());
-                                        RF_DEBUG(0, "", buffer);
+                                        eml_debug(0, "", buffer);
                                         successCount++;
                                     } else {
                                         char buffer[128];
                                         snprintf(buffer, sizeof(buffer), "❌ Failed to delete folder (may not be empty): %s", refreshFolderList[folderIdx - 1].c_str());
-                                        RF_DEBUG(0, "", buffer);
+                                        eml_debug(0, "", buffer);
                                         failCount++;
                                     }
                                 }
@@ -1413,12 +1405,12 @@ void manage_files() {
                                     if (RF_FS_REMOVE(refreshFileList[fileIdx - 1])) {
                                         char buffer[128];
                                         snprintf(buffer, sizeof(buffer), "✅ Deleted file: %s", refreshFileList[fileIdx - 1].c_str());
-                                        RF_DEBUG(0, "", buffer);
+                                        eml_debug(0, "", buffer);
                                         successCount++;
                                     } else {
                                         char buffer[128];
                                         snprintf(buffer, sizeof(buffer), "❌ Failed to delete file: %s", refreshFileList[fileIdx - 1].c_str());
-                                        RF_DEBUG(0, "", buffer);
+                                        eml_debug(0, "", buffer);
                                         failCount++;
                                     }
                                 }
@@ -1431,33 +1423,33 @@ void manage_files() {
                     
                     char resultBuffer[80];
                     snprintf(resultBuffer, sizeof(resultBuffer), "📊 Summary: %d deleted, %d failed", successCount, failCount);
-                    RF_DEBUG(0, "", resultBuffer);
+                    eml_debug(0, "", resultBuffer);
                     if (failCount > 0) {
-                        RF_DEBUG(0, "💡 Tip: Folders must be empty before deletion.");
+                        eml_debug(0, "💡 Tip: Folders must be empty before deletion.");
                     }
                 } else {
-                    RF_DEBUG(0, "❎ Deletion canceled.");
+                    eml_debug(0, "❎ Deletion canceled.");
                 }
             }
         }
         else if (operation.equals("e")) {
             // Add new file operation - isolated space
-            RF_DEBUG(0, "\n========== ➕ ADD NEW FILE MODE ==========");
+            eml_debug(0, "\n========== ➕ ADD NEW FILE MODE ==========");
             char buffer[128];
             snprintf(buffer, sizeof(buffer), "📍 Current directory: %s", currentDir.c_str());
-            RF_DEBUG(0, "", buffer);
-            RF_DEBUG(0, "You can create .csv, .txt, .log, .json.");
-            RF_DEBUG(0, "Enter filename or full path:");
+            eml_debug(0, "", buffer);
+            eml_debug(0, "You can create .csv, .txt, .log, .json.");
+            eml_debug(0, "Enter filename or full path:");
             String newFile = reception_data(0, true, currentDir);
             if (newFile.length() > 0) {
                 char msg[128];
                 snprintf(msg, sizeof(msg), "✅ File created: %s", newFile.c_str());
-                RF_DEBUG(0, "", msg);
+                eml_debug(0, "", msg);
             }
-            RF_DEBUG(0, "🔙 Returning to main menu...");
+            eml_debug(0, "🔙 Returning to main menu...");
         }
         else {
-            RF_DEBUG(0, "⚠️ Invalid operation. Use a, b, c, d, f, e, or 'exit'.");
+            eml_debug(0, "⚠️ Invalid operation. Use a, b, c, d, f, e, or 'exit'.");
         }
     }
 }
@@ -1466,13 +1458,13 @@ void deleteAllFiles() {
     if (!RF_FS_BEGIN(rf_current_storage())) {
         char buffer[64];
         snprintf(buffer, sizeof(buffer), "❌ %s Mount Failed!", rf_storage_type());
-        RF_DEBUG(0, "", buffer);
+        eml_debug(0, "", buffer);
         return;
     }
 
     char msg[64];
     snprintf(msg, sizeof(msg), "🚮 Scanning and deleting all files from %s...", rf_storage_type());
-    RF_DEBUG(0, "", msg);
+    eml_debug(0, "", msg);
 
     File root = RF_FS_OPEN("/", RF_FILE_READ);
     File file = root.openNextFile();
@@ -1485,12 +1477,12 @@ void deleteAllFiles() {
         if (RF_FS_REMOVE(path)) {
             char buffer[128];
             snprintf(buffer, sizeof(buffer), "✅ Deleted: %s", path.c_str());
-            RF_DEBUG(0, "", buffer);
+            eml_debug(0, "", buffer);
             deleted++;
         } else {
             char buffer[128];
             snprintf(buffer, sizeof(buffer), "❌ Failed:  %s", path.c_str());
-            RF_DEBUG(0, "", buffer);
+            eml_debug(0, "", buffer);
             failed++;
         }
 
@@ -1500,7 +1492,7 @@ void deleteAllFiles() {
 
     char summaryBuffer[80];
     snprintf(summaryBuffer, sizeof(summaryBuffer), "🧹 Cleanup complete. Deleted: %d, Failed: %d", deleted, failed);
-    RF_DEBUG(0, "", summaryBuffer);
+    eml_debug(0, "", summaryBuffer);
 }
 
 String reception_data(int exact_columns, bool print_file, String currentDir) {
@@ -1526,13 +1518,13 @@ String reception_data(int exact_columns, bool print_file, String currentDir) {
 
     // Normalize the path using common function
     fullPath = normalizePath(fullPath, currentDir);
-    RF_DEBUG(0, "ℹ️  Resolved to: ", fullPath);
+    eml_debug(0, "ℹ️  Resolved to: ", fullPath);
 
     // Ensure an extension exists; if not, default to .csv for backward compatibility
     int lastDot = fullPath.lastIndexOf('.');
     if (lastDot <= 0 || lastDot == (int)fullPath.length() - 1) {
         fullPath += ".csv";
-        RF_DEBUG(0, "ℹ️  No valid extension provided. Defaulting to .csv → ", fullPath);
+        eml_debug(0, "ℹ️  No valid extension provided. Defaulting to .csv → ", fullPath);
     }
 
     // Determine file type
@@ -1540,20 +1532,20 @@ String reception_data(int exact_columns, bool print_file, String currentDir) {
     bool isCSV = lower.endsWith(".csv");
     bool isTextFile = isCSV || lower.endsWith(".txt") || lower.endsWith(".log") || lower.endsWith(".json");
 
-    RF_DEBUG(0, "📁 Will save to: ", fullPath);
+    eml_debug(0, "📁 Will save to: ", fullPath);
 
     File file = RF_FS_OPEN(fullPath, RF_FILE_WRITE);
     if (!file) {
-        RF_DEBUG(0, "❌ Failed to open file for writing: ", fullPath);
+        eml_debug(0, "❌ Failed to open file for writing: ", fullPath);
         return fullPath;
     }
 
     if (isCSV) {
-        RF_DEBUG(0, "📥 Enter CSV rows (separated by space or newline). Type END to finish.");
+        eml_debug(0, "📥 Enter CSV rows (separated by space or newline). Type END to finish.");
     } else if (isTextFile) {
-        RF_DEBUG(0, "📥 Enter text lines. Type END to finish.");
+        eml_debug(0, "📥 Enter text lines. Type END to finish.");
     } else {
-        RF_DEBUG(0, "📥 Enter lines. Type END to finish.");
+        eml_debug(0, "📥 Enter lines. Type END to finish.");
     }
 
     String buffer = "";
@@ -1565,7 +1557,7 @@ String reception_data(int exact_columns, bool print_file, String currentDir) {
             input.trim();
 
             if (input.equalsIgnoreCase("END")) {
-                RF_DEBUG(0, "🔚 END received, closing file.");
+                eml_debug(0, "🔚 END received, closing file.");
                 break;
             }
 
@@ -1594,7 +1586,7 @@ String reception_data(int exact_columns, bool print_file, String currentDir) {
                         }
 
                         file.println(row);
-                        RF_DEBUG_2(0, "✅ Saved (", count > 234 ? 234 : count, " elements): ", row);
+                        eml_debug_2(0, "✅ Saved (", count > 234 ? 234 : count, " elements): ", row);
                         total_rows++;
                     }
 
@@ -1618,7 +1610,7 @@ String reception_data(int exact_columns, bool print_file, String currentDir) {
     }
     if (print_file) printFile(fullPath);
 
-    RF_DEBUG(0, "📄 Total lines written: ", total_rows);
+    eml_debug(0, "📄 Total lines written: ", total_rows);
 
     return fullPath; // Return the full path of the created file
 }
@@ -1626,14 +1618,14 @@ String reception_data(int exact_columns, bool print_file, String currentDir) {
 void cleanMalformedRows(const String& filename, int exact_columns) {
     File file = RF_FS_OPEN(filename, RF_FILE_READ);
     if (!file) {
-        RF_DEBUG(0, "❌ Failed to open ", filename);
+        eml_debug(0, "❌ Failed to open ", filename);
         return;
     }
 
     String tempName = filename + ".tmp";
     File temp = RF_FS_OPEN(tempName, RF_FILE_WRITE);
     if (!temp) {
-        RF_DEBUG(0, "❌ Failed to open temp file for writing: ", tempName); 
+        eml_debug(0, "❌ Failed to open temp file for writing: ", tempName); 
         file.close();
         return;
     }
@@ -1668,7 +1660,7 @@ void cleanMalformedRows(const String& filename, int exact_columns) {
     char buffer[128];
     snprintf(buffer, sizeof(buffer), "✅ Cleaned %s: %u rows kept, %u rows removed (not exactly %u elements).",
              filename.c_str(), kept, removed, exact_columns);
-    RF_DEBUG(0, "", buffer);
+    eml_debug(0, "", buffer);
 }
 
 bool deleteDirectoryRecursive(const String& path) {
@@ -1727,4 +1719,3 @@ bool deleteDirectoryRecursive(const String& path) {
     dir.close();
     return RF_FS_RMDIR(normalizedPath);
 }
-

@@ -25,7 +25,7 @@ Entries are grouped: small and close commits are consolidated into date-based re
 - speed up training process (on both side) using TOP-K screening method.
 - remove `partial loading mode`.
 - remove `extend_base_data` and add `remove_outliers` in config files.
-- combine `RF_DISABLE_RETRAIN` & `RF_ENABLE_RETRAIN` -> `RF_STATIC_MODEL` across all docs and code.
+- combine `RF_DISABLE_RETRAIN` & `RF_ENABLE_RETRAIN` -> `EML_STATIC_MODEL` across all docs and code.
 - ... other minor fixes and improvements.
 
 
@@ -113,7 +113,7 @@ Entries are grouped: small and close commits are consolidated into date-based re
 ## [2025-11-01] — Node layout dynamic completion & fixes
 
 - Finish dynamic node layout work, multiple fixes for inference warm-up and traversal loops.
-- Added aliases `sample_type` and `label_type`; sync and cleanup for `RF_LABEL_ERROR` and struct alignment optimizations.
+- Added aliases `rf_sample_type` and `rf_label_type`; sync and cleanup for `RF_LABEL_ERROR` and struct alignment optimizations.
 		- notable commits: 5407411, a51adf3
 
 ## [2025-10-27] — BIG UPGRADE: dynamic tree_node layout (space optimization)
